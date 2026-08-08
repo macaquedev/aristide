@@ -93,9 +93,10 @@ input mappings, console-skin overrides. A set + its sidecars = a reproducible in
   command path. Proves device layer + lock-free plumbing. ✅ (QWERTY fallback deferred;
   see docs/PROGRESS.md)
 - **M2 — organ model + GO loader**: parse `.organ` sets (test: Grabowski Friesach demo)
-  into the model; validate against GrandOrgue's docs.
+  into the model; validate against GrandOrgue's docs. ✅
 - **M3 — sampled voices**: attack-cache + disk-streaming playback with loops and basic
-  releases. First real organ sound.
+  releases. First real organ sound. ✅ code-complete (RAM-resident; disk streaming
+  moved to M4 with the rest of the engine quality pass — see docs/PROGRESS.md)
 - **M4 — engine quality pass**: phase-aligned multi-releases, sinc resampling, voicing,
   tremulants, wind model. The "better than Hauptwerk" milestone; A/B against GO.
 - **M5 — headless split + GUI**: IPC protocol, native GUI console, multi-window.
