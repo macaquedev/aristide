@@ -1,0 +1,9 @@
+[package]
+name = "aristide-model"
+description = "Organ model: divisions, stops, ranks, pipes, couplers, tuning"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true

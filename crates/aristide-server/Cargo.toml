@@ -1,0 +1,14 @@
+[package]
+name = "aristide-server"
+description = "Headless daemon: owns audio/MIDI devices, exposes the control-plane IPC"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+aristide-engine.workspace = true
+aristide-formats.workspace = true
+aristide-model.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
