@@ -54,7 +54,10 @@ pub fn build(organ: &Organ, device_rate: f32) -> Result<LoadedBank> {
             let absolute = organ.base_path.join(&attack.path);
             let entry = decoded.entry(attack.path.clone()).or_insert_with(|| {
                 match decode(&absolute, &attack.loops) {
-                    Ok((sample, info)) => {
+                    Ok((mut sample, info)) => {
+                        // Phase-align the release splice to this pipe's
+                        // fundamental (shared files share the pitch).
+                        sample.align_release(pipe.nominal_frequency_hz as f32);
                         let index = bank.push(sample);
                         Some(DecodedInfo { index, ..info })
                     }

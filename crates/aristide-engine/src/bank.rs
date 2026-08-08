@@ -9,6 +9,40 @@
 //! disk streamer will fill ring buffers with, so streaming replaces the
 //! storage behind this API rather than the API itself.
 
+/// Phase buckets per waveform period in a [`ReleaseAlignment`] table.
+pub const ALIGNMENT_BUCKETS: usize = 64;
+
+/// Phase-aligned release splicing: precomputed control-side, indexed by
+/// the RT thread in O(1) on note-off.
+///
+/// Splicing from the sustain loop to the release tail at a fixed frame
+/// lands at a random point in the waveform's cycle — the crossfade then
+/// partially cancels (a dip, or a double-strike "click"). This table
+/// maps the voice's phase within its fundamental period to the tail
+/// frame with the *same* phase, so the splice continues the waveform.
+#[derive(Debug, Clone)]
+pub struct ReleaseAlignment {
+    /// Fundamental period in frames at the file's own sample rate.
+    period: f64,
+    /// `offsets[b]` = tail frame whose phase matches a voice at phase
+    /// `b / ALIGNMENT_BUCKETS` (phase measured from the loop start).
+    offsets: Vec<u32>,
+}
+
+impl ReleaseAlignment {
+    /// The aligned splice target for a voice currently at `position`,
+    /// inside a loop starting at `loop_start`. RT-safe: two fmods and a
+    /// table index.
+    #[inline]
+    pub fn target(&self, position: f64, loop_start: u64) -> u64 {
+        // rem_euclid-style fract: correct even for releases that arrive
+        // before the cursor first reaches the loop.
+        let phase = (((position - loop_start as f64) / self.period).fract() + 1.0).fract();
+        let bucket = ((phase * ALIGNMENT_BUCKETS as f64) as usize).min(ALIGNMENT_BUCKETS - 1);
+        self.offsets[bucket] as u64
+    }
+}
+
 /// One decoded audio file: attack, sustain loop, and (optionally) an
 /// embedded release tail after the loop.
 #[derive(Debug, Clone)]
@@ -23,6 +57,7 @@ pub struct Sample {
     /// Frame where the embedded release tail starts. Only meaningful if
     /// it lies strictly before `frames()`; loop-less samples ignore it.
     release_start: u64,
+    release_alignment: Option<ReleaseAlignment>,
 }
 
 impl Sample {
@@ -64,7 +99,72 @@ impl Sample {
             sample_rate_hz,
             sustain_loop,
             release_start: release_start.min(frames),
+            release_alignment: None,
         })
+    }
+
+    /// Control-side analysis: build the [`ReleaseAlignment`] table for a
+    /// pipe sounding at `fundamental_hz`.
+    ///
+    /// One cross-correlation search locates the tail frame matching
+    /// phase 0 (the loop start's phase); the remaining buckets follow
+    /// arithmetically because the tail continues the same periodic
+    /// waveform. Skips silently when the sample has no spliceable tail
+    /// or the tail is too short to search — the fixed splice remains.
+    pub fn align_release(&mut self, fundamental_hz: f32) {
+        let Some((loop_start, _)) = self.sustain_loop else {
+            return;
+        };
+        let Some(tail) = self.release_start() else {
+            return;
+        };
+        if !(fundamental_hz > 0.0) {
+            return;
+        }
+        let period = self.sample_rate_hz as f64 / fundamental_hz as f64;
+        let period_frames = period.round() as u64;
+        // Correlation window: one period, capped to keep analysis cheap.
+        let window = period_frames.min(600).max(16);
+        let frames = self.frames();
+        if period_frames < 4 || tail + period_frames + window >= frames {
+            return;
+        }
+
+        // Template: the waveform right at the loop start (phase 0).
+        let score = |offset: u64| -> f64 {
+            let mut dot = 0.0f64;
+            let mut energy = 0.0f64;
+            let ch = self.channels as usize;
+            for i in 0..window {
+                let a = self.data[(loop_start + i) as usize * ch] as f64;
+                let b = self.data[(offset + i) as usize * ch] as f64;
+                dot += a * b;
+                energy += b * b;
+            }
+            dot / energy.max(1e-12).sqrt()
+        };
+        let phase0 = (tail..tail + period_frames)
+            .map(|offset| (offset, score(offset)))
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .expect("non-empty range")
+            .0;
+
+        let offsets = (0..ALIGNMENT_BUCKETS)
+            .map(|bucket| {
+                let advance = (bucket as f64 / ALIGNMENT_BUCKETS as f64 * period).round() as u64;
+                let mut offset = phase0 + advance;
+                if offset >= tail + period_frames {
+                    offset -= period_frames;
+                }
+                offset as u32
+            })
+            .collect();
+        self.release_alignment = Some(ReleaseAlignment { period, offsets });
+    }
+
+    #[inline]
+    pub fn release_alignment(&self) -> Option<&ReleaseAlignment> {
+        self.release_alignment.as_ref()
     }
 
     #[inline]
@@ -92,6 +192,12 @@ impl Sample {
     pub fn release_start(&self) -> Option<u64> {
         (self.sustain_loop.is_some() && self.release_start < self.frames())
             .then_some(self.release_start)
+    }
+
+    /// Raw interleaved data + channel count, for the sinc reader.
+    #[inline]
+    pub(crate) fn raw(&self) -> (&[f32], u16) {
+        (&self.data, self.channels)
     }
 
     /// Linearly interpolated stereo read at a fractional frame position.

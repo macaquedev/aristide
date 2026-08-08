@@ -17,10 +17,12 @@
 //! mapping, registration, and couplers out of the RT core entirely.
 
 pub mod bank;
+pub mod resample;
 
 use std::sync::Arc;
 
 use bank::{Sample, SampleBank};
+use resample::SincTable;
 use rtrb::{Consumer, Producer, RingBuffer};
 
 pub const MAX_VOICES: usize = 2048;
@@ -165,7 +167,13 @@ impl SampledVoice {
     /// Render one frame and advance. Returns `None` when the voice ends.
     /// End-of-data checks happen on entry so every read frame is emitted.
     #[inline]
-    fn tick(&mut self, sample: &Sample, crossfade_step: f32, kill_step: f32) -> Option<(f32, f32)> {
+    fn tick(
+        &mut self,
+        sample: &Sample,
+        table: &SincTable,
+        crossfade_step: f32,
+        kill_step: f32,
+    ) -> Option<(f32, f32)> {
         let last = (sample.frames() - 1) as f64;
         let looping = sample.sustain_loop().is_some();
         let ended = match self.phase {
@@ -178,12 +186,19 @@ impl SampledVoice {
             return None;
         }
 
-        let (mut left, mut right) = sample.read(self.position);
+        // Cursors still circling the sustain loop wrap their kernel taps
+        // across the seam; tail reads clamp at the sample edges.
+        let seam = if self.phase == SamplePhase::Tail {
+            None
+        } else {
+            sample.sustain_loop()
+        };
+        let (mut left, mut right) = table.read(sample, self.position, seam);
         let mut advance_position = true;
         match self.phase {
             SamplePhase::Held | SamplePhase::Tail => {}
             SamplePhase::Crossfade => {
-                let (tail_l, tail_r) = sample.read(self.release_position);
+                let (tail_l, tail_r) = table.read(sample, self.release_position, None);
                 left += (tail_l - left) * self.fade;
                 right += (tail_r - right) * self.fade;
                 self.fade += crossfade_step;
@@ -225,7 +240,12 @@ impl SampledVoice {
         }
         match sample.release_start() {
             Some(tail) if self.phase == SamplePhase::Held => {
-                self.release_position = tail as f64;
+                self.release_position = match (sample.release_alignment(), sample.sustain_loop()) {
+                    (Some(alignment), Some((loop_start, _))) => {
+                        alignment.target(self.position, loop_start) as f64
+                    }
+                    _ => tail as f64,
+                };
                 self.fade = 0.0;
                 self.phase = SamplePhase::Crossfade;
             }
@@ -255,6 +275,7 @@ pub struct Engine {
     sample_rate: f32,
     commands: Consumer<Command>,
     bank: Arc<SampleBank>,
+    sinc: SincTable,
     voices: Box<[Voice]>,
     master_gain: f32,
     tone_attack_step: f32,
@@ -270,6 +291,7 @@ impl Engine {
             sample_rate,
             commands: consumer,
             bank,
+            sinc: SincTable::new(),
             voices: vec![Voice::Idle; MAX_VOICES].into_boxed_slice(),
             master_gain: DEFAULT_MASTER_GAIN,
             tone_attack_step: 1.0 / (TONE_ATTACK_SECONDS * sample_rate),
@@ -297,6 +319,7 @@ impl Engine {
         let Engine {
             voices,
             bank,
+            sinc,
             tone_attack_step,
             tone_release_step,
             crossfade_step,
@@ -328,7 +351,7 @@ impl Engine {
                         continue;
                     };
                     for frame in 0..frames {
-                        match sampled.tick(sample, *crossfade_step, *kill_step) {
+                        match sampled.tick(sample, sinc, *crossfade_step, *kill_step) {
                             Some((left, right)) => mix_frame(
                                 &mut buffer[frame * channels..],
                                 channels,
@@ -559,6 +582,121 @@ mod tests {
         render(&mut engine, 48000);
         let out = render(&mut engine, 512);
         assert!(out.iter().all(|&v| v == 0.0));
+    }
+
+    /// A synthetic pipe: continuous sine through attack, loop, and a
+    /// gently decaying release tail, so waveform phase is knowable
+    /// everywhere. `aligned` controls whether the alignment table is
+    /// built (false = naive fixed splice, the M3 behaviour).
+    fn sine_pipe_bank(period: usize, aligned: bool) -> Arc<SampleBank> {
+        let omega = std::f64::consts::TAU / period as f64;
+        let loop_start = period * 4;
+        let loop_end = period * 12;
+        let frames = period * 24;
+        let data: Vec<f32> = (0..frames)
+            .map(|n| {
+                let envelope = if n >= loop_end {
+                    1.0 - 0.5 * (n - loop_end) as f64 / (frames - loop_end) as f64
+                } else {
+                    1.0
+                };
+                (envelope * (omega * n as f64).sin()) as f32
+            })
+            .collect();
+        let mut sample = Sample::new(
+            data,
+            1,
+            48000.0,
+            Some((loop_start as u64, loop_end as u64)),
+            loop_end as u64,
+        )
+        .expect("valid");
+        if aligned {
+            sample.align_release(48000.0 / period as f32);
+            assert!(sample.release_alignment().is_some(), "alignment built");
+        }
+        let mut bank = SampleBank::default();
+        bank.push(sample);
+        Arc::new(bank)
+    }
+
+    /// A misaligned splice doesn't click through a 30 ms crossfade — it
+    /// *cancels*: output amplitude dips toward zero mid-fade. Measure
+    /// the worst period-length RMS during the crossfade relative to the
+    /// held level.
+    fn release_dip_ratio(bank: Arc<SampleBank>, stop_after: usize, period: usize) -> f32 {
+        let (mut engine, mut handle) = Engine::new(48000.0, bank);
+        handle.send(Command::StartVoice {
+            handle: 1,
+            sample: 0,
+            rate: 1.0,
+            gain: 1.0,
+        });
+        let mut buffer = vec![0.0f32; stop_after * 2];
+        engine.process(&mut buffer, 2);
+        let held: Vec<f32> = buffer.chunks(2).map(|f| f[0]).collect();
+        let steady = rms(&held[held.len() - period..]);
+
+        handle.send(Command::StopVoice { handle: 1 });
+        // 30 ms crossfade = 1440 frames at 48 kHz.
+        let mut buffer = vec![0.0f32; 1500 * 2];
+        engine.process(&mut buffer, 2);
+        let fade: Vec<f32> = buffer.chunks(2).map(|f| f[0]).collect();
+        let mut worst = f32::MAX;
+        let mut start = 0;
+        while start + period <= fade.len() {
+            worst = worst.min(rms(&fade[start..start + period]));
+            start += period / 8;
+        }
+        worst / steady
+    }
+
+    fn rms(window: &[f32]) -> f32 {
+        (window.iter().map(|v| v * v).sum::<f32>() / window.len() as f32).sqrt()
+    }
+
+    #[test]
+    fn aligned_release_splice_never_cancels() {
+        let period = 480; // 100 Hz at 48 kHz
+        // Stop moments spread across the waveform cycle, including the
+        // adversarial anti-phase one (2640 = 5.5 periods).
+        for stop_after in [2400, 2520, 2580, 2640, 2700, 2763, 2885] {
+            let aligned = release_dip_ratio(sine_pipe_bank(period, true), stop_after, period);
+            assert!(
+                aligned > 0.7,
+                "stop at {stop_after}: aligned splice dipped to {aligned:.2} of held level"
+            );
+        }
+        // And the naive splice really is the artifact we claim to fix:
+        // anti-phase stop cancels hard.
+        let naive = release_dip_ratio(sine_pipe_bank(period, false), 2640, period);
+        let aligned = release_dip_ratio(sine_pipe_bank(period, true), 2640, period);
+        println!("anti-phase stop: aligned holds {aligned:.2} of level, naive dips to {naive:.2}");
+        assert!(
+            naive < 0.45,
+            "naive anti-phase splice should cancel (got {naive:.2}) — is this test still valid?"
+        );
+    }
+
+    #[test]
+    fn alignment_targets_match_waveform_phase() {
+        let period = 480usize;
+        let bank = sine_pipe_bank(period, true);
+        let sample = bank.get(0).expect("sample");
+        let alignment = sample.release_alignment().expect("alignment");
+        let (loop_start, _) = sample.sustain_loop().expect("loop");
+        for probe in 0..32 {
+            let position = loop_start as f64 + probe as f64 * 37.3;
+            let target = alignment.target(position, loop_start);
+            let source_phase = (position / period as f64).fract();
+            let target_phase = (target as f64 / period as f64).fract();
+            let mut delta = (source_phase - target_phase).abs();
+            delta = delta.min(1.0 - delta);
+            assert!(
+                delta < 1.5 / bank::ALIGNMENT_BUCKETS as f64 + 0.01,
+                "position {position}: source phase {source_phase:.3} vs target {target_phase:.3}"
+            );
+        }
     }
 
     #[test]
