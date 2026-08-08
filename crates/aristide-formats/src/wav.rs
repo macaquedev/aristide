@@ -29,6 +29,8 @@ pub enum WavError {
     Unsupported(String),
     #[error("malformed '{chunk}' chunk: {reason}")]
     Malformed { chunk: &'static str, reason: String },
+    #[error("WavPack decode error: {0}")]
+    WavPack(String),
 }
 
 /// A sustain loop from the `smpl` chunk, in sample frames.
@@ -127,12 +129,35 @@ fn read_u32(bytes: &[u8], offset: usize) -> Result<u32, WavError> {
 /// 12-byte RIFF/WAVE header), validating each chunk's declared size
 /// against the buffer before yielding it.
 fn iter_chunks(bytes: &[u8]) -> Result<Vec<ChunkRef>, WavError> {
+    iter_chunks_generic(bytes, false)
+}
+
+/// Like [`iter_chunks`], but for a WavPack "wrapper" buffer: the original
+/// RIFF header libwavpack stores verbatim, minus the actual `data` chunk
+/// payload (per the WavPack library docs, the wrapper's `data` chunk
+/// carries only the id and declared size). Any chunks that followed
+/// `data` in the source file (e.g. a trailing `smpl`) sit immediately
+/// after that empty `data` header rather than past its declared length,
+/// so `data` is treated as zero-length here to keep walking into them.
+fn iter_wrapper_chunks(bytes: &[u8]) -> Result<Vec<ChunkRef>, WavError> {
+    iter_chunks_generic(bytes, true)
+}
+
+fn iter_chunks_generic(
+    bytes: &[u8],
+    data_chunk_is_placeholder: bool,
+) -> Result<Vec<ChunkRef>, WavError> {
     let mut chunks = Vec::new();
     let mut pos = RIFF_HEADER_LEN;
     while pos + CHUNK_HEADER_LEN <= bytes.len() {
         let id = [bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]];
-        let len = read_u32(bytes, pos + 4)? as usize;
+        let declared_len = read_u32(bytes, pos + 4)? as usize;
         let start = pos + CHUNK_HEADER_LEN;
+        let len = if data_chunk_is_placeholder && &id == b"data" {
+            0
+        } else {
+            declared_len
+        };
         require_len(bytes, start + len)?;
         chunks.push(ChunkRef { id, start, len });
         // RIFF pads odd-sized chunks to an even boundary.
@@ -331,10 +356,67 @@ fn build_info(bytes: &[u8], chunks: &[ChunkRef]) -> Result<(WavInfo, FmtChunk), 
 /// without decoding them into memory.
 pub fn read_info(path: &Path) -> Result<WavInfo, WavError> {
     let bytes = fs::read(path)?;
+    if is_wavpack(&bytes) {
+        return crate::wavpack::read_info(path);
+    }
     parse_riff_header(&bytes)?;
     let chunks = iter_chunks(&bytes)?;
     let (info, _fmt) = build_info(&bytes, &chunks)?;
     Ok(info)
+}
+
+/// `smpl`/`cue` loop and marker metadata recovered from a chunk buffer
+/// that isn't necessarily a full, playable WAVE file — namely the
+/// "wrapper" bytes libwavpack hands back for a WavPack-compressed
+/// source (see [`crate::wavpack`]).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct WrapperMetadata {
+    pub loops: Vec<WavLoop>,
+    pub midi_unity_note: Option<u8>,
+    pub pitch_fraction: Option<u32>,
+    pub cue_points: Vec<u64>,
+}
+
+/// Extracts `smpl`/`cue` metadata from a WavPack wrapper buffer (the
+/// concatenation of the original RIFF header and, if present, trailer).
+/// Returns empty metadata rather than an error for anything malformed or
+/// absent, since callers treat wrapper recovery as best-effort.
+pub(crate) fn parse_wrapper_metadata(bytes: &[u8]) -> WrapperMetadata {
+    let mut meta = WrapperMetadata::default();
+    if parse_riff_header(bytes).is_err() {
+        return meta;
+    }
+    let Ok(chunks) = iter_wrapper_chunks(bytes) else {
+        return meta;
+    };
+
+    if let Some(smpl_chunk) = find_chunk(&chunks, b"smpl") {
+        let payload = &bytes[smpl_chunk.start..smpl_chunk.start + smpl_chunk.len];
+        if let Ok(header) = parse_smpl_header(payload) {
+            meta.midi_unity_note = Some(header.midi_unity_note);
+            meta.pitch_fraction = Some(header.pitch_fraction);
+            if let Ok(loops) = parse_smpl_loops(payload, header.loop_count) {
+                meta.loops = loops;
+            }
+        }
+    }
+
+    if let Some(cue_chunk) = find_chunk(&chunks, b"cue ") {
+        let payload = &bytes[cue_chunk.start..cue_chunk.start + cue_chunk.len];
+        if let Ok(points) = parse_cue_points(payload) {
+            meta.cue_points = points;
+        }
+    }
+
+    meta
+}
+
+/// WavPack's stream magic (`wvpk`), as sniffed from the first 4 bytes of
+/// a file. GrandOrgue sample sets sometimes ship WavPack-compressed
+/// audio under a `.wav` extension, so callers must sniff content rather
+/// than trust the extension.
+fn is_wavpack(bytes: &[u8]) -> bool {
+    bytes.len() >= 4 && &bytes[0..4] == b"wvpk"
 }
 
 /// Decodes sample data to interleaved `f32`, normalized to `[-1.0, 1.0]`.
@@ -382,8 +464,16 @@ pub fn parse(bytes: &[u8]) -> Result<WavFile, WavError> {
 }
 
 /// Reads and parses a WAV file from disk, decoding sample data.
+///
+/// Transparently handles WavPack-compressed sources too: GrandOrgue
+/// sample sets sometimes ship these with a misleading `.wav` extension,
+/// so files are sniffed by magic bytes (`wvpk`) rather than trusted by
+/// name, and delegated to [`crate::wavpack`] when compressed.
 pub fn read(path: &Path) -> Result<WavFile, WavError> {
     let bytes = fs::read(path)?;
+    if is_wavpack(&bytes) {
+        return crate::wavpack::read(path);
+    }
     parse(&bytes)
 }
 

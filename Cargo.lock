@@ -44,6 +44,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "aristide-model",
+ "pkg-config",
  "serde",
  "thiserror 2.0.20",
  "toml",

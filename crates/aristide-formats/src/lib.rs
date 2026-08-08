@@ -11,3 +11,4 @@
 pub mod grandorgue;
 pub mod sidecar {}
 pub mod wav;
+pub mod wavpack;

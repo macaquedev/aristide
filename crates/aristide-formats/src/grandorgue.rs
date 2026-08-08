@@ -10,8 +10,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use aristide_model::{
-    AttackSample, Coupler, Manual, ManualId, Organ, Pipe, Rank, RankId, RankRange,
-    ReleaseSample, SampleLoop, Stop, StopId,
+    AttackSample, Coupler, Manual, ManualId, Organ, Pipe, Rank, RankId, RankRange, ReleaseSample,
+    SampleLoop, Stop, StopId,
 };
 use thiserror::Error;
 
@@ -216,8 +216,7 @@ impl GainChain {
             amplitude_factor: parent.amplitude_factor
                 * (section.float_or("AmplitudeLevel", 100.0)? / 100.0),
             gain_db: parent.gain_db + section.float_or("Gain", 0.0)?,
-            pitch_tuning_cents: parent.pitch_tuning_cents
-                + section.float_or("PitchTuning", 0.0)?,
+            pitch_tuning_cents: parent.pitch_tuning_cents + section.float_or("PitchTuning", 0.0)?,
         })
     }
 
@@ -411,10 +410,8 @@ impl Builder<'_> {
             }
         } else {
             // Old-style stop: the section doubles as an inline rank.
-            let first_pipe_logical =
-                section.int_or("FirstAccessiblePipeLogicalPipeNumber", 1)?;
-            let derived_first_midi =
-                first_logical_midi + first_key_logical - first_pipe_logical;
+            let first_pipe_logical = section.int_or("FirstAccessiblePipeLogicalPipeNumber", 1)?;
+            let derived_first_midi = first_logical_midi + first_key_logical - first_pipe_logical;
             let first_midi = section.int_or("FirstMidiNoteNumber", derived_first_midi)?;
             let windchest = section.int_or("WindchestGroup", 1)?;
             let chain = windchest_chains
@@ -424,13 +421,8 @@ impl Builder<'_> {
 
             *next_inline_rank_id += 1;
             let rank_id = RankId(*next_inline_rank_id);
-            let mut rank = self.read_rank_pipes(
-                section,
-                rank_id,
-                accessible_pipes,
-                first_midi,
-                chain,
-            )?;
+            let mut rank =
+                self.read_rank_pipes(section, rank_id, accessible_pipes, first_midi, chain)?;
             rank.name.clone_from(&stop.name);
             let pipe_count = rank.pipes.len() as i64;
             ranks.push(rank);
@@ -452,8 +444,7 @@ impl Builder<'_> {
         parent_chain: GainChain,
     ) -> Result<Rank, OdfError> {
         let pipe_count = section.int("NumberOfLogicalPipes")?;
-        let mut rank =
-            self.read_rank_pipes(section, id, pipe_count, first_midi, parent_chain)?;
+        let mut rank = self.read_rank_pipes(section, id, pipe_count, first_midi, parent_chain)?;
         rank.name = section.string("Name")?.to_string();
         Ok(rank)
     }
@@ -524,7 +515,8 @@ impl Builder<'_> {
             return Ok(pipe);
         }
 
-        pipe.attacks.push(self.read_attack(section, prefix, &value)?);
+        pipe.attacks
+            .push(self.read_attack(section, prefix, &value)?);
         let attack_count = section.int_or(&format!("{prefix}AttackCount"), 0)?;
         for attack in 1..=attack_count {
             let attack_prefix = format!("{prefix}Attack{attack:03}");
@@ -875,6 +867,9 @@ FirstAccessibleKeyMIDINoteNumber=60\nNumberOfAccessibleKeys=1\nNumberOfStops=0\n
     fn missing_required_key_names_section() {
         let error = parse(b"[Organ]\nHasPedals=N\n", PathBuf::new()).unwrap_err();
         let message = error.to_string();
-        assert!(message.contains("Organ") && message.contains("ChurchName"), "{message}");
+        assert!(
+            message.contains("Organ") && message.contains("ChurchName"),
+            "{message}"
+        );
     }
 }
