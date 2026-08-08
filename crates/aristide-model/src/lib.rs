@@ -54,6 +54,30 @@ pub struct ReleaseSample {
     pub max_key_press_ms: Option<u32>,
 }
 
+/// Address of one pipe within an [`Organ`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PipeRef {
+    pub rank: RankId,
+    /// Index into the rank's `pipes`.
+    pub pipe: u16,
+}
+
+/// Where a pipe's sound comes from.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum PipeSource {
+    /// The pipe owns recorded samples.
+    Sampled {
+        attacks: Vec<AttackSample>,
+        releases: Vec<ReleaseSample>,
+    },
+    /// Unit-organ borrowing: sounding this pipe sounds another pipe.
+    /// The target may itself be borrowed; consumers follow the chain
+    /// (loaders guarantee it is acyclic).
+    Borrowed(PipeRef),
+    /// A placeholder occupying a key slot but never sounding.
+    Silent,
+}
+
 /// A single pipe: the atomic sounding unit. Everything in Aristide is
 /// ultimately addressed per-pipe (tuning, voicing, effects, routing).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,8 +93,17 @@ pub struct Pipe {
     /// Explicit MIDI key of the recording, overriding the sample file's
     /// own `smpl`-chunk unity note when present.
     pub midi_key_number: Option<u8>,
-    pub attacks: Vec<AttackSample>,
-    pub releases: Vec<ReleaseSample>,
+    pub source: PipeSource,
+}
+
+impl Pipe {
+    /// The pipe's own samples, if it has any (borrowed/silent pipes don't).
+    pub fn samples(&self) -> Option<(&[AttackSample], &[ReleaseSample])> {
+        match &self.source {
+            PipeSource::Sampled { attacks, releases } => Some((attacks, releases)),
+            _ => None,
+        }
+    }
 }
 
 /// A rank: one row of pipes of common construction (e.g. "Principal 8'").
@@ -127,5 +160,21 @@ pub struct Organ {
 impl Organ {
     pub fn rank(&self, id: RankId) -> Option<&Rank> {
         self.ranks.iter().find(|r| r.id == id)
+    }
+
+    pub fn pipe(&self, at: PipeRef) -> Option<&Pipe> {
+        self.rank(at.rank)?.pipes.get(at.pipe as usize)
+    }
+
+    /// Follow a borrow chain to the pipe that actually sounds.
+    /// Returns `None` for dangling references (loaders prevent cycles).
+    pub fn sounding_pipe(&self, at: PipeRef) -> Option<&Pipe> {
+        let mut hops = self.ranks.iter().map(|r| r.pipes.len()).sum::<usize>() + 1;
+        let mut pipe = self.pipe(at)?;
+        while let PipeSource::Borrowed(target) = &pipe.source {
+            pipe = self.pipe(*target)?;
+            hops = hops.checked_sub(1)?;
+        }
+        Some(pipe)
     }
 }

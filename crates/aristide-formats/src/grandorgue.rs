@@ -10,8 +10,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use aristide_model::{
-    AttackSample, Coupler, Manual, ManualId, Organ, Pipe, Rank, RankId, RankRange, ReleaseSample,
-    SampleLoop, Stop, StopId,
+    AttackSample, Coupler, Manual, ManualId, Organ, Pipe, PipeRef, PipeSource, Rank, RankId,
+    RankRange, ReleaseSample, SampleLoop, Stop, StopId,
 };
 use thiserror::Error;
 
@@ -52,6 +52,7 @@ pub fn parse(bytes: &[u8], base_path: PathBuf) -> Result<LoadResult, OdfError> {
         ini: &ini,
         base_path,
         warnings: Vec::new(),
+        pending_borrows: Vec::new(),
     }
     .build()
 }
@@ -231,10 +232,25 @@ const ROOT_CHAIN: GainChain = GainChain {
     pitch_tuning_cents: 0.0,
 };
 
+/// A `REF:<manual>:<stop>:<pipe>` borrow, recorded while reading pipes and
+/// resolved once every stop exists (the ODF allows forward references).
+/// `<stop>` is the 1-based slot within the manual's stop list, `<pipe>` the
+/// 1-based index into that stop's *first rank's* pipes (GOReferencePipe.cpp).
+struct PendingBorrow {
+    /// The borrowing pipe's slot in the organ being built.
+    at: PipeRef,
+    manual: i64,
+    stop_slot: i64,
+    pipe_number: i64,
+    /// "[Section] PipeNNN", for warnings.
+    context: String,
+}
+
 struct Builder<'a> {
     ini: &'a Ini,
     base_path: PathBuf,
     warnings: Vec<String>,
+    pending_borrows: Vec<PendingBorrow>,
 }
 
 impl Builder<'_> {
@@ -287,6 +303,10 @@ impl Builder<'_> {
         let mut next_stop_id = 0u32;
         let mut next_inline_rank_id = 1000u32; // clear of the [RankNNN] id space
 
+        // (manual index, 1-based stop slot) → the stop's first rank,
+        // the address space REF: borrows resolve against.
+        let mut stop_first_rank: HashMap<(i64, i64), RankId> = HashMap::new();
+
         for manual_index in first_manual..=manual_count {
             let section = self.ini.section(&format!("Manual{manual_index:03}"))?;
             let manual_id = ManualId(manual_index as u32);
@@ -319,6 +339,9 @@ impl Builder<'_> {
                     &mut next_inline_rank_id,
                     &mut organ.ranks,
                 )?;
+                if let Some(range) = stop.ranks.first() {
+                    stop_first_rank.insert((manual_index, slot), range.rank);
+                }
                 organ.stops.push(stop);
             }
 
@@ -350,10 +373,51 @@ impl Builder<'_> {
             }
         }
 
+        self.resolve_borrows(&mut organ, &stop_first_rank);
+
         Ok(LoadResult {
             organ,
             warnings: self.warnings,
         })
+    }
+
+    /// Patch every recorded `REF:` borrow now that all stops exist.
+    /// Unresolvable or cyclic borrows degrade to silent pipes with a
+    /// warning (GO aborts the whole load here; we stay lenient).
+    fn resolve_borrows(
+        &mut self,
+        organ: &mut Organ,
+        stop_first_rank: &HashMap<(i64, i64), RankId>,
+    ) {
+        let pending = std::mem::take(&mut self.pending_borrows);
+        for borrow in &pending {
+            let target = stop_first_rank
+                .get(&(borrow.manual, borrow.stop_slot))
+                .and_then(|&rank_id| {
+                    let rank = organ.rank(rank_id)?;
+                    let index = usize::try_from(borrow.pipe_number).ok()?.checked_sub(1)?;
+                    (index < rank.pipes.len()).then_some(PipeRef {
+                        rank: rank_id,
+                        pipe: index as u16,
+                    })
+                });
+            match target {
+                Some(target) => set_pipe_source(organ, borrow.at, PipeSource::Borrowed(target)),
+                None => self.warn(format!(
+                    "{}: REF:{}:{}:{} does not resolve to a pipe, silent",
+                    borrow.context, borrow.manual, borrow.stop_slot, borrow.pipe_number
+                )),
+            }
+        }
+        // Every target above was validated, so a chain can only fail to
+        // terminate by looping. Silencing the first pipe found on a cycle
+        // breaks it for the rest of the chain.
+        for borrow in &pending {
+            if organ.sounding_pipe(borrow.at).is_none() {
+                self.warn(format!("{}: borrow cycle, silent", borrow.context));
+                set_pipe_source(organ, borrow.at, PipeSource::Silent);
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -462,7 +526,11 @@ impl Builder<'_> {
         for index in 1..=pipe_count {
             let prefix = format!("Pipe{index:03}");
             let nominal_midi = first_midi + index - 1;
-            pipes.push(self.read_pipe(section, &prefix, nominal_midi, rank_chain)?);
+            let at = PipeRef {
+                rank: id,
+                pipe: (index - 1) as u16,
+            };
+            pipes.push(self.read_pipe(section, &prefix, nominal_midi, rank_chain, at)?);
         }
         Ok(Rank {
             id,
@@ -477,6 +545,7 @@ impl Builder<'_> {
         prefix: &str,
         nominal_midi: i64,
         rank_chain: GainChain,
+        at: PipeRef,
     ) -> Result<Pipe, OdfError> {
         let value = section.string(prefix)?.to_string();
         let chain = GainChain {
@@ -500,41 +569,53 @@ impl Builder<'_> {
                     ));
                 }
             },
-            attacks: Vec::new(),
-            releases: Vec::new(),
+            source: PipeSource::Silent,
         };
 
         if value.eq_ignore_ascii_case("DUMMY") {
             return Ok(pipe);
         }
         if let Some(reference) = value.strip_prefix("REF:") {
-            self.warn(format!(
-                "[{}] {prefix}: borrowed pipe (REF:{reference}) not yet supported, silent",
-                section.name
-            ));
+            // Stays Silent for now; resolve_borrows patches it once all
+            // stops are loaded (forward references are legal).
+            match parse_borrow(reference) {
+                Some((manual, stop_slot, pipe_number)) => {
+                    self.pending_borrows.push(PendingBorrow {
+                        at,
+                        manual,
+                        stop_slot,
+                        pipe_number,
+                        context: format!("[{}] {prefix}", section.name),
+                    });
+                }
+                None => self.warn(format!(
+                    "[{}] {prefix}: malformed reference REF:{reference}, silent",
+                    section.name
+                )),
+            }
             return Ok(pipe);
         }
 
-        pipe.attacks
-            .push(self.read_attack(section, prefix, &value)?);
+        let mut attacks = vec![self.read_attack(section, prefix, &value)?];
         let attack_count = section.int_or(&format!("{prefix}AttackCount"), 0)?;
         for attack in 1..=attack_count {
             let attack_prefix = format!("{prefix}Attack{attack:03}");
             let path = section.string(&attack_prefix)?.to_string();
-            pipe.attacks
-                .push(self.read_attack(section, &attack_prefix, &path)?);
+            attacks.push(self.read_attack(section, &attack_prefix, &path)?);
         }
 
         let release_count = section.int_or(&format!("{prefix}ReleaseCount"), 0)?;
+        let mut releases = Vec::with_capacity(release_count.max(0) as usize);
         for release in 1..=release_count {
             let release_prefix = format!("{prefix}Release{release:03}");
             let path = section.string(&release_prefix)?;
             let max_ms = section.int_or(&format!("{release_prefix}MaxKeyPressTime"), -1)?;
-            pipe.releases.push(ReleaseSample {
+            releases.push(ReleaseSample {
                 path: normalize_path(path),
                 max_key_press_ms: (max_ms >= 0).then_some(max_ms as u32),
             });
         }
+        pipe.source = PipeSource::Sampled { attacks, releases };
         Ok(pipe)
     }
 
@@ -577,6 +658,26 @@ impl Builder<'_> {
 /// ODF sample paths use backslashes regardless of host OS.
 fn normalize_path(path: &str) -> PathBuf {
     PathBuf::from(path.replace('\\', "/"))
+}
+
+/// The `<manual>:<stop>:<pipe>` payload of a `REF:` pipe.
+fn parse_borrow(reference: &str) -> Option<(i64, i64, i64)> {
+    let mut parts = reference.splitn(3, ':');
+    let manual = parts.next()?.trim().parse().ok()?;
+    let stop = parts.next()?.trim().parse().ok()?;
+    let pipe = parts.next()?.trim().parse().ok()?;
+    Some((manual, stop, pipe))
+}
+
+fn set_pipe_source(organ: &mut Organ, at: PipeRef, source: PipeSource) {
+    if let Some(pipe) = organ
+        .ranks
+        .iter_mut()
+        .find(|r| r.id == at.rank)
+        .and_then(|r| r.pipes.get_mut(at.pipe as usize))
+    {
+        pipe.source = source;
+    }
 }
 
 fn midi_to_hz(midi: f64) -> f64 {
@@ -647,10 +748,8 @@ Rank001=1
         let rank = &organ.ranks[0];
         assert_eq!(rank.name, "Principal 8");
         assert_eq!(rank.pipes.len(), 3);
-        assert_eq!(
-            rank.pipes[0].attacks[0].path,
-            PathBuf::from("samples/principal8/c1.wav")
-        );
+        let (attacks, _) = rank.pipes[0].samples().expect("sampled pipe");
+        assert_eq!(attacks[0].path, PathBuf::from("samples/principal8/c1.wav"));
         // MIDI 60 = middle C ≈ 261.63 Hz.
         assert!((rank.pipes[0].nominal_frequency_hz - 261.6256).abs() < 0.01);
 
@@ -779,25 +878,178 @@ Pipe001Release002=a-long.wav
         let organ = parse_str(text).organ;
         let pipe = &organ.ranks[0].pipes[0];
         assert_eq!(pipe.midi_key_number, Some(61));
-        assert_eq!(pipe.attacks.len(), 2);
+        let (attacks, releases) = pipe.samples().expect("sampled pipe");
+        assert_eq!(attacks.len(), 2);
         assert_eq!(
-            pipe.attacks[0].loops,
+            attacks[0].loops,
             vec![SampleLoop {
                 start: 1000,
                 end: 48000
             }]
         );
-        assert!(pipe.attacks[1].loops.is_empty());
-        assert_eq!(pipe.releases.len(), 2);
-        assert_eq!(pipe.releases[0].max_key_press_ms, Some(500));
-        assert_eq!(pipe.releases[1].max_key_press_ms, None);
+        assert!(attacks[1].loops.is_empty());
+        assert_eq!(releases.len(), 2);
+        assert_eq!(releases[0].max_key_press_ms, Some(500));
+        assert_eq!(releases[1].max_key_press_ms, None);
     }
 
     #[test]
-    fn dummy_and_ref_pipes_are_silent() {
+    fn dummy_and_ref_pipes() {
         let text = "\
 [Organ]
 ChurchName=Silent
+HasPedals=N
+NumberOfManuals=1
+NumberOfWindchestGroups=1
+
+[WindchestGroup001]
+Name=W
+
+[Manual001]
+Name=M
+NumberOfLogicalKeys=3
+FirstAccessibleKeyLogicalKeyNumber=1
+FirstAccessibleKeyMIDINoteNumber=60
+NumberOfAccessibleKeys=3
+NumberOfStops=1
+Stop001=1
+
+[Stop001]
+Name=S
+FirstAccessiblePipeLogicalKeyNumber=1
+NumberOfAccessiblePipes=3
+Pipe001=DUMMY
+Pipe002=REF:1:1:3
+Pipe003=a.wav
+";
+        let result = parse_str(text);
+        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+        let organ = &result.organ;
+        let rank_id = organ.ranks[0].id;
+        let pipes = &organ.ranks[0].pipes;
+        assert!(matches!(pipes[0].source, PipeSource::Silent));
+        let target = PipeRef {
+            rank: rank_id,
+            pipe: 2,
+        };
+        assert!(matches!(pipes[1].source, PipeSource::Borrowed(t) if t == target));
+        // The borrow chain lands on the sampled pipe.
+        let sounding = organ
+            .sounding_pipe(PipeRef {
+                rank: rank_id,
+                pipe: 1,
+            })
+            .expect("chain terminates");
+        assert!(sounding.samples().is_some());
+    }
+
+    #[test]
+    fn borrow_forward_reference_across_manuals() {
+        // The pedal (manual 0, loaded first) borrows from manual 1's
+        // stop, which doesn't exist yet when the pedal pipes are read.
+        let text = "\
+[Organ]
+ChurchName=Unit
+HasPedals=Y
+NumberOfManuals=1
+NumberOfWindchestGroups=1
+
+[WindchestGroup001]
+Name=W
+
+[Manual000]
+Name=Pedal
+NumberOfLogicalKeys=1
+FirstAccessibleKeyLogicalKeyNumber=1
+FirstAccessibleKeyMIDINoteNumber=36
+NumberOfAccessibleKeys=1
+NumberOfStops=1
+Stop001=1
+
+[Stop001]
+Name=Borrowed Bass
+FirstAccessiblePipeLogicalKeyNumber=1
+NumberOfAccessiblePipes=1
+Pipe001=REF:1:1:2
+
+[Manual001]
+Name=Great
+NumberOfLogicalKeys=2
+FirstAccessibleKeyLogicalKeyNumber=1
+FirstAccessibleKeyMIDINoteNumber=36
+NumberOfAccessibleKeys=2
+NumberOfStops=1
+Stop001=2
+
+[Stop002]
+Name=Principal
+FirstAccessiblePipeLogicalKeyNumber=1
+NumberOfAccessiblePipes=2
+Pipe001=036-C.wav
+Pipe002=037-Cis.wav
+";
+        let result = parse_str(text);
+        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+        let organ = &result.organ;
+        let pedal_rank = organ.stops[0].ranks[0].rank;
+        let great_rank = organ.stops[1].ranks[0].rank;
+        let PipeSource::Borrowed(target) = organ.ranks[0].pipes[0].source else {
+            panic!("expected borrowed pipe in pedal rank");
+        };
+        assert_eq!(organ.ranks[0].id, pedal_rank);
+        assert_eq!(
+            target,
+            PipeRef {
+                rank: great_rank,
+                pipe: 1
+            }
+        );
+        let sounding = organ.sounding_pipe(target).expect("resolves");
+        let (attacks, _) = sounding.samples().expect("sampled");
+        assert_eq!(attacks[0].path, PathBuf::from("037-Cis.wav"));
+    }
+
+    #[test]
+    fn invalid_and_malformed_borrows_degrade_to_silent() {
+        let text = "\
+[Organ]
+ChurchName=Bad Refs
+HasPedals=N
+NumberOfManuals=1
+NumberOfWindchestGroups=1
+
+[WindchestGroup001]
+Name=W
+
+[Manual001]
+Name=M
+NumberOfLogicalKeys=3
+FirstAccessibleKeyLogicalKeyNumber=1
+FirstAccessibleKeyMIDINoteNumber=60
+NumberOfAccessibleKeys=3
+NumberOfStops=1
+Stop001=1
+
+[Stop001]
+Name=S
+FirstAccessiblePipeLogicalKeyNumber=1
+NumberOfAccessiblePipes=3
+Pipe001=REF:9:9:9
+Pipe002=REF:nonsense
+Pipe003=a.wav
+";
+        let result = parse_str(text);
+        assert_eq!(result.warnings.len(), 2, "{:?}", result.warnings);
+        let pipes = &result.organ.ranks[0].pipes;
+        assert!(matches!(pipes[0].source, PipeSource::Silent));
+        assert!(matches!(pipes[1].source, PipeSource::Silent));
+    }
+
+    #[test]
+    fn borrow_cycle_is_broken_with_warning() {
+        let text = "\
+[Organ]
+ChurchName=Cycle
 HasPedals=N
 NumberOfManuals=1
 NumberOfWindchestGroups=1
@@ -818,14 +1070,25 @@ Stop001=1
 Name=S
 FirstAccessiblePipeLogicalKeyNumber=1
 NumberOfAccessiblePipes=2
-Pipe001=DUMMY
+Pipe001=REF:1:1:2
 Pipe002=REF:1:1:1
 ";
         let result = parse_str(text);
-        let pipes = &result.organ.ranks[0].pipes;
-        assert!(pipes[0].attacks.is_empty());
-        assert!(pipes[1].attacks.is_empty());
         assert_eq!(result.warnings.len(), 1, "{:?}", result.warnings);
+        let organ = &result.organ;
+        let rank_id = organ.ranks[0].id;
+        // Every pipe still resolves to something (Silent breaks the loop).
+        for pipe in 0..2 {
+            assert!(
+                organ
+                    .sounding_pipe(PipeRef {
+                        rank: rank_id,
+                        pipe
+                    })
+                    .is_some(),
+                "pipe {pipe} should terminate"
+            );
+        }
     }
 
     #[test]

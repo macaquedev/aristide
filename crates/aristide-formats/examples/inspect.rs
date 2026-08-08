@@ -29,24 +29,43 @@ fn main() -> anyhow::Result<()> {
     }
     let mut missing = 0usize;
     let mut sampled_pipes = 0usize;
+    let mut borrowed_pipes = 0usize;
+    let mut dead_borrows = 0usize;
+    let mut silent_pipes = 0usize;
     let mut total_attacks = 0usize;
     let mut total_releases = 0usize;
     for rank in &organ.ranks {
         let pipes = rank.pipes.len();
-        sampled_pipes += rank.pipes.iter().filter(|p| !p.attacks.is_empty()).count();
-        total_attacks += rank.pipes.iter().map(|p| p.attacks.len()).sum::<usize>();
-        total_releases += rank.pipes.iter().map(|p| p.releases.len()).sum::<usize>();
         for pipe in &rank.pipes {
-            for attack in &pipe.attacks {
-                if !organ.base_path.join(&attack.path).is_file() {
-                    missing += 1;
+            match &pipe.source {
+                aristide_model::PipeSource::Sampled { attacks, releases } => {
+                    sampled_pipes += 1;
+                    total_attacks += attacks.len();
+                    total_releases += releases.len();
+                    for attack in attacks {
+                        if !organ.base_path.join(&attack.path).is_file() {
+                            missing += 1;
+                        }
+                    }
                 }
+                aristide_model::PipeSource::Borrowed(target) => {
+                    borrowed_pipes += 1;
+                    let sounds = organ
+                        .sounding_pipe(*target)
+                        .is_some_and(|p| p.samples().is_some());
+                    if !sounds {
+                        dead_borrows += 1;
+                    }
+                }
+                aristide_model::PipeSource::Silent => silent_pipes += 1,
             }
         }
         println!("  rank {:24} {pipes} pipes", rank.name);
     }
     println!(
-        "sampled pipes: {sampled_pipes}, attacks: {total_attacks}, releases: {total_releases}, missing sample files: {missing}"
+        "sampled pipes: {sampled_pipes}, borrowed: {borrowed_pipes} ({dead_borrows} dead), \
+         silent: {silent_pipes}, attacks: {total_attacks}, releases: {total_releases}, \
+         missing sample files: {missing}"
     );
 
     // Exercise the WAV reader on the first real sample.
@@ -54,7 +73,8 @@ fn main() -> anyhow::Result<()> {
         .ranks
         .iter()
         .flat_map(|r| &r.pipes)
-        .flat_map(|p| &p.attacks)
+        .filter_map(|p| p.samples())
+        .flat_map(|(attacks, _)| attacks)
         .next()
     {
         let info = aristide_formats::wav::read_info(&organ.base_path.join(&attack.path))?;
