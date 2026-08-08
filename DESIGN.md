@@ -90,7 +90,8 @@ input mappings, console-skin overrides. A set + its sidecars = a reproducible in
 
 - **M0** — repo, workspace, this document. ✅
 - **M1 — first sound**: server opens audio+MIDI devices, sine-per-note through the RT
-  command path. Proves device layer + lock-free plumbing. QWERTY-as-manual fallback.
+  command path. Proves device layer + lock-free plumbing. ✅ (QWERTY fallback deferred;
+  see docs/PROGRESS.md)
 - **M2 — organ model + GO loader**: parse `.organ` sets (test: Grabowski Friesach demo)
   into the model; validate against GrandOrgue's docs.
 - **M3 — sampled voices**: attack-cache + disk-streaming playback with loops and basic
