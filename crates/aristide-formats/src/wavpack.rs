@@ -299,14 +299,12 @@ mod tests {
     use crate::wav;
     use std::path::PathBuf;
 
-    /// The real WavPack fixtures used here live outside the repo (they're
-    /// GrandOrgue demo-set samples, not something to commit); tests that
-    /// need one skip gracefully when the directory isn't present so a
-    /// checkout without the fixture still passes `cargo test`.
+    /// The real WavPack fixtures used here live in the gitignored
+    /// testsets/ directory (GrandOrgue demo-set samples, not something
+    /// to commit); tests that need one skip gracefully when the
+    /// directory isn't present so a bare checkout still passes.
     fn fixture_dir() -> Option<PathBuf> {
-        let dir = PathBuf::from(
-            "/tmp/claude-1000/-home-macaque-github-aristide/be0874ed-9e11-4d49-afee-69c9c36d0e6e/scratchpad/go-demo",
-        );
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testsets/grandorgue-demo");
         dir.is_dir().then_some(dir)
     }
 
