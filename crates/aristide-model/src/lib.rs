@@ -29,7 +29,7 @@ pub struct Manual {
 }
 
 /// A sustain loop within a sample, in frames.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SampleLoop {
     pub start: u64,
     pub end: u64,
@@ -61,9 +61,14 @@ pub struct Pipe {
     /// Nominal pitch this pipe sounds at concert tuning, before
     /// temperament/retuning layers.
     pub nominal_frequency_hz: f64,
-    /// Set-author tuning correction in cents.
+    /// Set-author tuning correction in cents (already combined across
+    /// the organ→windchest→rank→pipe inheritance chain by the loader).
     pub pitch_tuning_cents: f64,
+    /// Total gain in dB (amplitude chain folded in by the loader).
     pub gain_db: f64,
+    /// Explicit MIDI key of the recording, overriding the sample file's
+    /// own `smpl`-chunk unity note when present.
+    pub midi_key_number: Option<u8>,
     pub attacks: Vec<AttackSample>,
     pub releases: Vec<ReleaseSample>,
 }
