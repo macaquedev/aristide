@@ -12,3 +12,5 @@ aristide-model.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+cpal = "0.16"
+midir = "0.10"
