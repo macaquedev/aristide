@@ -24,9 +24,10 @@ pub struct Console {
     /// plays; channels past the end wrap.
     channel_map: Vec<usize>,
     next_handle: u64,
-    /// (manual index, MIDI key) → handles sounding for that key.
-    /// `percussive` voices are excluded (they stop themselves).
-    sounding: HashMap<(usize, u8), Vec<u64>>,
+    /// (manual index, MIDI key) → voices sounding for that key, tagged
+    /// with the stop that started them (so retiring a stop can silence
+    /// them). `percussive` voices are excluded (they stop themselves).
+    sounding: HashMap<(usize, u8), Vec<(StopId, u64)>>,
 }
 
 impl Console {
@@ -89,7 +90,7 @@ impl Console {
                 let handle = self.next_handle;
                 self.next_handle += 1;
                 if !spec.percussive {
-                    held.push(handle);
+                    held.push((stop.id, handle));
                 }
                 starts.push(VoiceStart {
                     handle,
@@ -115,6 +116,56 @@ impl Console {
         self.sounding
             .remove(&(manual_index, key))
             .unwrap_or_default()
+            .into_iter()
+            .map(|(_, handle)| handle)
+            .collect()
+    }
+
+    /// Draw or retire a stop. Retiring returns the handles of its
+    /// currently sounding voices so the caller can stop them.
+    pub fn set_drawn(&mut self, stop: StopId, drawn: bool) -> Vec<u64> {
+        if drawn {
+            if !self.drawn.contains(&stop) {
+                self.drawn.push(stop);
+            }
+            return Vec::new();
+        }
+        self.drawn.retain(|&id| id != stop);
+        let mut released = Vec::new();
+        for handles in self.sounding.values_mut() {
+            handles.retain(|&(owner, handle)| {
+                if owner == stop {
+                    released.push(handle);
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+        released
+    }
+
+    /// Every stop with its manual name and drawn state, for UIs.
+    pub fn stop_states(&self) -> Vec<(StopId, &str, &str, bool)> {
+        self.organ
+            .stops
+            .iter()
+            .map(|stop| {
+                let manual = self
+                    .organ
+                    .manuals
+                    .iter()
+                    .find(|m| m.id == stop.manual)
+                    .map(|m| m.name.as_str())
+                    .unwrap_or("?");
+                (
+                    stop.id,
+                    stop.name.as_str(),
+                    manual,
+                    self.drawn.contains(&stop.id),
+                )
+            })
+            .collect()
     }
 
     /// Forget everything sounding (the engine is told separately).

@@ -28,6 +28,43 @@ pub struct Sidecar {
     pub registration: Registration,
     #[serde(default)]
     pub wind: Wind,
+    #[serde(default)]
+    pub tremulant: Tremulant,
+}
+
+/// Synthesized tremulant, rendered as periodic wind-pressure modulation
+/// (measured behaviour: ~6 Hz, FM ±10–15 cents typical / ±24 ceiling,
+/// see docs/research/organ-wind-acoustics.md §5).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Tremulant {
+    /// Beat rate in Hz.
+    #[serde(default = "default_trem_rate_hz")]
+    pub rate_hz: f64,
+    /// Peak pitch swing in cents.
+    #[serde(default = "default_trem_depth_cents")]
+    pub depth_cents: f64,
+    /// 1-based ODF windchest numbers the tremulant acts on; empty = all.
+    #[serde(default)]
+    pub chests: Vec<u32>,
+}
+
+fn default_trem_rate_hz() -> f64 {
+    6.0
+}
+
+fn default_trem_depth_cents() -> f64 {
+    12.0
+}
+
+impl Default for Tremulant {
+    fn default() -> Self {
+        Tremulant {
+            rate_hz: default_trem_rate_hz(),
+            depth_cents: default_trem_depth_cents(),
+            chests: Vec::new(),
+        }
+    }
 }
 
 /// Wind-supply behaviour for this instrument (applied to every chest;

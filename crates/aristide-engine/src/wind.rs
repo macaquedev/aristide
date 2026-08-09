@@ -90,11 +90,96 @@ impl Default for WindParams {
     }
 }
 
+/// A tremulant: periodic pressure modulation on one wind group.
+///
+/// Physically a tremulant is a valve venting the wind supply at a few
+/// Hz; pitch, amplitude, and (later) brightness all move together
+/// because they all follow pressure. Measured targets
+/// (docs/research/organ-wind-acoustics.md §5): rate ~6 Hz, FM ±10–15
+/// cents typical (±24 ceiling), AM ≥ 1 dB, and — characteristically —
+/// cycle-to-cycle irregularity, modeled here as slow random walks on
+/// rate and depth (Hauptwerk likewise randomizes both continuously).
+#[derive(Debug, Clone, Copy)]
+pub struct TremulantParams {
+    pub rate_hz: f32,
+    /// Peak pressure modulation as a fraction (0.22 ≈ ±12 cents via the
+    /// default pitch exponent).
+    pub depth: f32,
+    /// Engage/disengage ramp, seconds (the valve spins up/down).
+    pub ramp_seconds: f32,
+    /// Slow random variation of rate and depth, as a fraction (0.08 =
+    /// ±8 % wander).
+    pub wobble: f32,
+}
+
+impl Default for TremulantParams {
+    fn default() -> Self {
+        TremulantParams {
+            rate_hz: 6.0,
+            depth: 0.22,
+            ramp_seconds: 0.7,
+            wobble: 0.08,
+        }
+    }
+}
+
+/// Slow random-walk state: a value slewing toward a periodically
+/// re-rolled target — a damped random process, not white noise.
+#[derive(Debug, Clone, Copy)]
+struct Wander {
+    value: f32,
+    target: f32,
+    /// Seconds until the next target re-roll.
+    countdown: f32,
+}
+
+impl Default for Wander {
+    fn default() -> Self {
+        Wander {
+            value: 1.0,
+            target: 1.0,
+            countdown: 0.0,
+        }
+    }
+}
+
+impl Wander {
+    /// Advance by `dt`, wandering within ±`spread` of 1.0.
+    fn step(&mut self, dt: f32, spread: f32, rng: &mut u32) {
+        self.countdown -= dt;
+        if self.countdown <= 0.0 {
+            // Re-roll every ~0.5–1.5 s.
+            self.countdown = 0.5 + xorshift_unit(rng);
+            self.target = 1.0 + spread * (2.0 * xorshift_unit(rng) - 1.0);
+        }
+        // Slew with ~0.5 s time constant.
+        self.value += (self.target - self.value) * (dt * 2.0).min(1.0);
+    }
+}
+
+#[inline]
+fn xorshift_unit(state: &mut u32) -> f32 {
+    let mut x = *state;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    *state = x;
+    (x >> 8) as f32 / (1u32 << 24) as f32
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct WindGroup {
     params: WindParams,
     pressure: f32,
     velocity: f32,
+    tremulant: TremulantParams,
+    /// 0 = off, 1 = on; the engage envelope slews between them.
+    tremulant_target: f32,
+    tremulant_level: f32,
+    tremulant_phase: f32,
+    rate_wander: Wander,
+    depth_wander: Wander,
+    rng: u32,
     /// Cached per-block factors.
     rate_factor: f32,
     gain_factor: f32,
@@ -106,6 +191,13 @@ impl Default for WindGroup {
             params: WindParams::default(),
             pressure: 1.0,
             velocity: 0.0,
+            tremulant: TremulantParams::default(),
+            tremulant_target: 0.0,
+            tremulant_level: 0.0,
+            tremulant_phase: 0.0,
+            rate_wander: Wander::default(),
+            depth_wander: Wander::default(),
+            rng: 0x9E3779B9,
             rate_factor: 1.0,
             gain_factor: 1.0,
         }
@@ -130,30 +222,63 @@ impl WindGroup {
             && self.params.natural_hz > 0.0
     }
 
+    pub fn set_tremulant_params(&mut self, params: TremulantParams) {
+        self.tremulant = params;
+    }
+
+    /// Engage/disengage the tremulant (ramped, safe while notes sound).
+    pub fn set_tremulant(&mut self, engaged: bool) {
+        self.tremulant_target = if engaged { 1.0 } else { 0.0 };
+    }
+
+    pub fn tremulant_engaged(&self) -> bool {
+        self.tremulant_target > 0.5
+    }
+
     /// Advance the regulator by `dt` seconds under demand `demand`
     /// (already attack-boosted by the caller), refreshing the factors.
     pub fn step(&mut self, demand: f32, dt: f32) {
-        if !self.enabled() {
+        let tremulant_active = self.tremulant_level > 1e-4 || self.tremulant_target > 0.0;
+        if !self.enabled() && !tremulant_active {
             return;
         }
         let p = &self.params;
-        // Load response is linear in demand, capped so a freak tutti
-        // can't fold the model in half.
-        let target = 1.0 - p.sag_depth * (demand / p.reference_demand).min(3.0);
-        let omega = core::f32::consts::TAU * p.natural_hz;
+        if self.enabled() {
+            // Load response is linear in demand, capped so a freak tutti
+            // can't fold the model in half.
+            let target = 1.0 - p.sag_depth * (demand / p.reference_demand).min(3.0);
+            let omega = core::f32::consts::TAU * p.natural_hz;
 
-        // Semi-implicit Euler, substepped so blocks far larger than the
-        // regulator period stay stable (ω·dt ≤ ~0.3 per substep).
-        let steps = (dt * omega / 0.25).ceil().max(1.0) as u32;
-        let h = dt / steps as f32;
-        for _ in 0..steps {
-            let accel = omega * omega * (target - self.pressure)
-                - 2.0 * p.damping * omega * self.velocity;
-            self.velocity += h * accel;
-            self.pressure = (self.pressure + h * self.velocity).clamp(0.5, 1.2);
+            // Semi-implicit Euler, substepped so blocks far larger than
+            // the regulator period stay stable (ω·dt ≤ ~0.3 per substep).
+            let steps = (dt * omega / 0.25).ceil().max(1.0) as u32;
+            let h = dt / steps as f32;
+            for _ in 0..steps {
+                let accel = omega * omega * (target - self.pressure)
+                    - 2.0 * p.damping * omega * self.velocity;
+                self.velocity += h * accel;
+                self.pressure = (self.pressure + h * self.velocity).clamp(0.5, 1.2);
+            }
         }
-        self.rate_factor = self.pressure.powf(p.pitch_exponent);
-        self.gain_factor = self.pressure.powf(p.gain_exponent);
+
+        // Tremulant: pressure modulation on top of the regulator state.
+        let mut effective = self.pressure;
+        if tremulant_active {
+            let t = &self.tremulant;
+            let ramp = (dt / t.ramp_seconds.max(0.01)).min(1.0);
+            self.tremulant_level += (self.tremulant_target - self.tremulant_level) * ramp;
+            self.rate_wander.step(dt, t.wobble, &mut self.rng);
+            self.depth_wander.step(dt, t.wobble, &mut self.rng);
+            self.tremulant_phase =
+                (self.tremulant_phase + dt * t.rate_hz * self.rate_wander.value).fract();
+            let modulation = t.depth
+                * self.depth_wander.value
+                * self.tremulant_level
+                * (core::f32::consts::TAU * self.tremulant_phase).sin();
+            effective = (effective * (1.0 + modulation)).clamp(0.3, 1.5);
+        }
+        self.rate_factor = effective.powf(p.pitch_exponent);
+        self.gain_factor = effective.powf(p.gain_exponent);
     }
 
     #[inline]
@@ -257,6 +382,88 @@ mod tests {
             sag > 1.8 * p.sag_depth && sag < 2.2 * p.sag_depth,
             "sag {sag} not ~2x {}",
             p.sag_depth
+        );
+    }
+
+    #[test]
+    fn tremulant_modulates_at_rate_and_disengages() {
+        let mut group = WindGroup::default();
+        let trem = TremulantParams {
+            wobble: 0.0, // deterministic for the rate check
+            ..TremulantParams::default()
+        };
+        group.set_tremulant_params(trem);
+        group.set_tremulant(true);
+
+        let dt = 0.002;
+        // Let the engage ramp finish.
+        for _ in 0..((3.0 / dt) as usize) {
+            group.step(0.0, dt);
+        }
+        // Track the rate factor over 2 s: depth and rate must match.
+        let mut min_f = f32::MAX;
+        let mut max_f = f32::MIN;
+        let mut crossings = 0;
+        let mut previous = group.rate_factor() - 1.0;
+        for _ in 0..((2.0 / dt) as usize) {
+            group.step(0.0, dt);
+            let value = group.rate_factor() - 1.0;
+            min_f = min_f.min(group.rate_factor());
+            max_f = max_f.max(group.rate_factor());
+            if previous < 0.0 && value >= 0.0 {
+                crossings += 1;
+            }
+            previous = value;
+        }
+        // ±22 % pressure through P^0.032 → ≈ ±0.64 % rate (±11 cents).
+        let expected = (1.0f32 + trem.depth).powf(group.params().pitch_exponent) - 1.0;
+        assert!(
+            max_f - 1.0 > 0.7 * expected && 1.0 - min_f > 0.7 * expected,
+            "depth: {min_f}..{max_f} vs expected ±{expected}"
+        );
+        assert!(
+            (11..=13).contains(&crossings),
+            "rate: {crossings} cycles in 2 s, expected ~12 at 6 Hz"
+        );
+
+        // Disengage: modulation ramps out.
+        group.set_tremulant(false);
+        for _ in 0..((3.0 / dt) as usize) {
+            group.step(0.0, dt);
+        }
+        let mut spread = 0.0f32;
+        for _ in 0..((1.0 / dt) as usize) {
+            group.step(0.0, dt);
+            spread = spread.max((group.rate_factor() - 1.0).abs());
+        }
+        assert!(spread < 0.0005, "tremulant should have died out: {spread}");
+    }
+
+    #[test]
+    fn tremulant_works_even_with_sag_disabled() {
+        let mut group = WindGroup::default();
+        group.set_params(WindParams {
+            sag_depth: 0.0,
+            ..WindParams::default()
+        });
+        group.set_tremulant(true);
+        for _ in 0..1000 {
+            group.step(0.0, 0.005);
+        }
+        assert!(
+            (group.rate_factor() - 1.0).abs() > 1e-4 || {
+                // could be near a zero crossing; scan a cycle
+                let mut hit = false;
+                for _ in 0..100 {
+                    group.step(0.0, 0.005);
+                    if (group.rate_factor() - 1.0).abs() > 1e-3 {
+                        hit = true;
+                        break;
+                    }
+                }
+                hit
+            },
+            "tremulant must run on a sag-disabled chest"
         );
     }
 

@@ -66,6 +66,13 @@ pub enum Command {
     },
     /// Reconfigure one wind group's supply model.
     SetWind { group: u8, params: WindParams },
+    /// Configure one wind group's tremulant.
+    SetTremulantParams {
+        group: u8,
+        params: wind::TremulantParams,
+    },
+    /// Engage/disengage one wind group's tremulant (ramped).
+    SetTremulant { group: u8, engaged: bool },
     /// Release the voice started with `handle`. Loop-less (percussive)
     /// voices ignore this and play to their end.
     StopVoice { handle: u64 },
@@ -447,6 +454,16 @@ impl Engine {
             Command::SetWind { group, params } => {
                 if let Some(wind) = self.wind.get_mut(group as usize) {
                     wind.set_params(params);
+                }
+            }
+            Command::SetTremulantParams { group, params } => {
+                if let Some(wind) = self.wind.get_mut(group as usize) {
+                    wind.set_tremulant_params(params);
+                }
+            }
+            Command::SetTremulant { group, engaged } => {
+                if let Some(wind) = self.wind.get_mut(group as usize) {
+                    wind.set_tremulant(engaged);
                 }
             }
             Command::StopVoice { handle } => {

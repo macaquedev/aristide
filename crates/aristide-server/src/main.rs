@@ -1,5 +1,6 @@
 mod bank;
 mod console;
+mod http;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -20,6 +21,8 @@ struct Args {
     stops: Vec<String>,
     list_stops: bool,
     master_gain: Option<f32>,
+    /// Local web console port.
+    http_port: u16,
 }
 
 fn parse_args() -> Result<Args> {
@@ -28,6 +31,7 @@ fn parse_args() -> Result<Args> {
         stops: Vec::new(),
         list_stops: false,
         master_gain: None,
+        http_port: 9669,
     };
     let mut iter = std::env::args().skip(1);
     while let Some(arg) = iter.next() {
@@ -48,6 +52,13 @@ fn parse_args() -> Result<Args> {
                         .parse()
                         .context("--gain must be a number")?,
                 )
+            }
+            "--http-port" => {
+                args.http_port = iter
+                    .next()
+                    .context("--http-port needs a value")?
+                    .parse()
+                    .context("--http-port must be a port number")?
             }
             other if args.set.is_none() && !other.starts_with('-') => {
                 args.set = Some(PathBuf::from(other))
@@ -149,14 +160,19 @@ fn resolve_channel_map(organ: &Organ, channel_names: &[String]) -> Vec<usize> {
 }
 
 /// What MIDI input drives: the sampled organ console, or the M1 tone.
-enum Control {
+pub enum Control {
     Tone,
     Organ(Console),
 }
 
-struct State {
-    engine: EngineHandle,
-    control: Control,
+pub struct State {
+    pub engine: EngineHandle,
+    pub control: Control,
+    /// Wind groups the tremulant acts on (from the sidecar; empty when
+    /// no set is loaded).
+    pub trem_groups: Vec<u8>,
+    pub trem_engaged: bool,
+    pub master_gain: f32,
 }
 
 fn main() -> Result<()> {
@@ -191,6 +207,7 @@ fn main() -> Result<()> {
     );
 
     let mut wind_params = None;
+    let mut trem_setup: Option<(aristide_engine::wind::TremulantParams, Vec<u8>)> = None;
     let (sample_bank, control) = match &args.set {
         Some(path) => {
             let organ = load_organ(path)?;
@@ -227,16 +244,36 @@ fn main() -> Result<()> {
                 args.stops.clone()
             };
             let defaults = aristide_engine::wind::WindParams::default();
+            let kp = defaults.pitch_exponent as f64;
             // sag_cents is what the user hears; invert P^kp to pressure.
             let sag_cents = sidecar.wind.sag_cents.clamp(0.0, 50.0);
             wind_params = Some(aristide_engine::wind::WindParams {
-                sag_depth: (1.0
-                    - 2f64.powf(-sag_cents / (1200.0 * defaults.pitch_exponent as f64)))
-                    as f32,
+                sag_depth: (1.0 - 2f64.powf(-sag_cents / (1200.0 * kp))) as f32,
                 natural_hz: sidecar.wind.bounce_hz.clamp(0.5, 12.0) as f32,
                 damping: sidecar.wind.damping.clamp(0.2, 1.5) as f32,
                 ..defaults
             });
+
+            // Tremulant: pitch cents → pressure swing through the same
+            // exponent, applied to the sidecar's chests (default: all).
+            let depth_cents = sidecar.tremulant.depth_cents.clamp(0.0, 30.0);
+            let trem_params = aristide_engine::wind::TremulantParams {
+                rate_hz: sidecar.tremulant.rate_hz.clamp(0.5, 12.0) as f32,
+                depth: (2f64.powf(depth_cents / (1200.0 * kp)) - 1.0) as f32,
+                ..Default::default()
+            };
+            let max_groups = aristide_engine::wind::MAX_WIND_GROUPS as u32;
+            let groups: Vec<u8> = if sidecar.tremulant.chests.is_empty() {
+                (0..max_groups as u8).collect()
+            } else {
+                sidecar
+                    .tremulant
+                    .chests
+                    .iter()
+                    .map(|&chest| chest.saturating_sub(1).min(max_groups - 1) as u8)
+                    .collect()
+            };
+            trem_setup = Some((trem_params, groups));
             let drawn = choose_registration(&organ, &patterns);
             let channel_map = resolve_channel_map(&organ, &sidecar.midi.channels);
             let console = Console::new(organ, loaded.specs, drawn, channel_map);
@@ -268,6 +305,25 @@ fn main() -> Result<()> {
         }
     }
 
+    let trem_groups = match &trem_setup {
+        Some((params, groups)) => {
+            tracing::info!(
+                "tremulant: {:.1} Hz, ±{:.0}% pressure, chests {:?}",
+                params.rate_hz,
+                params.depth * 100.0,
+                groups
+            );
+            for &group in groups {
+                handle.send(Command::SetTremulantParams {
+                    group,
+                    params: *params,
+                });
+            }
+            groups.clone()
+        }
+        None => Vec::new(),
+    };
+
     let stream = device.build_output_stream(
         &config,
         move |data: &mut [f32], _| engine.process(data, channels),
@@ -279,7 +335,13 @@ fn main() -> Result<()> {
     let state = Arc::new(Mutex::new(State {
         engine: handle,
         control,
+        trem_groups,
+        trem_engaged: false,
+        master_gain: args.master_gain.unwrap_or(0.35),
     }));
+    if let Err(err) = http::spawn(Arc::clone(&state), args.http_port) {
+        tracing::warn!("console ui disabled: {err}");
+    }
     let connections = connect_all_midi_inputs(&state)?;
     if connections.is_empty() {
         tracing::warn!("no MIDI inputs found — plug in the console and restart");
@@ -343,7 +405,9 @@ fn handle_midi(message: &[u8], state: &Mutex<State>) {
     };
     let channel = status & 0x0F;
     let mut state = state.lock().expect("state poisoned");
-    let State { engine, control } = &mut *state;
+    let State {
+        engine, control, ..
+    } = &mut *state;
 
     let mut send = |command: Command| {
         if !engine.send(command) {

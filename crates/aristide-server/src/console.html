@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Aristide</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: system-ui, sans-serif; background: #14161a; color: #e8e6e3;
+         margin: 0 auto; max-width: 640px; padding: 1.2rem; }
+  h1 { font-size: 1.1rem; letter-spacing: 0.15em; text-transform: uppercase;
+       color: #c8a24a; margin: 0 0 1rem; }
+  h2 { font-size: 0.8rem; letter-spacing: 0.1em; text-transform: uppercase;
+       color: #8b93a1; margin: 1.2rem 0 0.4rem; border-bottom: 1px solid #2a2e35;
+       padding-bottom: 0.3rem; }
+  .stops { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+  button.stop { border: 1px solid #3a3f48; border-radius: 999px;
+       background: #1d2025; color: #b9bec7; padding: 0.45rem 0.9rem; font-size: 0.85rem;
+       cursor: pointer; }
+  button.stop.on { background: #c8a24a; border-color: #c8a24a; color: #14161a;
+       font-weight: 600; }
+  .row { display: flex; align-items: center; gap: 0.8rem; margin-top: 1.2rem; }
+  input[type=range] { flex: 1; accent-color: #c8a24a; }
+  #trem.on { background: #7fb069; border-color: #7fb069; color: #14161a; }
+</style>
+</head>
+<body>
+<h1>Aristide — registration</h1>
+<div id="manuals"></div>
+<div class="row">
+  <button id="trem" class="stop">Tremulant</button>
+  <label for="gain" style="color:#8b93a1;font-size:0.8rem">GAIN</label>
+  <input id="gain" type="range" min="0.05" max="1.2" step="0.05">
+  <span id="gainv" style="color:#8b93a1;font-size:0.8rem;width:2.5rem"></span>
+</div>
+<script>
+async function refresh(data) {
+  if (!data) data = await (await fetch('/api/state')).json();
+  const groups = {};
+  for (const s of data.stops) (groups[s.manual] ||= []).push(s);
+  const root = document.getElementById('manuals');
+  root.innerHTML = '';
+  for (const [manual, stops] of Object.entries(groups)) {
+    const h = document.createElement('h2');
+    h.textContent = manual;
+    root.appendChild(h);
+    const div = document.createElement('div');
+    div.className = 'stops';
+    for (const s of stops) {
+      const b = document.createElement('button');
+      b.className = 'stop' + (s.on ? ' on' : '');
+      b.textContent = s.name;
+      b.onclick = async () => refresh(await (await fetch(
+        `/api/stop?id=${s.id}&on=${s.on ? 0 : 1}`, {method: 'POST'})).json());
+      div.appendChild(b);
+    }
+    root.appendChild(div);
+  }
+  const trem = document.getElementById('trem');
+  trem.classList.toggle('on', data.tremulant);
+  trem.onclick = async () => refresh(await (await fetch(
+    `/api/trem?on=${data.tremulant ? 0 : 1}`, {method: 'POST'})).json());
+  const gain = document.getElementById('gain');
+  gain.value = data.gain;
+  document.getElementById('gainv').textContent = Number(data.gain).toFixed(2);
+  gain.oninput = () => document.getElementById('gainv').textContent =
+    Number(gain.value).toFixed(2);
+  gain.onchange = async () => refresh(await (await fetch(
+    `/api/gain?v=${gain.value}`, {method: 'POST'})).json());
+}
+refresh();
+</script>
+</body>
+</html>

@@ -15,3 +15,10 @@ default = ["Bourdon 16'", "Montre 8'", "Prestant 4'", "Plein jeu III"]
 sag_cents = 3.0
 bounce_hz = 3.5
 damping = 0.5
+
+[tremulant]
+# Toggled from the web console. This set defines no windchest groups,
+# so the tremulant acts on the whole organ (chest 1).
+rate_hz = 6.0
+depth_cents = 12.0
+chests = [1]
