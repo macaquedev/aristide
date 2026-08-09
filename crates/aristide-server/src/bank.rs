@@ -316,7 +316,7 @@ mod tests {
                 .id,
         ];
         let mut console = crate::console::Console::new(organ, loaded.specs, drawn, Vec::new());
-        let starts = console.note_on(0, 60);
+        let (starts, _) = console.note_on(0, 60);
         assert!(!starts.is_empty(), "middle C should sound");
 
         let (mut engine, mut handle) =

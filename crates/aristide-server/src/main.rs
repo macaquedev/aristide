@@ -549,7 +549,11 @@ fn handle_midi(message: &[u8], state: &Mutex<State>) {
                 freq_hz: midi_note_to_hz(key),
             }),
             Control::Organ(console) => {
-                for start in console.note_on(channel, key) {
+                let (starts, retriggered) = console.note_on(channel, key);
+                for handle in retriggered {
+                    send(Command::StopVoice { handle });
+                }
+                for start in starts {
                     send(Command::StartVoice {
                         handle: start.handle,
                         sample: start.spec.sample,
