@@ -178,6 +178,12 @@ struct SampledVoice {
     fade: f32,
     /// FadeOut amplitude 1→0.
     amplitude: f32,
+    /// Fast envelope follower on the voice's own (pre-gain) output —
+    /// what "how loud am I right now" means at release time.
+    envelope: f32,
+    /// Level-matching scale applied to the release tail so it continues
+    /// at the voice's current loudness instead of the recording's.
+    tail_gain: f32,
     /// Wind group index (pre-clamped to `MAX_WIND_GROUPS`).
     group: u8,
     /// How much wind this voice draws while sounding.
@@ -234,13 +240,20 @@ impl SampledVoice {
             SamplePhase::Held | SamplePhase::Tail => {}
             SamplePhase::Crossfade => {
                 let (tail_l, tail_r) = table.read(sample, self.release_position, None);
-                left += (tail_l - left) * self.fade;
-                right += (tail_r - right) * self.fade;
+                // Raised-cosine-shaped blend (smoothstep ≈ it, no trig):
+                // linear fades dip audibly on the uncorrelated noise
+                // floor (Appleton 2019).
+                let weight = self.fade * self.fade * (3.0 - 2.0 * self.fade);
+                left += (tail_l * self.tail_gain - left) * weight;
+                right += (tail_r * self.tail_gain - right) * weight;
                 self.fade += crossfade_step;
                 self.release_position += rate;
                 if self.fade >= 1.0 {
-                    // Hand the (already advanced) tail cursor over.
+                    // Hand the (already advanced) tail cursor over and
+                    // fold the level match into the voice gain.
                     self.position = self.release_position;
+                    self.gain *= self.tail_gain;
+                    self.tail_gain = 1.0;
                     self.phase = SamplePhase::Tail;
                     advance_position = false;
                 }
@@ -281,6 +294,15 @@ impl SampledVoice {
                     }
                     _ => tail as f64,
                 };
+                // Level match: scale the tail to continue at the voice's
+                // current loudness (early releases are quieter than the
+                // recorded sustain — unscaled tails strike like a bell).
+                let reference = sample.tail_reference_level();
+                self.tail_gain = if reference > 1e-5 {
+                    (self.envelope / reference).clamp(0.05, 1.3)
+                } else {
+                    1.0
+                };
                 self.fade = 0.0;
                 self.phase = SamplePhase::Crossfade;
             }
@@ -318,6 +340,8 @@ pub struct Engine {
     tone_release_step: f32,
     crossfade_step: f32,
     kill_step: f32,
+    /// ~10 ms envelope-follower coefficient for release level matching.
+    envelope_step: f32,
 }
 
 impl Engine {
@@ -335,6 +359,7 @@ impl Engine {
             tone_release_step: 1.0 / (TONE_RELEASE_SECONDS * sample_rate),
             crossfade_step: 1.0 / (RELEASE_CROSSFADE_SECONDS * sample_rate),
             kill_step: 1.0 / (KILL_FADE_SECONDS * sample_rate),
+            envelope_step: 1.0 - (-1.0 / (0.01 * sample_rate)).exp(),
         };
         (engine, EngineHandle { commands: producer })
     }
@@ -383,6 +408,7 @@ impl Engine {
             tone_release_step,
             crossfade_step,
             kill_step,
+            envelope_step,
             ..
         } = self;
 
@@ -438,6 +464,10 @@ impl Engine {
                     for frame in 0..frames {
                         match sampled.tick(sample, sinc, rate_scale, *crossfade_step, *kill_step) {
                             Some((mut left, mut right)) => {
+                                // Track the voice's own loudness (pre-
+                                // gain) for release level matching.
+                                sampled.envelope += *envelope_step
+                                    * ((left.abs() + right.abs()) * 0.5 - sampled.envelope);
                                 if tilting {
                                     let lp = &mut sampled.lowpass;
                                     lp[0] += tilt_a * (left - lp[0]);
@@ -487,6 +517,8 @@ impl Engine {
                         gain,
                         fade: 0.0,
                         amplitude: 1.0,
+                        envelope: 0.0,
+                        tail_gain: 1.0,
                         group: group.min(MAX_WIND_GROUPS as u8 - 1),
                         wind_weight: wind_weight.max(0.0),
                         age_frames: 0,
@@ -910,6 +942,69 @@ mod tests {
             loaded > 480.5 && loaded < 481.5,
             "loaded period {loaded} should sag to ~481 frames"
         );
+    }
+
+    #[test]
+    fn early_release_does_not_strike_like_a_bell() {
+        // A pipe whose attack ramps up over 4 periods: releasing during
+        // the ramp used to splice to the tail at FULL recorded level —
+        // a bell strike. The level match must scale it down.
+        let period = 480usize;
+        let omega = std::f64::consts::TAU / period as f64;
+        let loop_start = period * 8;
+        let loop_end = period * 16;
+        let frames = period * 28;
+        let ramp_end = (period * 4) as f64;
+        let data: Vec<f32> = (0..frames)
+            .map(|n| {
+                let envelope = if (n as f64) < ramp_end {
+                    n as f64 / ramp_end
+                } else if n >= loop_end {
+                    1.0 - 0.5 * (n - loop_end) as f64 / (frames - loop_end) as f64
+                } else {
+                    1.0
+                };
+                (envelope * (omega * n as f64).sin()) as f32
+            })
+            .collect();
+        let mut sample = Sample::new(
+            data,
+            1,
+            48000.0,
+            Some((loop_start as u64, loop_end as u64)),
+            loop_end as u64,
+        )
+        .expect("valid");
+        sample.align_release(48000.0 / period as f32);
+        let mut bank = SampleBank::default();
+        bank.push(sample);
+
+        let (mut engine, mut handle) = Engine::new(48000.0, Arc::new(bank));
+        handle.send(Command::StartVoice {
+            handle: 1,
+            sample: 0,
+            rate: 1.0,
+            gain: 1.0,
+            group: 0,
+            wind_weight: 0.0,
+            brightness: 0.0,
+        });
+        // Release 1.5 periods in: the ramp is at ~37 % amplitude.
+        let mut buffer = vec![0.0f32; (period * 3 / 2) * 2];
+        engine.process(&mut buffer, 2);
+        handle.send(Command::StopVoice { handle: 1 });
+        let mut buffer = vec![0.0f32; 9600 * 2];
+        engine.process(&mut buffer, 2);
+        let peak = buffer.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
+        // Unmatched, the tail peaked at the full 1.0 × master. With the
+        // match, the tail leg is scaled to ~0.37; the residual above
+        // that is the main leg still swelling through the crossfade
+        // (the pipe genuinely keeps speaking for those 30 ms).
+        assert!(
+            peak < 0.55 * DEFAULT_MASTER_GAIN,
+            "release struck like a bell: peak {peak}"
+        );
+        assert!(peak > 0.02 * DEFAULT_MASTER_GAIN, "release went silent");
     }
 
     #[test]

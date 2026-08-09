@@ -58,6 +58,11 @@ pub struct Sample {
     /// it lies strictly before `frames()`; loop-less samples ignore it.
     release_start: u64,
     release_alignment: Option<ReleaseAlignment>,
+    /// Mean |sample| over the tail's first stretch — the loudness the
+    /// recorded release *starts* at. Voices scale the tail so it
+    /// continues at their own current level instead of striking at the
+    /// recording's (the "bell" artifact).
+    tail_reference_level: f32,
 }
 
 impl Sample {
@@ -93,14 +98,43 @@ impl Sample {
         if !(sample_rate_hz.is_finite() && sample_rate_hz > 0.0) {
             return Err(format!("bad sample rate {sample_rate_hz}"));
         }
-        Ok(Sample {
+        let mut sample = Sample {
             data,
             channels,
             sample_rate_hz,
             sustain_loop,
             release_start: release_start.min(frames),
             release_alignment: None,
-        })
+            tail_reference_level: 0.0,
+        };
+        if let Some(tail) = sample.release_start() {
+            let window = 2048.min(sample.frames() - tail);
+            sample.tail_reference_level = sample.mean_abs(tail, window);
+        }
+        Ok(sample)
+    }
+
+    /// Mean absolute value (mono-summed) over `window` frames from
+    /// `start` — the level metric shared with the voices' envelope
+    /// followers.
+    fn mean_abs(&self, start: u64, window: u64) -> f32 {
+        let ch = self.channels as usize;
+        let mut sum = 0.0f64;
+        for frame in start..start + window {
+            let base = frame as usize * ch;
+            let value = if ch == 1 {
+                self.data[base].abs()
+            } else {
+                (self.data[base].abs() + self.data[base + 1].abs()) * 0.5
+            };
+            sum += value as f64;
+        }
+        (sum / window.max(1) as f64) as f32
+    }
+
+    #[inline]
+    pub fn tail_reference_level(&self) -> f32 {
+        self.tail_reference_level
     }
 
     /// Control-side analysis: build the [`ReleaseAlignment`] table for a
