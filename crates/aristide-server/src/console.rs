@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use aristide_model::{Organ, RankId, StopId};
+use aristide_model::{ManualId, Organ, RankId, StopId};
 
 use crate::bank::VoiceSpec;
 
@@ -20,6 +20,8 @@ pub struct Console {
     organ: Organ,
     specs: HashMap<(RankId, u16), VoiceSpec>,
     drawn: Vec<StopId>,
+    /// Engaged couplers, as indices into `organ.couplers`.
+    engaged_couplers: Vec<usize>,
     /// `channel_map[c]` = index into `organ.manuals` MIDI channel `c`
     /// plays; channels past the end wrap.
     channel_map: Vec<usize>,
@@ -46,10 +48,36 @@ impl Console {
             organ,
             specs,
             drawn,
+            engaged_couplers: Vec::new(),
             channel_map,
             next_handle: 0,
             sounding: HashMap::new(),
         }
+    }
+
+    /// Expand one played key through the engaged couplers into every
+    /// (manual, MIDI key) that should sound. Couplers act on *played*
+    /// keys only — coupler-produced notes don't re-couple (matching
+    /// default organ behaviour, and making self-couplers like a 16' II
+    /// trivially finite; GO's opt-in propagation flags can come later).
+    fn couple(&self, manual: ManualId, midi_key: i16) -> Vec<(ManualId, i16)> {
+        let mut targets = vec![(manual, midi_key)];
+        for &engaged in &self.engaged_couplers {
+            let Some(coupler) = self.organ.couplers.get(engaged) else {
+                continue;
+            };
+            if coupler.from_manual != manual {
+                continue;
+            }
+            let target = (
+                coupler.to_manual,
+                midi_key.saturating_add(coupler.key_shift),
+            );
+            if !targets.contains(&target) {
+                targets.push(target);
+            }
+        }
+        targets
     }
 
     fn manual_index(&self, channel: u8) -> Option<usize> {
@@ -64,38 +92,43 @@ impl Console {
         let Some(manual_index) = self.manual_index(channel) else {
             return Vec::new();
         };
-        let manual = &self.organ.manuals[manual_index];
-        let Some(key_index) = key.checked_sub(manual.first_midi_note) else {
-            return Vec::new();
-        };
-        let key_index = key_index as u16;
-        if key_index >= manual.key_count {
-            return Vec::new();
-        }
+        let origin = self.organ.manuals[manual_index].id;
 
         let mut starts = Vec::new();
         let mut held = Vec::new();
-        for stop in &self.organ.stops {
-            if stop.manual != manual.id || !self.drawn.contains(&stop.id) {
+        for (manual_id, midi_key) in self.couple(origin, key as i16) {
+            let Some(manual) = self.organ.manuals.iter().find(|m| m.id == manual_id) else {
+                continue;
+            };
+            let key_index = midi_key - manual.first_midi_note as i16;
+            if key_index < 0 || key_index as u16 >= manual.key_count {
                 continue;
             }
-            for range in &stop.ranks {
-                if key_index < range.first_key || key_index >= range.first_key + range.key_count {
+            let key_index = key_index as u16;
+            for stop in &self.organ.stops {
+                if stop.manual != manual_id || !self.drawn.contains(&stop.id) {
                     continue;
                 }
-                let pipe = range.first_pipe + (key_index - range.first_key);
-                let Some(spec) = self.specs.get(&(range.rank, pipe)) else {
-                    continue;
-                };
-                let handle = self.next_handle;
-                self.next_handle += 1;
-                if !spec.percussive {
-                    held.push((stop.id, handle));
+                for range in &stop.ranks {
+                    if key_index < range.first_key
+                        || key_index >= range.first_key + range.key_count
+                    {
+                        continue;
+                    }
+                    let pipe = range.first_pipe + (key_index - range.first_key);
+                    let Some(spec) = self.specs.get(&(range.rank, pipe)) else {
+                        continue;
+                    };
+                    let handle = self.next_handle;
+                    self.next_handle += 1;
+                    if !spec.percussive {
+                        held.push((stop.id, handle));
+                    }
+                    starts.push(VoiceStart {
+                        handle,
+                        spec: *spec,
+                    });
                 }
-                starts.push(VoiceStart {
-                    handle,
-                    spec: *spec,
-                });
             }
         }
         if !held.is_empty() {
@@ -143,6 +176,38 @@ impl Console {
             });
         }
         released
+    }
+
+    /// Engage or release a coupler by its index in `organ.couplers`.
+    /// Sounding notes keep their current coupling; new presses use the
+    /// new state.
+    pub fn set_coupler(&mut self, index: usize, engaged: bool) {
+        if index >= self.organ.couplers.len() {
+            return;
+        }
+        if engaged {
+            if !self.engaged_couplers.contains(&index) {
+                self.engaged_couplers.push(index);
+            }
+        } else {
+            self.engaged_couplers.retain(|&i| i != index);
+        }
+    }
+
+    /// Every coupler with its engaged state, for UIs.
+    pub fn coupler_states(&self) -> Vec<(usize, &str, bool)> {
+        self.organ
+            .couplers
+            .iter()
+            .enumerate()
+            .map(|(index, coupler)| {
+                (
+                    index,
+                    coupler.name.as_str(),
+                    self.engaged_couplers.contains(&index),
+                )
+            })
+            .collect()
     }
 
     /// Every stop with its manual name and drawn state, for UIs.
@@ -328,6 +393,110 @@ mod tests {
         assert!(console.note_on(0, 20).is_empty());
         assert!(console.note_on(0, 120).is_empty());
         assert!(console.note_off(0, 20).is_empty());
+    }
+
+    /// Two manuals with one stop each, plus II/I unison, 16' I (self,
+    /// −12), and a deliberate I→II / II→I cycle pair.
+    fn coupled_console() -> Console {
+        let manual = |id: u32, name: &str| Manual {
+            id: ManualId(id),
+            name: name.into(),
+            first_midi_note: 36,
+            key_count: 61,
+        };
+        let stop = |id: u32, manual: u32, rank: u32| Stop {
+            id: StopId(id),
+            name: format!("stop {id}"),
+            manual: ManualId(manual),
+            ranks: vec![RankRange {
+                rank: RankId(rank),
+                first_key: 0,
+                key_count: 61,
+                first_pipe: 0,
+            }],
+        };
+        let rank = |id: u32| Rank {
+            id: RankId(id),
+            name: format!("rank {id}"),
+            windchest: 1,
+            pipes: (0..61)
+                .map(|_| Pipe {
+                    nominal_frequency_hz: 440.0,
+                    pitch_tuning_cents: 0.0,
+                    gain_db: 0.0,
+                    midi_key_number: None,
+                    source: PipeSource::Silent,
+                })
+                .collect(),
+        };
+        let coupler = |name: &str, from: u32, to: u32, shift: i16| aristide_model::Coupler {
+            name: name.into(),
+            from_manual: ManualId(from),
+            to_manual: ManualId(to),
+            key_shift: shift,
+        };
+        let organ = Organ {
+            name: "C".into(),
+            base_path: Default::default(),
+            manuals: vec![manual(1, "Great"), manual(2, "Swell")],
+            stops: vec![stop(1, 1, 1), stop(2, 2, 2)],
+            ranks: vec![rank(1), rank(2)],
+            couplers: vec![
+                coupler("II/I", 1, 2, 0),
+                coupler("16' I", 1, 1, -12),
+                coupler("I/II", 2, 1, 0),
+            ],
+        };
+        let mut specs = HashMap::new();
+        for rank in 1..=2u32 {
+            for pipe in 0..61u16 {
+                specs.insert(
+                    (RankId(rank), pipe),
+                    VoiceSpec {
+                        sample: rank - 1,
+                        rate: 1.0,
+                        gain: 1.0,
+                        percussive: false,
+                        group: 0,
+                        wind_weight: 1.0,
+                        brightness: 0.0,
+                    },
+                );
+            }
+        }
+        Console::new(organ, specs, vec![StopId(1), StopId(2)], Vec::new())
+    }
+
+    #[test]
+    fn couplers_route_between_manuals_and_octaves() {
+        let mut console = coupled_console();
+        // Channel 0 → Great (no pedal in this organ → identity map).
+        assert_eq!(console.note_on(0, 60).len(), 1, "no couplers yet");
+        console.note_off(0, 60);
+
+        console.set_coupler(0, true); // II/I
+        assert_eq!(console.note_on(0, 60).len(), 2, "unison coupler adds II");
+        assert_eq!(console.note_off(0, 60).len(), 2, "note-off kills both");
+
+        console.set_coupler(1, true); // 16' I (self, −12)
+        // Great C + Swell C (II/I) + Great C−12 (16' I). Coupled notes
+        // don't re-couple, so the sub-octave stays on the Great.
+        assert_eq!(console.note_on(0, 60).len(), 3);
+        console.note_off(0, 60);
+
+        // Out-of-compass shifted notes drop out quietly.
+        assert_eq!(console.note_on(0, 37).len(), 2, "37-12 is below compass");
+        console.note_off(0, 37);
+    }
+
+    #[test]
+    fn coupler_cycles_terminate() {
+        let mut console = coupled_console();
+        console.set_coupler(0, true); // II/I
+        console.set_coupler(2, true); // I/II — cycle
+        // I→II and II→I at unison collapse to the same two notes.
+        assert_eq!(console.note_on(0, 60).len(), 2);
+        console.note_off(0, 60);
     }
 
     #[test]

@@ -51,6 +51,22 @@ fn respond(
                 None => bad_request("missing id"),
             }
         }
+        (Method::Post, "/api/coupler") => {
+            let index = param(query, "idx").and_then(|v| v.parse::<usize>().ok());
+            let on = param(query, "on") == Some("1");
+            match index {
+                Some(index) => {
+                    {
+                        let mut state = state.lock().expect("state poisoned");
+                        if let Control::Organ(console) = &mut state.control {
+                            console.set_coupler(index, on);
+                        }
+                    }
+                    json(state_json(state))
+                }
+                None => bad_request("missing idx"),
+            }
+        }
         (Method::Post, "/api/trem") => {
             let on = param(query, "on") == Some("1");
             apply_trem(state, on);
@@ -110,6 +126,20 @@ fn state_json_locked(state: &State) -> String {
                 json_string(name),
                 json_string(manual),
                 drawn
+            ));
+        }
+    }
+    out.push_str("],\"couplers\":[");
+    if let Control::Organ(console) = &state.control {
+        let mut first = true;
+        for (index, name, engaged) in console.coupler_states() {
+            if !first {
+                out.push(',');
+            }
+            first = false;
+            out.push_str(&format!(
+                "{{\"idx\":{index},\"name\":{},\"on\":{engaged}}}",
+                json_string(name)
             ));
         }
     }

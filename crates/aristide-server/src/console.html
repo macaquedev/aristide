@@ -56,6 +56,22 @@ async function refresh(data) {
     }
     root.appendChild(div);
   }
+  if (data.couplers.length) {
+    const h = document.createElement('h2');
+    h.textContent = 'Couplers';
+    root.appendChild(h);
+    const div = document.createElement('div');
+    div.className = 'stops';
+    for (const c of data.couplers) {
+      const b = document.createElement('button');
+      b.className = 'stop' + (c.on ? ' on' : '');
+      b.textContent = c.name;
+      b.onclick = async () => refresh(await (await fetch(
+        `/api/coupler?idx=${c.idx}&on=${c.on ? 0 : 1}`, {method: 'POST'})).json());
+      div.appendChild(b);
+    }
+    root.appendChild(div);
+  }
   const trem = document.getElementById('trem');
   trem.classList.toggle('on', data.tremulant);
   trem.onclick = async () => refresh(await (await fetch(
