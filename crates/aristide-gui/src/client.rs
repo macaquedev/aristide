@@ -44,6 +44,9 @@ pub struct Snapshot {
     pub gain: f32,
     #[serde(default)]
     pub tuning: Option<TuningState>,
+    /// Reverb wet level; absent when no impulse response is loaded.
+    #[serde(default)]
+    pub reverb: Option<f32>,
 }
 
 /// A control action the UI wants performed.
@@ -53,6 +56,7 @@ pub enum Command {
     SetCoupler { idx: usize, on: bool },
     SetTremulant(bool),
     SetGain(f32),
+    SetReverb(f32),
     SetTuning { temperament: String, a4: f64, transpose: i8 },
 }
 
@@ -68,6 +72,7 @@ impl Command {
             }
             Command::SetTremulant(on) => format!("/api/trem?on={}", *on as u8),
             Command::SetGain(v) => format!("/api/gain?v={v}"),
+            Command::SetReverb(wet) => format!("/api/reverb?wet={wet}"),
             Command::SetTuning {
                 temperament,
                 a4,

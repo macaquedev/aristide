@@ -18,6 +18,7 @@
 
 pub mod bank;
 pub mod resample;
+pub mod reverb;
 pub mod wind;
 
 use std::sync::Arc;
@@ -85,6 +86,8 @@ pub enum Command {
     /// Fade out every sounding voice.
     AllNotesOff,
     SetMasterGain { linear: f32 },
+    /// Convolution reverb wet level (0 bypasses entirely).
+    SetReverbWet { wet: f32 },
 }
 
 /// Control-plane side of the engine. Not RT-constrained.
@@ -400,6 +403,7 @@ pub struct Engine {
     sinc: SincTable,
     voices: Box<[Voice]>,
     wind: [WindGroup; MAX_WIND_GROUPS],
+    reverb: Option<reverb::Reverb>,
     master_gain: f32,
     tone_attack_step: f32,
     tone_release_step: f32,
@@ -419,6 +423,7 @@ impl Engine {
             sinc: SincTable::new(),
             voices: vec![Voice::Idle; MAX_VOICES].into_boxed_slice(),
             wind: [WindGroup::default(); MAX_WIND_GROUPS],
+            reverb: None,
             master_gain: DEFAULT_MASTER_GAIN,
             tone_attack_step: 1.0 / (TONE_ATTACK_SECONDS * sample_rate),
             tone_release_step: 1.0 / (TONE_RELEASE_SECONDS * sample_rate),
@@ -581,6 +586,12 @@ impl Engine {
                 }
             }
         }
+
+        // Room: convolution reverb over the summed mix (wet trails dry
+        // by one internal block; see reverb.rs).
+        if let Some(reverb) = &mut self.reverb {
+            reverb.process(buffer, channels);
+        }
     }
 
     fn apply(&mut self, command: Command) {
@@ -695,7 +706,18 @@ impl Engine {
                     self.master_gain = linear;
                 }
             }
+            Command::SetReverbWet { wet } => {
+                if let Some(reverb) = &mut self.reverb {
+                    reverb.set_wet(wet);
+                }
+            }
         }
+    }
+
+    /// Install a convolution reverb. Control-side only — call before
+    /// the engine moves into the audio callback.
+    pub fn set_reverb(&mut self, ir: Option<Arc<reverb::PreparedIr>>, wet: f32) {
+        self.reverb = ir.map(|ir| reverb::Reverb::new(ir, wet));
     }
 
     /// Current pressure of a wind group (diagnostics and tests).

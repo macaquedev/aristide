@@ -22,6 +22,11 @@ temperament = "equal"
 a4_hz = 440.0
 transpose = 0
 
+# Convolution reverb (this set is recorded wet, so off by default):
+# [reverb]
+# ir = "synthetic"        # or a path to an IR wav next to the set
+# wet = 0.2
+
 [tremulant]
 # Toggled from the web console. This set defines no windchest groups,
 # so the tremulant acts on the whole organ (chest 1).

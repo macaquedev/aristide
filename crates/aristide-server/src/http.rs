@@ -67,6 +67,21 @@ fn respond(
                 None => bad_request("missing idx"),
             }
         }
+        (Method::Post, "/api/reverb") => {
+            match param(query, "wet").and_then(|v| v.parse::<f32>().ok()) {
+                Some(wet) if (0.0..=2.0).contains(&wet) => {
+                    {
+                        let mut state = state.lock().expect("state poisoned");
+                        if state.reverb_wet.is_some() {
+                            state.reverb_wet = Some(wet);
+                            state.engine.send(Command::SetReverbWet { wet });
+                        }
+                    }
+                    json(state_json(state))
+                }
+                _ => bad_request("bad wet"),
+            }
+        }
         (Method::Post, "/api/tuning") => {
             {
                 let mut state = state.lock().expect("state poisoned");
@@ -178,6 +193,9 @@ fn state_json_locked(state: &State) -> String {
             tuning.transpose
         ));
     }
+    if let Some(wet) = state.reverb_wet {
+        out.push_str(&format!(",\"reverb\":{wet}"));
+    }
     out.push('}');
     out
 }
@@ -247,6 +265,7 @@ mod tests {
             trem_groups: vec![0, 1],
             trem_engaged: false,
             master_gain: 0.35,
+            reverb_wet: Some(0.25),
         })))
     }
 

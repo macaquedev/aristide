@@ -158,6 +158,20 @@ impl eframe::App for App {
                         self.send(Command::SetGain(gain));
                         self.gain_edit = None;
                     }
+
+                    if let Some(current) = snapshot.reverb {
+                        ui.add_space(16.0);
+                        ui.label("Reverb");
+                        let mut wet = current;
+                        let slider = ui.add(
+                            egui::Slider::new(&mut wet, 0.0..=1.0)
+                                .fixed_decimals(2)
+                                .trailing_fill(true),
+                        );
+                        if slider.drag_stopped() || (slider.changed() && !slider.dragged()) {
+                            self.send(Command::SetReverb(wet));
+                        }
+                    }
                 });
 
                 if let Some(tuning) = &snapshot.tuning {

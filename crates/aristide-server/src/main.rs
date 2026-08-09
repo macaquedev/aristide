@@ -145,6 +145,49 @@ fn choose_registration(organ: &Organ, patterns: &[String]) -> Vec<StopId> {
     drawn
 }
 
+/// Load a reverb impulse response: a wav next to the set, or
+/// "synthetic" — a generated 2 s exponentially decaying stereo hall
+/// (useful before any IR file exists; also the fallback demo room).
+fn load_impulse_response(
+    spec: &str,
+    set_path: &std::path::Path,
+    device_rate: f32,
+) -> Result<aristide_engine::reverb::PreparedIr> {
+    if spec.eq_ignore_ascii_case("synthetic") {
+        let frames = (2.0 * device_rate) as usize;
+        let mut rng = 0x1357_9BDFu32;
+        let mut noise = move || {
+            rng ^= rng << 13;
+            rng ^= rng >> 17;
+            rng ^= rng << 5;
+            (rng >> 8) as f32 / (1u32 << 24) as f32 - 0.5
+        };
+        let mut data = Vec::with_capacity(frames * 2);
+        for i in 0..frames {
+            let t = i as f32 / device_rate;
+            // ~1.4 s RT60; highs die faster via a crude progressive tilt.
+            let envelope = (-t * 4.9).exp() * (1.0 - (-t * 60.0).exp());
+            data.push(noise() * envelope);
+            data.push(noise() * envelope);
+        }
+        return aristide_engine::reverb::PreparedIr::prepare(&data, 2, device_rate, device_rate)
+            .map_err(|e| anyhow::anyhow!(e));
+    }
+    let ir_path = set_path
+        .parent()
+        .unwrap_or(std::path::Path::new(""))
+        .join(spec);
+    let file = aristide_formats::wav::read(&ir_path)
+        .map_err(|e| anyhow::anyhow!("{}: {e}", ir_path.display()))?;
+    aristide_engine::reverb::PreparedIr::prepare(
+        &file.samples,
+        file.info.channels,
+        file.info.sample_rate as f32,
+        device_rate,
+    )
+    .map_err(|e| anyhow::anyhow!(e))
+}
+
 /// Sidecar manual names → manual indices; empty (or all-unmatched)
 /// falls back to the keyboards-first default inside `Console::new`.
 fn resolve_channel_map(organ: &Organ, channel_names: &[String]) -> Vec<usize> {
@@ -185,6 +228,8 @@ pub struct State {
     pub trem_groups: Vec<u8>,
     pub trem_engaged: bool,
     pub master_gain: f32,
+    /// Reverb wet level; `None` = no IR loaded.
+    pub reverb_wet: Option<f32>,
 }
 
 fn main() -> Result<()> {
@@ -225,6 +270,8 @@ fn main() -> Result<()> {
 
     let mut wind_params = None;
     let mut trem_setup: Option<(aristide_engine::wind::TremulantParams, Vec<u8>)> = None;
+    let mut reverb_ir: Option<Arc<aristide_engine::reverb::PreparedIr>> = None;
+    let mut reverb_wet = 0.0f32;
     let (sample_bank, control) = match &args.set {
         Some(path) => {
             let organ = load_organ(path)?;
@@ -292,6 +339,22 @@ fn main() -> Result<()> {
                     .collect()
             };
             trem_setup = Some((trem_params, groups));
+
+            if !sidecar.reverb.ir.is_empty() {
+                reverb_wet = sidecar.reverb.wet.clamp(0.0, 2.0) as f32;
+                match load_impulse_response(&sidecar.reverb.ir, path, sample_rate) {
+                    Ok(ir) => {
+                        tracing::info!(
+                            "reverb: {} ({} partitions), wet {:.2}",
+                            sidecar.reverb.ir,
+                            ir.partition_count(),
+                            reverb_wet
+                        );
+                        reverb_ir = Some(Arc::new(ir));
+                    }
+                    Err(err) => tracing::warn!("reverb disabled: {err}"),
+                }
+            }
             let drawn = choose_registration(&organ, &patterns);
             let channel_map = resolve_channel_map(&organ, &sidecar.midi.channels);
             let mut console = Console::new(organ, loaded.specs, drawn, channel_map);
@@ -332,6 +395,7 @@ fn main() -> Result<()> {
     let bank = Arc::new(sample_bank);
     let build_stream = |buffer_size: cpal::BufferSize| -> Result<(cpal::Stream, EngineHandle)> {
         let (mut engine, handle) = Engine::new(sample_rate, Arc::clone(&bank));
+        engine.set_reverb(reverb_ir.clone(), reverb_wet);
         let mut stream_config = config.clone();
         stream_config.buffer_size = buffer_size;
         let stream = device.build_output_stream(
@@ -396,6 +460,7 @@ fn main() -> Result<()> {
         trem_groups,
         trem_engaged: false,
         master_gain: args.master_gain.unwrap_or(0.35),
+        reverb_wet: reverb_ir.is_some().then_some(reverb_wet),
     }));
     if let Err(err) = http::spawn(Arc::clone(&state), args.http_port) {
         tracing::warn!("console ui disabled: {err}");

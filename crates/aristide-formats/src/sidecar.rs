@@ -32,6 +32,33 @@ pub struct Sidecar {
     pub tremulant: Tremulant,
     #[serde(default)]
     pub tuning: TuningConfig,
+    #[serde(default)]
+    pub reverb: ReverbConfig,
+}
+
+/// Convolution reverb: an impulse-response file next to the set (or
+/// "synthetic" for a generated hall) mixed at `wet`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReverbConfig {
+    /// Path to an IR wav relative to the set, "synthetic", or "" = off.
+    #[serde(default)]
+    pub ir: String,
+    #[serde(default = "default_reverb_wet")]
+    pub wet: f64,
+}
+
+fn default_reverb_wet() -> f64 {
+    0.25
+}
+
+impl Default for ReverbConfig {
+    fn default() -> Self {
+        ReverbConfig {
+            ir: String::new(),
+            wet: default_reverb_wet(),
+        }
+    }
 }
 
 /// Temperament / concert pitch / transposition defaults for the set.
