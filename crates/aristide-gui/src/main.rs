@@ -50,11 +50,11 @@ impl App {
             ctx.request_repaint();
         });
 
-        let mut style = (*cc.egui_ctx.style()).clone();
-        style.visuals = egui::Visuals::dark();
-        style.visuals.selection.bg_fill = GOLD;
-        style.visuals.selection.stroke = egui::Stroke::new(1.0, egui::Color32::BLACK);
-        cc.egui_ctx.set_style(style);
+        cc.egui_ctx.set_theme(egui::ThemePreference::Dark);
+        cc.egui_ctx.all_styles_mut(|style| {
+            style.visuals.selection.bg_fill = GOLD;
+            style.visuals.selection.stroke = egui::Stroke::new(1.0, egui::Color32::BLACK);
+        });
 
         App {
             commands: command_tx,
@@ -72,7 +72,7 @@ impl App {
 }
 
 impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
         while let Ok(update) = self.updates.try_recv() {
             match update {
                 Update::State(snapshot) => {
@@ -83,7 +83,9 @@ impl eframe::App for App {
             }
         }
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+        // eframe 0.36 hands the app its central Ui directly.
+        let ui = root;
+        {
             ui.horizontal(|ui| {
                 ui.heading(egui::RichText::new("ARISTIDE").color(GOLD).strong());
                 ui.label(egui::RichText::new(&self.server).weak().small());
@@ -215,6 +217,6 @@ impl eframe::App for App {
                     });
                 }
             });
-        });
+        }
     }
 }
