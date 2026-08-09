@@ -288,6 +288,107 @@ mod tests {
         path.is_file().then_some(path)
     }
 
+    /// Reproduce "fast spam distorts": hammer the plein jeu with rapid
+    /// on/off pairs and measure what actually comes out — NaNs, clicks,
+    /// peaks past the limiter ceiling, and the real-time cost.
+    #[test]
+    fn spam_stress_output_is_clean_and_realtime() {
+        let Some(path) = demo_organ() else {
+            eprintln!("skipping: demo set not present");
+            return;
+        };
+        let organ = aristide_formats::grandorgue::load(&path)
+            .expect("demo set loads")
+            .organ;
+        let loaded = build(&organ, 48000.0).expect("bank builds");
+        // Full plein jeu on the Great.
+        let manual_id = organ.manuals[1].id;
+        let drawn: Vec<_> = organ
+            .stops
+            .iter()
+            .filter(|s| {
+                s.manual == manual_id
+                    && ["Bourdon 16'", "Montre 8'", "Prestant 4'", "Plein jeu III"]
+                        .contains(&s.name.as_str())
+            })
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(drawn.len(), 4);
+        let mut console =
+            crate::console::Console::new(organ, loaded.specs, drawn, Vec::new());
+        let (mut engine, mut handle) =
+            aristide_engine::Engine::new(48000.0, std::sync::Arc::new(loaded.bank));
+
+        // 8 s of spam: every 40 ms, note-off then note-on across a
+        // 10-key cluster (≈ organist mashing), 256-frame blocks.
+        let block = 256usize;
+        let blocks = 8 * 48000 / block;
+        let mut buffer = vec![0.0f32; block * 2];
+        let mut worst_delta = 0.0f32;
+        let mut peak = 0.0f32;
+        let mut previous = 0.0f32;
+        let mut nan = false;
+        let keys = [55u8, 57, 59, 60, 62, 64, 65, 67, 69, 71];
+        let started = std::time::Instant::now();
+        for b in 0..blocks {
+            if b % 8 == 0 {
+                // toggle a rotating pair of keys
+                let key = keys[(b / 8) % keys.len()];
+                for handle_id in console.note_off(0, key) {
+                    handle.send(aristide_engine::Command::StopVoice { handle: handle_id });
+                }
+                let (starts, retriggered) = console.note_on(0, key);
+                for handle_id in retriggered {
+                    handle.send(aristide_engine::Command::StopVoice { handle: handle_id });
+                }
+                for start in starts {
+                    handle.send(aristide_engine::Command::StartVoice {
+                        handle: start.handle,
+                        sample: start.spec.sample,
+                        rate: start.spec.rate,
+                        gain: start.spec.gain,
+                        group: start.spec.group,
+                        wind_weight: start.spec.wind_weight,
+                        brightness: start.spec.brightness,
+                    });
+                }
+            }
+            engine.process(&mut buffer, 2);
+            for frame in buffer.chunks(2) {
+                let v = frame[0];
+                if !v.is_finite() {
+                    nan = true;
+                }
+                peak = peak.max(v.abs());
+                worst_delta = worst_delta.max((v - previous).abs());
+                previous = v;
+            }
+        }
+        let elapsed = started.elapsed().as_secs_f64();
+        let realtime_factor = elapsed / 8.0;
+        eprintln!(
+            "spam stress: peak {peak:.3}, worst frame delta {worst_delta:.3}, \
+             {:.1}% of realtime",
+            realtime_factor * 100.0
+        );
+        assert!(!nan, "NaN in output");
+        assert!(peak <= 0.98, "limiter ceiling breached: {peak}");
+        // A frame-to-frame jump beyond ~0.5 at these levels is a click.
+        assert!(
+            worst_delta < 0.5,
+            "click in spam output: delta {worst_delta}"
+        );
+        // Performance is only meaningful with optimizations; debug
+        // builds run this same test for correctness only.
+        if !cfg!(debug_assertions) {
+            assert!(
+                realtime_factor < 0.5,
+                "engine too slow: {:.0}% of realtime in release",
+                realtime_factor * 100.0
+            );
+        }
+    }
+
     /// The whole M3 pipeline, headless: ODF → model → bank → console →
     /// RT engine → nonzero audio frames.
     #[test]

@@ -46,6 +46,15 @@ const KILL_FADE_SECONDS: f32 = 0.015;
 /// GO plays cleanly.
 const DEFAULT_MASTER_GAIN: f32 = 0.178;
 
+/// Release tails older organs let ring for seconds; fast playing piles
+/// hundreds of them up and the CPU, not the ear, pays (each is masked
+/// by the fresh attacks anyway). Above this budget the quietest tails
+/// get a fast fade — HW's own polyphony strategy ("the most
+/// inconspicuous release samples" go first, Technical Datasheet).
+const TAIL_VOICE_BUDGET: usize = 128;
+/// At most this many tails shed per block, so a burst thins gradually.
+const TAIL_SHED_PER_BLOCK: usize = 8;
+
 /// Master-bus limiter ceiling and release. Big registrations with
 /// couplers can sum far past full scale; without this the DAC hard-clips
 /// ("horrible distortion when playing lots of notes"). Instant attack,
@@ -225,7 +234,37 @@ struct SampledVoice {
     phase: SamplePhase,
 }
 
+/// Per-block invariants of a sampled voice's render loop, hoisted out
+/// of the per-frame path (`Sample::frames()` alone is a u64 division —
+/// two of those per frame per voice was a real cost at high polyphony).
+/// Must be recomputed when the voice changes sample or loop mid-block.
+#[derive(Clone, Copy)]
+struct VoiceBlockContext {
+    rate: f64,
+    last: f64,
+    tail_last: f64,
+    current_loop: Option<(u64, u64)>,
+    looping: bool,
+}
+
 impl SampledVoice {
+    #[inline]
+    fn block_context(
+        &self,
+        sample: &Sample,
+        external: Option<&Sample>,
+        rate_scale: f64,
+    ) -> VoiceBlockContext {
+        let current_loop = sample.loop_at(self.loop_index as usize);
+        VoiceBlockContext {
+            rate: self.rate * rate_scale,
+            last: (sample.frames() - 1) as f64,
+            tail_last: (external.unwrap_or(sample).frames() - 1) as f64,
+            current_loop,
+            looping: current_loop.is_some(),
+        }
+    }
+
     /// Render one frame and advance. Returns `None` when the voice ends.
     /// End-of-data checks happen on entry so every read frame is emitted.
     #[inline]
@@ -234,18 +273,18 @@ impl SampledVoice {
         sample: &Sample,
         external: Option<&Sample>,
         table: &SincTable,
-        rate_scale: f64,
+        ctx: &VoiceBlockContext,
         crossfade_step: f32,
         kill_step: f32,
     ) -> Option<(f32, f32)> {
-        let rate = self.rate * rate_scale;
-        let last = (sample.frames() - 1) as f64;
-        let current_loop = sample.loop_at(self.loop_index as usize);
-        let looping = current_loop.is_some();
+        let rate = ctx.rate;
+        let last = ctx.last;
+        let current_loop = ctx.current_loop;
+        let looping = ctx.looping;
         // During a crossfade into a separate release sample, the tail
         // cursor lives in that sample's coordinates.
         let tail_sample = external.unwrap_or(sample);
-        let tail_last = (tail_sample.frames() - 1) as f64;
+        let tail_last = ctx.tail_last;
         let ended = match self.phase {
             SamplePhase::Held => !looping && self.position >= last,
             SamplePhase::Crossfade => self.release_position >= tail_last,
@@ -470,6 +509,38 @@ impl Engine {
         let frames = buffer.len() / channels;
         let master = self.master_gain;
 
+        // Polyphony guard: bound the release-tail pileup (fast playing
+        // stacks seconds-long tails; the quietest are inaudible under
+        // the fresh attacks but still cost full render time).
+        let mut tail_count = 0usize;
+        for voice in self.voices.iter() {
+            if let Voice::Sampled(sampled) = voice {
+                if matches!(sampled.phase, SamplePhase::Tail | SamplePhase::Crossfade) {
+                    tail_count += 1;
+                }
+            }
+        }
+        if tail_count > TAIL_VOICE_BUDGET {
+            let to_shed = (tail_count - TAIL_VOICE_BUDGET).min(TAIL_SHED_PER_BLOCK);
+            for _ in 0..to_shed {
+                let mut quietest: Option<(usize, f32)> = None;
+                for (index, voice) in self.voices.iter().enumerate() {
+                    if let Voice::Sampled(sampled) = voice {
+                        if sampled.phase == SamplePhase::Tail
+                            && quietest.is_none_or(|(_, level)| sampled.envelope < level)
+                        {
+                            quietest = Some((index, sampled.envelope));
+                        }
+                    }
+                }
+                let Some((index, _)) = quietest else { break };
+                if let Voice::Sampled(sampled) = &mut self.voices[index] {
+                    sampled.amplitude = 1.0;
+                    sampled.phase = SamplePhase::FadeOut;
+                }
+            }
+        }
+
         // Wind: one regulator step per block. Demand sums the wind
         // weight of everything sounding on each chest, with young
         // voices boosted (the pallet-opening gulp).
@@ -555,10 +626,13 @@ impl Engine {
                     let tilting = tilt_a > 0.0 && (treble - 1.0).abs() > 1e-4;
                     sampled.age_frames = sampled.age_frames.saturating_add(frames as u32);
                     // The voice can hand over to a separate release
-                    // sample mid-block; track the refs it reads from.
+                    // sample or switch loops mid-block; track the refs
+                    // and per-block invariants it reads from.
                     let mut current = sample;
                     let mut current_id = sampled.sample;
+                    let mut current_loop_index = sampled.loop_index;
                     let mut external = sampled.external_release.and_then(|id| bank.get(id));
+                    let mut ctx = sampled.block_context(current, external, rate_scale);
                     for frame in 0..frames {
                         if sampled.sample != current_id {
                             match bank.get(sampled.sample) {
@@ -566,18 +640,23 @@ impl Engine {
                                     current = switched;
                                     current_id = sampled.sample;
                                     external = None;
+                                    current_loop_index = sampled.loop_index;
+                                    ctx = sampled.block_context(current, external, rate_scale);
                                 }
                                 None => {
                                     *voice = Voice::Idle;
                                     break;
                                 }
                             }
+                        } else if sampled.loop_index != current_loop_index {
+                            current_loop_index = sampled.loop_index;
+                            ctx = sampled.block_context(current, external, rate_scale);
                         }
                         match sampled.tick(
                             current,
                             external,
                             sinc,
-                            rate_scale,
+                            &ctx,
                             *crossfade_step,
                             *kill_step,
                         ) {
