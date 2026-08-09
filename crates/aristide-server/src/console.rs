@@ -276,6 +276,7 @@ mod tests {
                         percussive: false,
                         group: 0,
                         wind_weight: 1.0,
+                        brightness: 0.02,
                     },
                 );
             }

@@ -267,6 +267,7 @@ fn main() -> Result<()> {
                 sag_depth: (1.0 - 2f64.powf(-sag_cents / (1200.0 * kp))) as f32,
                 natural_hz: sidecar.wind.bounce_hz.clamp(0.5, 12.0) as f32,
                 damping: sidecar.wind.damping.clamp(0.2, 1.5) as f32,
+                flow_noise: (sidecar.wind.flow_noise_percent / 100.0).clamp(0.0, 0.1) as f32,
                 ..defaults
             });
 
@@ -466,6 +467,7 @@ fn handle_midi(message: &[u8], state: &Mutex<State>) {
                         gain: start.spec.gain,
                         group: start.spec.group,
                         wind_weight: start.spec.wind_weight,
+                        brightness: start.spec.brightness,
                     });
                 }
             }

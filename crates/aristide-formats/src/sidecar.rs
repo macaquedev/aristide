@@ -83,6 +83,14 @@ pub struct Wind {
     /// Damping ratio: below 1 is bouncy, 1 is critically damped.
     #[serde(default = "default_damping")]
     pub damping: f64,
+    /// Per-pipe wind-flow noise in percent (measured 1–5; reeds more).
+    /// Slow independent wander per pipe; 0 disables.
+    #[serde(default = "default_flow_noise_percent")]
+    pub flow_noise_percent: f64,
+}
+
+fn default_flow_noise_percent() -> f64 {
+    2.0
 }
 
 fn default_sag_cents() -> f64 {
@@ -103,6 +111,7 @@ impl Default for Wind {
             sag_cents: default_sag_cents(),
             bounce_hz: default_bounce_hz(),
             damping: default_damping(),
+            flow_noise_percent: default_flow_noise_percent(),
         }
     }
 }

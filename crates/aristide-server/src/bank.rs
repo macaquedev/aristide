@@ -28,6 +28,9 @@ pub struct VoiceSpec {
     pub group: u8,
     /// Wind draw while sounding; 0 for noises and percussives.
     pub wind_weight: f32,
+    /// Tilt-filter coefficient for pressure→brightness coupling
+    /// (0 = no filter, e.g. noises).
+    pub brightness: f32,
 }
 
 pub struct LoadedBank {
@@ -86,6 +89,11 @@ pub fn build(organ: &Organ, device_rate: f32) -> Result<LoadedBank> {
                         .min(aristide_engine::wind::MAX_WIND_GROUPS as u32 - 1)
                         as u8,
                     wind_weight: wind_weight(pipe.nominal_frequency_hz, info.percussive),
+                    brightness: brightness_coefficient(
+                        pipe.nominal_frequency_hz,
+                        device_rate,
+                        info.percussive,
+                    ),
                 },
             );
         }
@@ -192,6 +200,19 @@ fn db_to_linear(db: f64) -> f32 {
     10f64.powf(db / 20.0) as f32
 }
 
+/// One-pole coefficient for the voice's brightness tilt, hinged around
+/// the pipe's 2nd harmonic so "upper partials" breathe with pressure
+/// while the fundamental stays put. Deep bass keeps a floor on the
+/// hinge (HW had to disable bass brightness modulation for distortion;
+/// a 150 Hz floor sidesteps that). Percussive noises skip the filter.
+fn brightness_coefficient(frequency_hz: f64, device_rate: f32, percussive: bool) -> f32 {
+    if percussive || !(frequency_hz > 0.0) {
+        return 0.0;
+    }
+    let hinge_hz = (2.0 * frequency_hz).clamp(150.0, 8000.0);
+    1.0 - (-core::f64::consts::TAU * hinge_hz / device_rate as f64).exp() as f32
+}
+
 /// How hard a pipe draws on its windchest. Wind consumption roughly
 /// halves per octave of speaking pitch (Walker US5508472 scales
 /// 8'/4'/2' as 1.0/0.5/0.25), i.e. weight ∝ 1/f, normalized to 1.0 at
@@ -256,6 +277,7 @@ mod tests {
                 gain: start.spec.gain,
                 group: start.spec.group,
                 wind_weight: start.spec.wind_weight,
+                brightness: start.spec.brightness,
             }));
         }
         let mut buffer = vec![0.0f32; 4800 * 2];

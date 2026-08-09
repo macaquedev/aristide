@@ -57,6 +57,14 @@ pub struct WindParams {
     pub pitch_exponent: f32,
     /// Pressure→volume coupling: gain factor = P^this.
     pub gain_exponent: f32,
+    /// Pressure→harmonic-content coupling: upper-partial gain = P^this
+    /// (Fletcher 1976: harmonic development rises with pressure; HW's
+    /// "harmonic shaping" leg). Applied via each voice's tilt filter.
+    pub brightness_exponent: f32,
+    /// Per-pipe wind-flow noise: each voice's draw wanders within
+    /// ±this fraction, slowly and independently (measured 1–5 %,
+    /// docs/research/hauptwerk-wind-model.md §2). 0 disables.
+    pub flow_noise: f32,
 }
 
 impl Default for WindParams {
@@ -86,6 +94,11 @@ impl Default for WindParams {
             // Fletcher 1976: source power ∝ P^1.5 → ~15 dB/decade →
             // linear gain ∝ P^0.75.
             gain_exponent: 0.75,
+            // ≈ −1.6 dB of upper partials at a −6 % chest drop; the
+            // tremulant's ±22 % pressure swings it ±5 dB — the
+            // "breathing timbre" a gain-only trem lacks.
+            brightness_exponent: 3.0,
+            flow_noise: 0.02,
         }
     }
 }
@@ -129,8 +142,9 @@ impl Default for TremulantParams {
 
 /// Slow random-walk state: a value slewing toward a periodically
 /// re-rolled target — a damped random process, not white noise.
+/// Used chest-side (tremulant irregularity) and per-voice (flow noise).
 #[derive(Debug, Clone, Copy)]
-struct Wander {
+pub struct Wander {
     value: f32,
     target: f32,
     /// Seconds until the next target re-roll.
@@ -148,8 +162,14 @@ impl Default for Wander {
 }
 
 impl Wander {
+    /// Signed deviation from nominal, in (−spread, +spread).
+    #[inline]
+    pub fn deviation(&self) -> f32 {
+        self.value - 1.0
+    }
+
     /// Advance by `dt`, wandering within ±`spread` of 1.0.
-    fn step(&mut self, dt: f32, spread: f32, rng: &mut u32) {
+    pub fn step(&mut self, dt: f32, spread: f32, rng: &mut u32) {
         self.countdown -= dt;
         if self.countdown <= 0.0 {
             // Re-roll every ~0.5–1.5 s.
@@ -187,6 +207,7 @@ pub struct WindGroup {
     /// Cached per-block factors.
     rate_factor: f32,
     gain_factor: f32,
+    brightness_factor: f32,
 }
 
 impl Default for WindGroup {
@@ -204,6 +225,7 @@ impl Default for WindGroup {
             rng: 0x9E3779B9,
             rate_factor: 1.0,
             gain_factor: 1.0,
+            brightness_factor: 1.0,
         }
     }
 }
@@ -216,6 +238,7 @@ impl WindGroup {
             self.velocity = 0.0;
             self.rate_factor = 1.0;
             self.gain_factor = 1.0;
+            self.brightness_factor = 1.0;
         }
     }
 
@@ -283,6 +306,7 @@ impl WindGroup {
         }
         self.rate_factor = effective.powf(p.pitch_exponent);
         self.gain_factor = effective.powf(p.gain_exponent);
+        self.brightness_factor = effective.powf(p.brightness_exponent);
     }
 
     #[inline]
@@ -298,6 +322,11 @@ impl WindGroup {
     #[inline]
     pub fn gain_factor(&self) -> f32 {
         self.gain_factor
+    }
+
+    #[inline]
+    pub fn brightness_factor(&self) -> f32 {
+        self.brightness_factor
     }
 
     #[inline]

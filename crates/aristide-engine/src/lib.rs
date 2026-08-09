@@ -56,6 +56,8 @@ pub enum Command {
     /// (sample-rate ratio × pitch adjustments), `gain` is linear.
     /// `group` is the wind group the voice draws from and `wind_weight`
     /// how much it draws (0 = draws nothing, e.g. action noises).
+    /// `brightness` is the voice's tilt-filter one-pole coefficient
+    /// (control-side from the pipe's pitch; 0 bypasses the filter).
     StartVoice {
         handle: u64,
         sample: u32,
@@ -63,6 +65,7 @@ pub enum Command {
         gain: f32,
         group: u8,
         wind_weight: f32,
+        brightness: f32,
     },
     /// Reconfigure one wind group's supply model.
     SetWind { group: u8, params: WindParams },
@@ -182,6 +185,14 @@ struct SampledVoice {
     /// Output frames since the voice started — drives the wind model's
     /// pallet-opening attack boost.
     age_frames: u32,
+    /// Tilt-filter coefficient (0 = bypass) and per-channel lowpass
+    /// state: out = lp + treble·(x − lp) splits the signal at roughly
+    /// the pipe's 2nd harmonic so pressure can breathe the timbre.
+    brightness_a: f32,
+    lowpass: [f32; 2],
+    /// Per-pipe wind-flow noise (slow, independent per voice).
+    wander: wind::Wander,
+    rng: u32,
     phase: SamplePhase,
 }
 
@@ -399,17 +410,48 @@ impl Engine {
                         continue;
                     };
                     let chest = &wind[sampled.group as usize];
-                    let rate_scale = chest.rate_factor() as f64;
-                    let gain = master * chest.gain_factor();
+                    let params = chest.params();
+
+                    // Per-voice flow noise, linearized around the chest
+                    // factors (a powf per voice per block would also be
+                    // fine, but ±2 % deviations are firmly linear).
+                    let mut deviation = 0.0;
+                    if params.flow_noise > 0.0 && sampled.wind_weight > 0.0 {
+                        sampled
+                            .wander
+                            .step(dt, params.flow_noise, &mut sampled.rng);
+                        deviation = sampled.wander.deviation();
+                    }
+                    let rate_scale =
+                        (chest.rate_factor() * (1.0 + params.pitch_exponent * deviation)) as f64;
+                    let gain =
+                        master * chest.gain_factor() * (1.0 + params.gain_exponent * deviation);
+                    let treble = (chest.brightness_factor()
+                        * (1.0 + params.brightness_exponent * deviation))
+                        .clamp(0.25, 2.0);
+
+                    let tilt_a = sampled.brightness_a;
+                    // Bypass the filter while it would do nothing: keeps
+                    // untouched-pressure rendering bit-identical.
+                    let tilting = tilt_a > 0.0 && (treble - 1.0).abs() > 1e-4;
                     sampled.age_frames = sampled.age_frames.saturating_add(frames as u32);
                     for frame in 0..frames {
                         match sampled.tick(sample, sinc, rate_scale, *crossfade_step, *kill_step) {
-                            Some((left, right)) => mix_frame(
-                                &mut buffer[frame * channels..],
-                                channels,
-                                left * gain,
-                                right * gain,
-                            ),
+                            Some((mut left, mut right)) => {
+                                if tilting {
+                                    let lp = &mut sampled.lowpass;
+                                    lp[0] += tilt_a * (left - lp[0]);
+                                    lp[1] += tilt_a * (right - lp[1]);
+                                    left = lp[0] + treble * (left - lp[0]);
+                                    right = lp[1] + treble * (right - lp[1]);
+                                }
+                                mix_frame(
+                                    &mut buffer[frame * channels..],
+                                    channels,
+                                    left * gain,
+                                    right * gain,
+                                )
+                            }
                             None => {
                                 *voice = Voice::Idle;
                                 break;
@@ -430,6 +472,7 @@ impl Engine {
                 gain,
                 group,
                 wind_weight,
+                brightness,
             } => {
                 if self.bank.get(sample).is_none() || !(rate > 0.0) {
                     return;
@@ -447,6 +490,10 @@ impl Engine {
                         group: group.min(MAX_WIND_GROUPS as u8 - 1),
                         wind_weight: wind_weight.max(0.0),
                         age_frames: 0,
+                        brightness_a: brightness.clamp(0.0, 1.0),
+                        lowpass: [0.0; 2],
+                        wander: wind::Wander::default(),
+                        rng: (handle as u32).wrapping_mul(0x9E37_79B9) | 1,
                         phase: SamplePhase::Held,
                     });
                 }
@@ -591,6 +638,7 @@ mod tests {
             gain: 1.0,
             group: 0,
             wind_weight: 0.0,
+            brightness: 0.0,
         });
         // 200 frames from a 100-frame sample: only survivable by looping.
         let out = render(&mut engine, 200);
@@ -620,6 +668,7 @@ mod tests {
             gain: 1.0,
             group: 0,
             wind_weight: 0.0,
+            brightness: 0.0,
         });
         render(&mut engine, 10);
         handle.send(Command::StopVoice { handle: 7 });
@@ -647,6 +696,7 @@ mod tests {
             gain: 1.0,
             group: 0,
             wind_weight: 0.0,
+            brightness: 0.0,
         });
         handle.send(Command::StopVoice { handle: 1 });
         let out = render(&mut engine, 60);
@@ -719,6 +769,7 @@ mod tests {
             gain: 1.0,
             group: 0,
             wind_weight: 0.0,
+            brightness: 0.0,
         });
         let mut buffer = vec![0.0f32; stop_after * 2];
         engine.process(&mut buffer, 2);
@@ -816,6 +867,7 @@ mod tests {
                     gain: 0.0,
                     group: 3,
                     wind_weight: 1.0,
+                    brightness: 0.0,
                 });
             }
             handle.send(Command::StartVoice {
@@ -825,6 +877,7 @@ mod tests {
                 gain: 1.0,
                 group: 3,
                 wind_weight: 0.0,
+                brightness: 0.0,
             });
             // Settle for ~1.5 s (12+ time constants), then measure.
             let mut buffer = vec![0.0f32; 1024 * 2];
@@ -860,6 +913,110 @@ mod tests {
     }
 
     #[test]
+    fn brightness_tilt_attenuates_highs_under_load() {
+        // A 1 kHz pipe with its tilt hinged at 200 Hz: nearly all of its
+        // energy sits in the "upper partials" band, so the chest's
+        // brightness factor acts on it almost directly.
+        let period = 48; // 1 kHz at 48 kHz
+        let tilt_a = 1.0 - (-std::f64::consts::TAU * 200.0 / 48000.0).exp() as f32;
+
+        let run = |loaded: bool, brightness: f32| -> f32 {
+            let (mut engine, mut handle) = Engine::new(48000.0, sine_pipe_bank(period, true));
+            // Kill per-voice noise so the comparison is deterministic.
+            let mut params = wind::WindParams::default();
+            params.flow_noise = 0.0;
+            for group in 0..wind::MAX_WIND_GROUPS as u8 {
+                handle.send(Command::SetWind { group, params });
+            }
+            if loaded {
+                for i in 0..30 {
+                    handle.send(Command::StartVoice {
+                        handle: 100 + i,
+                        sample: 0,
+                        rate: 1.0,
+                        gain: 0.0,
+                        group: 0,
+                        wind_weight: 1.0,
+                        brightness: 0.0,
+                    });
+                }
+            }
+            handle.send(Command::StartVoice {
+                handle: 1,
+                sample: 0,
+                rate: 1.0,
+                gain: 1.0,
+                group: 0,
+                wind_weight: 0.0,
+                brightness,
+            });
+            let mut buffer = vec![0.0f32; 1024 * 2];
+            for _ in 0..70 {
+                engine.process(&mut buffer, 2);
+            }
+            let mut buffer = vec![0.0f32; 8192 * 2];
+            engine.process(&mut buffer, 2);
+            let mono: Vec<f32> = buffer.chunks(2).map(|f| f[0]).collect();
+            rms(&mono)
+        };
+
+        let unloaded = run(false, tilt_a);
+        let loaded_tilted = run(true, tilt_a);
+        let loaded_flat = run(true, 0.0);
+        // Gain factor alone: 0.94^0.75 ≈ 0.955. With the tilt, a further
+        // ≈ 0.94^3 ≈ 0.83 on this (high) pipe.
+        let plain = loaded_flat / unloaded;
+        let tilted = loaded_tilted / unloaded;
+        assert!(
+            (plain - 0.955).abs() < 0.02,
+            "plain gain ratio {plain} should be ~0.955"
+        );
+        assert!(
+            tilted < plain * 0.88 && tilted > plain * 0.75,
+            "tilted ratio {tilted} should add ~0.83x on top of {plain}"
+        );
+    }
+
+    #[test]
+    fn flow_noise_wobbles_pitch_slightly_and_independently() {
+        let period = 480;
+        let measure_spread = |noise: f32| -> f64 {
+            let (mut engine, mut handle) = Engine::new(48000.0, sine_pipe_bank(period, true));
+            let mut params = wind::WindParams::default();
+            params.sag_depth = 0.0; // isolate the per-voice noise
+            params.flow_noise = noise;
+            handle.send(Command::SetWind { group: 0, params });
+            handle.send(Command::StartVoice {
+                handle: 1,
+                sample: 0,
+                rate: 1.0,
+                gain: 1.0,
+                group: 0,
+                wind_weight: 1.0,
+                brightness: 0.0,
+            });
+            // 10 windows of 0.2 s: the wander drifts across them.
+            let mut periods = Vec::new();
+            let mut buffer = vec![0.0f32; 9600 * 2];
+            for _ in 0..10 {
+                engine.process(&mut buffer, 2);
+                periods.push(measured_period(&buffer));
+            }
+            let min = periods.iter().cloned().fold(f64::MAX, f64::min);
+            let max = periods.iter().cloned().fold(f64::MIN, f64::max);
+            max - min
+        };
+
+        let quiet = measure_spread(0.0);
+        let noisy = measure_spread(0.05);
+        assert!(quiet < 0.05, "no noise → no drift, got {quiet}");
+        assert!(
+            noisy > 0.15,
+            "5% flow noise should visibly wander pitch, got {noisy}"
+        );
+    }
+
+    #[test]
     fn stereo_sample_reaches_both_channels() {
         // L ramps up, R constant — catches interleave mistakes.
         let mut data = Vec::new();
@@ -878,6 +1035,7 @@ mod tests {
             gain: 1.0,
             group: 0,
             wind_weight: 0.0,
+            brightness: 0.0,
         });
         let out = render(&mut engine, 50);
         let master = DEFAULT_MASTER_GAIN;
