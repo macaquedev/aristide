@@ -67,6 +67,28 @@ fn respond(
                 None => bad_request("missing idx"),
             }
         }
+        (Method::Post, "/api/tuning") => {
+            {
+                let mut state = state.lock().expect("state poisoned");
+                if let Control::Organ(console) = &mut state.control {
+                    let mut tuning = console.tuning();
+                    if let Some(t) =
+                        param(query, "temperament").and_then(crate::tuning::Temperament::parse)
+                    {
+                        tuning.temperament = t;
+                    }
+                    if let Some(a4) = param(query, "a4").and_then(|v| v.parse::<f64>().ok()) {
+                        tuning.a4_hz = a4.clamp(300.0, 500.0);
+                    }
+                    if let Some(t) = param(query, "transpose").and_then(|v| v.parse::<i8>().ok())
+                    {
+                        tuning.transpose = t.clamp(-12, 12);
+                    }
+                    console.set_tuning(tuning);
+                }
+            }
+            json(state_json(state))
+        }
         (Method::Post, "/api/trem") => {
             let on = param(query, "on") == Some("1");
             apply_trem(state, on);
@@ -144,9 +166,19 @@ fn state_json_locked(state: &State) -> String {
         }
     }
     out.push_str(&format!(
-        "],\"tremulant\":{},\"gain\":{}}}",
+        "],\"tremulant\":{},\"gain\":{}",
         state.trem_engaged, state.master_gain
     ));
+    if let Control::Organ(console) = &state.control {
+        let tuning = console.tuning();
+        out.push_str(&format!(
+            ",\"tuning\":{{\"temperament\":{},\"a4\":{},\"transpose\":{}}}",
+            json_string(tuning.temperament.name()),
+            tuning.a4_hz,
+            tuning.transpose
+        ));
+    }
+    out.push('}');
     out
 }
 

@@ -16,6 +16,12 @@ sag_cents = 3.0
 bounce_hz = 3.5
 damping = 0.5
 
+[tuning]
+# equal | werckmeister3 | kirnberger3 | meantone4 | pythagorean
+temperament = "equal"
+a4_hz = 440.0
+transpose = 0
+
 [tremulant]
 # Toggled from the web console. This set defines no windchest groups,
 # so the tremulant acts on the whole organ (chest 1).

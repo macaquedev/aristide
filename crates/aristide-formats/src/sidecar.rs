@@ -30,6 +30,40 @@ pub struct Sidecar {
     pub wind: Wind,
     #[serde(default)]
     pub tremulant: Tremulant,
+    #[serde(default)]
+    pub tuning: TuningConfig,
+}
+
+/// Temperament / concert pitch / transposition defaults for the set.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TuningConfig {
+    /// equal | werckmeister3 | kirnberger3 | meantone4 | pythagorean
+    #[serde(default = "default_temperament")]
+    pub temperament: String,
+    #[serde(default = "default_a4_hz")]
+    pub a4_hz: f64,
+    /// Semitones added to incoming keys (a transposer).
+    #[serde(default)]
+    pub transpose: i8,
+}
+
+fn default_temperament() -> String {
+    "equal".into()
+}
+
+fn default_a4_hz() -> f64 {
+    440.0
+}
+
+impl Default for TuningConfig {
+    fn default() -> Self {
+        TuningConfig {
+            temperament: default_temperament(),
+            a4_hz: default_a4_hz(),
+            transpose: 0,
+        }
+    }
 }
 
 /// Synthesized tremulant, rendered as periodic wind-pressure modulation

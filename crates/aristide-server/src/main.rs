@@ -1,6 +1,7 @@
 mod bank;
 mod console;
 mod http;
+mod tuning;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -293,7 +294,27 @@ fn main() -> Result<()> {
             trem_setup = Some((trem_params, groups));
             let drawn = choose_registration(&organ, &patterns);
             let channel_map = resolve_channel_map(&organ, &sidecar.midi.channels);
-            let console = Console::new(organ, loaded.specs, drawn, channel_map);
+            let mut console = Console::new(organ, loaded.specs, drawn, channel_map);
+            let temperament = tuning::Temperament::parse(&sidecar.tuning.temperament)
+                .unwrap_or_else(|| {
+                    tracing::warn!(
+                        "sidecar tuning: unknown temperament {:?}, using equal",
+                        sidecar.tuning.temperament
+                    );
+                    tuning::Temperament::Equal
+                });
+            let live_tuning = tuning::Tuning {
+                temperament,
+                a4_hz: sidecar.tuning.a4_hz.clamp(300.0, 500.0),
+                transpose: sidecar.tuning.transpose.clamp(-12, 12),
+            };
+            console.set_tuning(live_tuning);
+            tracing::info!(
+                "tuning: {} @ a'={} Hz, transpose {:+}",
+                live_tuning.temperament.name(),
+                live_tuning.a4_hz,
+                live_tuning.transpose
+            );
             for (channel, manual) in console.channel_names() {
                 tracing::info!("midi: channel {channel} → {manual}");
             }

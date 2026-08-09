@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use aristide_model::{ManualId, Organ, RankId, StopId};
 
 use crate::bank::VoiceSpec;
+use crate::tuning::Tuning;
 
 /// A voice the console wants started, tagged with the handle it will
 /// later be stopped by.
@@ -22,6 +23,7 @@ pub struct Console {
     drawn: Vec<StopId>,
     /// Engaged couplers, as indices into `organ.couplers`.
     engaged_couplers: Vec<usize>,
+    tuning: Tuning,
     /// `channel_map[c]` = index into `organ.manuals` MIDI channel `c`
     /// plays; channels past the end wrap.
     channel_map: Vec<usize>,
@@ -49,10 +51,19 @@ impl Console {
             specs,
             drawn,
             engaged_couplers: Vec::new(),
+            tuning: Tuning::default(),
             channel_map,
             next_handle: 0,
             sounding: HashMap::new(),
         }
+    }
+
+    pub fn set_tuning(&mut self, tuning: Tuning) {
+        self.tuning = tuning;
+    }
+
+    pub fn tuning(&self) -> Tuning {
+        self.tuning
     }
 
     /// Expand one played key through the engaged couplers into every
@@ -93,10 +104,13 @@ impl Console {
             return Vec::new();
         };
         let origin = self.organ.manuals[manual_index].id;
+        // The transposer shifts which pipes sound, like the console
+        // gadget; temperament + concert pitch then retune each pipe.
+        let played = key as i16 + self.tuning.transpose as i16;
 
         let mut starts = Vec::new();
         let mut held = Vec::new();
-        for (manual_id, midi_key) in self.couple(origin, key as i16) {
+        for (manual_id, midi_key) in self.couple(origin, played) {
             let Some(manual) = self.organ.manuals.iter().find(|m| m.id == manual_id) else {
                 continue;
             };
@@ -124,10 +138,11 @@ impl Console {
                     if !spec.percussive {
                         held.push((stop.id, handle));
                     }
-                    starts.push(VoiceStart {
-                        handle,
-                        spec: *spec,
-                    });
+                    let mut spec = *spec;
+                    if !spec.percussive {
+                        spec.rate *= self.tuning.rate_multiplier(midi_key as u8);
+                    }
+                    starts.push(VoiceStart { handle, spec });
                 }
             }
         }
@@ -487,6 +502,44 @@ mod tests {
         // Out-of-compass shifted notes drop out quietly.
         assert_eq!(console.note_on(0, 37).len(), 2, "37-12 is below compass");
         console.note_off(0, 37);
+    }
+
+    #[test]
+    fn tuning_retunes_and_transposes() {
+        let mut console = test_console();
+        // Equal temperament, a=440: everything at unity rate.
+        let baseline = console.note_on(0, 60)[0].spec.rate;
+        assert!((baseline - 1.0).abs() < 1e-6);
+        console.note_off(0, 60);
+
+        // Meantone C sits +10.265 cents above equal (a-referenced).
+        console.set_tuning(crate::tuning::Tuning {
+            temperament: crate::tuning::Temperament::Meantone4,
+            a4_hz: 440.0,
+            transpose: 0,
+        });
+        let meantone_c = console.note_on(0, 60)[0].spec.rate;
+        let expected = (10.265f32 / 1200.0).exp2();
+        assert!(
+            (meantone_c - expected).abs() < 1e-4,
+            "meantone C rate {meantone_c} vs {expected}"
+        );
+        console.note_off(0, 60);
+
+        // Transpose +2: key 60 routes to pipe 62 (rate reflects D's
+        // offset, and the sounding pipe index shifts).
+        console.set_tuning(crate::tuning::Tuning {
+            temperament: crate::tuning::Temperament::Equal,
+            a4_hz: 440.0,
+            transpose: 2,
+        });
+        let transposed = console.note_on(0, 60);
+        assert_eq!(transposed.len(), 2, "both drawn stops sound");
+        // Pipe index = key 62 − first_midi 36 = 26; sample index equals
+        // rank − 1 in the fixture, so instead verify by keying at the
+        // compass edge: 96 + 2 is out of range → silent.
+        console.note_off(0, 60);
+        assert!(console.note_on(0, 96).is_empty(), "96+2 exceeds compass");
     }
 
     #[test]
