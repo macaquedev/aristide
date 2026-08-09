@@ -817,8 +817,8 @@ mod tests {
             if phantom_voices > 0 {
                 let pressure = engine.wind_pressure(3);
                 assert!(
-                    (pressure - 0.995).abs() < 0.002,
-                    "steady pressure {pressure} should be ~0.995 at reference demand"
+                    (pressure - 0.94).abs() < 0.004,
+                    "steady pressure {pressure} should be ~0.94 at reference demand"
                 );
             }
             let mut buffer = vec![0.0f32; 8192 * 2];
@@ -833,11 +833,12 @@ mod tests {
             (unloaded - period as f64).abs() < 0.3,
             "unloaded period {unloaded} should be ~{period}"
         );
-        // Expected: P=0.995, rate factor 0.995^0.35 ≈ 0.99825 → ~480.8
-        // (≈ −3 cents: audible as breathing, not as portamento).
+        // Expected: P=0.94 (realistic 6% chest drop), rate factor
+        // 0.94^0.032 ≈ 0.99802 → ~481.0 (≈ −3.4 cents steady: the
+        // physically calibrated sensitivity of ~0.55 cents per 1%).
         assert!(
-            loaded > 480.4 && loaded < 481.4,
-            "loaded period {loaded} should sag to ~480.8 frames"
+            loaded > 480.5 && loaded < 481.5,
+            "loaded period {loaded} should sag to ~481 frames"
         );
     }
 

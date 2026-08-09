@@ -62,15 +62,30 @@ pub struct WindParams {
 impl Default for WindParams {
     fn default() -> Self {
         WindParams {
-            // ≈ −3 cents at reference demand with pitch_exponent 0.35.
-            sag_depth: 0.005,
+            // Calibrated against measured reality (docs/research/):
+            // chest pressure drops 1–10 % at full load are the realistic
+            // range (Fraunhofer ISMA 2007; HW CODM recommends 1–10 %);
+            // pipes detune ≈ 0.5–0.65 cents per 1 % pressure (Pykett's
+            // measurement; HW's own 3.3-cents-at-6.3 % calibration).
+            // 6 % × 0.032 → ≈ −3.4 cents steady at a full chorus, with
+            // note-on/off transients dipping deeper — per Hauptwerk's
+            // designer, the wobble at transitions IS the audible effect,
+            // not the static sag.
+            sag_depth: 0.06,
             reference_demand: 30.0,
+            // Reservoir resonance: Fraunhofer measured 3–10 Hz bellows
+            // modes; Walker's patent uses 2–5 Hz, ζ 0.4–0.7.
             natural_hz: 3.5,
             damping: 0.5,
-            attack_boost: 0.8,
-            attack_ms: 70.0,
-            pitch_exponent: 0.35,
-            gain_exponent: 0.8,
+            // Pallet gulp: onset dips measured 2–4× the sustained sag
+            // (600→400 Pa dips vs −15 % sustained, ISMA 2007).
+            attack_boost: 2.0,
+            attack_ms: 50.0,
+            // ≈ 0.55 cents per 1 % pressure (0.032 × 1200·log2 ≈ 0.55).
+            pitch_exponent: 0.032,
+            // Fletcher 1976: source power ∝ P^1.5 → ~15 dB/decade →
+            // linear gain ∝ P^0.75.
+            gain_exponent: 0.75,
         }
     }
 }

@@ -192,15 +192,15 @@ fn db_to_linear(db: f64) -> f32 {
     10f64.powf(db / 20.0) as f32
 }
 
-/// How hard a pipe draws on its windchest. Big pipes drink more:
-/// roughly with the square root of wavelength, normalized so a 2'-ish
-/// pipe (~150 Hz speaking pitch) draws 1.0. Percussive one-shots
-/// (action noises, stop thumps) draw nothing.
+/// How hard a pipe draws on its windchest. Wind consumption roughly
+/// halves per octave of speaking pitch (Walker US5508472 scales
+/// 8'/4'/2' as 1.0/0.5/0.25), i.e. weight ∝ 1/f, normalized to 1.0 at
+/// ~150 Hz. Percussive one-shots (action noises) draw nothing.
 fn wind_weight(frequency_hz: f64, percussive: bool) -> f32 {
     if percussive || !(frequency_hz > 0.0) {
         return 0.0;
     }
-    ((150.0 / frequency_hz).sqrt() as f32).clamp(0.15, 4.0)
+    ((150.0 / frequency_hz) as f32).clamp(0.1, 4.0)
 }
 
 #[cfg(test)]
