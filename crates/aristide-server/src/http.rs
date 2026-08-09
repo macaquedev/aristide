@@ -328,7 +328,7 @@ mod tests {
             control: Control::Organ(console),
             trem_groups: vec![0, 1],
             trem_engaged: false,
-            master_gain: 0.35,
+            master_gain: 0.178,
             reverb_wet: Some(0.25),
         })))
     }

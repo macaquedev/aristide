@@ -40,7 +40,11 @@ const RELEASE_CROSSFADE_SECONDS: f32 = 0.03;
 /// Emergency fade for voices stopped without a release tail to go to.
 const KILL_FADE_SECONDS: f32 = 0.015;
 
-const DEFAULT_MASTER_GAIN: f32 = 0.35;
+/// −15 dB: the GrandOrgue ecosystem convention — sample sets (e.g.
+/// Grabowski's) are normalized so a full-organ registration fits under
+/// exactly this default. Our previous −9 dB default clipped tuttis that
+/// GO plays cleanly.
+const DEFAULT_MASTER_GAIN: f32 = 0.178;
 
 /// Master-bus limiter ceiling and release. Big registrations with
 /// couplers can sum far past full scale; without this the DAC hard-clips

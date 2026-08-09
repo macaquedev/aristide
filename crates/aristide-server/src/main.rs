@@ -77,7 +77,7 @@ fn parse_args() -> Result<Args> {
             }
             other => anyhow::bail!(
                 "unknown argument {other:?} (usage: aristide-server [set.organ] \
-                 [--stops name,name] [--list-stops] [--gain 0.35])"
+                 [--stops name,name] [--list-stops] [--gain 0.18])"
             ),
         }
     }
@@ -463,7 +463,7 @@ fn main() -> Result<()> {
         control,
         trem_groups,
         trem_engaged: false,
-        master_gain: args.master_gain.unwrap_or(0.35),
+        master_gain: args.master_gain.unwrap_or(0.178),
         reverb_wet: reverb_ir.is_some().then_some(reverb_wet),
     }));
     if let Err(err) = http::spawn(Arc::clone(&state), args.http_port) {
