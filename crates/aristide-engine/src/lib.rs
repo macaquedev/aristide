@@ -80,6 +80,9 @@ pub enum Command {
     /// Release the voice started with `handle`. Loop-less (percussive)
     /// voices ignore this and play to their end.
     StopVoice { handle: u64 },
+    /// Silence a voice quickly WITHOUT its release tail (a short fade) —
+    /// for retiring control-noise voices silently.
+    KillVoice { handle: u64 },
     /// Start/stop the built-in additive test tone (no-set mode).
     NoteOn { key: u8, freq_hz: f32 },
     NoteOff { key: u8 },
@@ -365,8 +368,11 @@ impl SampledVoice {
                 // Level match: scale the tail to continue at the voice's
                 // current loudness (early releases are quieter than the
                 // recorded sustain — unscaled tails strike like a bell).
+                // Exception: a near-silent loop (control-noise samples:
+                // thump → silent loop → thump tail) means the tail is
+                // MEANT to be louder — play it as recorded.
                 let reference = sample.tail_reference_level();
-                self.tail_gain = if reference > 1e-5 {
+                self.tail_gain = if reference > 1e-5 && self.envelope > 0.02 * reference {
                     (self.envelope / reference).clamp(0.05, 1.1)
                 } else {
                     1.0
@@ -657,6 +663,16 @@ impl Engine {
                                 let age_ms = (sampled.age_frames as f32 / per_ms) as u32;
                                 sampled.release(sample, age_ms);
                             }
+                        }
+                    }
+                }
+            }
+            Command::KillVoice { handle } => {
+                for voice in self.voices.iter_mut() {
+                    if let Voice::Sampled(sampled) = voice {
+                        if sampled.handle == handle && sampled.phase != SamplePhase::FadeOut {
+                            sampled.amplitude = 1.0;
+                            sampled.phase = SamplePhase::FadeOut;
                         }
                     }
                 }

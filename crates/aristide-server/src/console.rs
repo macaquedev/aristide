@@ -24,6 +24,19 @@ pub struct Console {
     /// Engaged couplers, as indices into `organ.couplers`.
     engaged_couplers: Vec<usize>,
     tuning: Tuning,
+    /// Stops classified as control noises (drawstop thumps etc.) —
+    /// hidden from UIs, triggered by the control they belong to.
+    noise_stops: Vec<StopId>,
+    stop_noise: HashMap<StopId, VoiceSpec>,
+    coupler_noise: HashMap<usize, VoiceSpec>,
+    tremulant_noise: Option<VoiceSpec>,
+    /// Noise voices currently sounding their silent loop (control is
+    /// on); note-off on toggle-off plays the push-in thump.
+    stop_noise_open: HashMap<StopId, u64>,
+    coupler_noise_open: HashMap<usize, u64>,
+    trem_noise_open: Option<u64>,
+    noises_enabled: bool,
+    noise_volume: f32,
     /// `channel_map[c]` = index into `organ.manuals` MIDI channel `c`
     /// plays; channels past the end wrap.
     channel_map: Vec<usize>,
@@ -46,15 +59,140 @@ impl Console {
         } else {
             channel_map
         };
-        Console {
+        let mut console = Console {
             organ,
             specs,
             drawn,
             engaged_couplers: Vec::new(),
             tuning: Tuning::default(),
+            noise_stops: Vec::new(),
+            stop_noise: HashMap::new(),
+            coupler_noise: HashMap::new(),
+            tremulant_noise: None,
+            stop_noise_open: HashMap::new(),
+            coupler_noise_open: HashMap::new(),
+            trem_noise_open: None,
+            noises_enabled: true,
+            noise_volume: 0.7,
             channel_map,
             next_handle: 0,
             sounding: HashMap::new(),
+        };
+        console.classify_noises();
+        // Noise stops must never be part of the registration.
+        let noise_stops = console.noise_stops.clone();
+        console.drawn.retain(|id| !noise_stops.contains(id));
+        console
+    }
+
+    /// Control-noise "stops" (drawstop thumps, coupler clacks, blower).
+    /// GO-set convention: the noise sample is structured like a pipe —
+    /// pull-thump attack → near-silent sustain loop → push-in thump as
+    /// the release tail — so the engine's own note lifecycle plays it:
+    /// draw = note-on, retire = note-off. Classified by name (the
+    /// GO-world convention); mapped to their control by fuzzy match.
+    fn classify_noises(&mut self) {
+        let mut noise_stops = Vec::new();
+        for stop in &self.organ.stops {
+            if stop.name.to_lowercase().contains("noise") {
+                noise_stops.push(stop.id);
+            }
+        }
+        self.noise_stops = noise_stops;
+
+        for &noise_id in &self.noise_stops {
+            let Some(noise_stop) = self.organ.stops.iter().find(|s| s.id == noise_id) else {
+                continue;
+            };
+            let Some(spec) = noise_stop.ranks.first().and_then(|range| {
+                self.specs.get(&(range.rank, range.first_pipe)).copied()
+            }) else {
+                continue;
+            };
+            let name = noise_stop.name.to_lowercase();
+
+            if name.contains("tremblant") || name.contains("tremulant") {
+                self.tremulant_noise = Some(spec);
+                continue;
+            }
+            if name.contains("coupler") {
+                let stripped = strip_noise_suffix(&noise_stop.name);
+                let best = self
+                    .organ
+                    .couplers
+                    .iter()
+                    .enumerate()
+                    .map(|(index, coupler)| (index, name_match_score(&stripped, &coupler.name)))
+                    .max_by(|a, b| a.1.total_cmp(&b.1));
+                if let Some((index, score)) = best {
+                    if score >= 0.5 {
+                        self.coupler_noise.insert(index, spec);
+                    }
+                }
+                continue;
+            }
+            // Ordinary drawstop noise: match against real stops on the
+            // same manual.
+            let stripped = strip_noise_suffix(&noise_stop.name);
+            let best = self
+                .organ
+                .stops
+                .iter()
+                .filter(|s| s.manual == noise_stop.manual && !self.noise_stops.contains(&s.id))
+                .map(|s| (s.id, name_match_score(&stripped, &s.name)))
+                .max_by(|a, b| a.1.total_cmp(&b.1));
+            if let Some((id, score)) = best {
+                if score >= 0.45 {
+                    self.stop_noise.insert(id, spec);
+                }
+            }
+        }
+    }
+
+    /// Open a noise voice (pull thump into its silent loop). The voice
+    /// stays alive until the control toggles back off — its note-off
+    /// then plays the push-in thump from the sample's tail. Noise
+    /// voices never draw wind or breathe with pressure.
+    fn open_noise(&mut self, spec: Option<VoiceSpec>) -> Option<VoiceStart> {
+        let mut spec = spec?;
+        if !self.noises_enabled || self.noise_volume <= 0.0 {
+            return None;
+        }
+        spec.gain *= self.noise_volume;
+        spec.wind_weight = 0.0;
+        spec.brightness = 0.0;
+        let handle = self.next_handle;
+        self.next_handle += 1;
+        Some(VoiceStart { handle, spec })
+    }
+
+    /// Enable/disable noises and set their volume. Returns handles of
+    /// currently open noise voices to KILL (silently) when disabling.
+    pub fn set_noises(&mut self, enabled: bool, volume: f32) -> Vec<u64> {
+        self.noises_enabled = enabled;
+        self.noise_volume = volume.clamp(0.0, 2.0);
+        if enabled {
+            return Vec::new();
+        }
+        let mut kills: Vec<u64> = self.stop_noise_open.drain().map(|(_, h)| h).collect();
+        kills.extend(self.coupler_noise_open.drain().map(|(_, h)| h));
+        kills.extend(self.trem_noise_open.take());
+        kills
+    }
+
+    pub fn noises(&self) -> (bool, f32) {
+        (self.noises_enabled, self.noise_volume)
+    }
+
+    /// Tremulant toggled: open the trem noise voice or release it
+    /// (note-off plays the stop-side thump). Returns (start, stop).
+    pub fn tremulant_toggle_noise(&mut self, engaged: bool) -> (Option<VoiceStart>, Option<u64>) {
+        if engaged {
+            let start = self.open_noise(self.tremulant_noise);
+            self.trem_noise_open = start.as_ref().map(|s| s.handle);
+            (start, None)
+        } else {
+            (None, self.trem_noise_open.take())
         }
     }
 
@@ -169,14 +307,22 @@ impl Console {
             .collect()
     }
 
-    /// Draw or retire a stop. Retiring returns the handles of its
-    /// currently sounding voices so the caller can stop them.
-    pub fn set_drawn(&mut self, stop: StopId, drawn: bool) -> Vec<u64> {
+    /// Draw or retire a stop. Returns the handles of voices to stop
+    /// (retired pipes, or the noise voice whose note-off plays the
+    /// push-in thump) and the pull-thump noise voice to start.
+    pub fn set_drawn(&mut self, stop: StopId, drawn: bool) -> (Vec<u64>, Option<VoiceStart>) {
+        // Noise stops aren't directly drawable, and a no-op change
+        // shouldn't thump.
+        if self.noise_stops.contains(&stop) || self.drawn.contains(&stop) == drawn {
+            return (Vec::new(), None);
+        }
         if drawn {
-            if !self.drawn.contains(&stop) {
-                self.drawn.push(stop);
+            self.drawn.push(stop);
+            let noise = self.open_noise(self.stop_noise.get(&stop).copied());
+            if let Some(start) = &noise {
+                self.stop_noise_open.insert(stop, start.handle);
             }
-            return Vec::new();
+            return (Vec::new(), noise);
         }
         self.drawn.retain(|&id| id != stop);
         let mut released = Vec::new();
@@ -190,22 +336,30 @@ impl Console {
                 }
             });
         }
-        released
+        // Note-off on the open noise voice = the push-in thump.
+        released.extend(self.stop_noise_open.remove(&stop));
+        (released, None)
     }
 
     /// Engage or release a coupler by its index in `organ.couplers`.
     /// Sounding notes keep their current coupling; new presses use the
-    /// new state.
-    pub fn set_coupler(&mut self, index: usize, engaged: bool) {
-        if index >= self.organ.couplers.len() {
-            return;
+    /// new state. Returns (clack voice to start, noise handle to stop).
+    pub fn set_coupler(&mut self, index: usize, engaged: bool) -> (Option<VoiceStart>, Option<u64>) {
+        if index >= self.organ.couplers.len()
+            || self.engaged_couplers.contains(&index) == engaged
+        {
+            return (None, None);
         }
         if engaged {
-            if !self.engaged_couplers.contains(&index) {
-                self.engaged_couplers.push(index);
+            self.engaged_couplers.push(index);
+            let noise = self.open_noise(self.coupler_noise.get(&index).copied());
+            if let Some(start) = &noise {
+                self.coupler_noise_open.insert(index, start.handle);
             }
+            (noise, None)
         } else {
             self.engaged_couplers.retain(|&i| i != index);
+            (None, self.coupler_noise_open.remove(&index))
         }
     }
 
@@ -225,11 +379,13 @@ impl Console {
             .collect()
     }
 
-    /// Every stop with its manual name and drawn state, for UIs.
+    /// Every *playable* stop with its manual name and drawn state, for
+    /// UIs — control noises are hidden (they belong to their controls).
     pub fn stop_states(&self) -> Vec<(StopId, &str, &str, bool)> {
         self.organ
             .stops
             .iter()
+            .filter(|stop| !self.noise_stops.contains(&stop.id))
             .map(|stop| {
                 let manual = self
                     .organ
@@ -266,6 +422,58 @@ impl Console {
             })
             .collect()
     }
+}
+
+/// "Montre 8' stop noise" → "Montre 8'"; "I/P coupler stop noise" → "I/P".
+fn strip_noise_suffix(name: &str) -> String {
+    let lower = name.to_lowercase();
+    let mut stripped = lower.as_str();
+    for suffix in [" coupler stop noise", " stop noise", " noise"] {
+        if let Some(prefix) = stripped.strip_suffix(suffix) {
+            stripped = prefix;
+            break;
+        }
+    }
+    stripped.to_string()
+}
+
+/// Fuzzy score between a stripped noise name and a control name:
+/// normalized-prefix containment, else token overlap (tokens match on
+/// equality or ≥2-char prefix). Handles "Fl Harm 8" vs "Flute Harm. 8'"
+/// and "Ped Flute 4" vs "Flute 4'".
+fn name_match_score(noise: &str, candidate: &str) -> f32 {
+    let normalize = |s: &str| -> String {
+        s.chars()
+            .filter(|c| c.is_alphanumeric())
+            .collect::<String>()
+            .to_lowercase()
+    };
+    let (a, b) = (normalize(noise), normalize(candidate));
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
+    if b.starts_with(&a) || a.starts_with(&b) {
+        return 1.0;
+    }
+    let tokens = |s: &str| -> Vec<String> {
+        s.to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|t| !t.is_empty())
+            .map(str::to_string)
+            .collect()
+    };
+    let (ta, tb) = (tokens(noise), tokens(candidate));
+    let mut matched = 0usize;
+    for token_a in &ta {
+        if tb.iter().any(|token_b| {
+            token_a == token_b
+                || (token_a.len() >= 2 && token_b.starts_with(token_a.as_str()))
+                || (token_b.len() >= 2 && token_a.starts_with(token_b.as_str()))
+        }) {
+            matched += 1;
+        }
+    }
+    matched as f32 / ta.len().max(tb.len()) as f32
 }
 
 /// Keyboards first (in model order), pedal last: channel 0 lands on the

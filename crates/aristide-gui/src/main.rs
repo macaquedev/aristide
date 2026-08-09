@@ -159,6 +159,26 @@ impl eframe::App for App {
                         self.gain_edit = None;
                     }
 
+                    if let Some(noises) = &snapshot.noises {
+                        ui.add_space(16.0);
+                        let mut on = noises.on;
+                        if ui.toggle_value(&mut on, "Noises").changed() {
+                            self.send(Command::SetNoises {
+                                on,
+                                vol: noises.vol,
+                            });
+                        }
+                        let mut vol = noises.vol;
+                        let slider =
+                            ui.add(egui::Slider::new(&mut vol, 0.0..=1.5).fixed_decimals(2));
+                        if slider.drag_stopped() || (slider.changed() && !slider.dragged()) {
+                            self.send(Command::SetNoises {
+                                on: noises.on,
+                                vol,
+                            });
+                        }
+                    }
+
                     if let Some(current) = snapshot.reverb {
                         ui.add_space(16.0);
                         ui.label("Reverb");

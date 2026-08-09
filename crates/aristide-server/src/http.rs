@@ -58,14 +58,42 @@ fn respond(
                 Some(index) => {
                     {
                         let mut state = state.lock().expect("state poisoned");
-                        if let Control::Organ(console) = &mut state.control {
-                            console.set_coupler(index, on);
+                        let State {
+                            engine, control, ..
+                        } = &mut *state;
+                        if let Control::Organ(console) = control {
+                            let (start, stop) = console.set_coupler(index, on);
+                            send_noise(engine, start);
+                            if let Some(handle) = stop {
+                                engine.send(Command::StopVoice { handle });
+                            }
                         }
                     }
                     json(state_json(state))
                 }
                 None => bad_request("missing idx"),
             }
+        }
+        (Method::Post, "/api/noises") => {
+            {
+                let mut state = state.lock().expect("state poisoned");
+                let State {
+                    engine, control, ..
+                } = &mut *state;
+                if let Control::Organ(console) = control {
+                    let (mut enabled, mut volume) = console.noises();
+                    if let Some(on) = param(query, "on") {
+                        enabled = on == "1";
+                    }
+                    if let Some(v) = param(query, "vol").and_then(|v| v.parse::<f32>().ok()) {
+                        volume = v;
+                    }
+                    for handle in console.set_noises(enabled, volume) {
+                        engine.send(Command::KillVoice { handle });
+                    }
+                }
+            }
+            json(state_json(state))
         }
         (Method::Post, "/api/reverb") => {
             match param(query, "wet").and_then(|v| v.parse::<f32>().ok()) {
@@ -129,18 +157,48 @@ fn apply_stop(state: &Mutex<State>, id: u32, on: bool) {
         engine, control, ..
     } = &mut *state;
     if let Control::Organ(console) = control {
-        for handle in console.set_drawn(aristide_model::StopId(id), on) {
+        let (stopped, noise) = console.set_drawn(aristide_model::StopId(id), on);
+        for handle in stopped {
             engine.send(Command::StopVoice { handle });
         }
+        send_noise(engine, noise);
+    }
+}
+
+/// Start a control-noise one-shot (drawstop thump, coupler clack).
+fn send_noise(engine: &mut aristide_engine::EngineHandle, noise: Option<crate::console::VoiceStart>) {
+    if let Some(start) = noise {
+        engine.send(Command::StartVoice {
+            handle: start.handle,
+            sample: start.spec.sample,
+            rate: start.spec.rate,
+            gain: start.spec.gain,
+            group: start.spec.group,
+            wind_weight: start.spec.wind_weight,
+            brightness: start.spec.brightness,
+        });
     }
 }
 
 fn apply_trem(state: &Mutex<State>, on: bool) {
     let mut state = state.lock().expect("state poisoned");
+    let changed = state.trem_engaged != on;
     state.trem_engaged = on;
     let groups = state.trem_groups.clone();
     for group in groups {
         state.engine.send(Command::SetTremulant { group, engaged: on });
+    }
+    if changed {
+        let State {
+            engine, control, ..
+        } = &mut *state;
+        if let Control::Organ(console) = control {
+            let (start, stop) = console.tremulant_toggle_noise(on);
+            send_noise(engine, start);
+            if let Some(handle) = stop {
+                engine.send(Command::StopVoice { handle });
+            }
+        }
     }
 }
 
@@ -195,6 +253,12 @@ fn state_json_locked(state: &State) -> String {
     }
     if let Some(wet) = state.reverb_wet {
         out.push_str(&format!(",\"reverb\":{wet}"));
+    }
+    if let Control::Organ(console) = &state.control {
+        let (enabled, volume) = console.noises();
+        out.push_str(&format!(
+            ",\"noises\":{{\"on\":{enabled},\"vol\":{volume}}}"
+        ));
     }
     out.push('}');
     out
@@ -292,5 +356,61 @@ mod tests {
 
         respond(&state, &Method::Post, "/api/gain?v=0.5");
         assert!(state_json(&state).contains("\"gain\":0.5"));
+    }
+
+    #[test]
+    fn stop_noises_are_hidden_and_fire_on_toggles() {
+        let Some(state) = demo_state() else { return };
+
+        // No control noise masquerades as a drawable stop.
+        let body = state_json(&state);
+        assert!(
+            !body.contains("stop noise") && !body.contains("Motor noise"),
+            "noise stops leaked into the stop list"
+        );
+        assert!(body.contains("\"noises\":{\"on\":true"));
+
+        let mut guard = state.lock().expect("state");
+        let Control::Organ(console) = &mut guard.control else {
+            panic!("organ expected");
+        };
+        // Drawing Montre 8' produces its drawknob thump (a percussive
+        // one-shot at noise volume).
+        let montre = console
+            .stop_states()
+            .iter()
+            .find(|(_, name, _, _)| *name == "Montre 8'")
+            .map(|(id, _, _, _)| *id)
+            .expect("Montre 8' visible");
+        let (stopped, noise) = console.set_drawn(montre, true);
+        assert!(stopped.is_empty());
+        let noise = noise.expect("drawstop noise mapped and produced");
+        assert_eq!(noise.spec.wind_weight, 0.0, "noises draw no wind");
+
+        // Redundant draw: no second thump.
+        let (_, again) = console.set_drawn(montre, true);
+        assert!(again.is_none());
+
+        // Retiring releases the noise voice (its note-off = the
+        // push-in thump).
+        let (stopped, on_retire) = console.set_drawn(montre, false);
+        assert!(on_retire.is_none());
+        assert!(
+            stopped.contains(&noise.handle),
+            "retire must note-off the open noise voice"
+        );
+
+        // Coupler clack (demo couplers have mapped noises).
+        let (clack, _) = console.set_coupler(0, true);
+        let clack = clack.expect("coupler noise mapped");
+        let (_, unclack) = console.set_coupler(0, false);
+        assert_eq!(unclack, Some(clack.handle));
+
+        // Disabling kills open noise voices and mutes future toggles.
+        console.set_drawn(montre, true);
+        let kills = console.set_noises(false, 0.7);
+        assert!(!kills.is_empty(), "open noise voices killed on disable");
+        let (_, silent) = console.set_drawn(montre, false);
+        assert!(silent.is_none());
     }
 }

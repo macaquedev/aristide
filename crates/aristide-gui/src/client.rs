@@ -47,6 +47,14 @@ pub struct Snapshot {
     /// Reverb wet level; absent when no impulse response is loaded.
     #[serde(default)]
     pub reverb: Option<f32>,
+    #[serde(default)]
+    pub noises: Option<NoiseState>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct NoiseState {
+    pub on: bool,
+    pub vol: f32,
 }
 
 /// A control action the UI wants performed.
@@ -57,6 +65,7 @@ pub enum Command {
     SetTremulant(bool),
     SetGain(f32),
     SetReverb(f32),
+    SetNoises { on: bool, vol: f32 },
     SetTuning { temperament: String, a4: f64, transpose: i8 },
 }
 
@@ -73,6 +82,9 @@ impl Command {
             Command::SetTremulant(on) => format!("/api/trem?on={}", *on as u8),
             Command::SetGain(v) => format!("/api/gain?v={v}"),
             Command::SetReverb(wet) => format!("/api/reverb?wet={wet}"),
+            Command::SetNoises { on, vol } => {
+                format!("/api/noises?on={}&vol={vol}", *on as u8)
+            }
             Command::SetTuning {
                 temperament,
                 a4,

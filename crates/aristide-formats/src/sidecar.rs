@@ -34,6 +34,35 @@ pub struct Sidecar {
     pub tuning: TuningConfig,
     #[serde(default)]
     pub reverb: ReverbConfig,
+    #[serde(default)]
+    pub noises: NoisesConfig,
+}
+
+/// Control-operating noises (drawstop thumps, coupler clacks, blower).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NoisesConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_noise_volume")]
+    pub volume: f64,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_noise_volume() -> f64 {
+    0.7
+}
+
+impl Default for NoisesConfig {
+    fn default() -> Self {
+        NoisesConfig {
+            enabled: true,
+            volume: default_noise_volume(),
+        }
+    }
 }
 
 /// Convolution reverb: an impulse-response file next to the set (or
