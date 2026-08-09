@@ -24,6 +24,10 @@ pub struct VoiceSpec {
     pub gain: f32,
     /// Loop-less percussive samples get no StopVoice on key release.
     pub percussive: bool,
+    /// Wind group (0-based engine index, from the ODF windchest).
+    pub group: u8,
+    /// Wind draw while sounding; 0 for noises and percussives.
+    pub wind_weight: f32,
 }
 
 pub struct LoadedBank {
@@ -78,6 +82,10 @@ pub fn build(organ: &Organ, device_rate: f32) -> Result<LoadedBank> {
                         * (cents / 1200.0).exp2()) as f32,
                     gain: db_to_linear(pipe.gain_db),
                     percussive: info.percussive,
+                    group: (rank.windchest.saturating_sub(1))
+                        .min(aristide_engine::wind::MAX_WIND_GROUPS as u32 - 1)
+                        as u8,
+                    wind_weight: wind_weight(pipe.nominal_frequency_hz, info.percussive),
                 },
             );
         }
@@ -184,6 +192,17 @@ fn db_to_linear(db: f64) -> f32 {
     10f64.powf(db / 20.0) as f32
 }
 
+/// How hard a pipe draws on its windchest. Big pipes drink more:
+/// roughly with the square root of wavelength, normalized so a 2'-ish
+/// pipe (~150 Hz speaking pitch) draws 1.0. Percussive one-shots
+/// (action noises, stop thumps) draw nothing.
+fn wind_weight(frequency_hz: f64, percussive: bool) -> f32 {
+    if percussive || !(frequency_hz > 0.0) {
+        return 0.0;
+    }
+    ((150.0 / frequency_hz).sqrt() as f32).clamp(0.15, 4.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,6 +254,8 @@ mod tests {
                 sample: start.spec.sample,
                 rate: start.spec.rate,
                 gain: start.spec.gain,
+                group: start.spec.group,
+                wind_weight: start.spec.wind_weight,
             }));
         }
         let mut buffer = vec![0.0f32; 4800 * 2];

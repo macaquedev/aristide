@@ -199,6 +199,7 @@ mod tests {
                 .map(|id| Rank {
                     id: RankId(id),
                     name: format!("rank {id}"),
+                    windchest: 1,
                     pipes: (0..61)
                         .map(|_| Pipe {
                             nominal_frequency_hz: 440.0,
@@ -222,6 +223,8 @@ mod tests {
                         rate: 1.0,
                         gain: 1.0,
                         percussive: false,
+                        group: 0,
+                        wind_weight: 1.0,
                     },
                 );
             }

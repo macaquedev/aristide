@@ -190,6 +190,7 @@ fn main() -> Result<()> {
         channels
     );
 
+    let mut wind_params = None;
     let (sample_bank, control) = match &args.set {
         Some(path) => {
             let organ = load_organ(path)?;
@@ -225,6 +226,11 @@ fn main() -> Result<()> {
             } else {
                 args.stops.clone()
             };
+            wind_params = Some(aristide_engine::wind::WindParams {
+                sag_depth: (sidecar.wind.sag_percent / 100.0).clamp(0.0, 0.3) as f32,
+                recovery_seconds: (sidecar.wind.recovery_ms / 1000.0).clamp(0.01, 2.0) as f32,
+                ..Default::default()
+            });
             let drawn = choose_registration(&organ, &patterns);
             let channel_map = resolve_channel_map(&organ, &sidecar.midi.channels);
             let console = Console::new(organ, loaded.specs, drawn, channel_map);
@@ -242,6 +248,17 @@ fn main() -> Result<()> {
     let (mut engine, mut handle) = Engine::new(sample_rate, Arc::new(sample_bank));
     if let Some(gain) = args.master_gain {
         handle.send(Command::SetMasterGain { linear: gain });
+    }
+    if let Some(params) = wind_params {
+        tracing::info!(
+            "wind: sag {:.1}% / recovery {:.0} ms{}",
+            params.sag_depth * 100.0,
+            params.recovery_seconds * 1000.0,
+            if params.sag_depth == 0.0 { " (off)" } else { "" }
+        );
+        for group in 0..aristide_engine::wind::MAX_WIND_GROUPS as u8 {
+            handle.send(Command::SetWind { group, params });
+        }
     }
 
     let stream = device.build_output_stream(
@@ -340,6 +357,8 @@ fn handle_midi(message: &[u8], state: &Mutex<State>) {
                         sample: start.spec.sample,
                         rate: start.spec.rate,
                         gain: start.spec.gain,
+                        group: start.spec.group,
+                        wind_weight: start.spec.wind_weight,
                     });
                 }
             }

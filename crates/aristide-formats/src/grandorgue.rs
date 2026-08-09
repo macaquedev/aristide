@@ -522,6 +522,9 @@ impl Builder<'_> {
         parent_chain: GainChain,
     ) -> Result<Rank, OdfError> {
         let rank_chain = GainChain::read(section, parent_chain)?;
+        // Both standalone [RankNNN] and old-style [StopNNN] sections carry
+        // their windchest assignment under the same key.
+        let windchest = section.int_or("WindchestGroup", 1)?.max(1) as u32;
         let mut pipes = Vec::with_capacity(pipe_count.max(0) as usize);
         for index in 1..=pipe_count {
             let prefix = format!("Pipe{index:03}");
@@ -535,6 +538,7 @@ impl Builder<'_> {
         Ok(Rank {
             id,
             name: String::new(),
+            windchest,
             pipes,
         })
     }

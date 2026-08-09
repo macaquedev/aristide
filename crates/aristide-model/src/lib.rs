@@ -111,6 +111,9 @@ impl Pipe {
 pub struct Rank {
     pub id: RankId,
     pub name: String,
+    /// Which wind supply this rank speaks on (1-based, format-side
+    /// numbering; GO `WindchestGroup`). Drives the wind model.
+    pub windchest: u32,
     pub pipes: Vec<Pipe>,
 }
 

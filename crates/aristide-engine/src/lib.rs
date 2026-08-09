@@ -18,12 +18,14 @@
 
 pub mod bank;
 pub mod resample;
+pub mod wind;
 
 use std::sync::Arc;
 
 use bank::{Sample, SampleBank};
 use resample::SincTable;
 use rtrb::{Consumer, Producer, RingBuffer};
+use wind::{WindGroup, WindParams, MAX_WIND_GROUPS};
 
 pub const MAX_VOICES: usize = 2048;
 const COMMAND_QUEUE_CAPACITY: usize = 8192;
@@ -52,12 +54,18 @@ const HARMONICS: [(f32, f32); 5] = [
 pub enum Command {
     /// Start a sampled voice. `rate` is source frames per output frame
     /// (sample-rate ratio × pitch adjustments), `gain` is linear.
+    /// `group` is the wind group the voice draws from and `wind_weight`
+    /// how much it draws (0 = draws nothing, e.g. action noises).
     StartVoice {
         handle: u64,
         sample: u32,
         rate: f32,
         gain: f32,
+        group: u8,
+        wind_weight: f32,
     },
+    /// Reconfigure one wind group's supply model.
+    SetWind { group: u8, params: WindParams },
     /// Release the voice started with `handle`. Loop-less (percussive)
     /// voices ignore this and play to their end.
     StopVoice { handle: u64 },
@@ -153,13 +161,17 @@ struct SampledVoice {
     position: f64,
     /// Second cursor, into the release tail, during [`SamplePhase::Crossfade`].
     release_position: f64,
-    /// Source frames advanced per output frame.
+    /// Source frames advanced per output frame (before wind modulation).
     rate: f64,
     gain: f32,
     /// Crossfade progress 0→1.
     fade: f32,
     /// FadeOut amplitude 1→0.
     amplitude: f32,
+    /// Wind group index (pre-clamped to `MAX_WIND_GROUPS`).
+    group: u8,
+    /// How much wind this voice draws while sounding.
+    wind_weight: f32,
     phase: SamplePhase,
 }
 
@@ -171,9 +183,11 @@ impl SampledVoice {
         &mut self,
         sample: &Sample,
         table: &SincTable,
+        rate_scale: f64,
         crossfade_step: f32,
         kill_step: f32,
     ) -> Option<(f32, f32)> {
+        let rate = self.rate * rate_scale;
         let last = (sample.frames() - 1) as f64;
         let looping = sample.sustain_loop().is_some();
         let ended = match self.phase {
@@ -202,7 +216,7 @@ impl SampledVoice {
                 left += (tail_l - left) * self.fade;
                 right += (tail_r - right) * self.fade;
                 self.fade += crossfade_step;
-                self.release_position += self.rate;
+                self.release_position += rate;
                 if self.fade >= 1.0 {
                     // Hand the (already advanced) tail cursor over.
                     self.position = self.release_position;
@@ -218,7 +232,7 @@ impl SampledVoice {
         }
 
         if advance_position {
-            self.position += self.rate;
+            self.position += rate;
             // Only cursors still circling the sustain loop wrap; a Tail
             // cursor has left it for the release material.
             if self.phase != SamplePhase::Tail {
@@ -277,6 +291,7 @@ pub struct Engine {
     bank: Arc<SampleBank>,
     sinc: SincTable,
     voices: Box<[Voice]>,
+    wind: [WindGroup; MAX_WIND_GROUPS],
     master_gain: f32,
     tone_attack_step: f32,
     tone_release_step: f32,
@@ -293,6 +308,7 @@ impl Engine {
             bank,
             sinc: SincTable::new(),
             voices: vec![Voice::Idle; MAX_VOICES].into_boxed_slice(),
+            wind: [WindGroup::default(); MAX_WIND_GROUPS],
             master_gain: DEFAULT_MASTER_GAIN,
             tone_attack_step: 1.0 / (TONE_ATTACK_SECONDS * sample_rate),
             tone_release_step: 1.0 / (TONE_RELEASE_SECONDS * sample_rate),
@@ -315,11 +331,25 @@ impl Engine {
         let frames = buffer.len() / channels;
         let master = self.master_gain;
 
+        // Wind: one reservoir step per block. Demand is the summed wind
+        // weight of everything sounding on each chest.
+        let mut demand = [0.0f32; MAX_WIND_GROUPS];
+        for voice in self.voices.iter() {
+            if let Voice::Sampled(sampled) = voice {
+                demand[sampled.group as usize] += sampled.wind_weight;
+            }
+        }
+        let dt = frames as f32 / self.sample_rate;
+        for (group, wind) in self.wind.iter_mut().enumerate() {
+            wind.step(demand[group], dt);
+        }
+
         // Split borrows: voices mutably, bank/read-only params shared.
         let Engine {
             voices,
             bank,
             sinc,
+            wind,
             tone_attack_step,
             tone_release_step,
             crossfade_step,
@@ -350,13 +380,16 @@ impl Engine {
                         *voice = Voice::Idle;
                         continue;
                     };
+                    let chest = &wind[sampled.group as usize];
+                    let rate_scale = chest.rate_factor() as f64;
+                    let gain = master * chest.gain_factor();
                     for frame in 0..frames {
-                        match sampled.tick(sample, sinc, *crossfade_step, *kill_step) {
+                        match sampled.tick(sample, sinc, rate_scale, *crossfade_step, *kill_step) {
                             Some((left, right)) => mix_frame(
                                 &mut buffer[frame * channels..],
                                 channels,
-                                left * master,
-                                right * master,
+                                left * gain,
+                                right * gain,
                             ),
                             None => {
                                 *voice = Voice::Idle;
@@ -376,6 +409,8 @@ impl Engine {
                 sample,
                 rate,
                 gain,
+                group,
+                wind_weight,
             } => {
                 if self.bank.get(sample).is_none() || !(rate > 0.0) {
                     return;
@@ -390,8 +425,15 @@ impl Engine {
                         gain,
                         fade: 0.0,
                         amplitude: 1.0,
+                        group: group.min(MAX_WIND_GROUPS as u8 - 1),
+                        wind_weight: wind_weight.max(0.0),
                         phase: SamplePhase::Held,
                     });
+                }
+            }
+            Command::SetWind { group, params } => {
+                if let Some(wind) = self.wind.get_mut(group as usize) {
+                    wind.set_params(params);
                 }
             }
             Command::StopVoice { handle } => {
@@ -453,6 +495,14 @@ impl Engine {
         }
     }
 
+    /// Current pressure of a wind group (diagnostics and tests).
+    pub fn wind_pressure(&self, group: usize) -> f32 {
+        self.wind
+            .get(group)
+            .map(|w| w.pressure())
+            .unwrap_or(1.0)
+    }
+
     /// An idle slot, or one already on its way out (tail/fade) to steal.
     fn free_slot(&self) -> Option<usize> {
         let mut dying = None;
@@ -509,6 +559,8 @@ mod tests {
             sample: 0,
             rate: 1.0,
             gain: 1.0,
+            group: 0,
+            wind_weight: 0.0,
         });
         // 200 frames from a 100-frame sample: only survivable by looping.
         let out = render(&mut engine, 200);
@@ -536,6 +588,8 @@ mod tests {
             sample: 0,
             rate: 1.0,
             gain: 1.0,
+            group: 0,
+            wind_weight: 0.0,
         });
         render(&mut engine, 10);
         handle.send(Command::StopVoice { handle: 7 });
@@ -561,6 +615,8 @@ mod tests {
             sample: 0,
             rate: 1.0,
             gain: 1.0,
+            group: 0,
+            wind_weight: 0.0,
         });
         handle.send(Command::StopVoice { handle: 1 });
         let out = render(&mut engine, 60);
@@ -631,6 +687,8 @@ mod tests {
             sample: 0,
             rate: 1.0,
             gain: 1.0,
+            group: 0,
+            wind_weight: 0.0,
         });
         let mut buffer = vec![0.0f32; stop_after * 2];
         engine.process(&mut buffer, 2);
@@ -699,6 +757,76 @@ mod tests {
         }
     }
 
+    /// Mean rising-zero-crossing period of channel 0, sub-sample refined.
+    fn measured_period(buffer: &[f32]) -> f64 {
+        let mono: Vec<f32> = buffer.chunks(2).map(|f| f[0]).collect();
+        let mut crossings = Vec::new();
+        for i in 1..mono.len() {
+            if mono[i - 1] < 0.0 && mono[i] >= 0.0 {
+                let t = (i - 1) as f64 + (-mono[i - 1] as f64) / ((mono[i] - mono[i - 1]) as f64);
+                crossings.push(t);
+            }
+        }
+        assert!(crossings.len() > 3, "not enough periods to measure");
+        (crossings.last().unwrap() - crossings[0]) / (crossings.len() - 1) as f64
+    }
+
+    #[test]
+    fn wind_pressure_sags_pitch_under_load() {
+        let period = 480usize;
+
+        let run = |phantom_voices: usize| -> f64 {
+            let (mut engine, mut handle) = Engine::new(48000.0, sine_pipe_bank(period, true));
+            // Phantoms draw wind but are silent: gain 0, weight 1.
+            for i in 0..phantom_voices {
+                handle.send(Command::StartVoice {
+                    handle: 100 + i as u64,
+                    sample: 0,
+                    rate: 1.0,
+                    gain: 0.0,
+                    group: 3,
+                    wind_weight: 1.0,
+                });
+            }
+            handle.send(Command::StartVoice {
+                handle: 1,
+                sample: 0,
+                rate: 1.0,
+                gain: 1.0,
+                group: 3,
+                wind_weight: 0.0,
+            });
+            // Settle for ~1.5 s (12+ time constants), then measure.
+            let mut buffer = vec![0.0f32; 1024 * 2];
+            for _ in 0..70 {
+                engine.process(&mut buffer, 2);
+            }
+            if phantom_voices > 0 {
+                let pressure = engine.wind_pressure(3);
+                assert!(
+                    (pressure - 0.98).abs() < 0.004,
+                    "steady pressure {pressure} should be ~0.98 at reference demand"
+                );
+            }
+            let mut buffer = vec![0.0f32; 8192 * 2];
+            engine.process(&mut buffer, 2);
+            measured_period(&buffer)
+        };
+
+        let unloaded = run(0);
+        // 30 phantoms × weight 1.0 = the default reference demand.
+        let loaded = run(30);
+        assert!(
+            (unloaded - period as f64).abs() < 0.5,
+            "unloaded period {unloaded} should be ~{period}"
+        );
+        // Expected: P=0.98, rate factor 0.98^0.4 ≈ 0.99194 → ~483.9.
+        assert!(
+            loaded > 482.5 && loaded < 485.5,
+            "loaded period {loaded} should sag to ~484 frames"
+        );
+    }
+
     #[test]
     fn stereo_sample_reaches_both_channels() {
         // L ramps up, R constant — catches interleave mistakes.
@@ -716,6 +844,8 @@ mod tests {
             sample: 0,
             rate: 1.0,
             gain: 1.0,
+            group: 0,
+            wind_weight: 0.0,
         });
         let out = render(&mut engine, 50);
         let master = DEFAULT_MASTER_GAIN;

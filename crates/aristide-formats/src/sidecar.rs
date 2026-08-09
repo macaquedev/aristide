@@ -26,6 +26,39 @@ pub struct Sidecar {
     pub midi: Midi,
     #[serde(default)]
     pub registration: Registration,
+    #[serde(default)]
+    pub wind: Wind,
+}
+
+/// Wind-supply behaviour for this instrument (applied to every chest;
+/// per-chest overrides can come later with the voicing layer).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Wind {
+    /// Steady-state pressure sag, in percent, under a full-chorus load.
+    /// 0 disables the wind model.
+    #[serde(default = "default_sag_percent")]
+    pub sag_percent: f64,
+    /// Reservoir recovery time constant, in milliseconds.
+    #[serde(default = "default_recovery_ms")]
+    pub recovery_ms: f64,
+}
+
+fn default_sag_percent() -> f64 {
+    2.0
+}
+
+fn default_recovery_ms() -> f64 {
+    120.0
+}
+
+impl Default for Wind {
+    fn default() -> Self {
+        Wind {
+            sag_percent: default_sag_percent(),
+            recovery_ms: default_recovery_ms(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
