@@ -212,8 +212,8 @@ mod tests {
         // Every sampled and borrowed pipe got a playback spec.
         assert_eq!(loaded.specs.len(), 853 + 497, "spec count");
 
-        // Draw the second manual's first stop (channel 1 → manuals[1])
-        // and press middle C.
+        // Default channel map: channel 0 → the Great (manuals[1], since
+        // the pedal is manuals[0]). Draw its first stop, press middle C.
         let manual_id = organ.manuals[1].id;
         let drawn = vec![
             organ
@@ -223,8 +223,8 @@ mod tests {
                 .expect("manual has stops")
                 .id,
         ];
-        let mut console = crate::console::Console::new(organ, loaded.specs, drawn);
-        let starts = console.note_on(1, 60);
+        let mut console = crate::console::Console::new(organ, loaded.specs, drawn, Vec::new());
+        let starts = console.note_on(0, 60);
         assert!(!starts.is_empty(), "middle C should sound");
 
         let (mut engine, mut handle) =
@@ -243,7 +243,7 @@ mod tests {
         assert!(energy > 0.0, "the organ should make sound");
 
         // Release: voices splice to their tails and eventually go quiet.
-        for handle_id in console.note_off(1, 60) {
+        for handle_id in console.note_off(0, 60) {
             handle.send(aristide_engine::Command::StopVoice { handle: handle_id });
         }
         // Long releases: give it a generous 30 s of rendering.

@@ -20,6 +20,9 @@ pub struct Console {
     organ: Organ,
     specs: HashMap<(RankId, u16), VoiceSpec>,
     drawn: Vec<StopId>,
+    /// `channel_map[c]` = index into `organ.manuals` MIDI channel `c`
+    /// plays; channels past the end wrap.
+    channel_map: Vec<usize>,
     next_handle: u64,
     /// (manual index, MIDI key) → handles sounding for that key.
     /// `percussive` voices are excluded (they stop themselves).
@@ -27,24 +30,33 @@ pub struct Console {
 }
 
 impl Console {
-    pub fn new(organ: Organ, specs: HashMap<(RankId, u16), VoiceSpec>, drawn: Vec<StopId>) -> Console {
+    pub fn new(
+        organ: Organ,
+        specs: HashMap<(RankId, u16), VoiceSpec>,
+        drawn: Vec<StopId>,
+        channel_map: Vec<usize>,
+    ) -> Console {
+        let channel_map = if channel_map.is_empty() {
+            default_channel_map(&organ)
+        } else {
+            channel_map
+        };
         Console {
             organ,
             specs,
             drawn,
+            channel_map,
             next_handle: 0,
             sounding: HashMap::new(),
         }
     }
 
-    /// MIDI channels map onto manuals in model order (pedal first when
-    /// present); out-of-range channels wrap so a single-channel console
-    /// still reaches something.
     fn manual_index(&self, channel: u8) -> Option<usize> {
-        if self.organ.manuals.is_empty() {
+        if self.channel_map.is_empty() {
             return None;
         }
-        Some(channel as usize % self.organ.manuals.len())
+        let mapped = self.channel_map[channel as usize % self.channel_map.len()];
+        (mapped < self.organ.manuals.len()).then_some(mapped)
     }
 
     pub fn note_on(&mut self, channel: u8, key: u8) -> Vec<VoiceStart> {
@@ -108,6 +120,39 @@ impl Console {
     /// Forget everything sounding (the engine is told separately).
     pub fn all_off(&mut self) {
         self.sounding.clear();
+    }
+
+    /// The manual each MIDI channel plays, for logging.
+    pub fn channel_names(&self) -> Vec<(usize, &str)> {
+        self.channel_map
+            .iter()
+            .enumerate()
+            .filter_map(|(channel, &index)| {
+                self.organ
+                    .manuals
+                    .get(index)
+                    .map(|m| (channel, m.name.as_str()))
+            })
+            .collect()
+    }
+}
+
+/// Keyboards first (in model order), pedal last: channel 0 lands on the
+/// Great rather than the pedalboard, which is what a single keyboard
+/// plugged into a fresh setup almost always wants.
+pub fn default_channel_map(organ: &Organ) -> Vec<usize> {
+    let manual_count = organ.manuals.len();
+    if manual_count == 0 {
+        return Vec::new();
+    }
+    // The GO convention: a pedalboard, when present, is manuals[0].
+    let has_pedal = organ.manuals[0].id == aristide_model::ManualId(0);
+    if has_pedal && manual_count > 1 {
+        let mut map: Vec<usize> = (1..manual_count).collect();
+        map.push(0);
+        map
+    } else {
+        (0..manual_count).collect()
     }
 }
 
@@ -181,7 +226,32 @@ mod tests {
                 );
             }
         }
-        Console::new(organ, specs, vec![StopId(1), StopId(2)])
+        Console::new(organ, specs, vec![StopId(1), StopId(2)], Vec::new())
+    }
+
+    #[test]
+    fn default_channel_map_puts_keyboards_before_pedal() {
+        let manual = |id: u32, name: &str| Manual {
+            id: ManualId(id),
+            name: name.into(),
+            first_midi_note: 36,
+            key_count: 32,
+        };
+        let organ = Organ {
+            manuals: vec![
+                manual(0, "Pedal"),
+                manual(1, "Great"),
+                manual(2, "Swell"),
+            ],
+            ..Organ::default()
+        };
+        assert_eq!(default_channel_map(&organ), vec![1, 2, 0]);
+
+        let no_pedal = Organ {
+            manuals: vec![manual(1, "Great")],
+            ..Organ::default()
+        };
+        assert_eq!(default_channel_map(&no_pedal), vec![0]);
     }
 
     #[test]

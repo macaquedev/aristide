@@ -81,8 +81,11 @@ fn load_organ(path: &std::path::Path) -> Result<Organ> {
     Ok(result.organ)
 }
 
-/// `--stops` patterns select by name substring; the default draws each
-/// manual's first stop so a fresh start makes sound on every keyboard.
+/// Stop patterns (from `--stops` or the sidecar) resolve exact-first,
+/// then shortest-substring (see `sidecar::match_names`), so "plein jeu"
+/// draws the mixture and not its drawstop noise. With no patterns at
+/// all, each manual's first stop is drawn so a fresh start makes sound
+/// on every keyboard.
 fn choose_registration(organ: &Organ, patterns: &[String]) -> Vec<StopId> {
     let drawn: Vec<StopId> = if patterns.is_empty() {
         organ
@@ -92,15 +95,15 @@ fn choose_registration(organ: &Organ, patterns: &[String]) -> Vec<StopId> {
             .map(|s| s.id)
             .collect()
     } else {
-        organ
-            .stops
+        let names: Vec<&str> = organ.stops.iter().map(|s| s.name.as_str()).collect();
+        let mut drawn: Vec<StopId> = patterns
             .iter()
-            .filter(|s| {
-                let name = s.name.to_lowercase();
-                patterns.iter().any(|p| name.contains(p))
-            })
-            .map(|s| s.id)
-            .collect()
+            .flat_map(|p| aristide_formats::sidecar::match_names(&names, p))
+            .map(|i| organ.stops[i].id)
+            .collect();
+        drawn.sort_by_key(|id| id.0);
+        drawn.dedup();
+        drawn
     };
     for stop in &organ.stops {
         if drawn.contains(&stop.id) {
@@ -117,6 +120,32 @@ fn choose_registration(organ: &Organ, patterns: &[String]) -> Vec<StopId> {
         tracing::warn!("no stops matched — keys will be silent");
     }
     drawn
+}
+
+/// Sidecar manual names → manual indices; empty (or all-unmatched)
+/// falls back to the keyboards-first default inside `Console::new`.
+fn resolve_channel_map(organ: &Organ, channel_names: &[String]) -> Vec<usize> {
+    let names: Vec<&str> = organ.manuals.iter().map(|m| m.name.as_str()).collect();
+    let map: Vec<usize> = channel_names
+        .iter()
+        .filter_map(|pattern| {
+            let matched = aristide_formats::sidecar::match_names(&names, pattern);
+            if matched.len() != 1 {
+                tracing::warn!(
+                    "sidecar midi.channels: {pattern:?} matched {} manuals, ignoring map",
+                    matched.len()
+                );
+                None
+            } else {
+                Some(matched[0])
+            }
+        })
+        .collect();
+    if map.len() == channel_names.len() {
+        map
+    } else {
+        Vec::new()
+    }
 }
 
 /// What MIDI input drives: the sampled organ console, or the M1 tone.
@@ -164,6 +193,20 @@ fn main() -> Result<()> {
     let (sample_bank, control) = match &args.set {
         Some(path) => {
             let organ = load_organ(path)?;
+            let sidecar = match aristide_formats::sidecar::load_for(path) {
+                Ok(Some(sidecar)) => {
+                    tracing::info!(
+                        "sidecar: {}",
+                        aristide_formats::sidecar::path_for(path).display()
+                    );
+                    sidecar
+                }
+                Ok(None) => Default::default(),
+                Err(err) => {
+                    tracing::warn!("sidecar unreadable, ignoring: {err}");
+                    Default::default()
+                }
+            };
             let started = Instant::now();
             let loaded = bank::build(&organ, sample_rate)?;
             tracing::info!(
@@ -176,11 +219,19 @@ fn main() -> Result<()> {
             for note in loaded.skipped.iter().take(10) {
                 tracing::warn!("skipped: {note}");
             }
-            let drawn = choose_registration(&organ, &args.stops);
-            (
-                loaded.bank,
-                Control::Organ(Console::new(organ, loaded.specs, drawn)),
-            )
+            // CLI wins over sidecar; sidecar wins over the built-in default.
+            let patterns = if args.stops.is_empty() {
+                sidecar.registration.default.clone()
+            } else {
+                args.stops.clone()
+            };
+            let drawn = choose_registration(&organ, &patterns);
+            let channel_map = resolve_channel_map(&organ, &sidecar.midi.channels);
+            let console = Console::new(organ, loaded.specs, drawn, channel_map);
+            for (channel, manual) in console.channel_names() {
+                tracing::info!("midi: channel {channel} → {manual}");
+            }
+            (loaded.bank, Control::Organ(console))
         }
         None => {
             tracing::info!("no sample set given — playing the test tone");
@@ -316,4 +367,42 @@ fn handle_midi(message: &[u8], state: &Mutex<State>) {
 /// pipes carry their own pitch.)
 fn midi_note_to_hz(key: u8) -> f32 {
     440.0 * 2f32.powf((key as f32 - 69.0) / 12.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn demo_sidecar_selects_plein_jeu_and_maps_channels() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testsets/grandorgue-demo/demo.organ");
+        if !path.is_file() {
+            eprintln!("skipping: demo set not present");
+            return;
+        }
+        let organ = aristide_formats::grandorgue::load(&path)
+            .expect("demo set loads")
+            .organ;
+        let sidecar = aristide_formats::sidecar::load_for(&path)
+            .expect("sidecar readable")
+            .expect("sidecar present");
+
+        let drawn = choose_registration(&organ, &sidecar.registration.default);
+        let names: Vec<&str> = organ
+            .stops
+            .iter()
+            .filter(|s| drawn.contains(&s.id))
+            .map(|s| s.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            ["Montre 8'", "Bourdon 16'", "Prestant 4'", "Plein jeu III"],
+            "plein jeu registration, no drawstop noises"
+        );
+
+        let map = resolve_channel_map(&organ, &sidecar.midi.channels);
+        // First Manual, Second Manual, Pedal — Great on channel 0.
+        assert_eq!(map, vec![1, 2, 0]);
+    }
 }
