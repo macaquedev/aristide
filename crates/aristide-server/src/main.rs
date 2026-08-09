@@ -308,7 +308,7 @@ fn main() -> Result<()> {
     // it rejects our fixed size. Each attempt needs a fresh Engine (the
     // callback closure consumes it); the bank is shared via Arc.
     let bank = Arc::new(sample_bank);
-    let mut build_stream = |buffer_size: cpal::BufferSize| -> Result<(cpal::Stream, EngineHandle)> {
+    let build_stream = |buffer_size: cpal::BufferSize| -> Result<(cpal::Stream, EngineHandle)> {
         let (mut engine, handle) = Engine::new(sample_rate, Arc::clone(&bank));
         let mut stream_config = config.clone();
         stream_config.buffer_size = buffer_size;
