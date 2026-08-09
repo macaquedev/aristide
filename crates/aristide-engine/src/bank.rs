@@ -143,7 +143,10 @@ impl Sample {
             tail_reference_level: 0.0,
         };
         if let Some(tail) = sample.release_start() {
-            let window = 2048.min(sample.frames() - tail);
+            // Short window (~12 ms at 44.1 k): high pipes' room decay is
+            // fast, and a long average under-reads the tail's starting
+            // level, making the level matcher boost it — a ping.
+            let window = 512.min(sample.frames() - tail);
             sample.tail_reference_level = sample.mean_abs(tail, window);
         }
         Ok(sample)
@@ -265,8 +268,12 @@ impl Sample {
             return;
         };
         let period_frames = period.round() as u64;
-        // Correlation window: one period, capped to keep analysis cheap.
-        let window = period_frames.min(600).max(16);
+        // Correlation window: a couple of periods, floored at 128
+        // frames — a single short period (high pipes: ~30 frames) is
+        // far too little signal to lock phase against room noise, and a
+        // mis-locked phase0 turns every release into a click that rings
+        // in the recorded reverb ("pingy at the top").
+        let window = (period_frames * 2).clamp(128, 600);
         let frames = self.frames();
         if period_frames < 4 || tail + period_frames + window >= frames {
             return;
@@ -368,11 +375,11 @@ impl Sample {
         target_index: u32,
         max_hold_ms: Option<u32>,
     ) {
-        let level = target.mean_abs(0, 2048.min(target.frames()));
+        let level = target.mean_abs(0, 512.min(target.frames()));
         let alignment = match (self.measured_period, self.sustain_loop) {
             (Some(period), Some((loop_start, _))) => {
                 let period_frames = period.round().max(4.0) as u64;
-                let window = period_frames.min(600).max(16);
+                let window = (period_frames * 2).clamp(128, 600);
                 if target.frames() > period_frames + window {
                     let ch_self = self.channels as usize;
                     let ch_target = target.channels as usize;

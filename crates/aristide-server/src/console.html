@@ -27,6 +27,18 @@
 <body>
 <h1>Aristide — registration</h1>
 <div id="manuals"></div>
+<div class="row" id="tuningrow" style="display:none">
+  <label style="color:#8b93a1;font-size:0.8rem">TUNING</label>
+  <select id="temperament">
+    <option>equal</option><option>werckmeister3</option>
+    <option>kirnberger3</option><option>meantone4</option>
+    <option>pythagorean</option>
+  </select>
+  <label for="a4" style="color:#8b93a1;font-size:0.8rem">a′</label>
+  <input id="a4" type="number" min="300" max="500" step="0.5" style="width:5rem">
+  <label for="transpose" style="color:#8b93a1;font-size:0.8rem">TRANSPOSE</label>
+  <input id="transpose" type="number" min="-12" max="12" step="1" style="width:3.5rem">
+</div>
 <div class="row">
   <button id="trem" class="stop">Tremulant</button>
   <label for="gain" style="color:#8b93a1;font-size:0.8rem">GAIN</label>
@@ -76,6 +88,20 @@ async function refresh(data) {
   trem.classList.toggle('on', data.tremulant);
   trem.onclick = async () => refresh(await (await fetch(
     `/api/trem?on=${data.tremulant ? 0 : 1}`, {method: 'POST'})).json());
+  if (data.tuning) {
+    const row = document.getElementById('tuningrow');
+    row.style.display = 'flex';
+    const temperament = document.getElementById('temperament');
+    const a4 = document.getElementById('a4');
+    const transpose = document.getElementById('transpose');
+    if (document.activeElement !== temperament) temperament.value = data.tuning.temperament;
+    if (document.activeElement !== a4) a4.value = data.tuning.a4;
+    if (document.activeElement !== transpose) transpose.value = data.tuning.transpose;
+    const post = async () => refresh(await (await fetch(
+      `/api/tuning?temperament=${temperament.value}&a4=${a4.value}&transpose=${transpose.value}`,
+      {method: 'POST'})).json());
+    temperament.onchange = post; a4.onchange = post; transpose.onchange = post;
+  }
   const gain = document.getElementById('gain');
   gain.value = data.gain;
   document.getElementById('gainv').textContent = Number(data.gain).toFixed(2);

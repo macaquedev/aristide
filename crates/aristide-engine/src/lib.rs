@@ -290,18 +290,28 @@ impl SampledVoice {
             if self.phase != SamplePhase::Tail {
                 if let Some((start, end)) = current_loop {
                     if self.position >= end as f64 {
+                        // Wrap to THIS loop's own start — the only splice
+                        // the set's author guaranteed seamless. Loop
+                        // variety comes from choosing which loop's end we
+                        // run toward next (all loops live in one
+                        // continuous recording, so playing from here to
+                        // any later end is seamless too). Jumping into a
+                        // different loop's start pops audibly.
                         let overshoot = self.position - end as f64;
+                        self.position = (start as f64 + overshoot).min(end as f64 - 1.0);
                         let count = sample.loop_count();
                         if count > 1 {
-                            self.loop_index =
-                                (wind::xorshift_unit(&mut self.rng) * count as f32) as u8
-                                    % count as u8;
+                            let candidate = (wind::xorshift_unit(&mut self.rng) * count as f32)
+                                as u8
+                                % count as u8;
+                            if let Some((_, candidate_end)) =
+                                sample.loop_at(candidate as usize)
+                            {
+                                if (candidate_end as f64) > self.position {
+                                    self.loop_index = candidate;
+                                }
+                            }
                         }
-                        let (next_start, next_end) = sample
-                            .loop_at(self.loop_index as usize)
-                            .unwrap_or((start, end));
-                        self.position =
-                            (next_start as f64 + overshoot).min(next_end as f64 - 1.0);
                     }
                 }
             }
@@ -332,7 +342,7 @@ impl SampledVoice {
                     _ => 0.0,
                 };
                 self.tail_gain = if option.level > 1e-5 {
-                    (self.envelope / option.level).clamp(0.05, 1.3)
+                    (self.envelope / option.level).clamp(0.05, 1.1)
                 } else {
                     1.0
                 };
@@ -354,7 +364,7 @@ impl SampledVoice {
                 // recorded sustain — unscaled tails strike like a bell).
                 let reference = sample.tail_reference_level();
                 self.tail_gain = if reference > 1e-5 {
-                    (self.envelope / reference).clamp(0.05, 1.3)
+                    (self.envelope / reference).clamp(0.05, 1.1)
                 } else {
                     1.0
                 };
@@ -1037,9 +1047,11 @@ mod tests {
             *value = match index {
                 0..=99 => index as f32 / 100.0 * 0.8, // attack ramp
                 100..=199 => 0.8,                     // loop A
-                200..=299 => 0.55,                    // between
-                300..=399 => 0.3,                     // loop B
-                _ => 0.1,                             // tail
+                // smooth descent between the loops (the engine plays
+                // through here when switching toward loop B)
+                200..=299 => 0.8 - 0.5 * (index - 199) as f32 / 100.0,
+                300..=399 => 0.3, // loop B
+                _ => 0.3 - 0.3 * (index - 399) as f32 / 200.0, // tail out
             };
         }
         let mut sample = Sample::new(data, 1, 48000.0, Some((100, 200)), 400).expect("valid");
@@ -1068,9 +1080,28 @@ mod tests {
         };
         let high = near(0.8);
         let low = near(0.3);
+        // These loops are disjoint and sequential (pathological — real
+        // sets' loops overlap), so once the voice commits to the later
+        // loop the earlier one is behind it; what matters is that both
+        // get PLAYED and that every transition is seamless.
         assert!(
-            high > 500 && low > 500,
+            high > 200 && low > 500,
             "both loops should be visited: high {high}, low {low}"
+        );
+
+        // Loop switching must never splice discontinuously: the data is
+        // constants + a gentle ramp, so any frame-to-frame jump beyond
+        // the ramp slope is a click (the old code jumped straight from
+        // loop A's end into loop B's start: a 0.5-amplitude pop).
+        let mono: Vec<f32> = buffer.chunks(2).map(|f| f[0]).collect();
+        // Skip the attack ramp start-up.
+        let max_delta = mono[200..]
+            .windows(2)
+            .map(|w| (w[1] - w[0]).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_delta < 0.02 * master,
+            "loop transition clicked: max frame delta {max_delta}"
         );
     }
 
@@ -1200,6 +1231,52 @@ mod tests {
                 delta < 2.0 / bank::ALIGNMENT_BUCKETS as f64 + 0.01,
                 "position {position}: phase {source_phase:.3} vs target {target_phase:.3} \
                  (delta {delta:.3}) — period estimation failed"
+            );
+        }
+    }
+
+    #[test]
+    fn alignment_locks_phase_for_high_pipes_in_noise() {
+        // A high pipe: ~30-frame period (≈1.5 kHz) with room noise on
+        // top. One-period correlation windows can't lock phase against
+        // noise; the widened window must.
+        let period = 30usize;
+        let omega = std::f64::consts::TAU / period as f64;
+        let loop_start = 1200u64;
+        let loop_end = loop_start + (period * 100) as u64;
+        let frames = loop_end + (period * 40) as u64;
+        let mut noise_state = 0x1234_5678u32;
+        let mut noise = move || {
+            noise_state ^= noise_state << 13;
+            noise_state ^= noise_state >> 17;
+            noise_state ^= noise_state << 5;
+            ((noise_state >> 8) as f64 / (1u32 << 24) as f64 - 0.5) * 0.3
+        };
+        let data: Vec<f32> = (0..frames)
+            .map(|n| {
+                let envelope = if n >= loop_end {
+                    1.0 - 0.6 * (n - loop_end) as f64 / (frames - loop_end) as f64
+                } else {
+                    1.0
+                };
+                (envelope * ((omega * n as f64).sin() + noise())) as f32
+            })
+            .collect();
+        let mut sample =
+            Sample::new(data, 1, 44100.0, Some((loop_start, loop_end)), loop_end).expect("valid");
+        sample.align_release(44100.0 / period as f32);
+        let alignment = sample.release_alignment().expect("alignment built");
+        for probe in 0..16 {
+            let position = loop_start as f64 + probe as f64 * 217.7;
+            let target = alignment.target(position, loop_start);
+            let source_phase = (position / period as f64).fract();
+            let target_phase = (target as f64 / period as f64).fract();
+            let mut delta = (source_phase - target_phase).abs();
+            delta = delta.min(1.0 - delta);
+            assert!(
+                delta < 0.12,
+                "position {position}: phase {source_phase:.3} vs {target_phase:.3} — \
+                 high-pipe phase lock failed (delta {delta:.3})"
             );
         }
     }
