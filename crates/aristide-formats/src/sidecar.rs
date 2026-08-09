@@ -50,7 +50,7 @@ pub struct Tremulant {
 }
 
 fn default_trem_rate_hz() -> f64 {
-    6.0
+    5.0
 }
 
 fn default_trem_depth_cents() -> f64 {

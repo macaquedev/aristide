@@ -19,6 +19,7 @@ damping = 0.5
 [tremulant]
 # Toggled from the web console. This set defines no windchest groups,
 # so the tremulant acts on the whole organ (chest 1).
-rate_hz = 6.0
+# Typical range 4-7 Hz; lower = calmer.
+rate_hz = 4.6
 depth_cents = 12.0
 chests = [1]

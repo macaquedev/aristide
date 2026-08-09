@@ -23,6 +23,8 @@ struct Args {
     master_gain: Option<f32>,
     /// Local web console port.
     http_port: u16,
+    /// Requested audio buffer size in frames.
+    buffer_frames: u32,
 }
 
 fn parse_args() -> Result<Args> {
@@ -32,6 +34,7 @@ fn parse_args() -> Result<Args> {
         list_stops: false,
         master_gain: None,
         http_port: 9669,
+        buffer_frames: 256,
     };
     let mut iter = std::env::args().skip(1);
     while let Some(arg) = iter.next() {
@@ -59,6 +62,14 @@ fn parse_args() -> Result<Args> {
                     .context("--http-port needs a value")?
                     .parse()
                     .context("--http-port must be a port number")?
+            }
+            "--buffer" => {
+                args.buffer_frames = iter
+                    .next()
+                    .context("--buffer needs a frame count")?
+                    .parse::<u32>()
+                    .context("--buffer must be a frame count, e.g. 128/256/512")?
+                    .clamp(16, 8192)
             }
             other if args.set.is_none() && !other.starts_with('-') => {
                 args.set = Some(PathBuf::from(other))
@@ -196,14 +207,19 @@ fn main() -> Result<()> {
     let device = host
         .default_output_device()
         .context("no default audio output device")?;
+    // Latency = buffer size ÷ sample rate (plus device/driver stack).
+    // Left at the backend default this can be tens of milliseconds —
+    // we request a small fixed buffer instead; --buffer overrides.
     let config = pick_f32_config(&device)?;
     let sample_rate = config.sample_rate.0 as f32;
     let channels = config.channels as usize;
     tracing::info!(
-        "audio: {} @ {} Hz, {} channels",
+        "audio: {} @ {} Hz, {} channels, requesting {} frame buffer ({:.1} ms)",
         device.name().unwrap_or_else(|_| "<unnamed>".into()),
         config.sample_rate.0,
-        channels
+        channels,
+        args.buffer_frames,
+        args.buffer_frames as f32 * 1000.0 / sample_rate
     );
 
     let mut wind_params = None;
@@ -288,7 +304,35 @@ fn main() -> Result<()> {
         }
     };
 
-    let (mut engine, mut handle) = Engine::new(sample_rate, Arc::new(sample_bank));
+    // Build the stream, falling back to the backend's default buffer if
+    // it rejects our fixed size. Each attempt needs a fresh Engine (the
+    // callback closure consumes it); the bank is shared via Arc.
+    let bank = Arc::new(sample_bank);
+    let mut build_stream = |buffer_size: cpal::BufferSize| -> Result<(cpal::Stream, EngineHandle)> {
+        let (mut engine, handle) = Engine::new(sample_rate, Arc::clone(&bank));
+        let mut stream_config = config.clone();
+        stream_config.buffer_size = buffer_size;
+        let stream = device.build_output_stream(
+            &stream_config,
+            move |data: &mut [f32], _| engine.process(data, channels),
+            |err| tracing::error!("audio stream error: {err}"),
+            None,
+        )?;
+        Ok((stream, handle))
+    };
+    let (stream, mut handle) = match build_stream(cpal::BufferSize::Fixed(args.buffer_frames)) {
+        Ok(pair) => pair,
+        Err(err) => {
+            tracing::warn!(
+                "device refused a {}-frame buffer ({err}); using its default \
+                 (expect higher latency — try another --buffer value)",
+                args.buffer_frames
+            );
+            build_stream(cpal::BufferSize::Default)?
+        }
+    };
+    stream.play()?;
+
     if let Some(gain) = args.master_gain {
         handle.send(Command::SetMasterGain { linear: gain });
     }
@@ -323,14 +367,6 @@ fn main() -> Result<()> {
         }
         None => Vec::new(),
     };
-
-    let stream = device.build_output_stream(
-        &config,
-        move |data: &mut [f32], _| engine.process(data, channels),
-        |err| tracing::error!("audio stream error: {err}"),
-        None,
-    )?;
-    stream.play()?;
 
     let state = Arc::new(Mutex::new(State {
         engine: handle,

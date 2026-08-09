@@ -115,7 +115,11 @@ pub struct TremulantParams {
 impl Default for TremulantParams {
     fn default() -> Self {
         TremulantParams {
-            rate_hz: 6.0,
+            // Literature spans ~4–7 Hz (Pykett calls 6 "representative";
+            // theatre trems run fast, classical church trems slower).
+            // 5 Hz reads as a calm church tremulant; the sidecar knob
+            // decides per instrument.
+            rate_hz: 5.0,
             depth: 0.22,
             ramp_seconds: 0.7,
             wobble: 0.08,
@@ -389,7 +393,8 @@ mod tests {
     fn tremulant_modulates_at_rate_and_disengages() {
         let mut group = WindGroup::default();
         let trem = TremulantParams {
-            wobble: 0.0, // deterministic for the rate check
+            wobble: 0.0,  // deterministic for the rate check
+            rate_hz: 6.0, // pinned: the assertion counts cycles
             ..TremulantParams::default()
         };
         group.set_tremulant_params(trem);
