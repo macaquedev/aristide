@@ -172,6 +172,9 @@ struct SampledVoice {
     group: u8,
     /// How much wind this voice draws while sounding.
     wind_weight: f32,
+    /// Output frames since the voice started — drives the wind model's
+    /// pallet-opening attack boost.
+    age_frames: u32,
     phase: SamplePhase,
 }
 
@@ -331,12 +334,20 @@ impl Engine {
         let frames = buffer.len() / channels;
         let master = self.master_gain;
 
-        // Wind: one reservoir step per block. Demand is the summed wind
-        // weight of everything sounding on each chest.
+        // Wind: one regulator step per block. Demand sums the wind
+        // weight of everything sounding on each chest, with young
+        // voices boosted (the pallet-opening gulp).
         let mut demand = [0.0f32; MAX_WIND_GROUPS];
         for voice in self.voices.iter() {
             if let Voice::Sampled(sampled) = voice {
-                demand[sampled.group as usize] += sampled.wind_weight;
+                let params = self.wind[sampled.group as usize].params();
+                let attack_frames = params.attack_ms * 0.001 * self.sample_rate;
+                let boost = if (sampled.age_frames as f32) < attack_frames {
+                    params.attack_boost * (1.0 - sampled.age_frames as f32 / attack_frames)
+                } else {
+                    0.0
+                };
+                demand[sampled.group as usize] += sampled.wind_weight * (1.0 + boost);
             }
         }
         let dt = frames as f32 / self.sample_rate;
@@ -383,6 +394,7 @@ impl Engine {
                     let chest = &wind[sampled.group as usize];
                     let rate_scale = chest.rate_factor() as f64;
                     let gain = master * chest.gain_factor();
+                    sampled.age_frames = sampled.age_frames.saturating_add(frames as u32);
                     for frame in 0..frames {
                         match sampled.tick(sample, sinc, rate_scale, *crossfade_step, *kill_step) {
                             Some((left, right)) => mix_frame(
@@ -427,6 +439,7 @@ impl Engine {
                         amplitude: 1.0,
                         group: group.min(MAX_WIND_GROUPS as u8 - 1),
                         wind_weight: wind_weight.max(0.0),
+                        age_frames: 0,
                         phase: SamplePhase::Held,
                     });
                 }
@@ -804,8 +817,8 @@ mod tests {
             if phantom_voices > 0 {
                 let pressure = engine.wind_pressure(3);
                 assert!(
-                    (pressure - 0.98).abs() < 0.004,
-                    "steady pressure {pressure} should be ~0.98 at reference demand"
+                    (pressure - 0.995).abs() < 0.002,
+                    "steady pressure {pressure} should be ~0.995 at reference demand"
                 );
             }
             let mut buffer = vec![0.0f32; 8192 * 2];
@@ -817,13 +830,14 @@ mod tests {
         // 30 phantoms × weight 1.0 = the default reference demand.
         let loaded = run(30);
         assert!(
-            (unloaded - period as f64).abs() < 0.5,
+            (unloaded - period as f64).abs() < 0.3,
             "unloaded period {unloaded} should be ~{period}"
         );
-        // Expected: P=0.98, rate factor 0.98^0.4 ≈ 0.99194 → ~483.9.
+        // Expected: P=0.995, rate factor 0.995^0.35 ≈ 0.99825 → ~480.8
+        // (≈ −3 cents: audible as breathing, not as portamento).
         assert!(
-            loaded > 482.5 && loaded < 485.5,
-            "loaded period {loaded} should sag to ~484 frames"
+            loaded > 480.4 && loaded < 481.4,
+            "loaded period {loaded} should sag to ~480.8 frames"
         );
     }
 

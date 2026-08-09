@@ -226,10 +226,16 @@ fn main() -> Result<()> {
             } else {
                 args.stops.clone()
             };
+            let defaults = aristide_engine::wind::WindParams::default();
+            // sag_cents is what the user hears; invert P^kp to pressure.
+            let sag_cents = sidecar.wind.sag_cents.clamp(0.0, 50.0);
             wind_params = Some(aristide_engine::wind::WindParams {
-                sag_depth: (sidecar.wind.sag_percent / 100.0).clamp(0.0, 0.3) as f32,
-                recovery_seconds: (sidecar.wind.recovery_ms / 1000.0).clamp(0.01, 2.0) as f32,
-                ..Default::default()
+                sag_depth: (1.0
+                    - 2f64.powf(-sag_cents / (1200.0 * defaults.pitch_exponent as f64)))
+                    as f32,
+                natural_hz: sidecar.wind.bounce_hz.clamp(0.5, 12.0) as f32,
+                damping: sidecar.wind.damping.clamp(0.2, 1.5) as f32,
+                ..defaults
             });
             let drawn = choose_registration(&organ, &patterns);
             let channel_map = resolve_channel_map(&organ, &sidecar.midi.channels);
@@ -251,9 +257,10 @@ fn main() -> Result<()> {
     }
     if let Some(params) = wind_params {
         tracing::info!(
-            "wind: sag {:.1}% / recovery {:.0} ms{}",
+            "wind: {:.2}% pressure sag @ {:.1} Hz, ζ={:.2}{}",
             params.sag_depth * 100.0,
-            params.recovery_seconds * 1000.0,
+            params.natural_hz,
+            params.damping,
             if params.sag_depth == 0.0 { " (off)" } else { "" }
         );
         for group in 0..aristide_engine::wind::MAX_WIND_GROUPS as u8 {

@@ -35,28 +35,37 @@ pub struct Sidecar {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Wind {
-    /// Steady-state pressure sag, in percent, under a full-chorus load.
-    /// 0 disables the wind model.
-    #[serde(default = "default_sag_percent")]
-    pub sag_percent: f64,
-    /// Reservoir recovery time constant, in milliseconds.
-    #[serde(default = "default_recovery_ms")]
-    pub recovery_ms: f64,
+    /// Steady pitch sag of a full chorus, in cents. 0 disables the
+    /// wind model. Transient dips reach a bit deeper, briefly.
+    #[serde(default = "default_sag_cents")]
+    pub sag_cents: f64,
+    /// Regulator resonance in Hz: response speed and where the bellows
+    /// bounce sits.
+    #[serde(default = "default_bounce_hz")]
+    pub bounce_hz: f64,
+    /// Damping ratio: below 1 is bouncy, 1 is critically damped.
+    #[serde(default = "default_damping")]
+    pub damping: f64,
 }
 
-fn default_sag_percent() -> f64 {
-    2.0
+fn default_sag_cents() -> f64 {
+    3.0
 }
 
-fn default_recovery_ms() -> f64 {
-    120.0
+fn default_bounce_hz() -> f64 {
+    3.5
+}
+
+fn default_damping() -> f64 {
+    0.5
 }
 
 impl Default for Wind {
     fn default() -> Self {
         Wind {
-            sag_percent: default_sag_percent(),
-            recovery_ms: default_recovery_ms(),
+            sag_cents: default_sag_cents(),
+            bounce_hz: default_bounce_hz(),
+            damping: default_damping(),
         }
     }
 }

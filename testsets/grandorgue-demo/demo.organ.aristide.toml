@@ -8,3 +8,10 @@ channels = ["First Manual", "Second Manual", "Pedal"]
 [registration]
 # Plein jeu: principal chorus to the mixture.
 default = ["Bourdon 16'", "Montre 8'", "Prestant 4'", "Plein jeu III"]
+
+[wind]
+# Steady full-chorus pitch sag in cents (0 = off); transient dips go a
+# touch deeper. bounce_hz/damping shape the regulator's spring-back.
+sag_cents = 3.0
+bounce_hz = 3.5
+damping = 0.5
