@@ -1,0 +1,10 @@
+# Aristide sidecar for the GrandOrgue demo set.
+# Lives next to the set, never modifies it.
+
+[midi]
+# Channel 0 plays the Great; pedal moves to channel 2.
+channels = ["First Manual", "Second Manual", "Pedal"]
+
+[registration]
+# Plein jeu: principal chorus to the mixture.
+default = ["Bourdon 16'", "Montre 8'", "Prestant 4'", "Plein jeu III"]
