@@ -182,7 +182,7 @@ impl Wander {
 }
 
 #[inline]
-fn xorshift_unit(state: &mut u32) -> f32 {
+pub(crate) fn xorshift_unit(state: &mut u32) -> f32 {
     let mut x = *state;
     x ^= x << 13;
     x ^= x >> 17;

@@ -49,9 +49,12 @@ pub fn build(organ: &Organ, device_rate: f32) -> Result<LoadedBank> {
     // path → Ok(bank index + source metadata) or failure already noted.
     let mut decoded: HashMap<PathBuf, Option<DecodedInfo>> = HashMap::new();
 
+    // Separate release files, deduplicated independently of attacks.
+    let mut release_cache: HashMap<PathBuf, Option<u32>> = HashMap::new();
+
     for rank in &organ.ranks {
         for (pipe_index, pipe) in rank.pipes.iter().enumerate() {
-            let PipeSource::Sampled { attacks, .. } = &pipe.source else {
+            let PipeSource::Sampled { attacks, releases } = &pipe.source else {
                 continue;
             };
             let Some(attack) = attacks.first() else {
@@ -65,6 +68,35 @@ pub fn build(organ: &Organ, device_rate: f32) -> Result<LoadedBank> {
                         // Phase-align the release splice to this pipe's
                         // fundamental (shared files share the pitch).
                         sample.align_release(pipe.nominal_frequency_hz as f32);
+                        // Separate recorded releases become their own
+                        // one-shot bank entries, attached with hold-time
+                        // bounds and cross-file phase maps.
+                        for release in releases {
+                            let release_index = *release_cache
+                                .entry(release.path.clone())
+                                .or_insert_with(|| {
+                                    let path = organ.base_path.join(&release.path);
+                                    match decode_release(&path) {
+                                        Ok(release_sample) => Some(bank.push(release_sample)),
+                                        Err(reason) => {
+                                            skipped.push(format!(
+                                                "{}: {reason}",
+                                                release.path.display()
+                                            ));
+                                            None
+                                        }
+                                    }
+                                });
+                            if let Some(index) = release_index {
+                                if let Some(target) = bank.get(index) {
+                                    sample.attach_release(
+                                        target,
+                                        index,
+                                        release.max_key_press_ms,
+                                    );
+                                }
+                            }
+                        }
                         let index = bank.push(sample);
                         Some(DecodedInfo { index, ..info })
                     }
@@ -162,13 +194,19 @@ fn decode(path: &std::path::Path, odf_loops: &[aristide_model::SampleLoop]) -> R
         None => frames,
     };
 
-    let sample = Sample::new(
+    let mut sample = Sample::new(
         file.samples,
         file.info.channels,
         file.info.sample_rate as f32,
         sustain_loop,
         release_start,
     )?;
+    // Alternate loops beyond the primary: voices rotate through them.
+    for &(start, end) in &loops {
+        if Some((start, end)) != sustain_loop {
+            let _ = sample.add_loop(start, end);
+        }
+    }
     Ok((
         sample,
         DecodedInfo {
@@ -177,6 +215,20 @@ fn decode(path: &std::path::Path, odf_loops: &[aristide_model::SampleLoop]) -> R
             percussive: sustain_loop.is_none(),
         },
     ))
+}
+
+/// Decode a separate release file: a one-shot entry (no loops — it's a
+/// decay), played from its start on key-off.
+fn decode_release(path: &std::path::Path) -> Result<Sample, String> {
+    let file = wav::read(path).map_err(|e| e.to_string())?;
+    let frames = file.info.frames;
+    Sample::new(
+        file.samples,
+        file.info.channels,
+        file.info.sample_rate as f32,
+        None,
+        frames,
+    )
 }
 
 /// Walk a borrow chain to the sampled pipe's address (hop-capped; the

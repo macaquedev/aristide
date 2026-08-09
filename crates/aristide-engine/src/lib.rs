@@ -199,6 +199,11 @@ struct SampledVoice {
     /// Per-pipe wind-flow noise (slow, independent per voice).
     wander: wind::Wander,
     rng: u32,
+    /// Which of the sample's sustain loops the cursor is circling; a
+    /// new one is drawn at random on each pass.
+    loop_index: u8,
+    /// Separate release sample being crossfaded into, if any.
+    external_release: Option<u32>,
     phase: SamplePhase,
 }
 
@@ -209,6 +214,7 @@ impl SampledVoice {
     fn tick(
         &mut self,
         sample: &Sample,
+        external: Option<&Sample>,
         table: &SincTable,
         rate_scale: f64,
         crossfade_step: f32,
@@ -216,10 +222,15 @@ impl SampledVoice {
     ) -> Option<(f32, f32)> {
         let rate = self.rate * rate_scale;
         let last = (sample.frames() - 1) as f64;
-        let looping = sample.sustain_loop().is_some();
+        let current_loop = sample.loop_at(self.loop_index as usize);
+        let looping = current_loop.is_some();
+        // During a crossfade into a separate release sample, the tail
+        // cursor lives in that sample's coordinates.
+        let tail_sample = external.unwrap_or(sample);
+        let tail_last = (tail_sample.frames() - 1) as f64;
         let ended = match self.phase {
             SamplePhase::Held => !looping && self.position >= last,
-            SamplePhase::Crossfade => self.release_position >= last,
+            SamplePhase::Crossfade => self.release_position >= tail_last,
             SamplePhase::Tail => self.position >= last,
             SamplePhase::FadeOut => self.amplitude <= 0.0 || (!looping && self.position >= last),
         };
@@ -232,14 +243,14 @@ impl SampledVoice {
         let seam = if self.phase == SamplePhase::Tail {
             None
         } else {
-            sample.sustain_loop()
+            current_loop
         };
         let (mut left, mut right) = table.read(sample, self.position, seam);
         let mut advance_position = true;
         match self.phase {
             SamplePhase::Held | SamplePhase::Tail => {}
             SamplePhase::Crossfade => {
-                let (tail_l, tail_r) = table.read(sample, self.release_position, None);
+                let (tail_l, tail_r) = table.read(tail_sample, self.release_position, None);
                 // Raised-cosine-shaped blend (smoothstep ≈ it, no trig):
                 // linear fades dip audibly on the uncorrelated noise
                 // floor (Appleton 2019).
@@ -250,10 +261,15 @@ impl SampledVoice {
                 self.release_position += rate;
                 if self.fade >= 1.0 {
                     // Hand the (already advanced) tail cursor over and
-                    // fold the level match into the voice gain.
+                    // fold the level match into the voice gain. If the
+                    // tail is a separate sample, the voice moves there.
                     self.position = self.release_position;
                     self.gain *= self.tail_gain;
                     self.tail_gain = 1.0;
+                    if let Some(external_id) = self.external_release.take() {
+                        self.sample = external_id;
+                        self.loop_index = 0;
+                    }
                     self.phase = SamplePhase::Tail;
                     advance_position = false;
                 }
@@ -268,11 +284,24 @@ impl SampledVoice {
         if advance_position {
             self.position += rate;
             // Only cursors still circling the sustain loop wrap; a Tail
-            // cursor has left it for the release material.
+            // cursor has left it for the release material. On each pass
+            // a fresh loop is drawn at random (multi-loop sets), which
+            // decorrelates repetition.
             if self.phase != SamplePhase::Tail {
-                if let Some((start, end)) = sample.sustain_loop() {
-                    while self.position >= end as f64 {
-                        self.position -= (end - start) as f64;
+                if let Some((start, end)) = current_loop {
+                    if self.position >= end as f64 {
+                        let overshoot = self.position - end as f64;
+                        let count = sample.loop_count();
+                        if count > 1 {
+                            self.loop_index =
+                                (wind::xorshift_unit(&mut self.rng) * count as f32) as u8
+                                    % count as u8;
+                        }
+                        let (next_start, next_end) = sample
+                            .loop_at(self.loop_index as usize)
+                            .unwrap_or((start, end));
+                        self.position =
+                            (next_start as f64 + overshoot).min(next_end as f64 - 1.0);
                     }
                 }
             }
@@ -280,11 +309,37 @@ impl SampledVoice {
         Some((left * self.gain, right * self.gain))
     }
 
-    /// Key released: splice to the release tail if there is one.
-    fn release(&mut self, sample: &Sample) {
+    /// Key released: splice to a separate release (selected by hold
+    /// duration) or the embedded tail, whichever the sample offers.
+    fn release(&mut self, sample: &Sample, age_ms: u32) {
         match self.phase {
             SamplePhase::Held | SamplePhase::Crossfade => {}
             _ => return,
+        }
+        if self.phase == SamplePhase::Held && sample.sustain_loop().is_some() {
+            // Options are sorted (bounded holds ascending, unbounded
+            // last): the first whose bound covers the hold wins.
+            let chosen = sample
+                .release_options()
+                .iter()
+                .find(|option| option.max_hold_ms.is_none_or(|max| age_ms <= max));
+            if let Some(option) = chosen {
+                self.external_release = Some(option.sample);
+                self.release_position = match (option.alignment(), sample.sustain_loop()) {
+                    (Some(alignment), Some((loop_start, _))) => {
+                        alignment.target(self.position, loop_start) as f64
+                    }
+                    _ => 0.0,
+                };
+                self.tail_gain = if option.level > 1e-5 {
+                    (self.envelope / option.level).clamp(0.05, 1.3)
+                } else {
+                    1.0
+                };
+                self.fade = 0.0;
+                self.phase = SamplePhase::Crossfade;
+                return;
+            }
         }
         match sample.release_start() {
             Some(tail) if self.phase == SamplePhase::Held => {
@@ -461,8 +516,33 @@ impl Engine {
                     // untouched-pressure rendering bit-identical.
                     let tilting = tilt_a > 0.0 && (treble - 1.0).abs() > 1e-4;
                     sampled.age_frames = sampled.age_frames.saturating_add(frames as u32);
+                    // The voice can hand over to a separate release
+                    // sample mid-block; track the refs it reads from.
+                    let mut current = sample;
+                    let mut current_id = sampled.sample;
+                    let mut external = sampled.external_release.and_then(|id| bank.get(id));
                     for frame in 0..frames {
-                        match sampled.tick(sample, sinc, rate_scale, *crossfade_step, *kill_step) {
+                        if sampled.sample != current_id {
+                            match bank.get(sampled.sample) {
+                                Some(switched) => {
+                                    current = switched;
+                                    current_id = sampled.sample;
+                                    external = None;
+                                }
+                                None => {
+                                    *voice = Voice::Idle;
+                                    break;
+                                }
+                            }
+                        }
+                        match sampled.tick(
+                            current,
+                            external,
+                            sinc,
+                            rate_scale,
+                            *crossfade_step,
+                            *kill_step,
+                        ) {
                             Some((mut left, mut right)) => {
                                 // Track the voice's own loudness (pre-
                                 // gain) for release level matching.
@@ -526,6 +606,8 @@ impl Engine {
                         lowpass: [0.0; 2],
                         wander: wind::Wander::default(),
                         rng: (handle as u32).wrapping_mul(0x9E37_79B9) | 1,
+                        loop_index: 0,
+                        external_release: None,
                         phase: SamplePhase::Held,
                     });
                 }
@@ -546,11 +628,13 @@ impl Engine {
                 }
             }
             Command::StopVoice { handle } => {
+                let per_ms = self.sample_rate / 1000.0;
                 for voice in self.voices.iter_mut() {
                     if let Voice::Sampled(sampled) = voice {
                         if sampled.handle == handle {
                             if let Some(sample) = self.bank.get(sampled.sample) {
-                                sampled.release(sample);
+                                let age_ms = (sampled.age_frames as f32 / per_ms) as u32;
+                                sampled.release(sample, age_ms);
                             }
                         }
                     }
@@ -941,6 +1025,136 @@ mod tests {
         assert!(
             loaded > 480.5 && loaded < 481.5,
             "loaded period {loaded} should sag to ~481 frames"
+        );
+    }
+
+    #[test]
+    fn multi_loop_voices_visit_all_loops() {
+        // Two loops with distinct constant levels: 0.8 and 0.3. A voice
+        // drawing loops at random must produce both levels over time.
+        let mut data = vec![0.0f32; 600];
+        for (index, value) in data.iter_mut().enumerate() {
+            *value = match index {
+                0..=99 => index as f32 / 100.0 * 0.8, // attack ramp
+                100..=199 => 0.8,                     // loop A
+                200..=299 => 0.55,                    // between
+                300..=399 => 0.3,                     // loop B
+                _ => 0.1,                             // tail
+            };
+        }
+        let mut sample = Sample::new(data, 1, 48000.0, Some((100, 200)), 400).expect("valid");
+        sample.add_loop(300, 400).expect("alternate loop");
+        let mut bank = SampleBank::default();
+        bank.push(sample);
+        let (mut engine, mut handle) = Engine::new(48000.0, Arc::new(bank));
+        handle.send(Command::StartVoice {
+            handle: 1,
+            sample: 0,
+            rate: 1.0,
+            gain: 1.0,
+            group: 0,
+            wind_weight: 0.0,
+            brightness: 0.0,
+        });
+        // ~100 loop passes.
+        let mut buffer = vec![0.0f32; 10000 * 2];
+        engine.process(&mut buffer, 2);
+        let master = DEFAULT_MASTER_GAIN;
+        let near = |target: f32| {
+            buffer
+                .chunks(2)
+                .filter(|f| (f[0] - target * master).abs() < 0.05 * master)
+                .count()
+        };
+        let high = near(0.8);
+        let low = near(0.3);
+        assert!(
+            high > 500 && low > 500,
+            "both loops should be visited: high {high}, low {low}"
+        );
+    }
+
+    #[test]
+    fn separate_releases_select_by_hold_time() {
+        let period = 480usize;
+        let omega = std::f64::consts::TAU / period as f64;
+        let sine = |frames: usize, envelope: &dyn Fn(usize) -> f64| -> Vec<f32> {
+            (0..frames)
+                .map(|n| (envelope(n) * (omega * n as f64).sin()) as f32)
+                .collect()
+        };
+        // Attack sample: loop, no embedded tail (tail beyond EOF).
+        let attack_frames = period * 16;
+        let attack = sine(attack_frames, &|_| 1.0);
+        let mut source = Sample::new(
+            attack,
+            1,
+            48000.0,
+            Some(((period * 4) as u64, (period * 12) as u64)),
+            attack_frames as u64,
+        )
+        .expect("valid");
+        source.align_release(48000.0 / period as f32);
+        // Short release: 0.15 s of decaying sine. Long: 1.5 s.
+        let short = Sample::new(
+            sine(7200, &|n| 1.0 - n as f64 / 7200.0),
+            1,
+            48000.0,
+            None,
+            7200,
+        )
+        .expect("valid");
+        let long = Sample::new(
+            sine(72000, &|n| 1.0 - n as f64 / 72000.0),
+            1,
+            48000.0,
+            None,
+            72000,
+        )
+        .expect("valid");
+
+        let mut bank = SampleBank::default();
+        // Push releases first so their indices exist for attach.
+        let short_id = bank.push(short);
+        let long_id = bank.push(long);
+        source.attach_release(bank.get(short_id).expect("short"), short_id, Some(300));
+        source.attach_release(bank.get(long_id).expect("long"), long_id, None);
+        let source_id = bank.push(source);
+        let bank = Arc::new(bank);
+
+        let audible_seconds = |hold_frames: usize| -> f64 {
+            let (mut engine, mut handle) = Engine::new(48000.0, Arc::clone(&bank));
+            handle.send(Command::StartVoice {
+                handle: 1,
+                sample: source_id,
+                rate: 1.0,
+                gain: 1.0,
+                group: 0,
+                wind_weight: 0.0,
+                brightness: 0.0,
+            });
+            let mut buffer = vec![0.0f32; hold_frames * 2];
+            engine.process(&mut buffer, 2);
+            handle.send(Command::StopVoice { handle: 1 });
+            // Render 2 s and find the last audible frame.
+            let mut buffer = vec![0.0f32; 96000 * 2];
+            engine.process(&mut buffer, 2);
+            let last = buffer
+                .chunks(2)
+                .rposition(|f| f[0].abs() > 0.001)
+                .unwrap_or(0);
+            last as f64 / 48000.0
+        };
+
+        let staccato = audible_seconds(4800); // held 100 ms → short release
+        let tenuto = audible_seconds(24000); // held 500 ms → long release
+        assert!(
+            staccato < 0.35,
+            "staccato should use the 0.15 s release, rang for {staccato:.2} s"
+        );
+        assert!(
+            tenuto > 0.9,
+            "tenuto should use the 1.5 s release, rang for {tenuto:.2} s"
         );
     }
 

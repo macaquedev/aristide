@@ -54,15 +54,47 @@ pub struct Sample {
     /// Sustain loop as a half-open frame range; `None` = one-shot
     /// (percussive samples such as action noises play to the end).
     sustain_loop: Option<(u64, u64)>,
+    /// Additional sustain loops (author-provided alternates). Voices
+    /// pick a loop at random per pass, decorrelating repetition between
+    /// passes and between unison pipes.
+    extra_loops: Vec<(u64, u64)>,
     /// Frame where the embedded release tail starts. Only meaningful if
     /// it lies strictly before `frames()`; loop-less samples ignore it.
     release_start: u64,
     release_alignment: Option<ReleaseAlignment>,
+    /// Measured fundamental period, once alignment analysis has run —
+    /// shared by the embedded and separate-release phase maps.
+    measured_period: Option<f64>,
+    /// Separate recorded releases, sorted by `max_hold_ms` (None last).
+    releases: Vec<ReleaseOption>,
     /// Mean |sample| over the tail's first stretch — the loudness the
     /// recorded release *starts* at. Voices scale the tail so it
     /// continues at their own current level instead of striking at the
     /// recording's (the "bell" artifact).
     tail_reference_level: f32,
+}
+
+/// A separate recorded release, selectable by how long the note was
+/// held (GO `MaxKeyPressTime`; HW multi-release sampling).
+#[derive(Debug, Clone)]
+pub struct ReleaseOption {
+    /// Bank index of the release sample (a one-shot entry).
+    pub sample: u32,
+    /// Selected when the note was held at most this long; `None` = the
+    /// default/longest release.
+    pub max_hold_ms: Option<u32>,
+    /// Phase map from the source sample's cycle into the release's
+    /// opening period.
+    alignment: Option<ReleaseAlignment>,
+    /// Mean |sample| of the release head, for level matching.
+    pub level: f32,
+}
+
+impl ReleaseOption {
+    #[inline]
+    pub fn alignment(&self) -> Option<&ReleaseAlignment> {
+        self.alignment.as_ref()
+    }
 }
 
 impl Sample {
@@ -103,8 +135,11 @@ impl Sample {
             channels,
             sample_rate_hz,
             sustain_loop,
+            extra_loops: Vec::new(),
             release_start: release_start.min(frames),
             release_alignment: None,
+            measured_period: None,
+            releases: Vec::new(),
             tail_reference_level: 0.0,
         };
         if let Some(tail) = sample.release_start() {
@@ -209,9 +244,6 @@ impl Sample {
         let Some((loop_start, _)) = self.sustain_loop else {
             return;
         };
-        let Some(tail) = self.release_start() else {
-            return;
-        };
         if !(fundamental_hz > 0.0) {
             return;
         }
@@ -224,6 +256,12 @@ impl Sample {
         // doesn't correlate (unpitched noises).
         let nominal = self.sample_rate_hz as f64 / fundamental_hz as f64;
         let Some(period) = self.refine_period(nominal) else {
+            return;
+        };
+        self.measured_period = Some(period);
+        // The embedded-tail table additionally needs a tail to map into
+        // (samples with only separate releases stop here, period saved).
+        let Some(tail) = self.release_start() else {
             return;
         };
         let period_frames = period.round() as u64;
@@ -289,6 +327,113 @@ impl Sample {
     #[inline]
     pub fn sustain_loop(&self) -> Option<(u64, u64)> {
         self.sustain_loop
+    }
+
+    /// Register an alternate sustain loop (validated like the primary).
+    pub fn add_loop(&mut self, start: u64, end: u64) -> Result<(), String> {
+        if self.sustain_loop.is_none() {
+            return Err("no primary loop to alternate with".into());
+        }
+        if start >= end || end > self.frames() {
+            return Err(format!("loop {start}..{end} out of bounds"));
+        }
+        self.extra_loops.push((start, end));
+        Ok(())
+    }
+
+    /// Total number of selectable loops (primary + alternates).
+    #[inline]
+    pub fn loop_count(&self) -> usize {
+        self.sustain_loop.is_some() as usize + self.extra_loops.len()
+    }
+
+    /// Loop by index: 0 = primary, then alternates. Out of range falls
+    /// back to the primary so RT code never needs a bounds branch.
+    #[inline]
+    pub fn loop_at(&self, index: usize) -> Option<(u64, u64)> {
+        if index == 0 || index > self.extra_loops.len() {
+            self.sustain_loop
+        } else {
+            Some(self.extra_loops[index - 1])
+        }
+    }
+
+    /// Attach a separate recorded release (already pushed to the bank as
+    /// `target_index`), selectable when the note was held at most
+    /// `max_hold_ms`. Builds the cross-file phase map when this sample's
+    /// period has been measured (call [`Sample::align_release`] first).
+    pub fn attach_release(
+        &mut self,
+        target: &Sample,
+        target_index: u32,
+        max_hold_ms: Option<u32>,
+    ) {
+        let level = target.mean_abs(0, 2048.min(target.frames()));
+        let alignment = match (self.measured_period, self.sustain_loop) {
+            (Some(period), Some((loop_start, _))) => {
+                let period_frames = period.round().max(4.0) as u64;
+                let window = period_frames.min(600).max(16);
+                if target.frames() > period_frames + window {
+                    let ch_self = self.channels as usize;
+                    let ch_target = target.channels as usize;
+                    let score = |offset: u64| -> f64 {
+                        let mut dot = 0.0f64;
+                        let mut energy = 0.0f64;
+                        for i in 0..window {
+                            let a = self.data[(loop_start + i) as usize * ch_self] as f64;
+                            let b = target.data[(offset + i) as usize * ch_target] as f64;
+                            dot += a * b;
+                            energy += b * b;
+                        }
+                        dot / energy.max(1e-12).sqrt()
+                    };
+                    let phase0 = (0..period_frames)
+                        .map(|offset| (offset, score(offset)))
+                        .max_by(|a, b| a.1.total_cmp(&b.1))
+                        .map(|(offset, _)| offset)
+                        .unwrap_or(0);
+                    let offsets = (0..ALIGNMENT_BUCKETS)
+                        .map(|bucket| {
+                            let advance =
+                                (bucket as f64 / ALIGNMENT_BUCKETS as f64 * period).round() as u64;
+                            let mut offset = phase0 + advance;
+                            if offset >= period_frames {
+                                offset -= period_frames;
+                            }
+                            offset as u32
+                        })
+                        .collect();
+                    Some(ReleaseAlignment { period, offsets })
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        let option = ReleaseOption {
+            sample: target_index,
+            max_hold_ms,
+            alignment,
+            level,
+        };
+        // Keep sorted: bounded holds ascending, unbounded last — the RT
+        // selection is then "first option whose bound covers the hold".
+        let position = self
+            .releases
+            .iter()
+            .position(|existing| match (existing.max_hold_ms, option.max_hold_ms) {
+                (None, _) => true,
+                (Some(_), None) => false,
+                (Some(a), Some(b)) => a > b,
+            })
+            .unwrap_or(self.releases.len());
+        self.releases.insert(position, option);
+    }
+
+    /// Separate release options, sorted for hold-time selection.
+    #[inline]
+    pub fn release_options(&self) -> &[ReleaseOption] {
+        &self.releases
     }
 
     /// The release tail's first frame, if this sample has one to splice to.
