@@ -945,6 +945,52 @@ mod tests {
     }
 
     #[test]
+    fn alignment_survives_mistuned_pipes_and_long_loops() {
+        // Real pipes sit cents off their nominal pitch, and a voice can
+        // be hundreds of periods away from the loop-start phase anchor:
+        // without measuring the true period, the alignment table points
+        // at effectively random phase. True period here: 479.3 frames
+        // (non-integer); declared nominal: 483 (≈ 13 cents off).
+        let true_period = 479.3f64;
+        let omega = std::f64::consts::TAU / true_period;
+        let loop_start = 1920u64;
+        let loop_end = loop_start + 200 * 480; // ~200 periods of travel
+        let frames = loop_end + 480 * 20;
+        let data: Vec<f32> = (0..frames)
+            .map(|n| {
+                let envelope = if n >= loop_end {
+                    1.0 - 0.5 * (n - loop_end) as f64 / (frames - loop_end) as f64
+                } else {
+                    1.0
+                };
+                (envelope * (omega * n as f64).sin()) as f32
+            })
+            .collect();
+        let mut sample =
+            Sample::new(data, 1, 48000.0, Some((loop_start, loop_end)), loop_end).expect("valid");
+        sample.align_release(48000.0 / 483.0);
+        let alignment = sample.release_alignment().expect("alignment built");
+
+        for probe in 0..24 {
+            // Positions spread across the whole loop, far from anchor.
+            let position = loop_start as f64 + probe as f64 * 3997.3;
+            if position >= loop_end as f64 {
+                break;
+            }
+            let target = alignment.target(position, loop_start);
+            let source_phase = (position / true_period).fract();
+            let target_phase = (target as f64 / true_period).fract();
+            let mut delta = (source_phase - target_phase).abs();
+            delta = delta.min(1.0 - delta);
+            assert!(
+                delta < 2.0 / bank::ALIGNMENT_BUCKETS as f64 + 0.01,
+                "position {position}: phase {source_phase:.3} vs target {target_phase:.3} \
+                 (delta {delta:.3}) — period estimation failed"
+            );
+        }
+    }
+
+    #[test]
     fn early_release_does_not_strike_like_a_bell() {
         // A pipe whose attack ramps up over 4 periods: releasing during
         // the ramp used to splice to the tail at FULL recorded level —

@@ -114,6 +114,66 @@ impl Sample {
         Ok(sample)
     }
 
+    /// Measure the true fundamental period from the sustain loop by
+    /// normalized cross-correlation at a lag of many nominal periods
+    /// (long lag divides the peak-position error), parabolic-refined.
+    /// Returns `None` when the material doesn't correlate with itself
+    /// (unpitched noises) or the loop is too short to measure.
+    fn refine_period(&self, nominal: f64) -> Option<f64> {
+        let (loop_start, loop_end) = self.sustain_loop?;
+        let ch = self.channels as usize;
+        let loop_len = (loop_end - loop_start) as f64;
+        if !(nominal >= 4.0) || loop_len < nominal * 2.5 {
+            return None;
+        }
+        let window = (2048.0_f64).min(loop_len / 2.0) as u64;
+        // As many whole periods of lag as the loop accommodates.
+        let cycles = (((loop_len - window as f64) / nominal).floor() as u32).clamp(1, 24);
+        let base_lag = cycles as f64 * nominal;
+        let half_span = (nominal / 2.0).ceil() as i64;
+
+        let sample_at = |frame: u64| self.data[frame as usize * ch];
+        let score = |lag: i64| -> f64 {
+            let mut dot = 0.0f64;
+            let mut energy_a = 0.0f64;
+            let mut energy_b = 0.0f64;
+            for i in 0..window {
+                let a = sample_at(loop_start + i) as f64;
+                let b = sample_at((loop_start as i64 + lag) as u64 + i) as f64;
+                dot += a * b;
+                energy_a += a * a;
+                energy_b += b * b;
+            }
+            dot / (energy_a * energy_b).sqrt().max(1e-12)
+        };
+
+        let center = base_lag.round() as i64;
+        let mut best_lag = center;
+        let mut best = f64::MIN;
+        for lag in (center - half_span)..=(center + half_span) {
+            if lag <= 0 || (loop_start as i64 + lag) as u64 + window > loop_end {
+                continue;
+            }
+            let value = score(lag);
+            if value > best {
+                best = value;
+                best_lag = lag;
+            }
+        }
+        if best < 0.5 {
+            return None; // not periodic enough to align
+        }
+        // Parabolic interpolation around the integer peak.
+        let (left, right) = (score(best_lag - 1), score(best_lag + 1));
+        let denominator = left - 2.0 * best + right;
+        let offset = if denominator.abs() > 1e-12 {
+            (0.5 * (left - right) / denominator).clamp(-0.5, 0.5)
+        } else {
+            0.0
+        };
+        Some((best_lag as f64 + offset) / cycles as f64)
+    }
+
     /// Mean absolute value (mono-summed) over `window` frames from
     /// `start` — the level metric shared with the voices' envelope
     /// followers.
@@ -155,7 +215,17 @@ impl Sample {
         if !(fundamental_hz > 0.0) {
             return;
         }
-        let period = self.sample_rate_hz as f64 / fundamental_hz as f64;
+        // The nominal pitch is 12-EDO bookkeeping; real pipes sit cents
+        // away, and phase tracked over hundreds of periods from the
+        // loop-start anchor scrambles completely with even 0.1 % period
+        // error. Refine against the audio itself (long-lag
+        // autocorrelation, parabolically interpolated) — sub-1e-5
+        // relative accuracy, or give up on alignment when the material
+        // doesn't correlate (unpitched noises).
+        let nominal = self.sample_rate_hz as f64 / fundamental_hz as f64;
+        let Some(period) = self.refine_period(nominal) else {
+            return;
+        };
         let period_frames = period.round() as u64;
         // Correlation window: one period, capped to keep analysis cheap.
         let window = period_frames.min(600).max(16);
