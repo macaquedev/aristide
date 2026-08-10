@@ -152,9 +152,11 @@ fn choose_registration(organ: &Organ, patterns: &[String]) -> Vec<StopId> {
 fn audio_thread_setup(buffer_frames: u32, sample_rate: u32) {
     #[cfg(target_arch = "x86_64")]
     unsafe {
-        use core::arch::x86_64::{_mm_getcsr, _mm_setcsr};
         // MXCSR bit 15 = flush-to-zero, bit 6 = denormals-are-zero.
-        _mm_setcsr(_mm_getcsr() | 0x8000 | 0x0040);
+        let mut csr: u32 = 0;
+        core::arch::asm!("stmxcsr [{}]", in(reg) &mut csr, options(nostack));
+        csr |= 0x8000 | 0x0040;
+        core::arch::asm!("ldmxcsr [{}]", in(reg) &csr, options(nostack, readonly));
     }
     let _ = (buffer_frames, sample_rate);
     #[cfg(target_os = "linux")]
