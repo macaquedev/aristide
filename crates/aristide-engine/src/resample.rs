@@ -102,21 +102,35 @@ impl SincTable {
         if seam_safe && first_tap_frame >= 0 && first_tap_frame + (TAPS as i64) <= frames {
             let start = first_tap_frame as usize * channels;
             let window = &data[start..start + TAPS * channels];
-            let mut left = 0.0f32;
-            let mut right = 0.0f32;
-            if channels == 1 {
+            // The dominant per-sample cost of the whole engine: SIMD on
+            // x86_64 (SSE2 is baseline), scalar elsewhere.
+            #[cfg(target_arch = "x86_64")]
+            unsafe {
+                return if channels == 1 {
+                    let value = dot_blended_mono_sse2(row0, row1, row_mix, window);
+                    (value, value)
+                } else {
+                    dot_blended_stereo_sse2(row0, row1, row_mix, window)
+                };
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            {
+                let mut left = 0.0f32;
+                let mut right = 0.0f32;
+                if channels == 1 {
+                    for tap in 0..TAPS {
+                        let coefficient = row0[tap] + (row1[tap] - row0[tap]) * row_mix;
+                        left += coefficient * window[tap];
+                    }
+                    return (left, left);
+                }
                 for tap in 0..TAPS {
                     let coefficient = row0[tap] + (row1[tap] - row0[tap]) * row_mix;
-                    left += coefficient * window[tap];
+                    left += coefficient * window[tap * channels];
+                    right += coefficient * window[tap * channels + 1];
                 }
-                return (left, left);
+                return (left, right);
             }
-            for tap in 0..TAPS {
-                let coefficient = row0[tap] + (row1[tap] - row0[tap]) * row_mix;
-                left += coefficient * window[tap * channels];
-                right += coefficient * window[tap * channels + 1];
-            }
-            return (left, right);
         }
 
         // Slow path (window touches an edge or the loop seam): map each
@@ -150,6 +164,72 @@ impl SincTable {
 impl Default for SincTable {
     fn default() -> Self {
         SincTable::new()
+    }
+}
+
+/// Blend the two coefficient rows and dot against a mono window, 4 taps
+/// per SSE2 vector. Safety: caller guarantees `row0`, `row1`, `window`
+/// each hold at least `TAPS` values.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+unsafe fn dot_blended_mono_sse2(row0: &[f32], row1: &[f32], mix: f32, window: &[f32]) -> f32 {
+    use core::arch::x86_64::*;
+    unsafe {
+        let mix4 = _mm_set1_ps(mix);
+        let mut acc = _mm_setzero_ps();
+        for chunk in 0..TAPS / 4 {
+            let offset = chunk * 4;
+            let c0 = _mm_loadu_ps(row0.as_ptr().add(offset));
+            let c1 = _mm_loadu_ps(row1.as_ptr().add(offset));
+            let c = _mm_add_ps(c0, _mm_mul_ps(_mm_sub_ps(c1, c0), mix4));
+            let w = _mm_loadu_ps(window.as_ptr().add(offset));
+            acc = _mm_add_ps(acc, _mm_mul_ps(c, w));
+        }
+        horizontal_sum(acc)
+    }
+}
+
+/// Stereo variant: the window is interleaved LRLR; shuffle pairs of
+/// loads into an L vector and an R vector per 4 taps.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+unsafe fn dot_blended_stereo_sse2(
+    row0: &[f32],
+    row1: &[f32],
+    mix: f32,
+    window: &[f32],
+) -> (f32, f32) {
+    use core::arch::x86_64::*;
+    unsafe {
+        let mix4 = _mm_set1_ps(mix);
+        let mut acc_left = _mm_setzero_ps();
+        let mut acc_right = _mm_setzero_ps();
+        for chunk in 0..TAPS / 4 {
+            let offset = chunk * 4;
+            let c0 = _mm_loadu_ps(row0.as_ptr().add(offset));
+            let c1 = _mm_loadu_ps(row1.as_ptr().add(offset));
+            let c = _mm_add_ps(c0, _mm_mul_ps(_mm_sub_ps(c1, c0), mix4));
+            // L0 R0 L1 R1 | L2 R2 L3 R3 → L0 L1 L2 L3 / R0 R1 R2 R3
+            let w01 = _mm_loadu_ps(window.as_ptr().add(offset * 2));
+            let w23 = _mm_loadu_ps(window.as_ptr().add(offset * 2 + 4));
+            let left = _mm_shuffle_ps(w01, w23, 0b10_00_10_00);
+            let right = _mm_shuffle_ps(w01, w23, 0b11_01_11_01);
+            acc_left = _mm_add_ps(acc_left, _mm_mul_ps(c, left));
+            acc_right = _mm_add_ps(acc_right, _mm_mul_ps(c, right));
+        }
+        (horizontal_sum(acc_left), horizontal_sum(acc_right))
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline]
+unsafe fn horizontal_sum(v: core::arch::x86_64::__m128) -> f32 {
+    use core::arch::x86_64::*;
+    unsafe {
+        let hi = _mm_movehl_ps(v, v);
+        let sum2 = _mm_add_ps(v, hi);
+        let hi1 = _mm_shuffle_ps(sum2, sum2, 0b01);
+        _mm_cvtss_f32(_mm_add_ss(sum2, hi1))
     }
 }
 
@@ -272,6 +352,50 @@ mod tests {
                 (value as f64 - ideal).abs() < 1e-3,
                 "position {position}: {value} vs {ideal} at the loop seam"
             );
+        }
+    }
+
+    #[test]
+    fn simd_matches_scalar_reference() {
+        let table = SincTable::new();
+        let mut rng = 0xDEAD_BEEFu32;
+        let mut noise = move || {
+            rng ^= rng << 13;
+            rng ^= rng >> 17;
+            rng ^= rng << 5;
+            (rng >> 8) as f32 / (1u32 << 24) as f32 - 0.5
+        };
+        for &channels in &[1u16, 2] {
+            let frames = 2000usize;
+            let data: Vec<f32> = (0..frames * channels as usize).map(|_| noise()).collect();
+            let sample = Sample::new(data.clone(), channels, 48000.0, None, 0).expect("valid");
+            for probe in 0..200 {
+                let position = 50.0 + probe as f64 * 9.137;
+                let (left, right) = table.read(&sample, position, None);
+                // Scalar reference, straight from the definition.
+                let base = position.floor();
+                let fraction = position - base;
+                let scaled = fraction * PHASES as f64;
+                let row_index = scaled as usize;
+                let row_mix = (scaled - row_index as f64) as f32;
+                let row0 = &table.coefficients[row_index * TAPS..row_index * TAPS + TAPS];
+                let row1 =
+                    &table.coefficients[(row_index + 1) * TAPS..(row_index + 1) * TAPS + TAPS];
+                let first = base as usize - LEFT_TAPS;
+                let ch = channels as usize;
+                let mut expect_left = 0.0f32;
+                let mut expect_right = 0.0f32;
+                for tap in 0..TAPS {
+                    let c = row0[tap] + (row1[tap] - row0[tap]) * row_mix;
+                    expect_left += c * data[(first + tap) * ch];
+                    expect_right += c * data[(first + tap) * ch + (ch - 1)];
+                }
+                assert!(
+                    (left - expect_left).abs() < 1e-5 && (right - expect_right).abs() < 1e-5,
+                    "SIMD mismatch at {position} ({channels}ch): {left}/{right} vs \
+                     {expect_left}/{expect_right}"
+                );
+            }
         }
     }
 

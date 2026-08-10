@@ -231,6 +231,11 @@ struct SampledVoice {
     loop_index: u8,
     /// Separate release sample being crossfaded into, if any.
     external_release: Option<u32>,
+    /// A scheduled key-release: (frames until the pallet closes, hold
+    /// age in ms captured at key-up). Real pallets never close in the
+    /// same millisecond across a chord, and spreading the release also
+    /// spreads the crossfade CPU spike that a mass release causes.
+    pending_release: Option<(u16, u32)>,
     phase: SamplePhase,
 }
 
@@ -281,6 +286,17 @@ impl SampledVoice {
         let last = ctx.last;
         let current_loop = ctx.current_loop;
         let looping = ctx.looping;
+        // A scheduled release fires when its pallet-delay runs out.
+        if self.phase == SamplePhase::Held {
+            if let Some((delay, age_ms)) = self.pending_release {
+                if delay == 0 {
+                    self.pending_release = None;
+                    self.release(sample, age_ms);
+                } else {
+                    self.pending_release = Some((delay - 1, age_ms));
+                }
+            }
+        }
         // During a crossfade into a separate release sample, the tail
         // cursor lives in that sample's coordinates.
         let tail_sample = external.unwrap_or(sample);
@@ -461,6 +477,8 @@ pub struct Engine {
     voices: Box<[Voice]>,
     wind: [WindGroup; MAX_WIND_GROUPS],
     reverb: Option<reverb::Reverb>,
+    /// Max random pallet-close delay applied to key releases, frames.
+    release_stagger_frames: f32,
     /// Limiter envelope: the current tracked bus peak (decaying).
     limiter_envelope: f32,
     limiter_release: f32,
@@ -484,6 +502,7 @@ impl Engine {
             voices: vec![Voice::Idle; MAX_VOICES].into_boxed_slice(),
             wind: [WindGroup::default(); MAX_WIND_GROUPS],
             reverb: None,
+            release_stagger_frames: 0.008 * sample_rate,
             limiter_envelope: 0.0,
             limiter_release: (-1.0 / (LIMITER_RELEASE_SECONDS * sample_rate)).exp(),
             master_gain: DEFAULT_MASTER_GAIN,
@@ -631,7 +650,8 @@ impl Engine {
                     let mut current = sample;
                     let mut current_id = sampled.sample;
                     let mut current_loop_index = sampled.loop_index;
-                    let mut external = sampled.external_release.and_then(|id| bank.get(id));
+                    let mut current_external_id = sampled.external_release;
+                    let mut external = current_external_id.and_then(|id| bank.get(id));
                     let mut ctx = sampled.block_context(current, external, rate_scale);
                     for frame in 0..frames {
                         if sampled.sample != current_id {
@@ -640,6 +660,7 @@ impl Engine {
                                     current = switched;
                                     current_id = sampled.sample;
                                     external = None;
+                                    current_external_id = None;
                                     current_loop_index = sampled.loop_index;
                                     ctx = sampled.block_context(current, external, rate_scale);
                                 }
@@ -648,8 +669,12 @@ impl Engine {
                                     break;
                                 }
                             }
-                        } else if sampled.loop_index != current_loop_index {
+                        } else if sampled.loop_index != current_loop_index
+                            || sampled.external_release != current_external_id
+                        {
                             current_loop_index = sampled.loop_index;
+                            current_external_id = sampled.external_release;
+                            external = current_external_id.and_then(|id| bank.get(id));
                             ctx = sampled.block_context(current, external, rate_scale);
                         }
                         match sampled.tick(
@@ -742,6 +767,7 @@ impl Engine {
                         group: group.min(MAX_WIND_GROUPS as u8 - 1),
                         wind_weight: wind_weight.max(0.0),
                         age_frames: 0,
+                        pending_release: None,
                         brightness_a: brightness.clamp(0.0, 1.0),
                         lowpass: [0.0; 2],
                         wander: wind::Wander::default(),
@@ -769,11 +795,19 @@ impl Engine {
             }
             Command::StopVoice { handle } => {
                 let per_ms = self.sample_rate / 1000.0;
+                // Pallet spread: random per voice, up to the configured max.
+                let max_stagger = self.release_stagger_frames;
                 for voice in self.voices.iter_mut() {
                     if let Voice::Sampled(sampled) = voice {
                         if sampled.handle == handle {
-                            if let Some(sample) = self.bank.get(sampled.sample) {
-                                let age_ms = (sampled.age_frames as f32 / per_ms) as u32;
+                            let age_ms = (sampled.age_frames as f32 / per_ms) as u32;
+                            if sampled.phase == SamplePhase::Held
+                                && sampled.pending_release.is_none()
+                            {
+                                let delay = (wind::xorshift_unit(&mut sampled.rng)
+                                    * max_stagger) as u16;
+                                sampled.pending_release = Some((delay, age_ms));
+                            } else if let Some(sample) = self.bank.get(sampled.sample) {
                                 sampled.release(sample, age_ms);
                             }
                         }
@@ -843,6 +877,12 @@ impl Engine {
         }
     }
 
+    /// Maximum random pallet-close delay on key release (default 8 ms;
+    /// 0 = releases fire on the exact command frame, used by tests).
+    pub fn set_release_stagger(&mut self, seconds: f32) {
+        self.release_stagger_frames = (seconds.clamp(0.0, 0.05)) * self.sample_rate;
+    }
+
     /// Install a convolution reverb. Control-side only — call before
     /// the engine moves into the audio callback.
     pub fn set_reverb(&mut self, ir: Option<Arc<reverb::PreparedIr>>, wet: f32) {
@@ -908,6 +948,7 @@ mod tests {
     #[test]
     fn sampled_voice_plays_and_loops() {
         let (mut engine, mut handle) = Engine::new(100.0, test_bank());
+        engine.set_release_stagger(0.0);
         handle.send(Command::StartVoice {
             handle: 1,
             sample: 0,
@@ -938,6 +979,7 @@ mod tests {
     #[test]
     fn released_voice_splices_to_tail_and_ends() {
         let (mut engine, mut handle) = Engine::new(100.0, test_bank());
+        engine.set_release_stagger(0.0);
         handle.send(Command::StartVoice {
             handle: 7,
             sample: 0,
@@ -966,6 +1008,7 @@ mod tests {
         let mut bank = SampleBank::default();
         bank.push(sample);
         let (mut engine, mut handle) = Engine::new(100.0, Arc::new(bank));
+        engine.set_release_stagger(0.0);
         handle.send(Command::StartVoice {
             handle: 1,
             sample: 0,
@@ -985,6 +1028,7 @@ mod tests {
     #[test]
     fn tone_voice_still_works() {
         let (mut engine, mut handle) = Engine::new(48000.0, Arc::new(SampleBank::default()));
+        engine.set_release_stagger(0.0);
         handle.send(Command::NoteOn {
             key: 69,
             freq_hz: 440.0,
@@ -1039,6 +1083,7 @@ mod tests {
     /// held level.
     fn release_dip_ratio(bank: Arc<SampleBank>, stop_after: usize, period: usize) -> f32 {
         let (mut engine, mut handle) = Engine::new(48000.0, bank);
+        engine.set_release_stagger(0.0);
         handle.send(Command::StartVoice {
             handle: 1,
             sample: 0,
@@ -1135,6 +1180,7 @@ mod tests {
 
         let run = |phantom_voices: usize| -> f64 {
             let (mut engine, mut handle) = Engine::new(48000.0, sine_pipe_bank(period, true));
+            engine.set_release_stagger(0.0);
             // Phantoms draw wind but are silent: gain 0, weight 1.
             for i in 0..phantom_voices {
                 handle.send(Command::StartVoice {
@@ -1202,6 +1248,7 @@ mod tests {
         let mut bank = SampleBank::default();
         bank.push(sample);
         let (mut engine, mut handle) = Engine::new(48000.0, Arc::new(bank));
+        engine.set_release_stagger(0.0);
         handle.send(Command::StartVoice {
             handle: 1,
             sample: 0,
@@ -1255,6 +1302,7 @@ mod tests {
     #[test]
     fn limiter_passthrough_below_ceiling() {
         let (mut engine, mut handle) = Engine::new(48000.0, sine_pipe_bank(480, true));
+        engine.set_release_stagger(0.0);
         handle.send(Command::StartVoice {
             handle: 1,
             sample: 0,
@@ -1292,6 +1340,7 @@ mod tests {
         let mut bank = SampleBank::default();
         bank.push(sample);
         let (mut engine, mut handle) = Engine::new(48000.0, Arc::new(bank));
+        engine.set_release_stagger(0.0);
         handle.send(Command::StartVoice {
             handle: 1,
             sample: 0,
@@ -1388,6 +1437,7 @@ mod tests {
 
         let audible_seconds = |hold_frames: usize| -> f64 {
             let (mut engine, mut handle) = Engine::new(48000.0, Arc::clone(&bank));
+            engine.set_release_stagger(0.0);
             handle.send(Command::StartVoice {
                 handle: 1,
                 sample: source_id,
@@ -1550,6 +1600,7 @@ mod tests {
         bank.push(sample);
 
         let (mut engine, mut handle) = Engine::new(48000.0, Arc::new(bank));
+        engine.set_release_stagger(0.0);
         handle.send(Command::StartVoice {
             handle: 1,
             sample: 0,
@@ -1587,6 +1638,7 @@ mod tests {
 
         let run = |loaded: bool, brightness: f32| -> f32 {
             let (mut engine, mut handle) = Engine::new(48000.0, sine_pipe_bank(period, true));
+            engine.set_release_stagger(0.0);
             // Kill per-voice noise so the comparison is deterministic.
             let mut params = wind::WindParams::default();
             params.flow_noise = 0.0;
@@ -1647,6 +1699,7 @@ mod tests {
         let period = 480;
         let measure_spread = |noise: f32| -> f64 {
             let (mut engine, mut handle) = Engine::new(48000.0, sine_pipe_bank(period, true));
+            engine.set_release_stagger(0.0);
             let mut params = wind::WindParams::default();
             params.sag_depth = 0.0; // isolate the per-voice noise
             params.flow_noise = noise;
@@ -1693,6 +1746,7 @@ mod tests {
         let mut bank = SampleBank::default();
         bank.push(sample);
         let (mut engine, mut handle) = Engine::new(100.0, Arc::new(bank));
+        engine.set_release_stagger(0.0);
         handle.send(Command::StartVoice {
             handle: 1,
             sample: 0,

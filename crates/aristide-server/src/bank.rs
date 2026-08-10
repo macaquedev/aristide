@@ -389,6 +389,80 @@ mod tests {
         }
     }
 
+    /// The reported "awful pop on mass release": releasing a big chord
+    /// doubles those voices' cost at once (crossfade = two sinc reads).
+    /// The pallet stagger + SIMD must keep every block under budget.
+    #[test]
+    fn mass_release_stays_under_block_budget() {
+        let Some(path) = demo_organ() else {
+            eprintln!("skipping: demo set not present");
+            return;
+        };
+        let organ = aristide_formats::grandorgue::load(&path)
+            .expect("demo set loads")
+            .organ;
+        let loaded = build(&organ, 48000.0).expect("bank builds");
+        let manual_id = organ.manuals[1].id;
+        let drawn: Vec<_> = organ
+            .stops
+            .iter()
+            .filter(|s| s.manual == manual_id && !s.name.contains("noise"))
+            .map(|s| s.id)
+            .collect();
+        let mut console =
+            crate::console::Console::new(organ, loaded.specs, drawn, Vec::new());
+        let (mut engine, mut handle) =
+            aristide_engine::Engine::new(48000.0, std::sync::Arc::new(loaded.bank));
+
+        // Hold a 10-key chord over EVERY Great stop, settle, then
+        // release everything in one burst.
+        let keys = [48u8, 50, 52, 53, 55, 57, 59, 60, 62, 64];
+        for &key in &keys {
+            let (starts, _) = console.note_on(0, key);
+            for start in starts {
+                handle.send(aristide_engine::Command::StartVoice {
+                    handle: start.handle,
+                    sample: start.spec.sample,
+                    rate: start.spec.rate,
+                    gain: start.spec.gain,
+                    group: start.spec.group,
+                    wind_weight: start.spec.wind_weight,
+                    brightness: start.spec.brightness,
+                });
+            }
+        }
+        let block = 256usize;
+        let mut buffer = vec![0.0f32; block * 2];
+        for _ in 0..64 {
+            engine.process(&mut buffer, 2);
+        }
+        for &key in &keys {
+            for handle_id in console.note_off(0, key) {
+                handle.send(aristide_engine::Command::StopVoice { handle: handle_id });
+            }
+        }
+        // Watch half a second of blocks through the release storm.
+        let budget = block as f64 / 48000.0;
+        let mut worst = 0.0f64;
+        for _ in 0..(24000 / block) {
+            let started = std::time::Instant::now();
+            engine.process(&mut buffer, 2);
+            worst = worst.max(started.elapsed().as_secs_f64());
+        }
+        eprintln!(
+            "mass release: worst block {:.2} ms of {:.2} ms budget",
+            worst * 1000.0,
+            budget * 1000.0
+        );
+        if !cfg!(debug_assertions) {
+            assert!(
+                worst < budget * 0.8,
+                "release storm blows the block budget: {:.2} ms",
+                worst * 1000.0
+            );
+        }
+    }
+
     /// The whole M3 pipeline, headless: ODF → model → bank → console →
     /// RT engine → nonzero audio frames.
     #[test]
