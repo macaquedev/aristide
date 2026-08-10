@@ -504,6 +504,20 @@ impl SampleBank {
         self.samples.is_empty()
     }
 
+    /// Touch every page of sample data so first-play page faults never
+    /// land inside the audio callback (Linux maps heap lazily). Returns
+    /// a checksum so the traversal can't be optimized away.
+    pub fn pre_fault(&self) -> f32 {
+        let mut checksum = 0.0f32;
+        for sample in &self.samples {
+            // One touch per 4 KiB page (1024 f32s).
+            for value in sample.data.iter().step_by(1024) {
+                checksum += *value;
+            }
+        }
+        checksum
+    }
+
     /// Total decoded audio held, in bytes.
     pub fn resident_bytes(&self) -> usize {
         self.samples

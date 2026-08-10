@@ -286,6 +286,7 @@ dependencies = [
  "aristide-formats",
  "aristide-model",
  "cpal",
+ "libc",
  "midir",
  "tiny_http",
  "tracing",

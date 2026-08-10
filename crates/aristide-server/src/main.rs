@@ -145,6 +145,36 @@ fn choose_registration(organ: &Organ, patterns: &[String]) -> Vec<StopId> {
     drawn
 }
 
+/// One-time setup on the audio callback's own thread (cpal creates it,
+/// so this runs on first callback): real-time scheduling — without
+/// SCHED_FIFO any desktop load preempts us and no buffer size saves you
+/// — and flush-to-zero so denormals can't burn cycles.
+fn audio_thread_setup(buffer_frames: u32, sample_rate: u32) {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        use core::arch::x86_64::{_mm_getcsr, _mm_setcsr};
+        // MXCSR bit 15 = flush-to-zero, bit 6 = denormals-are-zero.
+        _mm_setcsr(_mm_getcsr() | 0x8000 | 0x0040);
+    }
+    let _ = (buffer_frames, sample_rate);
+    #[cfg(target_os = "linux")]
+    unsafe {
+        let param = libc::sched_param { sched_priority: 70 };
+        let result =
+            libc::pthread_setschedparam(libc::pthread_self(), libc::SCHED_FIFO, &param);
+        if result == 0 {
+            tracing::info!("audio thread: SCHED_FIFO real-time priority acquired");
+        } else {
+            tracing::warn!(
+                "audio thread: no real-time priority (errno {result}) — audio can \
+                 glitch under desktop load. Fix: add to /etc/security/limits.d/audio.conf: \
+                 '@audio - rtprio 95' and put your user in the 'audio' group \
+                 (log out/in), or run the server via `chrt -f 70`"
+            );
+        }
+    }
+}
+
 /// Load a reverb impulse response: a wav next to the set, or
 /// "synthetic" — a generated 2 s exponentially decaying stereo hall
 /// (useful before any IR file exists; also the fallback demo room).
@@ -235,6 +265,12 @@ pub struct State {
 fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     tracing::info!("aristide-server {}", env!("CARGO_PKG_VERSION"));
+    if cfg!(debug_assertions) {
+        tracing::warn!(
+            "DEBUG BUILD — 10-20x slower than release; audio WILL crackle. \
+             Run: cargo run --release -p aristide-server"
+        );
+    }
     let args = parse_args()?;
 
     if args.list_stops {
@@ -397,14 +433,32 @@ fn main() -> Result<()> {
     // it rejects our fixed size. Each attempt needs a fresh Engine (the
     // callback closure consumes it); the bank is shared via Arc.
     let bank = Arc::new(sample_bank);
+    // Fault every sample page in NOW; doing it lazily means page faults
+    // inside the audio callback on each pipe's first note.
+    let prefault_started = Instant::now();
+    let checksum = bank.pre_fault();
+    tracing::info!(
+        "pre-faulted {:.0} MiB of samples in {:.1?} (checksum {checksum:.3})",
+        bank.resident_bytes() as f64 / (1024.0 * 1024.0),
+        prefault_started.elapsed()
+    );
+
+    let buffer_hint = args.buffer_frames;
     let build_stream = |buffer_size: cpal::BufferSize| -> Result<(cpal::Stream, EngineHandle)> {
         let (mut engine, handle) = Engine::new(sample_rate, Arc::clone(&bank));
         engine.set_reverb(reverb_ir.clone(), reverb_wet);
         let mut stream_config = config.clone();
         stream_config.buffer_size = buffer_size;
+        let mut rt_ready = false;
         let stream = device.build_output_stream(
             &stream_config,
-            move |data: &mut [f32], _| engine.process(data, channels),
+            move |data: &mut [f32], _| {
+                if !rt_ready {
+                    rt_ready = true;
+                    audio_thread_setup(buffer_hint, sample_rate as u32);
+                }
+                engine.process(data, channels)
+            },
             |err| tracing::error!("audio stream error: {err}"),
             None,
         )?;
