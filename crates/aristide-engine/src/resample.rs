@@ -35,6 +35,10 @@ pub struct SincTable {
     /// fractional offset `p / PHASES`. The extra row lets reads
     /// interpolate `p → p+1` without wrapping.
     coefficients: Box<[f32]>,
+    /// Detected once at build (control side): AVX2+FMA kernels do the
+    /// 16-tap dot in two 8-wide FMAs instead of four SSE blocks.
+    #[cfg(target_arch = "x86_64")]
+    use_avx2: bool,
 }
 
 impl SincTable {
@@ -63,7 +67,12 @@ impl SincTable {
                 }
             }
         }
-        SincTable { coefficients }
+        SincTable {
+            coefficients,
+            #[cfg(target_arch = "x86_64")]
+            use_avx2: std::arch::is_x86_feature_detected!("avx2")
+                && std::arch::is_x86_feature_detected!("fma"),
+        }
     }
 
     /// Interpolated stereo read at a fractional frame position.
@@ -106,6 +115,14 @@ impl SincTable {
             // x86_64 (SSE2 is baseline), scalar elsewhere.
             #[cfg(target_arch = "x86_64")]
             unsafe {
+                // Mono only: measured on the stress suite, the 256-bit
+                // stereo path was ~10% SLOWER than SSE2 here (shuffle
+                // overhead + downclocking); mono's two clean 8-wide
+                // FMAs do win.
+                if self.use_avx2 && channels == 1 {
+                    let value = dot_blended_mono_avx2(row0, row1, row_mix, window);
+                    return (value, value);
+                }
                 return if channels == 1 {
                     let value = dot_blended_mono_sse2(row0, row1, row_mix, window);
                     (value, value)
@@ -230,6 +247,69 @@ unsafe fn horizontal_sum(v: core::arch::x86_64::__m128) -> f32 {
         let sum2 = _mm_add_ps(v, hi);
         let hi1 = _mm_shuffle_ps(sum2, sum2, 0b01);
         _mm_cvtss_f32(_mm_add_ss(sum2, hi1))
+    }
+}
+
+/// AVX2+FMA: 16 taps in two 8-wide fused blocks.
+/// Safety: caller guarantees slice lengths >= TAPS and that the CPU
+/// supports avx2+fma (checked at table construction).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn dot_blended_mono_avx2(row0: &[f32], row1: &[f32], mix: f32, window: &[f32]) -> f32 {
+    use core::arch::x86_64::*;
+    unsafe {
+        let mix8 = _mm256_set1_ps(mix);
+        let mut acc = _mm256_setzero_ps();
+        for chunk in 0..TAPS / 8 {
+            let offset = chunk * 8;
+            let c0 = _mm256_loadu_ps(row0.as_ptr().add(offset));
+            let c1 = _mm256_loadu_ps(row1.as_ptr().add(offset));
+            let c = _mm256_fmadd_ps(_mm256_sub_ps(c1, c0), mix8, c0);
+            let w = _mm256_loadu_ps(window.as_ptr().add(offset));
+            acc = _mm256_fmadd_ps(c, w, acc);
+        }
+        let low = _mm256_castps256_ps128(acc);
+        let high = _mm256_extractf128_ps(acc, 1);
+        horizontal_sum(_mm_add_ps(low, high))
+    }
+}
+
+/// Stereo AVX2: blended coefficients duplicated pair-wise so the
+/// interleaved LRLR window multiplies directly — even lanes accumulate
+/// left, odd lanes right.
+/// Safety: as [`dot_blended_mono_avx2`].
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+#[allow(dead_code)]
+unsafe fn dot_blended_stereo_avx2(
+    row0: &[f32],
+    row1: &[f32],
+    mix: f32,
+    window: &[f32],
+) -> (f32, f32) {
+    use core::arch::x86_64::*;
+    unsafe {
+        let mix4 = _mm_set1_ps(mix);
+        let mut acc = _mm256_setzero_ps();
+        for chunk in 0..TAPS / 4 {
+            let offset = chunk * 4;
+            let c0 = _mm_loadu_ps(row0.as_ptr().add(offset));
+            let c1 = _mm_loadu_ps(row1.as_ptr().add(offset));
+            let c = _mm_add_ps(c0, _mm_mul_ps(_mm_sub_ps(c1, c0), mix4));
+            // [c0 c1 c2 c3] -> [c0 c0 c1 c1 | c2 c2 c3 c3]
+            let dup = _mm256_set_m128(_mm_unpackhi_ps(c, c), _mm_unpacklo_ps(c, c));
+            let w = _mm256_loadu_ps(window.as_ptr().add(offset * 2));
+            acc = _mm256_fmadd_ps(dup, w, acc);
+        }
+        // Even lanes hold L terms, odd lanes R. Fold 256 -> 128 -> pair.
+        let low = _mm256_castps256_ps128(acc);
+        let high = _mm256_extractf128_ps(acc, 1);
+        let s4 = _mm_add_ps(low, high); // [L R L R]
+        let folded = _mm_add_ps(s4, _mm_movehl_ps(s4, s4)); // [L R . .]
+        (
+            _mm_cvtss_f32(folded),
+            _mm_cvtss_f32(_mm_shuffle_ps(folded, folded, 0b01)),
+        )
     }
 }
 

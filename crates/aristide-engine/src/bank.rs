@@ -152,6 +152,23 @@ impl Sample {
         Ok(sample)
     }
 
+    /// Fundamental phase (radians) of the waveform at `start`, by
+    /// projecting `window` frames onto sin/cos at `period` — immune to
+    /// harmonic content, unlike correlation peaks.
+    fn quadrature_phase(&self, start: u64, window: u64, period: f64) -> f64 {
+        let ch = self.channels as usize;
+        let window = window.min(self.frames().saturating_sub(start));
+        let mut re = 0.0f64;
+        let mut im = 0.0f64;
+        for i in 0..window {
+            let x = self.data[(start + i) as usize * ch] as f64;
+            let angle = core::f64::consts::TAU * i as f64 / period;
+            re += x * angle.cos();
+            im += x * angle.sin();
+        }
+        im.atan2(re)
+    }
+
     /// Measure the true fundamental period from the sustain loop by
     /// normalized cross-correlation at a lag of many nominal periods
     /// (long lag divides the peak-position error), parabolic-refined.
@@ -279,33 +296,19 @@ impl Sample {
             return;
         }
 
-        // Template: the waveform right at the loop start (phase 0).
-        let score = |offset: u64| -> f64 {
-            let mut dot = 0.0f64;
-            let mut energy = 0.0f64;
-            let ch = self.channels as usize;
-            for i in 0..window {
-                let a = self.data[(loop_start + i) as usize * ch] as f64;
-                let b = self.data[(offset + i) as usize * ch] as f64;
-                dot += a * b;
-                energy += b * b;
-            }
-            dot / energy.max(1e-12).sqrt()
-        };
-        let phase0 = (tail..tail + period_frames)
-            .map(|offset| (offset, score(offset)))
-            .max_by(|a, b| a.1.total_cmp(&b.1))
-            .expect("non-empty range")
-            .0;
-
+        // Fundamental phase via quadrature projection at the measured
+        // period — NOT correlation argmax: on principal pipes with
+        // strong 2nd harmonics the argmax could lock a half period off
+        // (fundamental cancels, octave reinforces = a missing-
+        // fundamental strike, i.e. exactly a bell).
+        let theta_loop = self.quadrature_phase(loop_start, window * 4, period);
+        let theta_tail = self.quadrature_phase(tail, window * 4, period);
         let offsets = (0..ALIGNMENT_BUCKETS)
             .map(|bucket| {
-                let advance = (bucket as f64 / ALIGNMENT_BUCKETS as f64 * period).round() as u64;
-                let mut offset = phase0 + advance;
-                if offset >= tail + period_frames {
-                    offset -= period_frames;
-                }
-                offset as u32
+                let turns = (theta_tail - theta_loop) / core::f64::consts::TAU
+                    + bucket as f64 / ALIGNMENT_BUCKETS as f64;
+                let delta = (period * turns.rem_euclid(1.0)).round() as u64;
+                (tail + delta.min(period_frames.saturating_sub(1))) as u32
             })
             .collect();
         self.release_alignment = Some(ReleaseAlignment { period, offsets });
@@ -379,35 +382,19 @@ impl Sample {
         let alignment = match (self.measured_period, self.sustain_loop) {
             (Some(period), Some((loop_start, _))) => {
                 let period_frames = period.round().max(4.0) as u64;
-                let window = (period_frames * 2).clamp(128, 600);
+                let window = (period_frames * 4).clamp(128, 2048);
                 if target.frames() > period_frames + window {
-                    let ch_self = self.channels as usize;
-                    let ch_target = target.channels as usize;
-                    let score = |offset: u64| -> f64 {
-                        let mut dot = 0.0f64;
-                        let mut energy = 0.0f64;
-                        for i in 0..window {
-                            let a = self.data[(loop_start + i) as usize * ch_self] as f64;
-                            let b = target.data[(offset + i) as usize * ch_target] as f64;
-                            dot += a * b;
-                            energy += b * b;
-                        }
-                        dot / energy.max(1e-12).sqrt()
-                    };
-                    let phase0 = (0..period_frames)
-                        .map(|offset| (offset, score(offset)))
-                        .max_by(|a, b| a.1.total_cmp(&b.1))
-                        .map(|(offset, _)| offset)
-                        .unwrap_or(0);
+                    // Quadrature phases (harmonic-immune; see
+                    // align_release) — cross-file this time.
+                    let theta_loop = self.quadrature_phase(loop_start, window, period);
+                    let theta_target = target.quadrature_phase(0, window, period);
                     let offsets = (0..ALIGNMENT_BUCKETS)
                         .map(|bucket| {
-                            let advance =
-                                (bucket as f64 / ALIGNMENT_BUCKETS as f64 * period).round() as u64;
-                            let mut offset = phase0 + advance;
-                            if offset >= period_frames {
-                                offset -= period_frames;
-                            }
-                            offset as u32
+                            let turns = (theta_target - theta_loop)
+                                / core::f64::consts::TAU
+                                + bucket as f64 / ALIGNMENT_BUCKETS as f64;
+                            let delta = (period * turns.rem_euclid(1.0)).round() as u64;
+                            delta.min(period_frames.saturating_sub(1)) as u32
                         })
                         .collect();
                     Some(ReleaseAlignment { period, offsets })

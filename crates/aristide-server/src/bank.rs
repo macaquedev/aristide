@@ -389,6 +389,111 @@ mod tests {
         }
     }
 
+    /// The user's exact worst case: ALL Great + Swell stops, Swell
+    /// coupled to Great at 8' and 16'. ~25 pipes per key. This is the
+    /// registration the engine must survive.
+    #[test]
+    fn full_organ_coupled_tutti_is_realtime() {
+        let Some(path) = demo_organ() else {
+            eprintln!("skipping: demo set not present");
+            return;
+        };
+        let organ = aristide_formats::grandorgue::load(&path)
+            .expect("demo set loads")
+            .organ;
+        let loaded = build(&organ, 48000.0).expect("bank builds");
+        let great = organ.manuals[1].id;
+        let swell = organ.manuals[2].id;
+        let drawn: Vec<_> = organ
+            .stops
+            .iter()
+            .filter(|s| {
+                (s.manual == great || s.manual == swell) && !s.name.contains("noise")
+            })
+            .map(|s| s.id)
+            .collect();
+        // Swell→Great at unison and 16'.
+        let couplers: Vec<usize> = organ
+            .couplers
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.from_manual == great && c.to_manual == swell)
+            .map(|(i, _)| i)
+            .collect();
+        assert!(couplers.len() >= 2, "need II/I and 16' II/I couplers");
+        let mut console =
+            crate::console::Console::new(organ, loaded.specs, drawn, Vec::new());
+        for &c in &couplers {
+            console.set_coupler(c, true);
+        }
+        // Production pre-faults at startup; match it or the first
+        // strike measures page faults instead of the engine.
+        let _ = loaded.bank.pre_fault();
+        let (mut engine, mut handle) =
+            aristide_engine::Engine::new(48000.0, std::sync::Arc::new(loaded.bank));
+
+        let keys = [48u8, 50, 52, 53, 55, 57, 59, 60, 62, 64];
+        let block = 256usize;
+        let mut buffer = vec![0.0f32; block * 2];
+        let mut voices_started = 0usize;
+        let mut send_chord = |console: &mut crate::console::Console,
+                              handle: &mut aristide_engine::EngineHandle,
+                              on: bool| {
+            for &key in &keys {
+                if on {
+                    let (starts, _) = console.note_on(0, key);
+                    voices_started += starts.len();
+                    for start in starts {
+                        handle.send(aristide_engine::Command::StartVoice {
+                            handle: start.handle,
+                            sample: start.spec.sample,
+                            rate: start.spec.rate,
+                            gain: start.spec.gain,
+                            group: start.spec.group,
+                            wind_weight: start.spec.wind_weight,
+                            brightness: start.spec.brightness,
+                        });
+                    }
+                } else {
+                    for h in console.note_off(0, key) {
+                        handle.send(aristide_engine::Command::StopVoice { handle: h });
+                    }
+                }
+            }
+        };
+
+        // 6 s: hold 1 s, release, re-strike every second (tails stack).
+        let started = std::time::Instant::now();
+        let mut worst_block = 0.0f64;
+        let blocks = 6 * 48000 / block;
+        for b in 0..blocks {
+            let second = b * block / 48000;
+            let phase_in_second = (b * block) % 48000;
+            if phase_in_second < block {
+                send_chord(&mut console, &mut handle, second % 2 == 0);
+            }
+            let t0 = std::time::Instant::now();
+            engine.process(&mut buffer, 2);
+            worst_block = worst_block.max(t0.elapsed().as_secs_f64());
+        }
+        let factor = started.elapsed().as_secs_f64() / 6.0;
+        eprintln!(
+            "coupled tutti: ~{} voices/chord, {:.1}% of realtime, worst block \
+             {:.2} ms of {:.2} ms",
+            voices_started / 3,
+            factor * 100.0,
+            worst_block * 1000.0,
+            block as f64 / 48.0
+        );
+        if !cfg!(debug_assertions) {
+            assert!(
+                factor < 0.7,
+                "coupled tutti not realtime-safe: {:.0}%",
+                factor * 100.0
+            );
+        }
+    }
+
     /// The reported "awful pop on mass release": releasing a big chord
     /// doubles those voices' cost at once (crossfade = two sinc reads).
     /// The pallet stagger + SIMD must keep every block under budget.

@@ -318,7 +318,15 @@ impl SampledVoice {
         } else {
             current_loop
         };
-        let (mut left, mut right) = table.read(sample, self.position, seam);
+        // During a crossfade the OUTGOING leg fades to zero — linear
+        // interpolation there is inaudible and halves the double-read
+        // cost that made mass releases blow the block budget. The
+        // persistent (incoming) leg keeps full sinc quality.
+        let (mut left, mut right) = if self.phase == SamplePhase::Crossfade {
+            sample.read(self.position)
+        } else {
+            table.read(sample, self.position, seam)
+        };
         let mut advance_position = true;
         match self.phase {
             SamplePhase::Held | SamplePhase::Tail => {}
@@ -477,6 +485,13 @@ pub struct Engine {
     voices: Box<[Voice]>,
     wind: [WindGroup; MAX_WIND_GROUPS],
     reverb: Option<reverb::Reverb>,
+    /// Free voice slots (invariant: index here ⇔ voice is Idle). A mass
+    /// chord used to run 200+ O(2048) scans in one block — that spike
+    /// alone ate the block budget.
+    free_slots: Vec<u16>,
+    /// StopVoice handles batched during the command drain and applied
+    /// in ONE voice pass (mass releases used to scan per handle).
+    stop_batch: Vec<u64>,
     /// Max random pallet-close delay applied to key releases, frames.
     release_stagger_frames: f32,
     /// Limiter envelope: the current tracked bus peak (decaying).
@@ -502,6 +517,8 @@ impl Engine {
             voices: vec![Voice::Idle; MAX_VOICES].into_boxed_slice(),
             wind: [WindGroup::default(); MAX_WIND_GROUPS],
             reverb: None,
+            free_slots: (0..MAX_VOICES as u16).rev().collect(),
+            stop_batch: Vec::with_capacity(MAX_VOICES),
             release_stagger_frames: 0.008 * sample_rate,
             limiter_envelope: 0.0,
             limiter_release: (-1.0 / (LIMITER_RELEASE_SECONDS * sample_rate)).exp(),
@@ -521,6 +538,36 @@ impl Engine {
     pub fn process(&mut self, buffer: &mut [f32], channels: usize) {
         while let Ok(command) = self.commands.pop() {
             self.apply(command);
+        }
+        // Apply the block's key releases in ONE pass over the pool
+        // (per-handle scans made mass releases O(handles × voices) —
+        // the measured 5 ms spike behind the release pops).
+        if !self.stop_batch.is_empty() {
+            self.stop_batch.sort_unstable();
+            let per_ms = self.sample_rate / 1000.0;
+            // Big releases spread wider (real tuttis do too): scale the
+            // pallet stagger with the batch so crossfades don't all
+            // land in the same two blocks.
+            let batch_scale = 1.0 + self.stop_batch.len() as f32 / 64.0;
+            let max_stagger =
+                (self.release_stagger_frames * batch_scale).min(0.025 * self.sample_rate);
+            for voice in self.voices.iter_mut() {
+                if let Voice::Sampled(sampled) = voice {
+                    if self.stop_batch.binary_search(&sampled.handle).is_ok() {
+                        let age_ms = (sampled.age_frames as f32 / per_ms) as u32;
+                        if sampled.phase == SamplePhase::Held
+                            && sampled.pending_release.is_none()
+                        {
+                            let delay = (wind::xorshift_unit(&mut sampled.rng)
+                                * max_stagger) as u16;
+                            sampled.pending_release = Some((delay, age_ms));
+                        } else if let Some(sample) = self.bank.get(sampled.sample) {
+                            sampled.release(sample, age_ms);
+                        }
+                    }
+                }
+            }
+            self.stop_batch.clear();
         }
 
         buffer.fill(0.0);
@@ -587,6 +634,7 @@ impl Engine {
             bank,
             sinc,
             wind,
+            free_slots,
             tone_attack_step,
             tone_release_step,
             crossfade_step,
@@ -595,7 +643,8 @@ impl Engine {
             ..
         } = self;
 
-        for voice in voices.iter_mut() {
+        for index in 0..voices.len() {
+            let voice = &mut voices[index];
             match voice {
                 Voice::Idle => {}
                 Voice::Tone(tone) => {
@@ -603,6 +652,7 @@ impl Engine {
                         let value = tone.tick(*tone_attack_step, *tone_release_step);
                         if tone.stage == ToneStage::Idle {
                             *voice = Voice::Idle;
+                            free_slots.push(index as u16);
                             break;
                         }
                         mix_frame(
@@ -616,6 +666,7 @@ impl Engine {
                 Voice::Sampled(sampled) => {
                     let Some(sample) = bank.get(sampled.sample) else {
                         *voice = Voice::Idle;
+                        free_slots.push(index as u16);
                         continue;
                     };
                     let chest = &wind[sampled.group as usize];
@@ -666,6 +717,7 @@ impl Engine {
                                 }
                                 None => {
                                     *voice = Voice::Idle;
+                                    free_slots.push(index as u16);
                                     break;
                                 }
                             }
@@ -706,6 +758,7 @@ impl Engine {
                             }
                             None => {
                                 *voice = Voice::Idle;
+                                free_slots.push(index as u16);
                                 break;
                             }
                         }
@@ -752,7 +805,7 @@ impl Engine {
                 if self.bank.get(sample).is_none() || !(rate > 0.0) {
                     return;
                 }
-                if let Some(slot) = self.free_slot() {
+                if let Some(slot) = self.allocate_slot() {
                     self.voices[slot] = Voice::Sampled(SampledVoice {
                         handle,
                         sample,
@@ -794,24 +847,10 @@ impl Engine {
                 }
             }
             Command::StopVoice { handle } => {
-                let per_ms = self.sample_rate / 1000.0;
-                // Pallet spread: random per voice, up to the configured max.
-                let max_stagger = self.release_stagger_frames;
-                for voice in self.voices.iter_mut() {
-                    if let Voice::Sampled(sampled) = voice {
-                        if sampled.handle == handle {
-                            let age_ms = (sampled.age_frames as f32 / per_ms) as u32;
-                            if sampled.phase == SamplePhase::Held
-                                && sampled.pending_release.is_none()
-                            {
-                                let delay = (wind::xorshift_unit(&mut sampled.rng)
-                                    * max_stagger) as u16;
-                                sampled.pending_release = Some((delay, age_ms));
-                            } else if let Some(sample) = self.bank.get(sampled.sample) {
-                                sampled.release(sample, age_ms);
-                            }
-                        }
-                    }
+                // Batched: applied in one pool pass at the top of the
+                // next process() (same block — commands drain first).
+                if self.stop_batch.len() < self.stop_batch.capacity() {
+                    self.stop_batch.push(handle);
                 }
             }
             Command::KillVoice { handle } => {
@@ -825,7 +864,7 @@ impl Engine {
                 }
             }
             Command::NoteOn { key, freq_hz } => {
-                if let Some(slot) = self.free_slot() {
+                if let Some(slot) = self.allocate_slot() {
                     self.voices[slot] = Voice::Tone(ToneVoice {
                         key,
                         phase: 0.0,
@@ -897,22 +936,18 @@ impl Engine {
             .unwrap_or(1.0)
     }
 
-    /// An idle slot, or one already on its way out (tail/fade) to steal.
-    fn free_slot(&self) -> Option<usize> {
-        let mut dying = None;
-        for (index, voice) in self.voices.iter().enumerate() {
-            match voice {
-                Voice::Idle => return Some(index),
-                Voice::Sampled(s)
-                    if dying.is_none()
-                        && matches!(s.phase, SamplePhase::Tail | SamplePhase::FadeOut) =>
-                {
-                    dying = Some(index)
-                }
-                _ => {}
-            }
+    /// A free slot in O(1); with the pool exhausted, steal a voice
+    /// already on its way out (rare — the tail budget keeps headroom).
+    fn allocate_slot(&mut self) -> Option<usize> {
+        if let Some(index) = self.free_slots.pop() {
+            return Some(index as usize);
         }
-        dying
+        self.voices.iter().position(|voice| {
+            matches!(
+                voice,
+                Voice::Sampled(s) if matches!(s.phase, SamplePhase::Tail | SamplePhase::FadeOut)
+            )
+        })
     }
 }
 
@@ -1470,6 +1505,48 @@ mod tests {
             tenuto > 0.9,
             "tenuto should use the 1.5 s release, rang for {tenuto:.2} s"
         );
+    }
+
+    #[test]
+    fn alignment_ignores_strong_second_harmonics() {
+        // A principal-like pipe: 2nd harmonic nearly as strong as the
+        // fundamental. Correlation-argmax alignment could lock a half
+        // period off here (fundamental cancels, octave reinforces — a
+        // missing-fundamental strike, i.e. a bell). Quadrature must
+        // track the FUNDAMENTAL phase.
+        let period = 480usize;
+        let omega = std::f64::consts::TAU / period as f64;
+        let loop_start = 1913u64; // deliberately not phase-aligned
+        let loop_end = loop_start + (period * 40) as u64;
+        let frames = loop_end + (period * 20) as u64;
+        let data: Vec<f32> = (0..frames)
+            .map(|n| {
+                let envelope = if n >= loop_end {
+                    1.0 - 0.5 * (n - loop_end) as f64 / (frames - loop_end) as f64
+                } else {
+                    1.0
+                };
+                let t = n as f64;
+                (envelope * ((omega * t).sin() + 0.9 * (2.0 * omega * t).sin() * 0.9)) as f32
+            })
+            .collect();
+        let mut sample =
+            Sample::new(data, 1, 48000.0, Some((loop_start, loop_end)), loop_end).expect("valid");
+        sample.align_release(48000.0 / period as f32);
+        let alignment = sample.release_alignment().expect("alignment built");
+        for probe in 0..16 {
+            let position = loop_start as f64 + probe as f64 * 1123.7;
+            let target = alignment.target(position, loop_start);
+            let source_phase = (position / period as f64).fract();
+            let target_phase = (target as f64 / period as f64).fract();
+            let mut delta = (source_phase - target_phase).abs();
+            delta = delta.min(1.0 - delta);
+            assert!(
+                delta < 2.0 / bank::ALIGNMENT_BUCKETS as f64 + 0.01,
+                "position {position}: fundamental phase {source_phase:.3} vs \
+                 {target_phase:.3} (delta {delta:.3}) — octave ghost splice"
+            );
+        }
     }
 
     #[test]
