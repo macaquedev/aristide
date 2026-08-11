@@ -911,7 +911,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn demo_sidecar_selects_plein_jeu_and_maps_channels() {
+    fn demo_sidecar_draws_full_organ_and_maps_channels() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../testsets/grandorgue-demo/demo.organ");
         if !path.is_file() {
@@ -926,17 +926,18 @@ mod tests {
             .expect("sidecar present");
 
         let drawn = choose_registration(&organ, &sidecar.registration.default);
+        // The sidecar default is "*": the full organ, every stop drawn.
+        assert_eq!(drawn.len(), organ.stops.len(), "every stop drawn");
+
+        // A named pattern still narrows to exactly what it says.
+        let plein = choose_registration(&organ, &["plein jeu".into()]);
         let names: Vec<&str> = organ
             .stops
             .iter()
-            .filter(|s| drawn.contains(&s.id))
+            .filter(|s| plein.contains(&s.id))
             .map(|s| s.name.as_str())
             .collect();
-        assert_eq!(
-            names,
-            ["Montre 8'", "Bourdon 16'", "Prestant 4'", "Plein jeu III"],
-            "plein jeu registration, no drawstop noises"
-        );
+        assert_eq!(names, ["Plein jeu III"], "no drawstop noises");
 
         let map = resolve_channel_map(&organ, &sidecar.midi.channels);
         // First Manual, Second Manual, Pedal — Great on channel 0.

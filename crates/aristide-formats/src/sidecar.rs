@@ -249,6 +249,9 @@ pub fn load_for(set: &Path) -> Result<Option<Sidecar>, SidecarError> {
 /// `pattern`. Exact (case-insensitive) matches win outright; otherwise
 /// every substring match tied for the shortest name is selected.
 pub fn match_names(names: &[&str], pattern: &str) -> Vec<usize> {
+    if pattern == "*" {
+        return (0..names.len()).collect();
+    }
     let pattern = pattern.to_lowercase();
     let lowered: Vec<String> = names.iter().map(|n| n.to_lowercase()).collect();
     let exact: Vec<usize> = (0..names.len())
