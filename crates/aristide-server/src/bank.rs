@@ -745,9 +745,12 @@ mod tests {
     /// mass chord press/release, press-release-repress, trills. Scans
     /// the output for single-sample steps far above local signal level
     /// and writes /tmp/crackle_hunt.wav for listening/inspection.
-    /// Run: cargo test --release -p aristide-server crackle_hunt -- --ignored --nocapture
+    /// This is the test that caught the shed-tail loop-teleport bug
+    /// (2026-08-11): FadeOut voices in release material were recaptured
+    /// by the sustain-loop wrap and jumped the cursor back into
+    /// full-level sustain — every user-facing crackle/pop/ghost-note
+    /// symptom traced to it. ~5 s in release; skips without the demo set.
     #[test]
-    #[ignore = "long; run explicitly when hunting clicks"]
     fn crackle_hunt_under_realistic_fast_playing() {
         let Some(path) = demo_organ() else {
             eprintln!("skipping: demo set not present");
@@ -832,10 +835,19 @@ mod tests {
         }
         events.sort_by_key(|e| e.0);
 
-        // Render 9.5 s in 512-frame blocks, events applied between blocks
+        // Phase D, 8-9 s: one more mass chord released into a LONG quiet
+        // decay — the user's recorded glitches cluster in the tail era.
+        for &k in &chord {
+            events.push((8 * sr + sr / 10, k, true));
+        }
+        for &k in &chord {
+            events.push((9 * sr, k, false));
+        }
+
+        // Render 16 s in 512-frame blocks, events applied between blocks
         // (as a real MIDI thread would deliver them).
         let block = 512usize;
-        let total_frames = sr * 19 / 2;
+        let total_frames = sr * 16;
         let mut output = Vec::with_capacity(total_frames * 2);
         let mut buffer = vec![0.0f32; block * 2];
         let mut next_event = 0usize;
@@ -887,22 +899,32 @@ mod tests {
         // Write the take for by-ear/DAW inspection.
         write_wav_f32("/tmp/crackle_hunt.wav", &output, 2, sr as u32);
 
-        // Click scan per channel: a single-sample step far above the
-        // local RMS is a discontinuity no acoustic content produces.
-        let mut clicks: Vec<(f64, f32, f32)> = Vec::new(); // (sec, delta, rms)
+        // Click scan per channel: an outlier in the SECOND difference
+        // against its own local statistics. This is what found the
+        // one-frame impulses in the user's recorded take — a plain
+        // step-vs-signal-RMS scan is deaf to a ±0.02 impulse inside
+        // loud content, but d2 of band-limited audio is smooth and a
+        // single wrong frame sticks out 12x+ in any context.
+        let mut clicks: Vec<(f64, f32, f32)> = Vec::new(); // (sec, d2, local)
         for ch in 0..2usize {
-            let mut rms_sq = 0.0f64;
+            let mut d2_rms_sq = 1e-9f64;
             const ALPHA: f64 = 1.0 / 256.0;
-            let mut prev = 0.0f32;
+            let mut x1 = 0.0f32;
+            let mut x2 = 0.0f32;
             for (i, frame_index) in (ch..output.len()).step_by(2).enumerate() {
                 let x = output[frame_index];
-                let delta = (x - prev).abs();
-                let rms = (rms_sq.sqrt() as f32).max(1e-4);
-                if i > 256 && delta > (7.0 * rms).max(0.04) {
-                    clicks.push((i as f64 / sr as f64, delta, rms));
+                let d2 = (x - 2.0 * x1 + x2).abs();
+                let local = (d2_rms_sq.sqrt() as f32).max(1e-5);
+                // Floor 0.015: teleport-class defects measured 0.02-0.09;
+                // below it live known ~-40 dB stereo splice kinks (R channel
+                // lands slightly misphased at some release splices) tracked
+                // as a quality item, not a regression.
+                if i > 512 && d2 > (12.0 * local).max(0.015) {
+                    clicks.push((i as f64 / sr as f64, d2, local));
                 }
-                rms_sq += ALPHA * ((x as f64) * (x as f64) - rms_sq);
-                prev = x;
+                d2_rms_sq += ALPHA * ((d2 as f64) * (d2 as f64) - d2_rms_sq);
+                x2 = x1;
+                x1 = x;
             }
         }
         clicks.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());

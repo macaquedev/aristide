@@ -246,6 +246,12 @@ struct SampledVoice {
     /// spreads the crossfade CPU spike that a mass release causes.
     pending_release: Option<(u16, u32)>,
     phase: SamplePhase,
+    /// The cursor has left the sustain loop for release material (set at
+    /// crossfade completion). Loop wrapping and seam-tap reads must never
+    /// apply again: a shed/killed tail whose phase is FadeOut is NOT in
+    /// the loop, and wrapping it teleports the cursor back into
+    /// full-level sustain — the click/ghost-note bug found 2026-08-11.
+    past_loop: bool,
 }
 
 /// Per-block invariants of a sampled voice's render loop, hoisted out
@@ -316,7 +322,9 @@ impl SampledVoice {
             SamplePhase::Held => !looping && self.position >= last,
             SamplePhase::Crossfade => self.release_position >= tail_last,
             SamplePhase::Tail => self.position >= last,
-            SamplePhase::FadeOut => self.amplitude <= 0.0 || (!looping && self.position >= last),
+            SamplePhase::FadeOut => {
+                self.amplitude <= 0.0 || ((!looping || self.past_loop) && self.position >= last)
+            }
         };
         if ended {
             return None;
@@ -324,7 +332,7 @@ impl SampledVoice {
 
         // Cursors still circling the sustain loop wrap their kernel taps
         // across the seam; tail reads clamp at the sample edges.
-        let seam = if self.phase == SamplePhase::Tail {
+        let seam = if self.phase == SamplePhase::Tail || self.past_loop {
             None
         } else {
             current_loop
@@ -333,7 +341,12 @@ impl SampledVoice {
         // interpolation there is inaudible and halves the double-read
         // cost that made mass releases blow the block budget. The
         // persistent (incoming) leg keeps full sinc quality.
-        let (mut left, mut right) = if ctx.lite || self.phase == SamplePhase::Crossfade {
+        // The outgoing crossfade leg once dropped to linear interpolation
+        // to halve the double-read cost, but the sinc→linear switch at
+        // release() put a ~-46 dB kink at the START of every splice — an
+        // audible tick on exposed releases. Keep full quality; the pallet
+        // stagger already spreads the crossfade CPU spike.
+        let (mut left, mut right) = if ctx.lite {
             sample.read(self.position)
         } else {
             table.read(sample, self.position, seam)
@@ -367,6 +380,7 @@ impl SampledVoice {
                         self.loop_index = 0;
                     }
                     self.phase = SamplePhase::Tail;
+                    self.past_loop = true;
                     advance_position = false;
                 }
             }
@@ -388,7 +402,7 @@ impl SampledVoice {
             // cursor has left it for the release material. On each pass
             // a fresh loop is drawn at random (multi-loop sets), which
             // decorrelates repetition.
-            if self.phase != SamplePhase::Tail {
+            if self.phase != SamplePhase::Tail && !self.past_loop {
                 if let Some((start, end)) = current_loop {
                     if self.position >= end as f64 {
                         // Wrap to THIS loop's own start — the only splice
@@ -907,6 +921,7 @@ impl Engine {
                         loop_index: 0,
                         external_release: None,
                         phase: SamplePhase::Held,
+                        past_loop: false,
                     });
                 }
             }
