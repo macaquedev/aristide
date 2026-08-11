@@ -736,4 +736,219 @@ mod tests {
         let energy: f32 = buffer.iter().map(|v| v * v).sum();
         assert_eq!(energy, 0.0, "voices should have ended after release");
     }
+
+    /// The user's machine, numerically: 44.1 kHz device rate, full
+    /// Great+Swell coupled at 8'+16', PRODUCTION release stagger (every
+    /// other cleanliness test zeroes it — the staggered
+    /// pending_release→release() mid-block path has never been
+    /// click-scanned), and a realistic playing schedule: fast spam,
+    /// mass chord press/release, press-release-repress, trills. Scans
+    /// the output for single-sample steps far above local signal level
+    /// and writes /tmp/crackle_hunt.wav for listening/inspection.
+    /// Run: cargo test --release -p aristide-server crackle_hunt -- --ignored --nocapture
+    #[test]
+    #[ignore = "long; run explicitly when hunting clicks"]
+    fn crackle_hunt_under_realistic_fast_playing() {
+        let Some(path) = demo_organ() else {
+            eprintln!("skipping: demo set not present");
+            return;
+        };
+        let organ = aristide_formats::grandorgue::load(&path)
+            .expect("demo set loads")
+            .organ;
+        let device_rate = 44_100.0f32;
+        let loaded = build(&organ, device_rate).expect("bank builds");
+        let great = organ.manuals[1].id;
+        let swell = organ.manuals[2].id;
+        let drawn: Vec<_> = organ
+            .stops
+            .iter()
+            .filter(|s| {
+                (s.manual == great || s.manual == swell) && !s.name.contains("noise")
+            })
+            .map(|s| s.id)
+            .collect();
+        let couplers: Vec<usize> = organ
+            .couplers
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.from_manual == great && c.to_manual == swell)
+            .map(|(i, _)| i)
+            .collect();
+        let mut console =
+            crate::console::Console::new(organ, loaded.specs, drawn, Vec::new());
+        for &c in &couplers {
+            console.set_coupler(c, true);
+        }
+        let _ = loaded.bank.pre_fault();
+        let (mut engine, mut handle) =
+            aristide_engine::Engine::new(device_rate, std::sync::Arc::new(loaded.bank));
+        // NOTE: release stagger stays at the production default.
+
+        // Deterministic schedule of (frame, key, on) events.
+        let sr = device_rate as usize;
+        let mut events: Vec<(usize, u8, bool)> = Vec::new();
+        let mut rng = 0xA5F1_5EEDu32;
+        let mut rand = move |n: usize| {
+            rng ^= rng << 13;
+            rng ^= rng >> 17;
+            rng ^= rng << 5;
+            (rng as usize) % n
+        };
+        let spam_keys = [48u8, 50, 52, 53, 55, 57, 59, 60, 62, 64, 65, 67, 69, 72];
+        // Phase A, 0-3 s: fast spam — a new key every 30-90 ms, each held 60-200 ms.
+        let mut t = sr / 10;
+        while t < 3 * sr {
+            let key = spam_keys[rand(spam_keys.len())];
+            let hold = sr * (60 + rand(140)) / 1000;
+            events.push((t, key, true));
+            events.push((t + hold, key, false));
+            t += sr * (30 + rand(60)) / 1000;
+        }
+        // Phase B, 3-6 s: mass F-major chord, hold, release all at once,
+        // then 150 ms later press one coupler-sharing key (his exact
+        // press-release-repress report), twice.
+        let chord = [53u8, 57, 60, 65, 69, 72];
+        for round in 0..2usize {
+            let base = 3 * sr + round * (3 * sr / 2);
+            for &k in &chord {
+                events.push((base, k, true));
+            }
+            for &k in &chord {
+                events.push((base + sr * 4 / 5, k, false));
+            }
+            events.push((base + sr * 4 / 5 + sr * 15 / 100, 67, true));
+            events.push((base + sr * 4 / 5 + sr * 45 / 100, 67, false));
+        }
+        // Phase C, 6-8 s: trills — alternate two keys every 40 ms.
+        let mut t = 6 * sr;
+        let mut which = false;
+        while t < 8 * sr {
+            let key = if which { 60 } else { 62 };
+            events.push((t, key, true));
+            events.push((t + sr * 35 / 1000, key, false));
+            which = !which;
+            t += sr * 40 / 1000;
+        }
+        events.sort_by_key(|e| e.0);
+
+        // Render 9.5 s in 512-frame blocks, events applied between blocks
+        // (as a real MIDI thread would deliver them).
+        let block = 512usize;
+        let total_frames = sr * 19 / 2;
+        let mut output = Vec::with_capacity(total_frames * 2);
+        let mut buffer = vec![0.0f32; block * 2];
+        let mut next_event = 0usize;
+        let mut frame = 0usize;
+        let mut limited_blocks = 0usize;
+        let mut total_blocks = 0usize;
+        let mut worst_reduction_db = 0.0f32;
+        while frame < total_frames {
+            while next_event < events.len() && events[next_event].0 < frame + block {
+                let (_, key, on) = events[next_event];
+                next_event += 1;
+                if on {
+                    let (starts, retriggered) = console.note_on(0, key);
+                    for h in retriggered {
+                        assert!(handle.send(aristide_engine::Command::StopVoice { handle: h }));
+                    }
+                    for start in starts {
+                        assert!(handle.send(aristide_engine::Command::StartVoice {
+                            handle: start.handle,
+                            sample: start.spec.sample,
+                            rate: start.spec.rate,
+                            gain: start.spec.gain,
+                            group: start.spec.group,
+                            wind_weight: start.spec.wind_weight,
+                            brightness: start.spec.brightness,
+                        }));
+                    }
+                } else {
+                    for h in console.note_off(0, key) {
+                        assert!(handle.send(aristide_engine::Command::StopVoice { handle: h }));
+                    }
+                }
+            }
+            engine.process(&mut buffer, 2);
+            output.extend_from_slice(&buffer);
+            let reduction = engine.limiter_gain_db();
+            if reduction < 0.0 {
+                limited_blocks += 1;
+                worst_reduction_db = worst_reduction_db.min(reduction);
+            }
+            total_blocks += 1;
+            frame += block;
+        }
+        println!(
+            "limiter: engaged in {limited_blocks}/{total_blocks} blocks, \
+             worst reduction {worst_reduction_db:.1} dB"
+        );
+
+        // Write the take for by-ear/DAW inspection.
+        write_wav_f32("/tmp/crackle_hunt.wav", &output, 2, sr as u32);
+
+        // Click scan per channel: a single-sample step far above the
+        // local RMS is a discontinuity no acoustic content produces.
+        let mut clicks: Vec<(f64, f32, f32)> = Vec::new(); // (sec, delta, rms)
+        for ch in 0..2usize {
+            let mut rms_sq = 0.0f64;
+            const ALPHA: f64 = 1.0 / 256.0;
+            let mut prev = 0.0f32;
+            for (i, frame_index) in (ch..output.len()).step_by(2).enumerate() {
+                let x = output[frame_index];
+                let delta = (x - prev).abs();
+                let rms = (rms_sq.sqrt() as f32).max(1e-4);
+                if i > 256 && delta > (7.0 * rms).max(0.04) {
+                    clicks.push((i as f64 / sr as f64, delta, rms));
+                }
+                rms_sq += ALPHA * ((x as f64) * (x as f64) - rms_sq);
+                prev = x;
+            }
+        }
+        clicks.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        clicks.dedup_by(|a, b| (a.0 - b.0).abs() < 0.005);
+        println!("clicks found: {}", clicks.len());
+        for (sec, delta, rms) in clicks.iter().take(25) {
+            let near: Vec<String> = events
+                .iter()
+                .filter(|e| (e.0 as f64 / sr as f64 - sec).abs() < 0.03)
+                .map(|e| format!("{}{}", if e.2 { "+" } else { "-" }, e.1))
+                .collect();
+            println!(
+                "  t={sec:.3}s step={delta:.4} rms={rms:.4} events±30ms={}",
+                near.join(",")
+            );
+        }
+        assert!(
+            clicks.is_empty(),
+            "{} discontinuities in engine output (see /tmp/crackle_hunt.wav)",
+            clicks.len()
+        );
+    }
+
+    fn write_wav_f32(path: &str, samples: &[f32], channels: u16, rate: u32) {
+        use std::io::Write as _;
+        let mut f = std::fs::File::create(path).expect("wav create");
+        let data_len = (samples.len() * 4) as u32;
+        let byte_rate = rate * channels as u32 * 4;
+        let mut header = Vec::with_capacity(44);
+        header.extend_from_slice(b"RIFF");
+        header.extend_from_slice(&(36 + data_len).to_le_bytes());
+        header.extend_from_slice(b"WAVEfmt ");
+        header.extend_from_slice(&16u32.to_le_bytes());
+        header.extend_from_slice(&3u16.to_le_bytes()); // IEEE float
+        header.extend_from_slice(&channels.to_le_bytes());
+        header.extend_from_slice(&rate.to_le_bytes());
+        header.extend_from_slice(&byte_rate.to_le_bytes());
+        header.extend_from_slice(&(channels * 4).to_le_bytes());
+        header.extend_from_slice(&32u16.to_le_bytes());
+        header.extend_from_slice(b"data");
+        header.extend_from_slice(&data_len.to_le_bytes());
+        f.write_all(&header).expect("wav header");
+        let mut bytes = Vec::with_capacity(samples.len() * 4);
+        for s in samples {
+            bytes.extend_from_slice(&s.to_le_bytes());
+        }
+        f.write_all(&bytes).expect("wav data");
+    }
 }

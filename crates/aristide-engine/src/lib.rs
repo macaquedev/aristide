@@ -1023,6 +1023,16 @@ impl Engine {
     /// Diagnostics: validate the free-slot invariant (every listed slot
     /// is Idle, no duplicates) — slot corruption resurrects old voices.
     /// Not for the audio thread; used by tests and debug tooling.
+    /// Current limiter gain in dB (0 = passthrough, negative = actively
+    /// reducing). Diagnostic + meter feed; safe to read between blocks.
+    pub fn limiter_gain_db(&self) -> f32 {
+        if self.limiter_envelope > LIMITER_CEILING {
+            20.0 * (LIMITER_CEILING / self.limiter_envelope).log10()
+        } else {
+            0.0
+        }
+    }
+
     pub fn assert_slot_invariants(&self) {
         let mut seen = std::collections::HashSet::new();
         for &slot in &self.free_slots {
