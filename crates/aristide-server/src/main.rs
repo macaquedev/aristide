@@ -28,6 +28,8 @@ struct Args {
     buffer_frames: u32,
     /// Record the engine's exact output to this WAV file (diagnostics).
     record: Option<PathBuf>,
+    /// Safe mode: GO-grade minimal DSP, for isolating environment issues.
+    safe: bool,
 }
 
 fn parse_args() -> Result<Args> {
@@ -39,6 +41,7 @@ fn parse_args() -> Result<Args> {
         http_port: 9669,
         buffer_frames: 256,
         record: None,
+        safe: false,
     };
     let mut iter = std::env::args().skip(1);
     while let Some(arg) = iter.next() {
@@ -67,6 +70,7 @@ fn parse_args() -> Result<Args> {
                     .parse()
                     .context("--http-port must be a port number")?
             }
+            "--safe" => args.safe = true,
             "--record" => {
                 args.record = Some(PathBuf::from(
                     iter.next().context("--record needs a wav path")?,
@@ -461,12 +465,23 @@ fn main() -> Result<()> {
     // Recording tap: engine output -> lock-free ring -> writer thread.
     let mut tap_consumer = None;
     let record_requested = args.record.is_some();
+    let safe_mode = args.safe;
+    if safe_mode {
+        tracing::warn!(
+            "SAFE MODE: linear interpolation, no wind/tremulant/brightness — \
+             diagnostic quality floor (GO-grade). If audio still glitches \
+             here, the problem is the environment, not the engine's DSP."
+        );
+    }
 
     let build_stream = |buffer_size: cpal::BufferSize,
                         tap_out: &mut Option<rtrb::Consumer<f32>>|
      -> Result<(cpal::Stream, EngineHandle)> {
         let (mut engine, handle) = Engine::new(sample_rate, Arc::clone(&bank));
         engine.set_reverb(reverb_ir.clone(), reverb_wet);
+        if safe_mode {
+            engine.set_lite(true);
+        }
         if record_requested {
             // ~90 s of stereo headroom; the writer drains far faster.
             let (producer, consumer) = rtrb::RingBuffer::new(1 << 23);

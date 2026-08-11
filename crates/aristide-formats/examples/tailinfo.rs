@@ -30,6 +30,14 @@ fn main() -> anyhow::Result<()> {
             );
         }
         println!("  cues {:?}", info.cue_points);
+        // The very end of the file: a nonzero level here means every
+        // voice HARD-CUTS to silence at EOF — a click per note.
+        let end_window = 512.min(frames as usize);
+        let mut end_peak = 0.0f32;
+        for f in (frames as usize - end_window)..frames as usize {
+            end_peak = end_peak.max(file.samples[f * ch].abs());
+        }
+        println!("  EOF: last-512-frame peak {end_peak:.5}");
         if let Some(l) = info.loops.first() {
             let tail = l.end + 1;
             println!(

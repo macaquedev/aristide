@@ -231,6 +231,11 @@ struct SampledVoice {
     loop_index: u8,
     /// Separate release sample being crossfaded into, if any.
     external_release: Option<u32>,
+    /// Per-frame gain decay during Crossfade/Tail (1.0 = none). GO's
+    /// staccato model: a short note hasn't formed the room's reverb
+    /// yet, so its recorded (fully-reverberant) release tail is decayed
+    /// over seconds to compensate.
+    tail_decay: f32,
     /// FadeOut speed multiplier on the kill ramp: 1.0 = 15 ms (silent
     /// noise voices, panic), 0.1 = ~150 ms (polyphony shedding, where
     /// abruptness would be audible).
@@ -249,6 +254,7 @@ struct SampledVoice {
 /// Must be recomputed when the voice changes sample or loop mid-block.
 #[derive(Clone, Copy)]
 struct VoiceBlockContext {
+    lite: bool,
     rate: f64,
     last: f64,
     tail_last: f64,
@@ -266,6 +272,7 @@ impl SampledVoice {
     ) -> VoiceBlockContext {
         let current_loop = sample.loop_at(self.loop_index as usize);
         VoiceBlockContext {
+            lite: false,
             rate: self.rate * rate_scale,
             last: (sample.frames() - 1) as f64,
             tail_last: (external.unwrap_or(sample).frames() - 1) as f64,
@@ -326,7 +333,7 @@ impl SampledVoice {
         // interpolation there is inaudible and halves the double-read
         // cost that made mass releases blow the block budget. The
         // persistent (incoming) leg keeps full sinc quality.
-        let (mut left, mut right) = if self.phase == SamplePhase::Crossfade {
+        let (mut left, mut right) = if ctx.lite || self.phase == SamplePhase::Crossfade {
             sample.read(self.position)
         } else {
             table.read(sample, self.position, seam)
@@ -335,7 +342,11 @@ impl SampledVoice {
         match self.phase {
             SamplePhase::Held | SamplePhase::Tail => {}
             SamplePhase::Crossfade => {
-                let (tail_l, tail_r) = table.read(tail_sample, self.release_position, None);
+                let (tail_l, tail_r) = if ctx.lite {
+                    tail_sample.read(self.release_position)
+                } else {
+                    table.read(tail_sample, self.release_position, None)
+                };
                 // Raised-cosine-shaped blend (smoothstep ≈ it, no trig):
                 // linear fades dip audibly on the uncorrelated noise
                 // floor (Appleton 2019).
@@ -366,6 +377,11 @@ impl SampledVoice {
             }
         }
 
+        if matches!(self.phase, SamplePhase::Crossfade | SamplePhase::Tail)
+            && self.tail_decay < 1.0
+        {
+            self.gain *= self.tail_decay;
+        }
         if advance_position {
             self.position += rate;
             // Only cursors still circling the sustain loop wrap; a Tail
@@ -447,15 +463,32 @@ impl SampledVoice {
                 // Level match: scale the tail to continue at the voice's
                 // current loudness (early releases are quieter than the
                 // recorded sustain — unscaled tails strike like a bell).
+                // Floor at 0.2 like GO: a fully-silent-entry release
+                // sounds MORE artificial than a slightly loud one.
                 // Exception: a near-silent loop (control-noise samples:
                 // thump → silent loop → thump tail) means the tail is
                 // MEANT to be louder — play it as recorded.
                 let reference = sample.tail_reference_level();
                 self.tail_gain = if reference > 1e-5 && self.envelope > 0.02 * reference {
-                    (self.envelope / reference).clamp(0.05, 1.1)
+                    (self.envelope / reference).clamp(0.2, 1.1)
                 } else {
                     1.0
                 };
+                // GO's staccato model: notes shorter than the room's
+                // build-up time get their (fully reverberant) recorded
+                // tail decayed over seconds — staccato in a cathedral
+                // doesn't ring like a held chord. Build-up time 100–350
+                // ms scaled by tail length; decay span grows with note
+                // brevity (GO: 200 ms – 6 s).
+                let tail_seconds =
+                    (sample.frames().saturating_sub(tail)) as f32 / sample.sample_rate_hz();
+                let full_reverb_ms = (60.0 * tail_seconds + 40.0).clamp(100.0, 350.0);
+                if (age_ms as f32) < full_reverb_ms {
+                    let decay_ms = full_reverb_ms + 6000.0 * age_ms as f32 / full_reverb_ms;
+                    // −60 dB across decay_ms, expressed per frame.
+                    let frames = decay_ms * 0.001 * sample.sample_rate_hz();
+                    self.tail_decay = (0.001f32).powf(1.0 / frames.max(1.0));
+                }
                 self.fade = 0.0;
                 self.phase = SamplePhase::Crossfade;
             }
@@ -489,6 +522,11 @@ pub struct Engine {
     voices: Box<[Voice]>,
     wind: [WindGroup; MAX_WIND_GROUPS],
     reverb: Option<reverb::Reverb>,
+    /// Diagnostic "safe mode": linear interpolation, no wind/tremulant/
+    /// brightness/flow-noise — per-voice cost at or below GrandOrgue's.
+    /// If audio still glitches in this mode, the environment (not the
+    /// engine's DSP weight) is the cause.
+    lite: bool,
     /// Diagnostic tap: every output sample is offered to this ring
     /// (lock-free push, silently dropped when full) so the control side
     /// can record the engine's EXACT output — the decisive test for
@@ -526,6 +564,7 @@ impl Engine {
             voices: vec![Voice::Idle; MAX_VOICES].into_boxed_slice(),
             wind: [WindGroup::default(); MAX_WIND_GROUPS],
             reverb: None,
+            lite: false,
             tap: None,
             free_slots: (0..MAX_VOICES as u16).rev().collect(),
             stop_batch: Vec::with_capacity(MAX_VOICES),
@@ -641,10 +680,13 @@ impl Engine {
             }
         }
         let dt = frames as f32 / self.sample_rate;
-        for (group, wind) in self.wind.iter_mut().enumerate() {
-            wind.step(demand[group], dt);
+        if !self.lite {
+            for (group, wind) in self.wind.iter_mut().enumerate() {
+                wind.step(demand[group], dt);
+            }
         }
 
+        let lite = self.lite;
         // Split borrows: voices mutably, bank/read-only params shared.
         let Engine {
             voices,
@@ -693,19 +735,26 @@ impl Engine {
                     // factors (a powf per voice per block would also be
                     // fine, but ±2 % deviations are firmly linear).
                     let mut deviation = 0.0;
-                    if params.flow_noise > 0.0 && sampled.wind_weight > 0.0 {
+                    if !lite && params.flow_noise > 0.0 && sampled.wind_weight > 0.0 {
                         sampled
                             .wander
                             .step(dt, params.flow_noise, &mut sampled.rng);
                         deviation = sampled.wander.deviation();
                     }
-                    let rate_scale =
-                        (chest.rate_factor() * (1.0 + params.pitch_exponent * deviation)) as f64;
-                    let gain =
-                        master * chest.gain_factor() * (1.0 + params.gain_exponent * deviation);
-                    let treble = (chest.brightness_factor()
-                        * (1.0 + params.brightness_exponent * deviation))
-                        .clamp(0.25, 2.0);
+                    let (rate_scale, gain, treble) = if lite {
+                        (1.0f64, master, 1.0f32)
+                    } else {
+                        (
+                            (chest.rate_factor() * (1.0 + params.pitch_exponent * deviation))
+                                as f64,
+                            master
+                                * chest.gain_factor()
+                                * (1.0 + params.gain_exponent * deviation),
+                            (chest.brightness_factor()
+                                * (1.0 + params.brightness_exponent * deviation))
+                                .clamp(0.25, 2.0),
+                        )
+                    };
 
                     let tilt_a = sampled.brightness_a;
                     // Bypass the filter while it would do nothing: keeps
@@ -721,6 +770,7 @@ impl Engine {
                     let mut current_external_id = sampled.external_release;
                     let mut external = current_external_id.and_then(|id| bank.get(id));
                     let mut ctx = sampled.block_context(current, external, rate_scale);
+                    ctx.lite = lite;
                     for frame in 0..frames {
                         if sampled.sample != current_id {
                             match bank.get(sampled.sample) {
@@ -731,6 +781,7 @@ impl Engine {
                                     current_external_id = None;
                                     current_loop_index = sampled.loop_index;
                                     ctx = sampled.block_context(current, external, rate_scale);
+                                    ctx.lite = lite;
                                 }
                                 None => {
                                     *voice = Voice::Idle;
@@ -745,6 +796,7 @@ impl Engine {
                             current_external_id = sampled.external_release;
                             external = current_external_id.and_then(|id| bank.get(id));
                             ctx = sampled.block_context(current, external, rate_scale);
+                            ctx.lite = lite;
                         }
                         match sampled.tick(
                             current,
@@ -845,6 +897,7 @@ impl Engine {
                         group: group.min(MAX_WIND_GROUPS as u8 - 1),
                         wind_weight: wind_weight.max(0.0),
                         age_frames: 0,
+                        tail_decay: 1.0,
                         fade_scale: 1.0,
                         pending_release: None,
                         brightness_a: brightness.clamp(0.0, 1.0),
@@ -948,6 +1001,11 @@ impl Engine {
     /// 0 = releases fire on the exact command frame, used by tests).
     pub fn set_release_stagger(&mut self, seconds: f32) {
         self.release_stagger_frames = (seconds.clamp(0.0, 0.05)) * self.sample_rate;
+    }
+
+    /// Enable safe mode (see the `lite` field). Control-side only.
+    pub fn set_lite(&mut self, on: bool) {
+        self.lite = on;
     }
 
     /// Install the diagnostic output tap. Control-side only — call
