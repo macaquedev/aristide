@@ -249,13 +249,19 @@ fn promote_audio_thread_via_rtkit() {
         })
         .unwrap_or(10)
         .clamp(1, 70);
+    // MakeThreadRealtime only promotes threads of the D-Bus caller — and
+    // our caller is dbus-send, a different process (rtkit answers ENOENT:
+    // it looked for our tid inside dbus-send). The WithPID variant names
+    // the target process explicitly; rtkit still checks it belongs to the
+    // same uid, so this stays unprivileged.
     let request = std::process::Command::new("dbus-send")
         .args([
             "--system",
             "--print-reply",
             "--dest=org.freedesktop.RealtimeKit1",
             "/org/freedesktop/RealtimeKit1",
-            "org.freedesktop.RealtimeKit1.MakeThreadRealtime",
+            "org.freedesktop.RealtimeKit1.MakeThreadRealtimeWithPID",
+            &format!("uint64:{}", std::process::id()),
             &format!("uint64:{tid}"),
             &format!("uint32:{max_priority}"),
         ])
