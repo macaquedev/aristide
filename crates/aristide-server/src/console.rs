@@ -41,10 +41,17 @@ pub struct Console {
     /// plays; channels past the end wrap.
     channel_map: Vec<usize>,
     next_handle: u64,
-    /// (manual index, MIDI key) → voices sounding for that key, tagged
-    /// with the stop that started them (so retiring a stop can silence
+    /// (manual index, MIDI key) → pipes held by that key, tagged with
+    /// the stop that engaged them (so retiring a stop can release
     /// them). `percussive` voices are excluded (they stop themselves).
-    sounding: HashMap<(usize, u8), Vec<(StopId, u64)>>,
+    sounding: HashMap<(usize, u8), Vec<(StopId, RankId, u16)>>,
+    /// Each speaking pipe's voice handle and how many holders (keys,
+    /// couplers) currently demand it. A pipe speaks ONCE no matter how
+    /// many routes reach it — starting a second voice on the same pipe
+    /// sums the identical recording coherently (+6 dB), and on release
+    /// the phase aligner makes both tails coherent too: the release
+    /// comes out LOUDER than the chord (the octave-coupled F-major pop).
+    speaking: HashMap<(RankId, u16), (u64, u32)>,
 }
 
 impl Console {
@@ -77,6 +84,7 @@ impl Console {
             channel_map,
             next_handle: 0,
             sounding: HashMap::new(),
+            speaking: HashMap::new(),
         };
         console.classify_noises();
         // Noise stops must never be part of the registration.
@@ -245,13 +253,16 @@ impl Console {
         let Some(manual_index) = self.manual_index(channel) else {
             return (Vec::new(), Vec::new());
         };
-        let retriggered: Vec<u64> = self
+        let mut retriggered = Vec::new();
+        for (_, rank, pipe) in self
             .sounding
             .remove(&(manual_index, key))
             .unwrap_or_default()
-            .into_iter()
-            .map(|(_, handle)| handle)
-            .collect();
+        {
+            if let Some(handle) = self.release_pipe(rank, pipe) {
+                retriggered.push(handle);
+            }
+        }
         let origin = self.organ.manuals[manual_index].id;
         // The transposer shifts which pipes sound, like the console
         // gadget; temperament + concert pitch then retune each pipe.
@@ -282,16 +293,25 @@ impl Console {
                     let Some(spec) = self.specs.get(&(range.rank, pipe)) else {
                         continue;
                     };
-                    let handle = self.next_handle;
-                    self.next_handle += 1;
-                    if !spec.percussive {
-                        held.push((stop.id, handle));
+                    if spec.percussive {
+                        // One-shots (noises) aren't refcounted.
+                        let handle = self.next_handle;
+                        self.next_handle += 1;
+                        starts.push(VoiceStart { handle, spec: *spec });
+                        continue;
                     }
-                    let mut spec = *spec;
-                    if !spec.percussive {
-                        spec.rate *= self.tuning.rate_multiplier(midi_key as u8);
+                    held.push((stop.id, range.rank, pipe));
+                    match self.speaking.get_mut(&(range.rank, pipe)) {
+                        Some((_, holders)) => *holders += 1,
+                        None => {
+                            let handle = self.next_handle;
+                            self.next_handle += 1;
+                            self.speaking.insert((range.rank, pipe), (handle, 1));
+                            let mut spec = *spec;
+                            spec.rate *= self.tuning.rate_multiplier(midi_key as u8);
+                            starts.push(VoiceStart { handle, spec });
+                        }
                     }
-                    starts.push(VoiceStart { handle, spec });
                 }
             }
         }
@@ -305,12 +325,31 @@ impl Console {
         let Some(manual_index) = self.manual_index(channel) else {
             return Vec::new();
         };
-        self.sounding
+        let mut released = Vec::new();
+        for (_, rank, pipe) in self
+            .sounding
             .remove(&(manual_index, key))
             .unwrap_or_default()
-            .into_iter()
-            .map(|(_, handle)| handle)
-            .collect()
+        {
+            if let Some(handle) = self.release_pipe(rank, pipe) {
+                released.push(handle);
+            }
+        }
+        released
+    }
+
+    /// One holder lets go of a pipe; the voice stops only when the
+    /// last holder does.
+    fn release_pipe(&mut self, rank: RankId, pipe: u16) -> Option<u64> {
+        let (handle, holders) = self.speaking.get_mut(&(rank, pipe))?;
+        *holders -= 1;
+        if *holders == 0 {
+            let handle = *handle;
+            self.speaking.remove(&(rank, pipe));
+            Some(handle)
+        } else {
+            None
+        }
     }
 
     /// Draw or retire a stop. Returns the handles of voices to stop
@@ -331,16 +370,22 @@ impl Console {
             return (Vec::new(), noise);
         }
         self.drawn.retain(|&id| id != stop);
-        let mut released = Vec::new();
-        for handles in self.sounding.values_mut() {
-            handles.retain(|&(owner, handle)| {
+        let mut to_release: Vec<(RankId, u16)> = Vec::new();
+        for entries in self.sounding.values_mut() {
+            entries.retain(|&(owner, rank, pipe)| {
                 if owner == stop {
-                    released.push(handle);
+                    to_release.push((rank, pipe));
                     false
                 } else {
                     true
                 }
             });
+        }
+        let mut released = Vec::new();
+        for (rank, pipe) in to_release {
+            if let Some(handle) = self.release_pipe(rank, pipe) {
+                released.push(handle);
+            }
         }
         // Note-off on the open noise voice = the push-in thump.
         released.extend(self.stop_noise_open.remove(&stop));
@@ -413,6 +458,7 @@ impl Console {
     /// Forget everything sounding (the engine is told separately).
     pub fn all_off(&mut self) {
         self.sounding.clear();
+        self.speaking.clear();
     }
 
     /// The manual each MIDI channel plays, for logging.
@@ -754,6 +800,38 @@ mod tests {
         // compass edge: 96 + 2 is out of range → silent.
         console.note_off(0, 60);
         assert!(console.note_on(0, 96).0.is_empty(), "96+2 exceeds compass");
+    }
+
+    #[test]
+    fn shared_pipes_speak_once_across_octave_coupling() {
+        // The F-major pop: with a 16' coupler, key 72's coupled pipe IS
+        // key 60's direct pipe. It must not start a second voice — the
+        // identical recording would sum coherently (+6 dB) and the
+        // phase-aligned release would make both tails coherent too:
+        // a release LOUDER than the chord.
+        let mut console = coupled_console();
+        console.set_coupler(1, true); // 16' I: self-coupler at −12
+
+        let (first, _) = console.note_on(0, 72);
+        assert_eq!(first.len(), 2, "72 direct + coupled 60");
+        let (second, _) = console.note_on(0, 60);
+        assert_eq!(
+            second.len(),
+            1,
+            "60's direct pipe already speaks via 72's coupling — only \
+             the new 48-pipe may start"
+        );
+
+        // Releasing 72 must NOT stop the shared pipe (60 still holds it).
+        let stopped = console.note_off(0, 72);
+        assert_eq!(stopped.len(), 1, "only 72's unshared pipe stops");
+        // Releasing 60 stops the shared pipe and 60's own coupled pipe.
+        let stopped = console.note_off(0, 60);
+        assert_eq!(stopped.len(), 2, "shared pipe + 48-pipe stop last");
+
+        // Every started voice eventually stopped exactly once.
+        assert!(console.note_off(0, 60).is_empty());
+        assert!(console.note_off(0, 72).is_empty());
     }
 
     #[test]
