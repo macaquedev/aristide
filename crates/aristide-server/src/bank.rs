@@ -494,6 +494,114 @@ mod tests {
         }
     }
 
+    /// "Previous notes reappear and bang": hunt voice-resurrection.
+    /// Play/release cycles under the coupled registration, then full
+    /// silence — no audio may ever come back, and the engine's slot
+    /// invariants must hold throughout.
+    #[test]
+    fn released_notes_never_resurrect() {
+        let Some(path) = demo_organ() else {
+            eprintln!("skipping: demo set not present");
+            return;
+        };
+        let organ = aristide_formats::grandorgue::load(&path)
+            .expect("demo set loads")
+            .organ;
+        let loaded = build(&organ, 48000.0).expect("bank builds");
+        let great = organ.manuals[1].id;
+        let swell = organ.manuals[2].id;
+        let drawn: Vec<_> = organ
+            .stops
+            .iter()
+            .filter(|s| {
+                (s.manual == great || s.manual == swell) && !s.name.contains("noise")
+            })
+            .map(|s| s.id)
+            .collect();
+        let couplers: Vec<usize> = organ
+            .couplers
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.from_manual == great && c.to_manual == swell)
+            .map(|(i, _)| i)
+            .collect();
+        let mut console =
+            crate::console::Console::new(organ, loaded.specs, drawn, Vec::new());
+        for &c in &couplers {
+            console.set_coupler(c, true);
+        }
+        let (mut engine, mut handle) =
+            aristide_engine::Engine::new(48000.0, std::sync::Arc::new(loaded.bank));
+
+        // F-major with octave doublings (shared pipes via 16' coupler),
+        // struck and released 6 times with overlapping (legato) edges.
+        let chord = [41u8, 45, 48, 53, 57, 60];
+        let block = 256usize;
+        let mut buffer = vec![0.0f32; block * 2];
+        for cycle in 0..6 {
+            for &key in &chord {
+                let (starts, retriggered) = console.note_on(0, key);
+                for h in retriggered {
+                    handle.send(aristide_engine::Command::StopVoice { handle: h });
+                }
+                for start in starts {
+                    handle.send(aristide_engine::Command::StartVoice {
+                        handle: start.handle,
+                        sample: start.spec.sample,
+                        rate: start.spec.rate,
+                        gain: start.spec.gain,
+                        group: start.spec.group,
+                        wind_weight: start.spec.wind_weight,
+                        brightness: start.spec.brightness,
+                    });
+                }
+                // Stagger key events across blocks like real playing.
+                engine.process(&mut buffer, 2);
+            }
+            for _ in 0..40 {
+                engine.process(&mut buffer, 2);
+            }
+            // Release in a different order than pressed (legato-ish).
+            for &key in chord.iter().rev() {
+                for h in console.note_off(0, key) {
+                    handle.send(aristide_engine::Command::StopVoice { handle: h });
+                }
+                engine.process(&mut buffer, 2);
+            }
+            for _ in 0..(cycle % 3) * 10 {
+                engine.process(&mut buffer, 2);
+            }
+            engine.assert_slot_invariants();
+        }
+
+        // All keys are up. Render 8 s: energy must decay to silence and
+        // NEVER come back.
+        let mut last_seconds_energy = Vec::new();
+        for _ in 0..(8 * 48000 / block) {
+            engine.process(&mut buffer, 2);
+            last_seconds_energy.push(buffer.iter().map(|v| (*v as f64) * (*v as f64)).sum::<f64>());
+        }
+        engine.assert_slot_invariants();
+        let blocks_per_second = 48000 / block;
+        let second_energy: Vec<f64> = last_seconds_energy
+            .chunks(blocks_per_second)
+            .map(|c| c.iter().sum())
+            .collect();
+        // Tails run ~4 s; seconds 6-8 must be silent.
+        assert!(
+            second_energy[6] < 1e-9 && second_energy[7] < 1e-9,
+            "audio persists/returns after full release: {second_energy:?}"
+        );
+        // And strictly no resurgence: every second quieter than the one
+        // two seconds before it.
+        for i in 2..second_energy.len() {
+            assert!(
+                second_energy[i] <= second_energy[i - 2] + 1e-9,
+                "energy resurged at second {i}: {second_energy:?}"
+            );
+        }
+    }
+
     /// The reported "awful pop on mass release": releasing a big chord
     /// doubles those voices' cost at once (crossfade = two sinc reads).
     /// The pallet stagger + SIMD must keep every block under budget.

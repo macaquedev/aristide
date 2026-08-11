@@ -942,6 +942,27 @@ impl Engine {
         self.reverb = ir.map(|ir| reverb::Reverb::new(ir, wet));
     }
 
+    /// Diagnostics: validate the free-slot invariant (every listed slot
+    /// is Idle, no duplicates) — slot corruption resurrects old voices.
+    /// Not for the audio thread; used by tests and debug tooling.
+    pub fn assert_slot_invariants(&self) {
+        let mut seen = std::collections::HashSet::new();
+        for &slot in &self.free_slots {
+            assert!(seen.insert(slot), "slot {slot} in free list twice");
+            assert!(
+                matches!(self.voices[slot as usize], Voice::Idle),
+                "slot {slot} in free list but voice not idle"
+            );
+        }
+        // And the converse: every idle voice is findable.
+        let idle = self
+            .voices
+            .iter()
+            .filter(|v| matches!(v, Voice::Idle))
+            .count();
+        assert_eq!(idle, self.free_slots.len(), "idle voices lost from free list");
+    }
+
     /// Current pressure of a wind group (diagnostics and tests).
     pub fn wind_pressure(&self, group: usize) -> f32 {
         self.wind
