@@ -26,6 +26,8 @@ struct Args {
     http_port: u16,
     /// Requested audio buffer size in frames.
     buffer_frames: u32,
+    /// Record the engine's exact output to this WAV file (diagnostics).
+    record: Option<PathBuf>,
 }
 
 fn parse_args() -> Result<Args> {
@@ -36,6 +38,7 @@ fn parse_args() -> Result<Args> {
         master_gain: None,
         http_port: 9669,
         buffer_frames: 256,
+        record: None,
     };
     let mut iter = std::env::args().skip(1);
     while let Some(arg) = iter.next() {
@@ -63,6 +66,11 @@ fn parse_args() -> Result<Args> {
                     .context("--http-port needs a value")?
                     .parse()
                     .context("--http-port must be a port number")?
+            }
+            "--record" => {
+                args.record = Some(PathBuf::from(
+                    iter.next().context("--record needs a wav path")?,
+                ))
             }
             "--buffer" => {
                 args.buffer_frames = iter
@@ -446,12 +454,30 @@ fn main() -> Result<()> {
     );
 
     let buffer_hint = args.buffer_frames;
-    let build_stream = |buffer_size: cpal::BufferSize| -> Result<(cpal::Stream, EngineHandle)> {
+    // Overrun detector: the callback timestamps itself; late arrivals
+    // (gap > 2x the nominal block time) are counted and reported — the
+    // objective signal for delivery-layer glitches.
+    let overruns = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    // Recording tap: engine output -> lock-free ring -> writer thread.
+    let mut tap_consumer = None;
+    let record_requested = args.record.is_some();
+
+    let build_stream = |buffer_size: cpal::BufferSize,
+                        tap_out: &mut Option<rtrb::Consumer<f32>>|
+     -> Result<(cpal::Stream, EngineHandle)> {
         let (mut engine, handle) = Engine::new(sample_rate, Arc::clone(&bank));
         engine.set_reverb(reverb_ir.clone(), reverb_wet);
+        if record_requested {
+            // ~90 s of stereo headroom; the writer drains far faster.
+            let (producer, consumer) = rtrb::RingBuffer::new(1 << 23);
+            engine.set_tap(producer);
+            *tap_out = Some(consumer);
+        }
         let mut stream_config = config.clone();
         stream_config.buffer_size = buffer_size;
         let mut rt_ready = false;
+        let mut last_callback: Option<std::time::Instant> = None;
+        let overruns = Arc::clone(&overruns);
         let stream = device.build_output_stream(
             &stream_config,
             move |data: &mut [f32], _| {
@@ -459,6 +485,14 @@ fn main() -> Result<()> {
                     rt_ready = true;
                     audio_thread_setup(buffer_hint, sample_rate as u32);
                 }
+                let now = std::time::Instant::now();
+                if let Some(previous) = last_callback {
+                    let nominal = data.len() as f64 / channels as f64 / sample_rate as f64;
+                    if now.duration_since(previous).as_secs_f64() > nominal * 2.0 {
+                        overruns.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+                last_callback = Some(now);
                 engine.process(data, channels)
             },
             |err| tracing::error!("audio stream error: {err}"),
@@ -466,17 +500,19 @@ fn main() -> Result<()> {
         )?;
         Ok((stream, handle))
     };
-    let (stream, mut handle) = match build_stream(cpal::BufferSize::Fixed(args.buffer_frames)) {
-        Ok(pair) => pair,
-        Err(err) => {
-            tracing::warn!(
-                "device refused a {}-frame buffer ({err}); using its default \
-                 (expect higher latency — try another --buffer value)",
-                args.buffer_frames
-            );
-            build_stream(cpal::BufferSize::Default)?
-        }
-    };
+    let (stream, mut handle) =
+        match build_stream(cpal::BufferSize::Fixed(args.buffer_frames), &mut tap_consumer) {
+            Ok(pair) => pair,
+            Err(err) => {
+                tracing::warn!(
+                    "device refused a {}-frame buffer ({err}); using its default \
+                     (expect higher latency — try another --buffer value)",
+                    args.buffer_frames
+                );
+                tap_consumer = None;
+                build_stream(cpal::BufferSize::Default, &mut tap_consumer)?
+            }
+        };
     stream.play()?;
 
     if let Some(gain) = args.master_gain {
@@ -532,8 +568,86 @@ fn main() -> Result<()> {
         tracing::info!("listening on {} MIDI input(s) — play!", connections.len());
     }
 
-    std::thread::park();
+    // Recorder thread: drain the tap into a WAV (16-bit PCM).
+    let recording = args.record.clone();
+    let recorder = tap_consumer.map(|mut consumer| {
+        let path = recording.clone().expect("record path");
+        tracing::info!("recording engine output to {}", path.display());
+        let rate = sample_rate as u32;
+        std::thread::Builder::new()
+            .name("aristide-record".into())
+            .spawn(move || -> std::io::Result<()> {
+                use std::io::{Seek, SeekFrom, Write};
+                let mut file = std::io::BufWriter::new(std::fs::File::create(&path)?);
+                // Placeholder RIFF/data sizes, patched at shutdown.
+                file.write_all(b"RIFF\0\0\0\0WAVEfmt ")?;
+                file.write_all(&16u32.to_le_bytes())?;
+                file.write_all(&1u16.to_le_bytes())?; // PCM
+                file.write_all(&2u16.to_le_bytes())?; // stereo
+                file.write_all(&rate.to_le_bytes())?;
+                file.write_all(&(rate * 4).to_le_bytes())?;
+                file.write_all(&4u16.to_le_bytes())?;
+                file.write_all(&16u16.to_le_bytes())?;
+                file.write_all(b"data\0\0\0\0")?;
+                let mut written: u32 = 0;
+                while !SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
+                    while let Ok(value) = consumer.pop() {
+                        let clamped = (value.clamp(-1.0, 1.0) * 32767.0) as i16;
+                        file.write_all(&clamped.to_le_bytes())?;
+                        written = written.saturating_add(2);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                let inner = file.get_mut();
+                inner.seek(SeekFrom::Start(4))?;
+                inner.write_all(&(36 + written).to_le_bytes())?;
+                inner.seek(SeekFrom::Start(40))?;
+                inner.write_all(&written.to_le_bytes())?;
+                file.flush()?;
+                Ok(())
+            })
+            .expect("spawn recorder")
+    });
+
+    // Ctrl-C: finish the WAV cleanly instead of truncating it.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(
+            libc::SIGINT,
+            handle_sigint as extern "C" fn(libc::c_int) as usize,
+        );
+    }
+
+    let mut reported_overruns = 0u32;
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let total = overruns.load(std::sync::atomic::Ordering::Relaxed);
+        if total > reported_overruns {
+            tracing::warn!(
+                "audio callback arrived late {} time(s) — delivery-layer \
+                 glitches (CPU contention or missing RT priority), not \
+                 engine output",
+                total
+            );
+            reported_overruns = total;
+        }
+        if SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
+            break;
+        }
+    }
+    if let Some(worker) = recorder {
+        tracing::info!("finalizing recording…");
+        let _ = worker.join();
+    }
+    tracing::info!("bye ({} late callbacks total)", reported_overruns);
     Ok(())
+}
+
+static SHUTDOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(unix)]
+extern "C" fn handle_sigint(_signal: libc::c_int) {
+    SHUTDOWN.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// M1+ supports f32 output only; PipeWire/JACK and ALSA's plug layer all

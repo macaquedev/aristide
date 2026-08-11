@@ -489,6 +489,11 @@ pub struct Engine {
     voices: Box<[Voice]>,
     wind: [WindGroup; MAX_WIND_GROUPS],
     reverb: Option<reverb::Reverb>,
+    /// Diagnostic tap: every output sample is offered to this ring
+    /// (lock-free push, silently dropped when full) so the control side
+    /// can record the engine's EXACT output — the decisive test for
+    /// "is the noise in the engine or in the delivery layer".
+    tap: Option<Producer<f32>>,
     /// Free voice slots (invariant: index here ⇔ voice is Idle). A mass
     /// chord used to run 200+ O(2048) scans in one block — that spike
     /// alone ate the block budget.
@@ -521,6 +526,7 @@ impl Engine {
             voices: vec![Voice::Idle; MAX_VOICES].into_boxed_slice(),
             wind: [WindGroup::default(); MAX_WIND_GROUPS],
             reverb: None,
+            tap: None,
             free_slots: (0..MAX_VOICES as u16).rev().collect(),
             stop_batch: Vec::with_capacity(MAX_VOICES),
             release_stagger_frames: 0.008 * sample_rate,
@@ -800,6 +806,14 @@ impl Engine {
                 }
             }
         }
+
+        // Diagnostic recording tap (drops samples when the ring is
+        // full rather than ever blocking).
+        if let Some(tap) = &mut self.tap {
+            for &value in buffer.iter() {
+                let _ = tap.push(value);
+            }
+        }
     }
 
     fn apply(&mut self, command: Command) {
@@ -934,6 +948,12 @@ impl Engine {
     /// 0 = releases fire on the exact command frame, used by tests).
     pub fn set_release_stagger(&mut self, seconds: f32) {
         self.release_stagger_frames = (seconds.clamp(0.0, 0.05)) * self.sample_rate;
+    }
+
+    /// Install the diagnostic output tap. Control-side only — call
+    /// before the engine moves into the audio callback.
+    pub fn set_tap(&mut self, tap: Producer<f32>) {
+        self.tap = Some(tap);
     }
 
     /// Install a convolution reverb. Control-side only — call before
