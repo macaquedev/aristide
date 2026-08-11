@@ -179,13 +179,107 @@ fn audio_thread_setup(buffer_frames: u32, sample_rate: u32) {
         if result == 0 {
             tracing::info!("audio thread: SCHED_FIFO real-time priority acquired");
         } else {
-            tracing::warn!(
-                "audio thread: no real-time priority (errno {result}) — audio can \
-                 glitch under desktop load. Fix: add to /etc/security/limits.d/audio.conf: \
-                 '@audio - rtprio 95' and put your user in the 'audio' group \
-                 (log out/in), or run the server via `chrt -f 70`"
+            // Ordinary desktop users have no rtprio rlimit, so this is the
+            // common path. Publish our kernel tid; a helper thread will ask
+            // RealtimeKit (the mechanism PipeWire and every DAW use) to
+            // promote us — rtkit only accepts requests by tid.
+            let tid = libc::syscall(libc::SYS_gettid) as i64;
+            AUDIO_TID.store(tid, std::sync::atomic::Ordering::Release);
+            tracing::info!(
+                "audio thread: direct SCHED_FIFO denied (errno {result}); \
+                 asking RealtimeKit to promote tid {tid}"
             );
         }
+    }
+}
+
+/// Kernel tid of the audio callback thread, published only when direct
+/// SCHED_FIFO promotion failed and RealtimeKit should be tried.
+#[cfg(target_os = "linux")]
+static AUDIO_TID: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+/// Promote the audio thread through the RealtimeKit D-Bus service, from a
+/// normal thread (never the audio thread — D-Bus is IO). Uses `dbus-send`
+/// (present on any desktop that has rtkit) instead of a D-Bus library
+/// dependency. rtkit refuses processes without an RLIMIT_RTTIME ceiling —
+/// the kernel's runaway-RT-thread guard; the accounting resets every time
+/// the callback blocks on the device (~every buffer), so 200 ms of
+/// *continuous* RT CPU only happens if we are catastrophically broken.
+#[cfg(target_os = "linux")]
+fn promote_audio_thread_via_rtkit() {
+    use std::sync::atomic::Ordering;
+    let mut tid = 0;
+    // The first callback (which publishes the tid) fires within one buffer
+    // of stream.play(); 3 s covers even a device that starts paused.
+    for _ in 0..300 {
+        tid = AUDIO_TID.load(Ordering::Acquire);
+        if tid != 0 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    if tid == 0 {
+        return; // direct promotion succeeded (or no callback ever ran)
+    }
+    unsafe {
+        let limit = libc::rlimit {
+            rlim_cur: 200_000, // µs of continuous RT CPU before SIGKILL
+            rlim_max: 200_000,
+        };
+        libc::setrlimit(libc::RLIMIT_RTTIME, &limit);
+    }
+    let max_priority = std::process::Command::new("dbus-send")
+        .args([
+            "--system",
+            "--print-reply",
+            "--dest=org.freedesktop.RealtimeKit1",
+            "/org/freedesktop/RealtimeKit1",
+            "org.freedesktop.DBus.Properties.Get",
+            "string:org.freedesktop.RealtimeKit1",
+            "string:MaxRealtimePriority",
+        ])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .split_whitespace()
+                .last()
+                .and_then(|v| v.parse::<i64>().ok())
+        })
+        .unwrap_or(10)
+        .clamp(1, 70);
+    let request = std::process::Command::new("dbus-send")
+        .args([
+            "--system",
+            "--print-reply",
+            "--dest=org.freedesktop.RealtimeKit1",
+            "/org/freedesktop/RealtimeKit1",
+            "org.freedesktop.RealtimeKit1.MakeThreadRealtime",
+            &format!("uint64:{tid}"),
+            &format!("uint32:{max_priority}"),
+        ])
+        .output();
+    let policy = unsafe { libc::sched_getscheduler(tid as libc::pid_t) };
+    if policy == libc::SCHED_FIFO || policy == libc::SCHED_RR {
+        tracing::info!(
+            "audio thread: real-time priority {max_priority} acquired via RealtimeKit"
+        );
+    } else {
+        let detail = match request {
+            Ok(out) if !out.status.success() => {
+                String::from_utf8_lossy(&out.stderr).trim().to_string()
+            }
+            Ok(_) => "rtkit accepted but the policy did not change".into(),
+            Err(err) => format!("dbus-send unavailable: {err}"),
+        };
+        tracing::warn!(
+            "audio thread: NO real-time priority ({detail}) — audio will glitch \
+             under desktop load. Manual fix: add '@audio - rtprio 95' to \
+             /etc/security/limits.d/audio.conf, add your user to the 'audio' \
+             group, log out/in. Quick test: \
+             sudo setcap cap_sys_nice+ep <path-to-aristide-server>"
+        );
     }
 }
 
@@ -535,6 +629,8 @@ fn main() -> Result<()> {
             }
         };
     stream.play()?;
+    #[cfg(target_os = "linux")]
+    std::thread::spawn(promote_audio_thread_via_rtkit);
 
     if let Some(gain) = args.master_gain {
         handle.send(Command::SetMasterGain { linear: gain });
