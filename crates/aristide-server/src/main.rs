@@ -278,7 +278,11 @@ pub struct State {
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
-    tracing::info!("aristide-server {}", env!("CARGO_PKG_VERSION"));
+    tracing::info!(
+        "aristide-server {} (commit {})",
+        env!("CARGO_PKG_VERSION"),
+        option_env!("ARISTIDE_COMMIT").unwrap_or("unknown")
+    );
     if cfg!(debug_assertions) {
         tracing::warn!(
             "DEBUG BUILD — 10-20x slower than release; audio WILL crackle. \
@@ -310,7 +314,9 @@ fn main() -> Result<()> {
     let sample_rate = config.sample_rate.0 as f32;
     let channels = config.channels as usize;
     tracing::info!(
-        "audio: {} @ {} Hz, {} channels, requesting {} frame buffer ({:.1} ms)",
+        "=== DIAGNOSTIC: commit {} | {} | device '{}' | {} Hz | {} ch | {} frame buffer ({:.1} ms) — paste this line when reporting audio issues ===",
+        option_env!("ARISTIDE_COMMIT").unwrap_or("unknown"),
+        if cfg!(debug_assertions) { "DEBUG BUILD (bad!)" } else { "release" },
         device.name().unwrap_or_else(|_| "<unnamed>".into()),
         config.sample_rate.0,
         channels,
@@ -667,16 +673,38 @@ extern "C" fn handle_sigint(_signal: libc::c_int) {
 
 /// M1+ supports f32 output only; PipeWire/JACK and ALSA's plug layer all
 /// offer it. Format conversion becomes the server's job later.
+///
+/// CRITICAL: never take a range's MAX rate blindly — a device whose
+/// default format isn't f32 used to land us on its highest f32 rate
+/// (up to 192 kHz = 4× the CPU per voice), guaranteeing overruns that
+/// no engine optimization could ever fix.
 fn pick_f32_config(device: &cpal::Device) -> Result<cpal::StreamConfig> {
     let default = device.default_output_config()?;
     if default.sample_format() == cpal::SampleFormat::F32 {
+        let rate = default.sample_rate().0;
+        if rate > 96_000 {
+            tracing::warn!(
+                "device default is {rate} Hz — unusually high; engine cost \
+                 scales with rate"
+            );
+        }
         return Ok(default.into());
     }
-    device
-        .supported_output_configs()?
-        .find(|c| c.sample_format() == cpal::SampleFormat::F32)
-        .map(|c| c.with_max_sample_rate().into())
-        .context("audio device offers no f32 output format")
+    let target = 48_000u32;
+    let mut best: Option<cpal::StreamConfig> = None;
+    let mut best_distance = u32::MAX;
+    for range in device.supported_output_configs()? {
+        if range.sample_format() != cpal::SampleFormat::F32 {
+            continue;
+        }
+        let rate = target.clamp(range.min_sample_rate().0, range.max_sample_rate().0);
+        let distance = rate.abs_diff(target);
+        if distance < best_distance {
+            best_distance = distance;
+            best = Some(range.with_sample_rate(cpal::SampleRate(rate)).into());
+        }
+    }
+    best.context("audio device offers no f32 output format")
 }
 
 fn connect_all_midi_inputs(state: &Arc<Mutex<State>>) -> Result<Vec<MidiInputConnection<()>>> {
