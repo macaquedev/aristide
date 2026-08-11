@@ -45,6 +45,10 @@ pub struct Console {
     /// the stop that engaged them (so retiring a stop can release
     /// them). `percussive` voices are excluded (they stop themselves).
     sounding: HashMap<(usize, u8), Vec<(StopId, RankId, u16)>>,
+    /// The most recent voice handle started per pipe — used to expedite
+    /// a still-releasing (pallet-staggered) predecessor when the pipe
+    /// re-speaks, so a pipe can never overlap itself at full level.
+    last_pipe_voice: HashMap<(RankId, u16), u64>,
     /// Each speaking pipe's voice handle and how many holders (keys,
     /// couplers) currently demand it. A pipe speaks ONCE no matter how
     /// many routes reach it — starting a second voice on the same pipe
@@ -85,6 +89,7 @@ impl Console {
             next_handle: 0,
             sounding: HashMap::new(),
             speaking: HashMap::new(),
+            last_pipe_voice: HashMap::new(),
         };
         console.classify_noises();
         // Noise stops must never be part of the registration.
@@ -307,6 +312,16 @@ impl Console {
                             let handle = self.next_handle;
                             self.next_handle += 1;
                             self.speaking.insert((range.rank, pipe), (handle, 1));
+                            // The pipe's previous voice may still be in
+                            // its pallet-stagger window (Held at full
+                            // level); expedite its release or the pipe
+                            // overlaps itself — heard as a phantom
+                            // "opening of another note".
+                            if let Some(previous) =
+                                self.last_pipe_voice.insert((range.rank, pipe), handle)
+                            {
+                                retriggered.push(previous);
+                            }
                             let mut spec = *spec;
                             spec.rate *= self.tuning.rate_multiplier(midi_key as u8);
                             starts.push(VoiceStart { handle, spec });
@@ -318,6 +333,10 @@ impl Console {
         if !held.is_empty() {
             self.sounding.insert((manual_index, key), held);
         }
+        // Expedites can duplicate handles already queued by the
+        // retrigger drain; the engine tolerates it but keep it clean.
+        retriggered.sort_unstable();
+        retriggered.dedup();
         (starts, retriggered)
     }
 
@@ -832,6 +851,38 @@ mod tests {
         // Every started voice eventually stopped exactly once.
         assert!(console.note_off(0, 60).is_empty());
         assert!(console.note_off(0, 72).is_empty());
+    }
+
+    #[test]
+    fn re_pressed_pipe_expedites_its_staggered_predecessor() {
+        // Press a chord, release it (voices enter the pallet-stagger
+        // window at full level), then instantly re-press a key that
+        // reaches one of those pipes: the new press must carry the old
+        // voice's handle so the engine releases it NOW — otherwise the
+        // pipe overlaps itself ("you hear the opening of another note").
+        let mut console = coupled_console();
+        console.set_coupler(1, true); // 16' I self-coupler
+
+        let (starts, _) = console.note_on(0, 72); // pipes 36 and 24
+        let shared_pipe_voice = starts
+            .iter()
+            .map(|s| s.handle)
+            .max()
+            .expect("voices started");
+        let released = console.note_off(0, 72);
+        assert_eq!(released.len(), 2);
+
+        // Immediately press 60 → its direct pipe IS 72's coupled pipe.
+        let (_, expedited) = console.note_on(0, 60);
+        assert!(
+            expedited.contains(&shared_pipe_voice)
+                || released.contains(&shared_pipe_voice),
+            "the shared pipe's previous voice must be expedited on re-press"
+        );
+        assert!(
+            !expedited.is_empty(),
+            "re-press within the stagger window must expedite predecessors"
+        );
     }
 
     #[test]
