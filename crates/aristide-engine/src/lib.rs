@@ -231,6 +231,10 @@ struct SampledVoice {
     loop_index: u8,
     /// Separate release sample being crossfaded into, if any.
     external_release: Option<u32>,
+    /// FadeOut speed multiplier on the kill ramp: 1.0 = 15 ms (silent
+    /// noise voices, panic), 0.1 = ~150 ms (polyphony shedding, where
+    /// abruptness would be audible).
+    fade_scale: f32,
     /// A scheduled key-release: (frames until the pallet closes, hold
     /// age in ms captured at key-up). Real pallets never close in the
     /// same millisecond across a chord, and spreading the release also
@@ -358,7 +362,7 @@ impl SampledVoice {
             SamplePhase::FadeOut => {
                 left *= self.amplitude;
                 right *= self.amplitude;
-                self.amplitude -= kill_step;
+                self.amplitude -= kill_step * self.fade_scale;
             }
         }
 
@@ -589,19 +593,26 @@ impl Engine {
         if tail_count > TAIL_VOICE_BUDGET {
             let to_shed = (tail_count - TAIL_VOICE_BUDGET).min(TAIL_SHED_PER_BLOCK);
             for _ in 0..to_shed {
+                // Rank by audible contribution — envelope × voice gain —
+                // not raw sample level (a quiet recording with high gain
+                // outranks a hot recording turned down).
                 let mut quietest: Option<(usize, f32)> = None;
                 for (index, voice) in self.voices.iter().enumerate() {
                     if let Voice::Sampled(sampled) = voice {
+                        let contribution = sampled.envelope * sampled.gain;
                         if sampled.phase == SamplePhase::Tail
-                            && quietest.is_none_or(|(_, level)| sampled.envelope < level)
+                            && quietest.is_none_or(|(_, level)| contribution < level)
                         {
-                            quietest = Some((index, sampled.envelope));
+                            quietest = Some((index, contribution));
                         }
                     }
                 }
                 let Some((index, _)) = quietest else { break };
                 if let Voice::Sampled(sampled) = &mut self.voices[index] {
                     sampled.amplitude = 1.0;
+                    // Gentle ~150 ms fade: under 128 masking tails this
+                    // is inaudible; the 15 ms kill ramp is not.
+                    sampled.fade_scale = 0.1;
                     sampled.phase = SamplePhase::FadeOut;
                 }
             }
@@ -820,6 +831,7 @@ impl Engine {
                         group: group.min(MAX_WIND_GROUPS as u8 - 1),
                         wind_weight: wind_weight.max(0.0),
                         age_frames: 0,
+                        fade_scale: 1.0,
                         pending_release: None,
                         brightness_a: brightness.clamp(0.0, 1.0),
                         lowpass: [0.0; 2],
@@ -858,6 +870,7 @@ impl Engine {
                     if let Voice::Sampled(sampled) = voice {
                         if sampled.handle == handle && sampled.phase != SamplePhase::FadeOut {
                             sampled.amplitude = 1.0;
+                            sampled.fade_scale = 1.0;
                             sampled.phase = SamplePhase::FadeOut;
                         }
                     }
@@ -897,6 +910,7 @@ impl Engine {
                         Voice::Sampled(sampled) => {
                             if sampled.phase != SamplePhase::FadeOut {
                                 sampled.amplitude = 1.0;
+                                sampled.fade_scale = 1.0;
                                 sampled.phase = SamplePhase::FadeOut;
                             }
                         }
