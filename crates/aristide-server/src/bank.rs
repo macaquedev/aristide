@@ -915,11 +915,11 @@ mod tests {
                 let x = output[frame_index];
                 let d2 = (x - 2.0 * x1 + x2).abs();
                 let local = (d2_rms_sq.sqrt() as f32).max(1e-5);
-                // Floor 0.015: teleport-class defects measured 0.02-0.09;
-                // below it live known ~-40 dB stereo splice kinks (R channel
-                // lands slightly misphased at some release splices) tracked
-                // as a quality item, not a regression.
-                if i > 512 && d2 > (12.0 * local).max(0.015) {
+                // Floor 0.008: teleport-class defects measured 0.02-0.09,
+                // and the crossfade-completion double-gain dip measured
+                // 0.008-0.014 — both must stay dead. Natural content under
+                // this schedule stays well below the 12x-local gate.
+                if i > 512 && d2 > (12.0 * local).max(0.008) {
                     clicks.push((i as f64 / sr as f64, d2, local));
                 }
                 d2_rms_sq += ALPHA * ((d2 as f64) * (d2 as f64) - d2_rms_sq);

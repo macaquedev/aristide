@@ -352,6 +352,13 @@ impl SampledVoice {
             table.read(sample, self.position, seam)
         };
         let mut advance_position = true;
+        // This frame's output gain, captured BEFORE the match arms mutate
+        // self.gain. The crossfade-completion frame folds tail_gain into
+        // the voice gain for FUTURE frames, but its own blend already
+        // applied tail_gain — returning with the mutated gain applied it
+        // twice, dipping exactly one frame by up to 5x (tail_gain floor
+        // 0.2): an audible tick on every splice handover.
+        let frame_gain = self.gain;
         match self.phase {
             SamplePhase::Held | SamplePhase::Tail => {}
             SamplePhase::Crossfade => {
@@ -431,7 +438,7 @@ impl SampledVoice {
                 }
             }
         }
-        Some((left * self.gain, right * self.gain))
+        Some((left * frame_gain, right * frame_gain))
     }
 
     /// Key released: splice to a separate release (selected by hold
