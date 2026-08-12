@@ -1207,8 +1207,12 @@ mod tests {
                     t += sr * 2 / 5; // 400 ms between chords
                 }
             }
+            // A final SOLO staccato note so pitch behavior is measurable
+            // without chord partials interfering.
+            events.push((t + sr / 2, 79, true));
+            events.push((t + sr / 2 + sr / 8, 79, false));
             events.sort_by_key(|e| e.0);
-            let total = t + 2 * sr;
+            let total = t + 3 * sr;
             let block = 512usize;
             let mut output = Vec::new();
             let mut buffer = vec![0.0f32; block * 2];

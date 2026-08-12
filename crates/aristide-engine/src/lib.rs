@@ -203,6 +203,15 @@ struct SampledVoice {
     gain: f32,
     /// Crossfade progress 0→1.
     fade: f32,
+    /// Release pitch drop: as the pallet closes, blowing pressure
+    /// collapses and a flue pipe's pitch sags before the sound dies —
+    /// small pipes noticeably so (Viscount US7442869 models this; Aeolus
+    /// has per-stop release detune). A constant-pitch high release reads
+    /// as a struck bell; bells don't bend. `bend` ramps 0 to 1; the
+    /// playback rate is scaled by (1 - depth * bend).
+    release_bend: f32,
+    release_bend_depth: f32,
+    release_bend_step: f32,
     /// Staccato room-charge: the tail's LATE diffuse field never built
     /// up for a short note, but its early reflections and speech-off
     /// did. Output is scaled by (charge + deficit) where deficit decays
@@ -317,7 +326,13 @@ impl SampledVoice {
         crossfade_step: f32,
         kill_step: f32,
     ) -> Option<(f32, f32)> {
-        let rate = ctx.rate;
+        let mut rate = ctx.rate;
+        if self.release_bend_depth > 0.0
+            && matches!(self.phase, SamplePhase::Crossfade | SamplePhase::Tail)
+        {
+            self.release_bend += (1.0 - self.release_bend) * self.release_bend_step;
+            rate *= 1.0 - (self.release_bend_depth * self.release_bend) as f64;
+        }
         let last = ctx.last;
         let current_loop = ctx.current_loop;
         let looping = ctx.looping;
@@ -595,6 +610,19 @@ impl SampledVoice {
                 // per-frame gain factor. Down-repitched pipes were the
                 // "bell": their tails rang up to 40% too long.
                 self.fade_step = pitch_scaled_fade_step(sample, self.rate, output_rate, age_ms);
+                if let Some(period) = sample.measured_period() {
+                    let f0 = sample.sample_rate_hz() as f64 / period;
+                    // Depth grows with pipe pitch: ~35 cents at 1 kHz+,
+                    // ~15 at 250 Hz, negligible for big pipes.
+                    let cents = (12.0 * (f0 / 100.0).sqrt()).clamp(3.0, 38.0);
+                    self.release_bend_depth = 1.0 - (-(cents as f32) / 1200.0).exp2();
+                    // Pressure collapse: ~12 periods, 15-80 ms.
+                    let tau_s = (12.0 * period / sample.sample_rate_hz() as f64)
+                        .clamp(0.015, 0.080);
+                    self.release_bend_step =
+                        1.0 - (-1.0 / (tau_s as f32 * output_rate)).exp();
+                    self.release_bend = 0.0;
+                }
                 let lambda = sample.tail_decay_db_per_s();
                 let repitch =
                     (self.rate as f32) * output_rate / sample.sample_rate_hz();
@@ -1019,6 +1047,9 @@ impl Engine {
                         tail_charge: 1.0,
                         tail_charge_deficit: 0.0,
                         tail_charge_step: 1.0,
+                        release_bend: 0.0,
+                        release_bend_depth: 0.0,
+                        release_bend_step: 0.0,
                         amplitude: 1.0,
                         envelope: 0.0,
                         tail_gain: 1.0,
