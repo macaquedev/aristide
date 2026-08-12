@@ -75,6 +75,30 @@ async function refresh(data) {
     }
     root.appendChild(div);
   }
+  if ((data.enclosures || []).length) {
+    const h = document.createElement('h2');
+    h.textContent = 'Swell';
+    root.appendChild(h);
+    for (const e of data.enclosures) {
+      const row = document.createElement('div');
+      row.className = 'row';
+      const label = document.createElement('label');
+      label.textContent = e.name;
+      label.style.cssText = 'color:#8b93a1;font-size:0.8rem;min-width:6rem';
+      const slider = document.createElement('input');
+      slider.type = 'range';
+      slider.min = 0; slider.max = 1; slider.step = 0.01;
+      slider.value = e.value;
+      const pct = document.createElement('span');
+      pct.style.cssText = 'color:#8b93a1;font-size:0.8rem;width:3rem';
+      pct.textContent = Math.round(e.value * 100) + '%';
+      slider.oninput = () => pct.textContent = Math.round(slider.value * 100) + '%';
+      slider.onchange = async () => refresh(await (await fetch(
+        `/api/enclosure?idx=${e.idx}&v=${slider.value}`, {method: 'POST'})).json());
+      row.append(label, slider, pct);
+      root.appendChild(row);
+    }
+  }
   if (data.couplers.length) {
     const h = document.createElement('h2');
     h.textContent = 'Couplers';

@@ -35,3 +35,21 @@ transpose = 0
 rate_hz = 4.6
 depth_cents = 12.0
 chests = [1]
+
+[enclosures]
+# Swell boxes (the set defines two: Recit on chest 3, an undisplayed
+# "Grandorgue" box on chest 2). Constants per
+# docs/research/enclosure-modeling.md — tune by ear:
+#   floor_db   broadband attenuation fully closed (0 = use the set's
+#              AmpMinimumLevel: Recit 20% = -14 dB, GO box 30% = -10.5 dB)
+#   shelf_db   extra treble attenuation fully closed (the "muffle")
+#   corner_*   where the muffle hinges, open -> closed
+#   taper      1 = dB-linear pedal law (Hauptwerk); >1 bunches near closed
+#   full_sweep_s  shutter inertia (0 = pedal drives shutters directly)
+cc = 11
+floor_db = 0.0
+shelf_db = -10.0
+corner_open_hz = 8000.0
+corner_closed_hz = 1000.0
+taper = 1.0
+full_sweep_s = 0.5

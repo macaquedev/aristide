@@ -137,6 +137,34 @@ pub struct Stop {
     pub ranks: Vec<RankRange>,
 }
 
+/// A swell box / expression enclosure: a shuttered chamber whose
+/// shutter position attenuates and filters every pipe on its member
+/// windchests. Membership lives on [`Windchest`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Enclosure {
+    pub name: String,
+    /// Linear amplitude percentage when fully closed (GO
+    /// `AmpMinimumLevel`, 0–100). The loader passes the set's value
+    /// through; taper law and filtering are engine policy.
+    pub amp_minimum_level: f64,
+    /// Producer's suggested expression-controller ordering (GO
+    /// `MIDIInputNumber`); 0/absent = none.
+    pub midi_input_number: Option<u16>,
+    /// Whether the set shows this enclosure on its console.
+    pub displayed: bool,
+}
+
+/// A windchest group: the unit ranks reference for wind supply and
+/// enclosure membership (GO `[WindchestGroupNNN]`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Windchest {
+    /// 1-based format-side number, as referenced by [`Rank::windchest`].
+    pub number: u32,
+    pub name: String,
+    /// Indices into [`Organ::enclosures`] this chest sits inside.
+    pub enclosures: Vec<u32>,
+}
+
 /// A coupler: plays another manual's engaged stops from this manual,
 /// possibly shifted (sub/super octave = ±1200 cents at 12-EDO, but
 /// stored as a key delta since shift semantics are keyboard-relative).
@@ -158,6 +186,8 @@ pub struct Organ {
     pub stops: Vec<Stop>,
     pub ranks: Vec<Rank>,
     pub couplers: Vec<Coupler>,
+    pub enclosures: Vec<Enclosure>,
+    pub windchests: Vec<Windchest>,
 }
 
 impl Organ {

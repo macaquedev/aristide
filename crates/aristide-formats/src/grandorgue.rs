@@ -264,23 +264,72 @@ impl Builder<'_> {
 
         let organ_chain = GainChain::read(&organ_section, ROOT_CHAIN)?;
 
+        // Enclosures: name + closed-amplitude floor; the engine decides
+        // taper and filtering (docs/research/enclosure-modeling.md).
+        let enclosure_count = organ_section.int_or("NumberOfEnclosures", 0)?;
+        let mut enclosures = Vec::new();
+        for index in 1..=enclosure_count {
+            let section = self.ini.section(&format!("Enclosure{index:03}"))?;
+            let midi_input = section.int_or("MIDIInputNumber", 0)?;
+            enclosures.push(aristide_model::Enclosure {
+                name: section.string("Name")?.to_string(),
+                amp_minimum_level: section.float_or("AmpMinimumLevel", 0.0)?.clamp(0.0, 100.0),
+                midi_input_number: (midi_input > 0).then_some(midi_input as u16),
+                displayed: section.bool_or("Displayed", true)?,
+            });
+        }
+
         let mut windchest_chains = HashMap::new();
+        let mut windchests = Vec::new();
         for index in 1..=windchest_count {
-            let chain = match self.ini.section(&format!("WindchestGroup{index:03}")) {
-                Ok(section) => GainChain::read(&section, organ_chain)?,
+            let (chain, windchest) = match self.ini.section(&format!("WindchestGroup{index:03}")) {
+                Ok(section) => {
+                    // EnclosureNNN values are 1-based global enclosure
+                    // indices (GOWindchest.cpp); store them 0-based.
+                    let member_count = section.int_or("NumberOfEnclosures", 0)?;
+                    let mut members = Vec::new();
+                    for member in 1..=member_count {
+                        let reference = section.int(&format!("Enclosure{member:03}"))?;
+                        if (1..=enclosure_count).contains(&reference) {
+                            members.push(reference as u32 - 1);
+                        } else {
+                            self.warn(format!(
+                                "[WindchestGroup{index:03}] Enclosure{member:03}={reference} \
+                                 out of range; ignored"
+                            ));
+                        }
+                    }
+                    let windchest = aristide_model::Windchest {
+                        number: index as u32,
+                        name: section
+                            .get("Name")
+                            .unwrap_or(&format!("Windchest {index}"))
+                            .to_string(),
+                        enclosures: members,
+                    };
+                    (GainChain::read(&section, organ_chain)?, windchest)
+                }
                 Err(_) => {
                     self.warn(format!(
                         "[WindchestGroup{index:03}] missing; using organ-level defaults"
                     ));
-                    organ_chain
+                    let windchest = aristide_model::Windchest {
+                        number: index as u32,
+                        name: format!("Windchest {index}"),
+                        enclosures: Vec::new(),
+                    };
+                    (organ_chain, windchest)
                 }
             };
             windchest_chains.insert(index, chain);
+            windchests.push(windchest);
         }
 
         let mut organ = Organ {
             name,
             base_path: std::mem::take(&mut self.base_path),
+            enclosures,
+            windchests,
             ..Organ::default()
         };
 

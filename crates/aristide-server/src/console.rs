@@ -40,6 +40,12 @@ pub struct Console {
     /// `channel_map[c]` = index into `organ.manuals` MIDI channel `c`
     /// plays; channels past the end wrap.
     channel_map: Vec<usize>,
+    /// Per manual index: the enclosures (engine indices) its stops sit
+    /// inside — an expression pedal on that manual's channel drives
+    /// them. Derived from stop→rank→windchest→enclosure membership.
+    manual_enclosures: Vec<Vec<u8>>,
+    /// Current pedal position per enclosure (1 = open, GO's default).
+    enclosure_positions: Vec<f32>,
     next_handle: u64,
     /// (manual index, MIDI key) → pipes held by that key, tagged with
     /// the stop that engaged them (so retiring a stop can release
@@ -86,6 +92,8 @@ impl Console {
             noises_enabled: true,
             noise_volume: 0.7,
             channel_map,
+            manual_enclosures: Vec::new(),
+            enclosure_positions: Vec::new(),
             next_handle: 0,
             sounding: HashMap::new(),
             speaking: HashMap::new(),
@@ -95,7 +103,94 @@ impl Console {
         // Noise stops must never be part of the registration.
         let noise_stops = console.noise_stops.clone();
         console.drawn.retain(|id| !noise_stops.contains(id));
+        console.map_enclosures();
         console
+    }
+
+    /// Which enclosures each manual's expression pedal drives: every
+    /// box that any of the manual's stops (via rank → windchest) sits
+    /// inside. Noise stops don't count — a drawstop thump rank on an
+    /// effects chest must not capture a pedal.
+    fn map_enclosures(&mut self) {
+        self.enclosure_positions = vec![1.0; self.organ.enclosures.len()];
+        self.manual_enclosures = vec![Vec::new(); self.organ.manuals.len()];
+        let max = aristide_engine::enclosure::MAX_ENCLOSURES as u32;
+        for stop in &self.organ.stops {
+            if self.noise_stops.contains(&stop.id) {
+                continue;
+            }
+            let Some(manual_index) = self
+                .organ
+                .manuals
+                .iter()
+                .position(|m| m.id == stop.manual)
+            else {
+                continue;
+            };
+            for range in &stop.ranks {
+                let Some(rank) = self.organ.rank(range.rank) else {
+                    continue;
+                };
+                let Some(chest) = self
+                    .organ
+                    .windchests
+                    .iter()
+                    .find(|c| c.number == rank.windchest)
+                else {
+                    continue;
+                };
+                for &enclosure in chest.enclosures.iter().take(1) {
+                    if enclosure < max
+                        && !self.manual_enclosures[manual_index].contains(&(enclosure as u8))
+                    {
+                        self.manual_enclosures[manual_index].push(enclosure as u8);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Expression pedal on `channel`: move every enclosure that
+    /// channel's manual encloses. Returns (engine index, position)
+    /// pairs for the control loop to forward.
+    pub fn expression(&mut self, channel: u8, value: u8) -> Vec<(u8, f32)> {
+        let Some(manual_index) = self.manual_index(channel) else {
+            return Vec::new();
+        };
+        let position = value.min(127) as f32 / 127.0;
+        let mut moves = Vec::new();
+        for &enclosure in &self.manual_enclosures[manual_index] {
+            if let Some(slot) = self.enclosure_positions.get_mut(enclosure as usize) {
+                *slot = position;
+            }
+            moves.push((enclosure, position));
+        }
+        moves
+    }
+
+    /// UI pedal move on one enclosure by model index.
+    pub fn set_enclosure(&mut self, index: usize, position: f32) -> Option<(u8, f32)> {
+        let position = position.clamp(0.0, 1.0);
+        *self.enclosure_positions.get_mut(index)? = position;
+        (index < aristide_engine::enclosure::MAX_ENCLOSURES)
+            .then_some((index as u8, position))
+    }
+
+    /// (model index, name, position, displayed) per enclosure, for UIs.
+    pub fn enclosure_states(&self) -> Vec<(usize, String, f32, bool)> {
+        self.organ
+            .enclosures
+            .iter()
+            .enumerate()
+            .map(|(index, enclosure)| {
+                (
+                    index,
+                    enclosure.name.clone(),
+                    self.enclosure_positions.get(index).copied().unwrap_or(1.0),
+                    enclosure.displayed,
+                )
+            })
+            .collect()
     }
 
     /// Control-noise "stops" (drawstop thumps, coupler clacks, blower).
@@ -622,6 +717,8 @@ mod tests {
                 })
                 .collect(),
             couplers: vec![],
+            enclosures: vec![],
+            windchests: vec![],
         };
         let mut specs = HashMap::new();
         for rank in 1..=2u32 {
@@ -636,6 +733,7 @@ mod tests {
                         group: 0,
                         wind_weight: 1.0,
                         brightness: 0.02,
+                        enclosure: aristide_engine::enclosure::ENCLOSURE_NONE,
                     },
                 );
             }
@@ -740,6 +838,8 @@ mod tests {
                 coupler("16' I", 1, 1, -12),
                 coupler("I/II", 2, 1, 0),
             ],
+            enclosures: vec![],
+            windchests: vec![],
         };
         let mut specs = HashMap::new();
         for rank in 1..=2u32 {
@@ -754,6 +854,7 @@ mod tests {
                         group: 0,
                         wind_weight: 1.0,
                         brightness: 0.0,
+                        enclosure: aristide_engine::enclosure::ENCLOSURE_NONE,
                     },
                 );
             }

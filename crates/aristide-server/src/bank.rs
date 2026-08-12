@@ -31,6 +31,10 @@ pub struct VoiceSpec {
     /// Tilt-filter coefficient for pressure→brightness coupling
     /// (0 = no filter, e.g. noises).
     pub brightness: f32,
+    /// Swell box (0-based engine index from the ODF windchest
+    /// membership; [`aristide_engine::enclosure::ENCLOSURE_NONE`] for
+    /// unenclosed divisions).
+    pub enclosure: u8,
 }
 
 pub struct LoadedBank {
@@ -52,7 +56,31 @@ pub fn build(organ: &Organ, device_rate: f32) -> Result<LoadedBank> {
     // Separate release files, deduplicated independently of attacks.
     let mut release_cache: HashMap<PathBuf, Option<u32>> = HashMap::new();
 
+    // Windchest number → enclosure engine index. A voice carries ONE
+    // enclosure; GO multiplies when a chest sits in several boxes, but
+    // no real set seen does — warn and take the first.
+    let mut chest_enclosures: HashMap<u32, u8> = HashMap::new();
+    for chest in &organ.windchests {
+        let Some(&first) = chest.enclosures.first() else {
+            continue;
+        };
+        if chest.enclosures.len() > 1 {
+            skipped.push(format!(
+                "windchest {} ({}) sits in {} enclosures; using the first",
+                chest.number,
+                chest.name,
+                chest.enclosures.len()
+            ));
+        }
+        let index = (first as usize).min(aristide_engine::enclosure::MAX_ENCLOSURES - 1) as u8;
+        chest_enclosures.insert(chest.number, index);
+    }
+
     for rank in &organ.ranks {
+        let enclosure = chest_enclosures
+            .get(&rank.windchest)
+            .copied()
+            .unwrap_or(aristide_engine::enclosure::ENCLOSURE_NONE);
         for (pipe_index, pipe) in rank.pipes.iter().enumerate() {
             let PipeSource::Sampled { attacks, releases } = &pipe.source else {
                 continue;
@@ -126,6 +154,7 @@ pub fn build(organ: &Organ, device_rate: f32) -> Result<LoadedBank> {
                         device_rate,
                         info.percussive,
                     ),
+                    enclosure,
                 },
             );
         }
@@ -288,6 +317,217 @@ mod tests {
         path.is_file().then_some(path)
     }
 
+    /// The demo set's two ODF enclosures must reach the voice specs:
+    /// Récit chest (3) → enclosure 0, enclosed Great chest (2) →
+    /// enclosure 1, unenclosed chest (1) → none. And an expression
+    /// pedal on the Récit channel must drive the Récit box.
+    #[test]
+    fn demo_enclosures_reach_specs_and_expression() {
+        let Some(path) = demo_organ() else {
+            eprintln!("skipping: demo set not present");
+            return;
+        };
+        let organ = aristide_formats::grandorgue::load(&path).expect("loads").organ;
+        assert_eq!(organ.enclosures.len(), 2);
+        assert_eq!(organ.enclosures[0].name, "Recit");
+        assert_eq!(organ.enclosures[0].amp_minimum_level, 20.0);
+        assert_eq!(organ.enclosures[1].amp_minimum_level, 30.0);
+        let chest = |n: u32| organ.windchests.iter().find(|c| c.number == n).unwrap();
+        assert_eq!(chest(1).enclosures, Vec::<u32>::new());
+        assert_eq!(chest(2).enclosures, vec![1]);
+        assert_eq!(chest(3).enclosures, vec![0]);
+
+        let loaded = build(&organ, 44_100.0).expect("bank builds");
+        let spec_for = |pattern: &str| {
+            let stop = organ
+                .stops
+                .iter()
+                .find(|s| s.name.contains(pattern))
+                .unwrap_or_else(|| panic!("stop {pattern}"));
+            let range = stop.ranks.first().expect("ranks");
+            loaded
+                .specs
+                .get(&(range.rank, range.first_pipe))
+                .copied()
+                .unwrap_or_else(|| panic!("spec for {pattern}"))
+        };
+        assert_eq!(spec_for("Hautbois").enclosure, 0);
+        assert_eq!(spec_for("Plein jeu III").enclosure, 1);
+        assert_eq!(
+            spec_for("Montre").enclosure,
+            aristide_engine::enclosure::ENCLOSURE_NONE
+        );
+
+        // Channel 0 → Second Manual (Récit): the pedal reaches box 0.
+        let mut console =
+            crate::console::Console::new(organ.clone(), loaded.specs.clone(), Vec::new(), vec![2]);
+        let moves = console.expression(0, 64);
+        assert!(
+            moves.iter().any(|&(e, p)| e == 0 && (p - 64.0 / 127.0).abs() < 1e-6),
+            "Récit pedal did not move box 0: {moves:?}"
+        );
+    }
+
+    /// Render swell-box listening takes on the Récit reeds/strings
+    /// (the registration a real swell box exists for): A/B states, a
+    /// live pedal sweep through the inertia model, and a release with
+    /// the box slammed shut (the tail must stay frozen).
+    #[test]
+    #[ignore = "renders /tmp swell wavs"]
+    fn render_swell_demos() {
+        let Some(path) = demo_organ() else { return };
+        let organ = aristide_formats::grandorgue::load(&path).expect("loads").organ;
+        let device_rate = 44_100.0f32;
+        let loaded = build(&organ, device_rate).expect("bank builds");
+        let sr = device_rate as usize;
+        let recit = organ.manuals[2].id;
+        let drawn: Vec<_> = organ
+            .stops
+            .iter()
+            .filter(|s| {
+                s.manual == recit
+                    && !s.name.contains("noise")
+                    && ["Bourdon 8", "Gamba 8", "Hautbois 8", "Trompette 8"]
+                        .iter()
+                        .any(|p| s.name.contains(p))
+            })
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(drawn.len(), 4, "expected the four Récit 8' stops");
+
+        enum Event {
+            Note(u8, bool),
+            Pedal(f32),
+        }
+        let render = |events: &[(usize, Event)], total: usize, out: &str| {
+            let mut console = crate::console::Console::new(
+                organ.clone(),
+                loaded.specs.clone(),
+                drawn.clone(),
+                vec![2],
+            );
+            let (mut engine, mut handle) =
+                aristide_engine::Engine::new(device_rate, std::sync::Arc::new(loaded.bank.clone()));
+            handle.send(aristide_engine::Command::SetMasterGain { linear: 0.4 });
+            // Sidecar-default box behaviour, floors from the ODF.
+            for (index, enclosure) in organ.enclosures.iter().enumerate() {
+                handle.send(aristide_engine::Command::SetEnclosure {
+                    enclosure: index as u8,
+                    params: aristide_engine::enclosure::EnclosureParams {
+                        floor_db: 20.0
+                            * (enclosure.amp_minimum_level as f32 / 100.0).max(0.01).log10(),
+                        ..Default::default()
+                    },
+                });
+            }
+            let block = 512usize;
+            let mut output = Vec::new();
+            let mut buffer = vec![0.0f32; block * 2];
+            let mut next = 0usize;
+            let mut frame = 0usize;
+            let started = std::time::Instant::now();
+            while frame < total {
+                while next < events.len() && events[next].0 < frame + block {
+                    match events[next].1 {
+                        Event::Note(key, true) => {
+                            let (starts, retriggered) = console.note_on(0, key);
+                            for h in retriggered {
+                                handle.send(aristide_engine::Command::StopVoice { handle: h });
+                            }
+                            for st in starts {
+                                handle.send(aristide_engine::Command::StartVoice {
+                                    handle: st.handle,
+                                    sample: st.spec.sample,
+                                    rate: st.spec.rate,
+                                    gain: st.spec.gain,
+                                    group: st.spec.group,
+                                    wind_weight: st.spec.wind_weight,
+                                    brightness: st.spec.brightness,
+                                    enclosure: st.spec.enclosure,
+                                });
+                            }
+                        }
+                        Event::Note(key, false) => {
+                            for h in console.note_off(0, key) {
+                                handle.send(aristide_engine::Command::StopVoice { handle: h });
+                            }
+                        }
+                        Event::Pedal(position) => {
+                            for (enclosure, position) in
+                                console.expression(0, (position * 127.0) as u8)
+                            {
+                                handle.send(
+                                    aristide_engine::Command::SetEnclosurePosition {
+                                        enclosure,
+                                        position,
+                                    },
+                                );
+                            }
+                        }
+                    }
+                    next += 1;
+                }
+                engine.process(&mut buffer, 2);
+                output.extend_from_slice(&buffer);
+                frame += block;
+            }
+            let rtf = started.elapsed().as_secs_f64() / (total as f64 / device_rate as f64);
+            write_wav_f32(out, &output, 2, sr as u32);
+            println!("wrote {out} (realtime factor {rtf:.3})");
+        };
+
+        let chord: [u8; 3] = [60, 64, 67];
+        // Take 1: the same chord at open / half / closed.
+        let mut events: Vec<(usize, Event)> = Vec::new();
+        for (i, position) in [1.0f32, 0.5, 0.0].into_iter().enumerate() {
+            let base = i * sr * 4 + sr / 4;
+            events.push((base.saturating_sub(sr / 4), Event::Pedal(position)));
+            for &k in &chord {
+                events.push((base, Event::Note(k, true)));
+                events.push((base + sr * 5 / 2, Event::Note(k, false)));
+            }
+        }
+        render(&events, 3 * sr * 4 + sr, "/tmp/swell_ab.wav");
+
+        // Take 2: held chord, pedal streaming closed→open→closed like a
+        // real expression pedal (20 CC steps per move).
+        let mut events: Vec<(usize, Event)> = vec![(0, Event::Pedal(1.0))];
+        for &k in &chord {
+            events.push((sr / 4, Event::Note(k, true)));
+        }
+        let mut stream = |events: &mut Vec<(usize, Event)>, at: usize, from: f32, to: f32| {
+            for step in 0..=20 {
+                let t = step as f32 / 20.0;
+                events.push((
+                    at + (t * 1.2 * sr as f32) as usize,
+                    Event::Pedal(from + (to - from) * t),
+                ));
+            }
+        };
+        stream(&mut events, sr, 1.0, 0.0);
+        stream(&mut events, 4 * sr, 0.0, 1.0);
+        stream(&mut events, 7 * sr, 1.0, 0.0);
+        for &k in &chord {
+            events.push((10 * sr, Event::Note(k, false)));
+        }
+        events.sort_by_key(|e| e.0);
+        render(&events, 12 * sr, "/tmp/swell_sweep.wav");
+
+        // Take 3: release with the box just closed, then the pedal
+        // reopens DURING the tail — the tail must not follow (frozen at
+        // key-off; it is room decay that already left the box).
+        let mut events: Vec<(usize, Event)> = vec![(0, Event::Pedal(1.0))];
+        for &k in &chord {
+            events.push((sr / 4, Event::Note(k, true)));
+        }
+        events.push((2 * sr, Event::Pedal(0.0)));
+        for &k in &chord {
+            events.push((3 * sr, Event::Note(k, false)));
+        }
+        events.push((3 * sr + sr / 3, Event::Pedal(1.0)));
+        render(&events, 7 * sr, "/tmp/swell_release_freeze.wav");
+    }
+
     /// Reproduce "fast spam distorts": hammer the plein jeu with rapid
     /// on/off pairs and measure what actually comes out — NaNs, clicks,
     /// peaks past the limiter ceiling, and the real-time cost.
@@ -350,6 +590,7 @@ mod tests {
                         group: start.spec.group,
                         wind_weight: start.spec.wind_weight,
                         brightness: start.spec.brightness,
+                        enclosure: start.spec.enclosure,
                     });
                 }
             }
@@ -452,6 +693,7 @@ mod tests {
                             group: start.spec.group,
                             wind_weight: start.spec.wind_weight,
                             brightness: start.spec.brightness,
+                        enclosure: start.spec.enclosure,
                         });
                     }
                 } else {
@@ -553,6 +795,7 @@ mod tests {
                         group: start.spec.group,
                         wind_weight: start.spec.wind_weight,
                         brightness: start.spec.brightness,
+                        enclosure: start.spec.enclosure,
                     });
                 }
                 // Stagger key events across blocks like real playing.
@@ -641,6 +884,7 @@ mod tests {
                     group: start.spec.group,
                     wind_weight: start.spec.wind_weight,
                     brightness: start.spec.brightness,
+                        enclosure: start.spec.enclosure,
                 });
             }
         }
@@ -718,6 +962,7 @@ mod tests {
                 group: start.spec.group,
                 wind_weight: start.spec.wind_weight,
                 brightness: start.spec.brightness,
+                        enclosure: start.spec.enclosure,
             }));
         }
         let mut buffer = vec![0.0f32; 4800 * 2];
@@ -873,6 +1118,7 @@ mod tests {
                             group: start.spec.group,
                             wind_weight: start.spec.wind_weight,
                             brightness: start.spec.brightness,
+                        enclosure: start.spec.enclosure,
                         }));
                     }
                 } else {
@@ -1000,6 +1246,7 @@ mod tests {
                 group: st.spec.group,
                 wind_weight: st.spec.wind_weight,
                 brightness: st.spec.brightness,
+                        enclosure: st.spec.enclosure,
             });
         }
         let block = 512usize;
@@ -1102,6 +1349,7 @@ mod tests {
                                 group: st.spec.group,
                                 wind_weight: st.spec.wind_weight,
                                 brightness: st.spec.brightness,
+                        enclosure: st.spec.enclosure,
                             });
                         }
                     } else {
@@ -1236,6 +1484,7 @@ mod tests {
                                 group: st.spec.group,
                                 wind_weight: st.spec.wind_weight,
                                 brightness: st.spec.brightness,
+                        enclosure: st.spec.enclosure,
                             });
                         }
                     } else {
@@ -1362,6 +1611,7 @@ mod tests {
                             group: st.spec.group,
                             wind_weight: st.spec.wind_weight,
                             brightness: st.spec.brightness,
+                        enclosure: st.spec.enclosure,
                         });
                     }
                 } else {
@@ -1422,6 +1672,7 @@ mod tests {
                             group: st.spec.group,
                             wind_weight: st.spec.wind_weight,
                             brightness: st.spec.brightness,
+                        enclosure: st.spec.enclosure,
                         });
                     }
                 }
@@ -1532,6 +1783,7 @@ mod tests {
                         group: st.spec.group,
                         wind_weight: st.spec.wind_weight,
                         brightness: st.spec.brightness,
+                        enclosure: st.spec.enclosure,
                     });
                 }
             }

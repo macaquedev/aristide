@@ -374,6 +374,8 @@ pub struct State {
     pub master_gain: f32,
     /// Reverb wet level; `None` = no IR loaded.
     pub reverb_wet: Option<f32>,
+    /// MIDI controller number driving swell boxes (sidecar `[enclosures] cc`).
+    pub expression_cc: u8,
 }
 
 fn main() -> Result<()> {
@@ -426,6 +428,8 @@ fn main() -> Result<()> {
 
     let mut wind_params = None;
     let mut trem_setup: Option<(aristide_engine::wind::TremulantParams, Vec<u8>)> = None;
+    let mut enclosure_setup: Vec<(u8, aristide_engine::enclosure::EnclosureParams)> = Vec::new();
+    let mut expression_cc = 11u8;
     let mut reverb_ir: Option<Arc<aristide_engine::reverb::PreparedIr>> = None;
     let mut reverb_wet = 0.0f32;
     let (sample_bank, control) = match &args.set {
@@ -495,6 +499,45 @@ fn main() -> Result<()> {
                     .collect()
             };
             trem_setup = Some((trem_params, groups));
+
+            // Enclosures: one engine box per ODF enclosure, floor from
+            // the set's AmpMinimumLevel unless the sidecar overrides,
+            // filter/inertia constants from the sidecar.
+            let boxes = &sidecar.enclosures;
+            expression_cc = boxes.cc.min(119);
+            for (index, enclosure) in organ
+                .enclosures
+                .iter()
+                .enumerate()
+                .take(aristide_engine::enclosure::MAX_ENCLOSURES)
+            {
+                let floor_db = if boxes.floor_db < 0.0 {
+                    boxes.floor_db.max(-40.0)
+                } else {
+                    // GO: AmpMinimumLevel % linear amplitude closed.
+                    // Clamp at −40 dB (a 0 would be −∞; measured real
+                    // boxes span 10–20 dB broadband).
+                    20.0 * (enclosure.amp_minimum_level / 100.0).max(0.01).log10()
+                };
+                enclosure_setup.push((
+                    index as u8,
+                    aristide_engine::enclosure::EnclosureParams {
+                        floor_db: floor_db as f32,
+                        shelf_db: boxes.shelf_db.clamp(-40.0, 0.0) as f32,
+                        corner_open_hz: boxes.corner_open_hz.clamp(100.0, 20_000.0) as f32,
+                        corner_closed_hz: boxes.corner_closed_hz.clamp(100.0, 20_000.0) as f32,
+                        taper: boxes.taper.clamp(0.2, 5.0) as f32,
+                        full_sweep_s: boxes.full_sweep_s.clamp(0.0, 5.0) as f32,
+                    },
+                ));
+            }
+            if organ.enclosures.len() > aristide_engine::enclosure::MAX_ENCLOSURES {
+                tracing::warn!(
+                    "set defines {} enclosures; engine tracks the first {}",
+                    organ.enclosures.len(),
+                    aristide_engine::enclosure::MAX_ENCLOSURES
+                );
+            }
 
             if !sidecar.reverb.ir.is_empty() {
                 reverb_wet = sidecar.reverb.wet.clamp(0.0, 2.0) as f32;
@@ -654,6 +697,20 @@ fn main() -> Result<()> {
         }
     }
 
+    for &(enclosure, params) in &enclosure_setup {
+        tracing::info!(
+            "enclosure {}: floor {:.1} dB, shelf {:.1} dB @ {:.0}→{:.0} Hz, sweep {:.2} s (CC{})",
+            enclosure,
+            params.floor_db,
+            params.shelf_db,
+            params.corner_open_hz,
+            params.corner_closed_hz,
+            params.full_sweep_s,
+            expression_cc
+        );
+        handle.send(Command::SetEnclosure { enclosure, params });
+    }
+
     let trem_groups = match &trem_setup {
         Some((params, groups)) => {
             tracing::info!(
@@ -680,6 +737,7 @@ fn main() -> Result<()> {
         trem_engaged: false,
         master_gain: args.master_gain.unwrap_or(0.178),
         reverb_wet: reverb_ir.is_some().then_some(reverb_wet),
+        expression_cc,
     }));
     if let Err(err) = http::spawn(Arc::clone(&state), args.http_port) {
         tracing::warn!("console ui disabled: {err}");
@@ -847,6 +905,7 @@ fn handle_midi(message: &[u8], state: &Mutex<State>) {
     };
     let channel = status & 0x0F;
     let mut state = state.lock().expect("state poisoned");
+    let expression_cc = state.expression_cc;
     let State {
         engine, control, ..
     } = &mut *state;
@@ -877,6 +936,7 @@ fn handle_midi(message: &[u8], state: &Mutex<State>) {
                         group: start.spec.group,
                         wind_weight: start.spec.wind_weight,
                         brightness: start.spec.brightness,
+                        enclosure: start.spec.enclosure,
                     });
                 }
             }
@@ -894,6 +954,17 @@ fn handle_midi(message: &[u8], state: &Mutex<State>) {
                 console.all_off();
             }
             send(Command::AllNotesOff);
+        }
+        // Expression pedal: drive the swell boxes of the channel's manual.
+        (0xB0, cc, value) if cc == expression_cc => {
+            if let Control::Organ(console) = control {
+                for (enclosure, position) in console.expression(channel, value) {
+                    send(Command::SetEnclosurePosition {
+                        enclosure,
+                        position,
+                    });
+                }
+            }
         }
         _ => {}
     }

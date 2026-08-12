@@ -36,6 +36,79 @@ pub struct Sidecar {
     pub reverb: ReverbConfig,
     #[serde(default)]
     pub noises: NoisesConfig,
+    #[serde(default)]
+    pub enclosures: EnclosuresConfig,
+}
+
+/// Swell box behaviour (applied to every enclosure the set defines;
+/// per-box overrides can come later with the voicing layer). Constants
+/// and defaults grounded in docs/research/enclosure-modeling.md.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnclosuresConfig {
+    /// MIDI expression controller number driving the boxes (11 =
+    /// expression, the convention; 7 works for volume-pedal rigs).
+    #[serde(default = "default_expression_cc")]
+    pub cc: u8,
+    /// Broadband attenuation fully closed, dB (negative). 0 = derive
+    /// from the set's own AmpMinimumLevel (GO semantics).
+    #[serde(default)]
+    pub floor_db: f64,
+    /// Extra high-shelf attenuation fully closed, dB (negative) —
+    /// the "muffle". Measured boxes lose ~10 dB more treble than bass.
+    #[serde(default = "default_shelf_db")]
+    pub shelf_db: f64,
+    /// Shelf corner fully open / fully closed, Hz.
+    #[serde(default = "default_corner_open_hz")]
+    pub corner_open_hz: f64,
+    #[serde(default = "default_corner_closed_hz")]
+    pub corner_closed_hz: f64,
+    /// Pedal-to-dB curve: 1 = dB-linear (Hauptwerk's law), >1 bunches
+    /// the change near closed (raw physics), <1 the opposite.
+    #[serde(default = "default_taper")]
+    pub taper: f64,
+    /// Shutter inertia: full-sweep settle time in seconds (0 = the
+    /// pedal drives the shutters directly).
+    #[serde(default = "default_full_sweep_s")]
+    pub full_sweep_s: f64,
+}
+
+fn default_expression_cc() -> u8 {
+    11
+}
+
+fn default_shelf_db() -> f64 {
+    -10.0
+}
+
+fn default_corner_open_hz() -> f64 {
+    8_000.0
+}
+
+fn default_corner_closed_hz() -> f64 {
+    1_000.0
+}
+
+fn default_taper() -> f64 {
+    1.0
+}
+
+fn default_full_sweep_s() -> f64 {
+    0.5
+}
+
+impl Default for EnclosuresConfig {
+    fn default() -> Self {
+        EnclosuresConfig {
+            cc: default_expression_cc(),
+            floor_db: 0.0,
+            shelf_db: default_shelf_db(),
+            corner_open_hz: default_corner_open_hz(),
+            corner_closed_hz: default_corner_closed_hz(),
+            taper: default_taper(),
+            full_sweep_s: default_full_sweep_s(),
+        }
+    }
 }
 
 /// Control-operating noises (drawstop thumps, coupler clacks, blower).

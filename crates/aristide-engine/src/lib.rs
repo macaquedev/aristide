@@ -17,6 +17,7 @@
 //! mapping, registration, and couplers out of the RT core entirely.
 
 pub mod bank;
+pub mod enclosure;
 pub mod resample;
 pub mod reverb;
 pub mod wind;
@@ -24,6 +25,7 @@ pub mod wind;
 use std::sync::Arc;
 
 use bank::{Sample, SampleBank};
+use enclosure::{Enclosure, EnclosureParams, ENCLOSURE_NONE, MAX_ENCLOSURES};
 use resample::SincTable;
 use rtrb::{Consumer, Producer, RingBuffer};
 use wind::{WindGroup, WindParams, MAX_WIND_GROUPS};
@@ -80,6 +82,8 @@ pub enum Command {
     /// how much it draws (0 = draws nothing, e.g. action noises).
     /// `brightness` is the voice's tilt-filter one-pole coefficient
     /// (control-side from the pipe's pitch; 0 bypasses the filter).
+    /// `enclosure` is the swell box the voice sits inside
+    /// ([`ENCLOSURE_NONE`] for unenclosed divisions).
     StartVoice {
         handle: u64,
         sample: u32,
@@ -88,6 +92,7 @@ pub enum Command {
         group: u8,
         wind_weight: f32,
         brightness: f32,
+        enclosure: u8,
     },
     /// Reconfigure one wind group's supply model.
     SetWind { group: u8, params: WindParams },
@@ -98,6 +103,14 @@ pub enum Command {
     },
     /// Engage/disengage one wind group's tremulant (ramped).
     SetTremulant { group: u8, engaged: bool },
+    /// Reconfigure one enclosure's box model.
+    SetEnclosure {
+        enclosure: u8,
+        params: EnclosureParams,
+    },
+    /// Move one enclosure's pedal (0 = closed, 1 = open); the shutter
+    /// inertia model slews toward it.
+    SetEnclosurePosition { enclosure: u8, position: f32 },
     /// Release the voice started with `handle`. Loop-less (percussive)
     /// voices ignore this and play to their end.
     StopVoice { handle: u64 },
@@ -246,6 +259,23 @@ struct SampledVoice {
     /// the pipe's 2nd harmonic so pressure can breathe the timbre.
     brightness_a: f32,
     lowpass: [f32; 2],
+    /// Swell box this voice sits inside ([`ENCLOSURE_NONE`] = none),
+    /// with the box factors cached per voice: a Held voice re-reads
+    /// them each block; a released voice keeps them FROZEN — the tail
+    /// is room decay that already left the box, so later shutter moves
+    /// must not touch it (HW's rule; GO bakes the gain in likewise).
+    enclosure: u8,
+    /// Broadband box gain, de-zippered per frame with a ~5 ms one-pole
+    /// toward `enc_gain_target` (block-stepped gain is audible zipper;
+    /// a one-pole never overshoots regardless of block size).
+    enc_gain: f32,
+    enc_gain_target: f32,
+    /// Shelf leg: high-frequency gain and one-pole corner coefficient,
+    /// same filter form as the brightness tilt but hinged at the box
+    /// corner instead of the pipe's 2nd harmonic.
+    enc_hi_gain: f32,
+    enc_coeff: f32,
+    enc_lowpass: [f32; 2],
     /// Per-pipe wind-flow noise (slow, independent per voice).
     wander: wind::Wander,
     rng: u32,
@@ -669,6 +699,7 @@ pub struct Engine {
     sinc: SincTable,
     voices: Box<[Voice]>,
     wind: [WindGroup; MAX_WIND_GROUPS],
+    enclosures: [Enclosure; MAX_ENCLOSURES],
     reverb: Option<reverb::Reverb>,
     /// Diagnostic "safe mode": linear interpolation, no wind/tremulant/
     /// brightness/flow-noise — per-voice cost at or below GrandOrgue's.
@@ -699,6 +730,8 @@ pub struct Engine {
     kill_step: f32,
     /// ~10 ms envelope-follower coefficient for release level matching.
     envelope_step: f32,
+    /// ~5 ms one-pole coefficient de-zippering per-voice enclosure gain.
+    enc_ramp: f32,
 }
 
 impl Engine {
@@ -711,6 +744,7 @@ impl Engine {
             sinc: SincTable::new(),
             voices: vec![Voice::Idle; MAX_VOICES].into_boxed_slice(),
             wind: [WindGroup::default(); MAX_WIND_GROUPS],
+            enclosures: [Enclosure::default(); MAX_ENCLOSURES],
             reverb: None,
             lite: false,
             tap: None,
@@ -725,6 +759,7 @@ impl Engine {
             crossfade_step: 1.0 / (RELEASE_CROSSFADE_SECONDS * sample_rate),
             kill_step: 1.0 / (KILL_FADE_SECONDS * sample_rate),
             envelope_step: 1.0 - (-1.0 / (0.01 * sample_rate)).exp(),
+            enc_ramp: 1.0 - (-1.0 / (0.005 * sample_rate)).exp(),
         };
         (engine, EngineHandle { commands: producer })
     }
@@ -832,6 +867,9 @@ impl Engine {
             for (group, wind) in self.wind.iter_mut().enumerate() {
                 wind.step(demand[group], dt);
             }
+            for box_state in self.enclosures.iter_mut() {
+                box_state.step(dt, self.sample_rate);
+            }
         }
 
         let lite = self.lite;
@@ -842,12 +880,14 @@ impl Engine {
             bank,
             sinc,
             wind,
+            enclosures,
             free_slots,
             tone_attack_step,
             tone_release_step,
             crossfade_step,
             kill_step,
             envelope_step,
+            enc_ramp,
             ..
         } = self;
 
@@ -909,6 +949,18 @@ impl Engine {
                     // Bypass the filter while it would do nothing: keeps
                     // untouched-pressure rendering bit-identical.
                     let tilting = tilt_a > 0.0 && (treble - 1.0).abs() > 1e-4;
+
+                    // Swell box: a Held voice tracks its box each block
+                    // (gain ramped per frame — pedal sweeps would zipper
+                    // otherwise); any released/fading voice keeps the
+                    // factors frozen from its last Held block.
+                    let enclosed = !lite && sampled.enclosure != ENCLOSURE_NONE;
+                    if enclosed && sampled.phase == SamplePhase::Held {
+                        let box_state = &enclosures[sampled.enclosure as usize];
+                        sampled.enc_gain_target = box_state.gain();
+                        sampled.enc_hi_gain = box_state.hi_gain();
+                        sampled.enc_coeff = box_state.coeff();
+                    }
                     sampled.age_frames = sampled.age_frames.saturating_add(frames as u32);
                     // The voice can hand over to a separate release
                     // sample or switch loops mid-block; track the refs
@@ -970,6 +1022,17 @@ impl Engine {
                                     left = lp[0] + treble * (left - lp[0]);
                                     right = lp[1] + treble * (right - lp[1]);
                                 }
+                                if enclosed {
+                                    let lp = &mut sampled.enc_lowpass;
+                                    lp[0] += sampled.enc_coeff * (left - lp[0]);
+                                    lp[1] += sampled.enc_coeff * (right - lp[1]);
+                                    left = lp[0] + sampled.enc_hi_gain * (left - lp[0]);
+                                    right = lp[1] + sampled.enc_hi_gain * (right - lp[1]);
+                                    sampled.enc_gain += *enc_ramp
+                                        * (sampled.enc_gain_target - sampled.enc_gain);
+                                    left *= sampled.enc_gain;
+                                    right *= sampled.enc_gain;
+                                }
                                 mix_frame(
                                     &mut buffer[frame * channels..],
                                     channels,
@@ -1030,10 +1093,23 @@ impl Engine {
                 group,
                 wind_weight,
                 brightness,
+                enclosure,
             } => {
                 if self.bank.get(sample).is_none() || !(rate > 0.0) {
                     return;
                 }
+                let enclosure = if (enclosure as usize) < MAX_ENCLOSURES {
+                    enclosure
+                } else {
+                    ENCLOSURE_NONE
+                };
+                // Voices born inside a box start at the box's CURRENT
+                // factors (starting at 1.0 would ramp every attack).
+                let box_state = self
+                    .enclosures
+                    .get(enclosure as usize)
+                    .copied()
+                    .unwrap_or_default();
                 if let Some(slot) = self.allocate_slot() {
                     self.voices[slot] = Voice::Sampled(SampledVoice {
                         handle,
@@ -1061,6 +1137,12 @@ impl Engine {
                         pending_release: None,
                         brightness_a: brightness.clamp(0.0, 1.0),
                         lowpass: [0.0; 2],
+                        enclosure,
+                        enc_gain: box_state.gain(),
+                        enc_gain_target: box_state.gain(),
+                        enc_hi_gain: box_state.hi_gain(),
+                        enc_coeff: box_state.coeff(),
+                        enc_lowpass: [0.0; 2],
                         wander: wind::Wander::default(),
                         rng: (handle as u32).wrapping_mul(0x9E37_79B9) | 1,
                         loop_index: 0,
@@ -1083,6 +1165,19 @@ impl Engine {
             Command::SetTremulant { group, engaged } => {
                 if let Some(wind) = self.wind.get_mut(group as usize) {
                     wind.set_tremulant(engaged);
+                }
+            }
+            Command::SetEnclosure { enclosure, params } => {
+                if let Some(box_state) = self.enclosures.get_mut(enclosure as usize) {
+                    box_state.set_params(params);
+                }
+            }
+            Command::SetEnclosurePosition {
+                enclosure,
+                position,
+            } => {
+                if let Some(box_state) = self.enclosures.get_mut(enclosure as usize) {
+                    box_state.set_target(position);
                 }
             }
             Command::StopVoice { handle } => {
@@ -1211,6 +1306,14 @@ impl Engine {
         assert_eq!(idle, self.free_slots.len(), "idle voices lost from free list");
     }
 
+    /// Current shutter position of an enclosure (diagnostics and tests).
+    pub fn enclosure_position(&self, index: usize) -> f32 {
+        self.enclosures
+            .get(index)
+            .map(|e| e.position())
+            .unwrap_or(1.0)
+    }
+
     /// Current pressure of a wind group (diagnostics and tests).
     pub fn wind_pressure(&self, group: usize) -> f32 {
         self.wind
@@ -1275,6 +1378,7 @@ mod tests {
             group: 0,
             wind_weight: 0.0,
             brightness: 0.0,
+            enclosure: ENCLOSURE_NONE,
         });
         // 200 frames from a 100-frame sample: only survivable by looping.
         let out = render(&mut engine, 200);
@@ -1306,6 +1410,7 @@ mod tests {
             group: 0,
             wind_weight: 0.0,
             brightness: 0.0,
+            enclosure: ENCLOSURE_NONE,
         });
         render(&mut engine, 10);
         handle.send(Command::StopVoice { handle: 7 });
@@ -1335,6 +1440,7 @@ mod tests {
             group: 0,
             wind_weight: 0.0,
             brightness: 0.0,
+            enclosure: ENCLOSURE_NONE,
         });
         handle.send(Command::StopVoice { handle: 1 });
         let out = render(&mut engine, 60);
@@ -1410,6 +1516,7 @@ mod tests {
             group: 0,
             wind_weight: 0.0,
             brightness: 0.0,
+            enclosure: ENCLOSURE_NONE,
         });
         let mut buffer = vec![0.0f32; stop_after * 2];
         engine.process(&mut buffer, 2);
@@ -1509,6 +1616,7 @@ mod tests {
                     group: 3,
                     wind_weight: 1.0,
                     brightness: 0.0,
+                    enclosure: ENCLOSURE_NONE,
                 });
             }
             handle.send(Command::StartVoice {
@@ -1519,6 +1627,7 @@ mod tests {
                 group: 3,
                 wind_weight: 0.0,
                 brightness: 0.0,
+                enclosure: ENCLOSURE_NONE,
             });
             // Settle for ~1.5 s (12+ time constants), then measure.
             let mut buffer = vec![0.0f32; 1024 * 2];
@@ -1575,6 +1684,7 @@ mod tests {
             group: 0,
             wind_weight: 0.0,
             brightness: 0.0,
+            enclosure: ENCLOSURE_NONE,
         });
         // Let the limiter settle, then inspect a window.
         let mut buffer = vec![0.0f32; 48000 * 2];
@@ -1629,6 +1739,7 @@ mod tests {
             group: 0,
             wind_weight: 0.0,
             brightness: 0.0,
+            enclosure: ENCLOSURE_NONE,
         });
         let mut buffer = vec![0.0f32; 4800 * 2];
         engine.process(&mut buffer, 2);
@@ -1667,6 +1778,7 @@ mod tests {
             group: 0,
             wind_weight: 0.0,
             brightness: 0.0,
+            enclosure: ENCLOSURE_NONE,
         });
         // ~100 loop passes.
         let mut buffer = vec![0.0f32; 10000 * 2];
@@ -1764,6 +1876,7 @@ mod tests {
                 group: 0,
                 wind_weight: 0.0,
                 brightness: 0.0,
+                enclosure: ENCLOSURE_NONE,
             });
             let mut buffer = vec![0.0f32; hold_frames * 2];
             engine.process(&mut buffer, 2);
@@ -1969,6 +2082,7 @@ mod tests {
             group: 0,
             wind_weight: 0.0,
             brightness: 0.0,
+            enclosure: ENCLOSURE_NONE,
         });
         // Release 1.5 periods in: the ramp is at ~37 % amplitude.
         let mut buffer = vec![0.0f32; (period * 3 / 2) * 2];
@@ -2015,6 +2129,7 @@ mod tests {
                         group: 0,
                         wind_weight: 1.0,
                         brightness: 0.0,
+                        enclosure: ENCLOSURE_NONE,
                     });
                 }
             }
@@ -2026,6 +2141,7 @@ mod tests {
                 group: 0,
                 wind_weight: 0.0,
                 brightness,
+                enclosure: ENCLOSURE_NONE,
             });
             let mut buffer = vec![0.0f32; 1024 * 2];
             for _ in 0..70 {
@@ -2072,6 +2188,7 @@ mod tests {
                 group: 0,
                 wind_weight: 1.0,
                 brightness: 0.0,
+                enclosure: ENCLOSURE_NONE,
             });
             // 10 windows of 0.2 s: the wander drifts across them.
             let mut periods = Vec::new();
@@ -2115,10 +2232,185 @@ mod tests {
             group: 0,
             wind_weight: 0.0,
             brightness: 0.0,
+            enclosure: ENCLOSURE_NONE,
         });
         let out = render(&mut engine, 50);
         let master = DEFAULT_MASTER_GAIN;
         assert!((out[41] - 0.25 * master).abs() < 1e-6, "right channel");
         assert!((out[40] - out[41]).abs() > 1e-6, "channels differ");
+    }
+
+    /// Two-tone fixture for enclosure tests: 100 Hz + 6 kHz at 44.1 kHz,
+    /// seamless loop (both periods divide the loop length... 100 Hz does
+    /// exactly; 6 kHz nearly — the sinc seam wrap absorbs the rest), and
+    /// a gently decaying tail past the loop for release tests.
+    fn two_tone_bank() -> Arc<SampleBank> {
+        let sr = 44_100.0f64;
+        let frames = 4 * 44_100usize;
+        let loop_start = 441 * 10;
+        let loop_end = 441 * 250;
+        let data: Vec<f32> = (0..frames)
+            .map(|n| {
+                let t = n as f64 / sr;
+                let envelope = if n >= loop_end {
+                    (-((n - loop_end) as f64) / sr / 0.8).exp()
+                } else {
+                    1.0
+                };
+                (0.3 * (core::f64::consts::TAU * 100.0 * t).sin()
+                    + 0.3 * (core::f64::consts::TAU * 6_000.0 * t).sin())
+                    as f32
+                    * envelope as f32
+            })
+            .collect();
+        let sample = Sample::new(
+            data,
+            1,
+            sr as f32,
+            Some((loop_start as u64, loop_end as u64)),
+            loop_end as u64,
+        )
+        .expect("valid");
+        let mut bank = SampleBank::default();
+        bank.push(sample);
+        Arc::new(bank)
+    }
+
+    /// Signal power at `freq` over `window` frames of channel 0
+    /// (quadrature correlation — windows hold whole cycles).
+    fn band_power(output: &[f32], skip: usize, window: usize, freq: f32, sr: f32) -> f64 {
+        let mut sin_acc = 0.0f64;
+        let mut cos_acc = 0.0f64;
+        for i in 0..window {
+            let phase = core::f64::consts::TAU * freq as f64 * (skip + i) as f64 / sr as f64;
+            let v = output[(skip + i) * 2] as f64;
+            sin_acc += v * phase.sin();
+            cos_acc += v * phase.cos();
+        }
+        let norm = 2.0 / window as f64;
+        (sin_acc * norm).powi(2) + (cos_acc * norm).powi(2)
+    }
+
+    fn enclosure_test_engine(full_sweep_s: f32) -> (Engine, EngineHandle) {
+        let (mut engine, mut handle) = Engine::new(44_100.0, two_tone_bank());
+        engine.set_release_stagger(0.0);
+        handle.send(Command::SetEnclosure {
+            enclosure: 0,
+            params: enclosure::EnclosureParams {
+                full_sweep_s,
+                ..enclosure::EnclosureParams::default()
+            },
+        });
+        handle.send(Command::StartVoice {
+            handle: 1,
+            sample: 0,
+            rate: 1.0,
+            gain: 1.0,
+            group: 0,
+            wind_weight: 0.0,
+            brightness: 0.0,
+            enclosure: 0,
+        });
+        (engine, handle)
+    }
+
+    /// Closing the box must attenuate broadband by ~floor_db and the
+    /// high band by ~floor_db + shelf_db: a muffle, not a volume knob.
+    #[test]
+    fn closed_enclosure_attenuates_highs_more_than_lows() {
+        let (mut engine, mut handle) = enclosure_test_engine(0.0);
+        let sr = 44_100usize;
+        let out_open = render(&mut engine, sr);
+        handle.send(Command::SetEnclosurePosition {
+            enclosure: 0,
+            position: 0.0,
+        });
+        let out_closed = render(&mut engine, sr);
+
+        // 0.2 s windows late in each second (filters settled), whole
+        // cycles of both tones.
+        let (skip, window) = (sr / 2, sr / 5);
+        let low_db =
+            10.0 * (band_power(&out_closed, skip, window, 100.0, sr as f32)
+                / band_power(&out_open, skip, window, 100.0, sr as f32))
+            .log10();
+        let high_db =
+            10.0 * (band_power(&out_closed, skip, window, 6_000.0, sr as f32)
+                / band_power(&out_open, skip, window, 6_000.0, sr as f32))
+            .log10();
+        let p = enclosure::EnclosureParams::default();
+        assert!(
+            (low_db - p.floor_db as f64).abs() < 1.5,
+            "low band moved {low_db:.1} dB, expected ~{}",
+            p.floor_db
+        );
+        assert!(
+            (high_db - (p.floor_db + p.shelf_db) as f64).abs() < 2.0,
+            "high band moved {high_db:.1} dB, expected ~{}",
+            p.floor_db + p.shelf_db
+        );
+    }
+
+    /// A released voice's tail is room decay that already left the box:
+    /// shutter moves after key-off must not touch it (bit-identical to
+    /// a run where the pedal never moves).
+    #[test]
+    fn release_tail_ignores_later_shutter_moves() {
+        let run = |close_after_release: bool| -> Vec<f32> {
+            let (mut engine, mut handle) = enclosure_test_engine(0.0);
+            let sr = 44_100usize;
+            render(&mut engine, sr / 2);
+            handle.send(Command::StopVoice { handle: 1 });
+            render(&mut engine, sr / 10);
+            if close_after_release {
+                handle.send(Command::SetEnclosurePosition {
+                    enclosure: 0,
+                    position: 0.0,
+                });
+            }
+            render(&mut engine, sr / 2)
+        };
+        let open_tail = run(false);
+        let closed_tail = run(true);
+        assert!(
+            open_tail
+                .iter()
+                .zip(&closed_tail)
+                .all(|(a, b)| (a - b).abs() < 1e-7),
+            "tail changed after key-off shutter move"
+        );
+        // And the tail is actually sounding (the assertion above must
+        // not pass vacuously on silence).
+        assert!(open_tail.iter().any(|&v| v.abs() > 1e-4), "tail silent");
+    }
+
+    /// A full pedal sweep through the inertia model must not click:
+    /// sample-to-sample steps stay comparable to the steady signal's.
+    #[test]
+    fn pedal_sweep_is_click_free() {
+        let (mut engine, mut handle) = enclosure_test_engine(0.3);
+        let sr = 44_100usize;
+        let steady = render(&mut engine, sr);
+        handle.send(Command::SetEnclosurePosition {
+            enclosure: 0,
+            position: 0.0,
+        });
+        let sweep = render(&mut engine, sr);
+        let max_step = |out: &[f32]| -> f32 {
+            out.chunks(2)
+                .map(|f| f[0])
+                .collect::<Vec<_>>()
+                .windows(2)
+                .map(|w| (w[1] - w[0]).abs())
+                .fold(0.0f32, f32::max)
+        };
+        let steady_step = max_step(&steady[sr..]);
+        let sweep_step = max_step(&sweep);
+        assert!(
+            sweep_step < 1.3 * steady_step,
+            "sweep steps {sweep_step} vs steady {steady_step}"
+        );
+        // The sweep actually closed the box.
+        assert!(engine.enclosure_position(0) < 0.05);
     }
 }

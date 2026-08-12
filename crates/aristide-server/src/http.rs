@@ -137,6 +137,32 @@ fn respond(
             apply_trem(state, on);
             json(state_json(state))
         }
+        (Method::Post, "/api/enclosure") => {
+            let index = param(query, "idx").and_then(|v| v.parse::<usize>().ok());
+            let value = param(query, "v").and_then(|v| v.parse::<f32>().ok());
+            match (index, value) {
+                (Some(index), Some(value)) if (0.0..=1.0).contains(&value) => {
+                    {
+                        let mut state = state.lock().expect("state poisoned");
+                        let State {
+                            engine, control, ..
+                        } = &mut *state;
+                        if let Control::Organ(console) = control {
+                            if let Some((enclosure, position)) =
+                                console.set_enclosure(index, value)
+                            {
+                                engine.send(Command::SetEnclosurePosition {
+                                    enclosure,
+                                    position,
+                                });
+                            }
+                        }
+                    }
+                    json(state_json(state))
+                }
+                _ => bad_request("bad enclosure move"),
+            }
+        }
         (Method::Post, "/api/gain") => match param(query, "v").and_then(|v| v.parse::<f32>().ok())
         {
             Some(v) if (0.0..=2.0).contains(&v) => {
@@ -176,6 +202,7 @@ fn send_noise(engine: &mut aristide_engine::EngineHandle, noise: Option<crate::c
             group: start.spec.group,
             wind_weight: start.spec.wind_weight,
             brightness: start.spec.brightness,
+            enclosure: start.spec.enclosure,
         });
     }
 }
@@ -259,6 +286,19 @@ fn state_json_locked(state: &State) -> String {
         out.push_str(&format!(
             ",\"noises\":{{\"on\":{enabled},\"vol\":{volume}}}"
         ));
+        out.push_str(",\"enclosures\":[");
+        let mut first = true;
+        for (index, name, position, displayed) in console.enclosure_states() {
+            if !first {
+                out.push(',');
+            }
+            first = false;
+            out.push_str(&format!(
+                "{{\"idx\":{index},\"name\":{},\"value\":{position},\"displayed\":{displayed}}}",
+                json_string(&name)
+            ));
+        }
+        out.push(']');
     }
     out.push('}');
     out
@@ -330,6 +370,7 @@ mod tests {
             trem_engaged: false,
             master_gain: 0.178,
             reverb_wet: Some(0.25),
+            expression_cc: 11,
         })))
     }
 
