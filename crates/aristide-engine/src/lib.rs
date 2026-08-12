@@ -203,6 +203,12 @@ struct SampledVoice {
     gain: f32,
     /// Crossfade progress 0→1.
     fade: f32,
+    /// Per-voice crossfade step, set at release() from the pipe's
+    /// fundamental: ~9 periods, clamped 6–184 ms (GO/HW practice: bass
+    /// splices need long fades, treble fades must be short or they smear
+    /// the speech-off transient into an "artificial" fade). 0 = use the
+    /// engine default.
+    fade_step: f32,
     /// FadeOut amplitude 1→0.
     amplitude: f32,
     /// Fast envelope follower on the voice's own (pre-gain) output —
@@ -266,6 +272,9 @@ struct VoiceBlockContext {
     tail_last: f64,
     current_loop: Option<(u64, u64)>,
     looping: bool,
+    /// Engine output sample rate; releases need it to convert dB/s
+    /// decay compensation into a per-frame factor.
+    output_sr: f32,
 }
 
 impl SampledVoice {
@@ -284,6 +293,7 @@ impl SampledVoice {
             tail_last: (external.unwrap_or(sample).frames() - 1) as f64,
             current_loop,
             looping: current_loop.is_some(),
+            output_sr: 44_100.0, // overridden by the block loop
         }
     }
 
@@ -308,7 +318,7 @@ impl SampledVoice {
             if let Some((delay, age_ms)) = self.pending_release {
                 if delay == 0 {
                     self.pending_release = None;
-                    self.release(sample, age_ms);
+                    self.release(sample, age_ms, ctx.output_sr);
                 } else {
                     self.pending_release = Some((delay - 1, age_ms));
                 }
@@ -373,7 +383,11 @@ impl SampledVoice {
                 let weight = self.fade * self.fade * (3.0 - 2.0 * self.fade);
                 left += (tail_l * self.tail_gain - left) * weight;
                 right += (tail_r * self.tail_gain - right) * weight;
-                self.fade += crossfade_step;
+                self.fade += if self.fade_step > 0.0 {
+                    self.fade_step
+                } else {
+                    crossfade_step
+                };
                 self.release_position += rate;
                 if self.fade >= 1.0 {
                     // Hand the (already advanced) tail cursor over and
@@ -398,8 +412,20 @@ impl SampledVoice {
             }
         }
 
+        // EOF guard: a tail must reach the end of its material silent.
+        // Decay compensation can leave boosted level near EOF (and some
+        // sets simply end hot); fade the final ~46 ms instead of cutting.
+        if self.past_loop {
+            const GUARD_FRAMES: f64 = 2048.0;
+            let remaining = last - self.position;
+            if remaining < GUARD_FRAMES {
+                let scale = (remaining / GUARD_FRAMES).max(0.0) as f32;
+                left *= scale;
+                right *= scale;
+            }
+        }
         if matches!(self.phase, SamplePhase::Crossfade | SamplePhase::Tail)
-            && self.tail_decay < 1.0
+            && self.tail_decay != 1.0
         {
             self.gain *= self.tail_decay;
         }
@@ -443,7 +469,27 @@ impl SampledVoice {
 
     /// Key released: splice to a separate release (selected by hold
     /// duration) or the embedded tail, whichever the sample offers.
-    fn release(&mut self, sample: &Sample, age_ms: u32) {
+    fn release(&mut self, sample: &Sample, age_ms: u32, output_rate: f32) {
+        fn pitch_scaled_fade_step(
+            sample: &Sample,
+            rate: f64,
+            output_rate: f32,
+            age_ms: u32,
+        ) -> f32 {
+            let Some(period) = sample.measured_period() else {
+                return 0.0; // engine default
+            };
+            let output_period = period / rate.max(1e-6);
+            // ~9 fundamental periods (GO: 184 ms bass → 6 ms treble),
+            // but never longer than the note has lived: a mid-attack
+            // release must not keep swelling through a long fade — the
+            // drive collapses when the pallet closes.
+            let age_frames = age_ms as f64 * 0.001 * output_rate as f64;
+            let frames = (9.0 * output_period)
+                .min(age_frames.max(0.006 * output_rate as f64))
+                .clamp(0.006 * output_rate as f64, 0.184 * output_rate as f64);
+            (1.0 / frames) as f32
+        }
         match self.phase {
             SamplePhase::Held | SamplePhase::Crossfade => {}
             _ => return,
@@ -468,6 +514,7 @@ impl SampledVoice {
                 } else {
                     1.0
                 };
+                self.fade_step = pitch_scaled_fade_step(sample, self.rate, output_rate, age_ms);
                 self.fade = 0.0;
                 self.phase = SamplePhase::Crossfade;
                 return;
@@ -495,22 +542,34 @@ impl SampledVoice {
                 } else {
                     1.0
                 };
-                // GO's staccato model: notes shorter than the room's
-                // build-up time get their (fully reverberant) recorded
-                // tail decayed over seconds — staccato in a cathedral
-                // doesn't ring like a held chord. Build-up time 100–350
-                // ms scaled by tail length; decay span grows with note
-                // brevity (GO: 200 ms – 6 s).
+                // Staccato: a room's decay RATE is fixed by the room —
+                // a short note leaves a QUIETER tail, never a faster-
+                // decaying one (GO decays the rate instead, which turns
+                // fast passages into plucks). Model the room charge as a
+                // first-order build-up toward steady state.
                 let tail_seconds =
                     (sample.frames().saturating_sub(tail)) as f32 / sample.sample_rate_hz();
                 let full_reverb_ms = (60.0 * tail_seconds + 40.0).clamp(100.0, 350.0);
                 if (age_ms as f32) < full_reverb_ms {
-                    let decay_ms = full_reverb_ms + 6000.0 * age_ms as f32 / full_reverb_ms;
-                    // −60 dB across decay_ms, expressed per frame.
-                    let frames = decay_ms * 0.001 * sample.sample_rate_hz();
-                    self.tail_decay = (0.001f32).powf(1.0 / frames.max(1.0));
+                    let charge = 1.0 - (-(age_ms as f32) / (0.5 * full_reverb_ms)).exp();
+                    self.tail_gain = (self.tail_gain * charge).max(0.1);
                 }
-                self.fade = 0.0;
+                // Repitching by R also plays the recorded room decay R×
+                // too fast (or slow) — ring time must not depend on the
+                // key, so compensate the measured tail decay rate with a
+                // per-frame gain factor. Down-repitched pipes were the
+                // "bell": their tails rang up to 40% too long.
+                self.fade_step = pitch_scaled_fade_step(sample, self.rate, output_rate, age_ms);
+                let lambda = sample.tail_decay_db_per_s();
+                let repitch =
+                    (self.rate as f32) * output_rate / sample.sample_rate_hz();
+                self.tail_decay = if lambda > 0.0 && (repitch - 1.0).abs() > 0.01 {
+                    let db_per_s = (lambda * (repitch - 1.0)).clamp(-15.0, 15.0);
+                    10.0f32.powf(db_per_s / (20.0 * output_rate))
+                } else {
+                    1.0
+                };
+self.fade = 0.0;
                 self.phase = SamplePhase::Crossfade;
             }
             Some(_) => {} // already crossfading
@@ -632,7 +691,7 @@ impl Engine {
                                 * max_stagger) as u16;
                             sampled.pending_release = Some((delay, age_ms));
                         } else if let Some(sample) = self.bank.get(sampled.sample) {
-                            sampled.release(sample, age_ms);
+                            sampled.release(sample, age_ms, self.sample_rate);
                         }
                     }
                 }
@@ -709,6 +768,7 @@ impl Engine {
 
         let lite = self.lite;
         // Split borrows: voices mutably, bank/read-only params shared.
+        let output_sr = self.sample_rate;
         let Engine {
             voices,
             bank,
@@ -792,6 +852,7 @@ impl Engine {
                     let mut external = current_external_id.and_then(|id| bank.get(id));
                     let mut ctx = sampled.block_context(current, external, rate_scale);
                     ctx.lite = lite;
+                    ctx.output_sr = output_sr;
                     for frame in 0..frames {
                         if sampled.sample != current_id {
                             match bank.get(sampled.sample) {
@@ -803,6 +864,7 @@ impl Engine {
                                     current_loop_index = sampled.loop_index;
                                     ctx = sampled.block_context(current, external, rate_scale);
                                     ctx.lite = lite;
+                    ctx.output_sr = output_sr;
                                 }
                                 None => {
                                     *voice = Voice::Idle;
@@ -818,6 +880,7 @@ impl Engine {
                             external = current_external_id.and_then(|id| bank.get(id));
                             ctx = sampled.block_context(current, external, rate_scale);
                             ctx.lite = lite;
+                    ctx.output_sr = output_sr;
                         }
                         match sampled.tick(
                             current,
@@ -912,6 +975,7 @@ impl Engine {
                         rate: rate as f64,
                         gain,
                         fade: 0.0,
+                        fade_step: 0.0,
                         amplitude: 1.0,
                         envelope: 0.0,
                         tail_gain: 1.0,

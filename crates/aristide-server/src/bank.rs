@@ -948,6 +948,306 @@ mod tests {
         );
     }
 
+    /// A room's decay rate does not transpose: a pipe synthesized by
+    /// repitching a neighbor's recording (+600 cents on this demo set)
+    /// must ring at the RECORDING's measured decay rate, not 1.41x
+    /// faster. Uncompensated, this was the "artificial/bell" release:
+    /// every key rang at a different, wrong speed.
+    #[test]
+    fn repitched_release_rings_at_native_decay_rate() {
+        let Some(path) = demo_organ() else {
+            eprintln!("skipping: demo set not present");
+            return;
+        };
+        let organ = aristide_formats::grandorgue::load(&path).expect("loads").organ;
+        let device_rate = 44_100.0f32;
+        let loaded = build(&organ, device_rate).expect("bank builds");
+        let great = organ.manuals[1].id;
+        let montre = organ
+            .stops
+            .iter()
+            .find(|s| s.manual == great && s.name.contains("Montre"))
+            .expect("montre");
+        let sr = device_rate as usize;
+        let mut console = crate::console::Console::new(
+            organ.clone(),
+            loaded.specs.clone(),
+            vec![montre.id],
+            Vec::new(),
+        );
+        let (mut engine, mut handle) =
+            aristide_engine::Engine::new(device_rate, std::sync::Arc::new(loaded.bank.clone()));
+        engine.set_release_stagger(0.0);
+        let (starts, _) = console.note_on(0, 60);
+        let voice = starts.first().expect("voice");
+        assert!(
+            (voice.spec.rate - 1.414).abs() < 0.01,
+            "expected the +600-cent demo pipe, got rate {}",
+            voice.spec.rate
+        );
+        let lambda = loaded
+            .bank
+            .get(voice.spec.sample)
+            .expect("sample")
+            .tail_decay_db_per_s() as f64;
+        assert!(lambda > 10.0, "tail decay unmeasured: {lambda}");
+        for st in starts {
+            handle.send(aristide_engine::Command::StartVoice {
+                handle: st.handle,
+                sample: st.spec.sample,
+                rate: st.spec.rate,
+                gain: st.spec.gain,
+                group: st.spec.group,
+                wind_weight: st.spec.wind_weight,
+                brightness: st.spec.brightness,
+            });
+        }
+        let block = 512usize;
+        let mut buffer = vec![0.0f32; block * 2];
+        let hold = 2 * sr;
+        let mut output = Vec::new();
+        let mut frame = 0usize;
+        let mut released = false;
+        while frame < hold + 2 * sr {
+            if !released && frame >= hold {
+                released = true;
+                for h in console.note_off(0, 60) {
+                    handle.send(aristide_engine::Command::StopVoice { handle: h });
+                }
+            }
+            engine.process(&mut buffer, 2);
+            output.extend_from_slice(&buffer);
+            frame += block;
+        }
+        let rms_db = |t: f64| -> f64 {
+            let start = ((2.0 + t) * sr as f64) as usize;
+            let window = sr / 20;
+            let mut acc = 0.0f64;
+            for i in 0..window {
+                let v = (output[(start + i) * 2] + output[(start + i) * 2 + 1]) as f64 * 0.5;
+                acc += v * v;
+            }
+            10.0 * (acc / window as f64).max(1e-14).log10()
+        };
+        let slope = (rms_db(0.3) - rms_db(0.9)) / 0.6; // dB/s, positive
+        // Uncompensated the +600-cent repitch decays at lambda*1.414
+        // (~51 dB/s here); compensation (clamped +-15 dB/s) brings it
+        // back toward lambda. Allow generous measurement slack.
+        assert!(
+            (slope - lambda).abs() < 10.0,
+            "repitched tail decays at {slope:.1} dB/s; recording decays at {lambda:.1}"
+        );
+    }
+
+    /// Diagnostic: render one pipe at several hold lengths and dump the
+    /// release for offline envelope comparison against the raw tail.
+    /// cargo test -p aristide-server release_envelope -- --ignored --nocapture
+    #[test]
+    #[ignore = "diagnostic, writes /tmp wavs"]
+    fn release_envelope_diagnostic() {
+        let Some(path) = demo_organ() else { return };
+        let organ = aristide_formats::grandorgue::load(&path).expect("loads").organ;
+        let device_rate = 44_100.0f32;
+        let loaded = build(&organ, device_rate).expect("bank builds");
+        let great = organ.manuals[1].id;
+        let montre = organ
+            .stops
+            .iter()
+            .find(|s| s.manual == great && s.name.contains("Montre"))
+            .expect("montre");
+        let drawn = vec![montre.id];
+        let sr = device_rate as usize;
+        for hold_ms in [80usize, 200, 500, 2000] {
+            let mut console =
+                crate::console::Console::new(organ.clone(), loaded.specs.clone(), drawn.clone(), Vec::new());
+            let (mut engine, mut handle) =
+                aristide_engine::Engine::new(device_rate, std::sync::Arc::new(loaded.bank.clone()));
+            let block = 512usize;
+            let hold_frames = sr * hold_ms / 1000;
+            let total = hold_frames + sr * 5;
+            let mut output = Vec::new();
+            let mut buffer = vec![0.0f32; block * 2];
+            let mut frame = 0usize;
+            let mut on = false;
+            let mut off = false;
+            while frame < total {
+                if !on {
+                    on = true;
+                    let (starts, _) = console.note_on(0, 60);
+                    for st in starts {
+                        handle.send(aristide_engine::Command::StartVoice {
+                            handle: st.handle,
+                            sample: st.spec.sample,
+                            rate: st.spec.rate,
+                            gain: st.spec.gain,
+                            group: st.spec.group,
+                            wind_weight: st.spec.wind_weight,
+                            brightness: st.spec.brightness,
+                        });
+                    }
+                }
+                if !off && frame >= hold_frames {
+                    off = true;
+                    for h in console.note_off(0, 60) {
+                        handle.send(aristide_engine::Command::StopVoice { handle: h });
+                    }
+                }
+                engine.process(&mut buffer, 2);
+                output.extend_from_slice(&buffer);
+                frame += block;
+            }
+            write_wav_f32(
+                &format!("/tmp/release_{hold_ms}ms.wav"),
+                &output,
+                2,
+                sr as u32,
+            );
+        }
+        println!("wrote /tmp/release_{{80,200,500,2000}}ms.wav");
+
+        // Ground truth from the same decoder the engine plays: the raw
+        // tail envelope of the Montre pipe's own sample.
+        let spec = loaded
+            .specs
+            .iter()
+            .find(|((_, _), v)| {
+                organ.stops.iter().any(|s| s.id == montre.id)
+                    && v.wind_weight > 0.0
+            })
+            .map(|(_, v)| *v);
+        // Find the montre middle-C spec through the console instead.
+        let mut console =
+            crate::console::Console::new(organ.clone(), loaded.specs.clone(), drawn.clone(), Vec::new());
+        let (starts, _) = console.note_on(0, 60);
+        let st = starts.first().expect("montre voice");
+        let sample = loaded.bank.get(st.spec.sample).expect("sample");
+        let tail = sample.release_start().unwrap_or(0);
+        let sr_s = sample.sample_rate_hz();
+        let win = (0.05 * sr_s) as u64;
+        let mut env = Vec::new();
+        let mut k = 0u64;
+        while tail + (k + 1) * win < sample.frames() {
+            let mut acc = 0.0f64;
+            for i in 0..win {
+                let (l, r) = sample.read((tail + k * win + i) as f64);
+                let v = (l + r) * 0.5;
+                acc += (v as f64) * (v as f64);
+            }
+            let rms = (acc / win as f64).sqrt();
+            env.push(20.0 * (rms.max(1e-7)).log10());
+            k += 1;
+        }
+        let pts = [0usize, 1, 2, 4, 8, 16, 24, 40, 60];
+        let line: Vec<String> = pts
+            .iter()
+            .filter(|&&p| p < env.len())
+            .map(|&p| format!("{}ms:{:.1}", 50 * p, env[p]))
+            .collect();
+        println!("RAW tail env dB: {}", line.join(" "));
+        let _ = spec;
+
+        // Level-match inputs: what the release() ratio actually sees.
+        let (ls, le) = sample.sustain_loop().expect("loop");
+        let mut acc = 0.0f64;
+        let mut mean = 0.0f64;
+        let count = (le - ls).min(8820);
+        for i in 0..count {
+            let (l, r) = sample.read((ls + i) as f64);
+            let v = ((l + r) * 0.5) as f64;
+            acc += v * v;
+            mean += v.abs();
+        }
+        println!(
+            "sustain loop: rms {:.4} mean-abs {:.4} | tail_reference_level {:.4} | ratio(loop-mean/ref) {:.3}",
+            (acc / count as f64).sqrt(),
+            mean / count as f64,
+            sample.tail_reference_level(),
+            (mean / count as f64) / sample.tail_reference_level() as f64
+        );
+
+        // Lite render (wind/tilt/wander off) of the 2 s hold isolates
+        // whether the accelerating decay lives in the full-mode path.
+        let mut console =
+            crate::console::Console::new(organ.clone(), loaded.specs.clone(), drawn.clone(), Vec::new());
+        let (mut engine, mut handle) =
+            aristide_engine::Engine::new(device_rate, std::sync::Arc::new(loaded.bank.clone()));
+        engine.set_lite(true);
+        let block = 512usize;
+        let hold_frames = sr * 2;
+        let total = hold_frames + sr * 5;
+        let mut output = Vec::new();
+        let mut buffer = vec![0.0f32; block * 2];
+        let mut frame = 0usize;
+        let mut sent_on = false;
+        let mut sent_off = false;
+        while frame < total {
+            if !sent_on {
+                sent_on = true;
+                let (starts, _) = console.note_on(0, 60);
+                for st in starts {
+                    handle.send(aristide_engine::Command::StartVoice {
+                        handle: st.handle,
+                        sample: st.spec.sample,
+                        rate: st.spec.rate,
+                        gain: st.spec.gain,
+                        group: st.spec.group,
+                        wind_weight: st.spec.wind_weight,
+                        brightness: st.spec.brightness,
+                    });
+                }
+            }
+            if !sent_off && frame >= hold_frames {
+                sent_off = true;
+                for h in console.note_off(0, 60) {
+                    handle.send(aristide_engine::Command::StopVoice { handle: h });
+                }
+            }
+            engine.process(&mut buffer, 2);
+            output.extend_from_slice(&buffer);
+            frame += block;
+        }
+        write_wav_f32("/tmp/release_lite_2000ms.wav", &output, 2, sr as u32);
+        println!("wrote /tmp/release_lite_2000ms.wav");
+
+        // Zero-assumption check: the rendered tail vs the sample data it
+        // should be replaying (RELDBG said relpos 164499 for this voice),
+        // both through the same decoder. Master -15 dB default, voice
+        // gain 1.2 * tail_gain 1.1.
+        let rate = st.spec.rate as f64;
+        let total_gain = 0.177828 * st.spec.gain * 1.1;
+        println!(
+            "spec.rate={} gain={} | sample_rate_hz={} frames={} tail_frames={} tail_seconds_at_rate={:.2}",
+            st.spec.rate,
+            st.spec.gain,
+            sample.sample_rate_hz(),
+            sample.frames(),
+            sample.frames() - 164_450,
+            (sample.frames() - 164_450) as f64 / (44100.0 * rate)
+        );
+        let relpos = 164_499.0f64;
+        for t_ms in [200usize, 400, 800, 1200] {
+            let w = (0.05 * sr as f64) as usize;
+            let render_start = ((2.0 + 0.03 + t_ms as f64 / 1000.0) * sr as f64) as usize;
+            let mut r_acc = 0.0f64;
+            for i in 0..w {
+                let v = (output[(render_start + i) * 2] + output[(render_start + i) * 2 + 1]) as f64 * 0.5;
+                r_acc += v * v;
+            }
+            let mut e_acc = 0.0f64;
+            for i in 0..w {
+                let (l, r) = sample.read(relpos + (t_ms as f64 / 1000.0 * sr as f64 + i as f64) * rate);
+                let v = ((l + r) * 0.5) as f64 * total_gain as f64;
+                e_acc += v * v;
+            }
+            println!(
+                "t+{t_ms}ms: render {:.1} dB, expected {:.1} dB, delta {:.1}",
+                10.0 * (r_acc / w as f64).log10(),
+                10.0 * (e_acc / w as f64).log10(),
+                10.0 * (r_acc / e_acc).log10()
+            );
+        }
+    }
+
     fn write_wav_f32(path: &str, samples: &[f32], channels: u16, rate: u32) {
         use std::io::Write as _;
         let mut f = std::fs::File::create(path).expect("wav create");

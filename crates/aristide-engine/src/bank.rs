@@ -72,6 +72,12 @@ pub struct Sample {
     /// continues at their own current level instead of striking at the
     /// recording's (the "bell" artifact).
     tail_reference_level: f32,
+    /// Measured decay rate of the embedded tail, in amplitude dB per
+    /// second (positive = decaying). Repitching a sample by rate R also
+    /// time-scales its recorded room decay by R — but a room's decay
+    /// rate does not transpose (Rucz 2015; Angster and Miklos). Voices
+    /// use this to gain-compensate so ring time stays key-invariant.
+    tail_decay_db_per_s: f32,
 }
 
 /// A separate recorded release, selectable by how long the note was
@@ -141,6 +147,7 @@ impl Sample {
             measured_period: None,
             releases: Vec::new(),
             tail_reference_level: 0.0,
+            tail_decay_db_per_s: 0.0,
         };
         if let Some(tail) = sample.release_start() {
             // Short window (~12 ms at 44.1 k): high pipes' room decay is
@@ -148,6 +155,7 @@ impl Sample {
             // level, making the level matcher boost it — a ping.
             let window = 512.min(sample.frames() - tail);
             sample.tail_reference_level = sample.mean_abs(tail, window);
+            sample.tail_decay_db_per_s = sample.measure_tail_decay(tail);
         }
         Ok(sample)
     }
@@ -248,6 +256,68 @@ impl Sample {
     }
 
     #[inline]
+    pub fn tail_decay_db_per_s(&self) -> f32 {
+        self.tail_decay_db_per_s
+    }
+
+    /// Measured fundamental period in source frames, when alignment
+    /// analysis has run.
+    pub fn measured_period(&self) -> Option<f64> {
+        self.measured_period
+    }
+
+    /// Least-squares slope of the tail's log-envelope (50 ms RMS
+    /// windows), skipping the first 150 ms — the drive-collapse plateau
+    /// before the exponential knee (Rucz 2015, fig. 2.5b) — and stopping
+    /// at the measurement floor. Returns 0 (no compensation) when the
+    /// tail is too short or too quiet to fit.
+    fn measure_tail_decay(&self, tail: u64) -> f32 {
+        let sr = self.sample_rate_hz as f64;
+        let window = (0.05 * sr) as u64;
+        let skip = (0.15 * sr) as u64;
+        let start = tail + skip;
+        if window == 0 || self.frames() < start + 3 * window {
+            return 0.0;
+        }
+        let count = ((self.frames() - start) / window).saturating_sub(1) as usize;
+        if count < 3 {
+            return 0.0;
+        }
+        let mut xs = 0.0f64;
+        let mut ys = 0.0f64;
+        let mut xx = 0.0f64;
+        let mut xy = 0.0f64;
+        let mut n = 0.0f64;
+        for k in 0..count {
+            let mut acc = 0.0f64;
+            for i in 0..window {
+                let (l, r) = self.read((start + k as u64 * window + i) as f64);
+                let v = ((l + r) * 0.5) as f64;
+                acc += v * v;
+            }
+            let rms = (acc / window as f64).sqrt();
+            if rms < 1e-6 {
+                break; // below measurement floor; fit what rang
+            }
+            let x = k as f64 * window as f64 / sr;
+            let y = 20.0 * rms.log10();
+            xs += x;
+            ys += y;
+            xx += x * x;
+            xy += x * y;
+            n += 1.0;
+        }
+        if n < 3.0 {
+            return 0.0;
+        }
+        let denominator = n * xx - xs * xs;
+        if denominator.abs() < 1e-12 {
+            return 0.0;
+        }
+        let slope = (n * xy - xs * ys) / denominator; // dB/s, negative when decaying
+        (-slope as f32).clamp(0.0, 120.0)
+    }
+
     pub fn tail_reference_level(&self) -> f32 {
         self.tail_reference_level
     }
