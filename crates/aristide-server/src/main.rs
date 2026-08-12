@@ -742,7 +742,12 @@ fn main() -> Result<()> {
     if let Err(err) = http::spawn(Arc::clone(&state), args.http_port) {
         tracing::warn!("console ui disabled: {err}");
     }
-    let connections = connect_all_midi_inputs(&state)?;
+    // MIDI is optional: the console UI can play notes on its own, so a
+    // box with no sequencer access still gets a working instrument.
+    let connections = connect_all_midi_inputs(&state).unwrap_or_else(|err| {
+        tracing::warn!("MIDI unavailable ({err}) — console UI input only");
+        Vec::new()
+    });
     if connections.is_empty() {
         tracing::warn!("no MIDI inputs found — plug in the console and restart");
     } else {

@@ -353,6 +353,15 @@ impl Console {
         let Some(manual_index) = self.manual_index(channel) else {
             return (Vec::new(), Vec::new());
         };
+        self.note_on_manual(manual_index, key)
+    }
+
+    /// `note_on` addressed by manual index — the coordinate UIs speak
+    /// (a clicked on-screen key has no MIDI channel).
+    pub fn note_on_manual(&mut self, manual_index: usize, key: u8) -> (Vec<VoiceStart>, Vec<u64>) {
+        if manual_index >= self.organ.manuals.len() {
+            return (Vec::new(), Vec::new());
+        }
         let mut retriggered = Vec::new();
         for (_, rank, pipe) in self
             .sounding
@@ -439,6 +448,11 @@ impl Console {
         let Some(manual_index) = self.manual_index(channel) else {
             return Vec::new();
         };
+        self.note_off_manual(manual_index, key)
+    }
+
+    /// `note_off` addressed by manual index (see `note_on_manual`).
+    pub fn note_off_manual(&mut self, manual_index: usize, key: u8) -> Vec<u64> {
         let mut released = Vec::new();
         for (_, rank, pipe) in self
             .sounding
@@ -567,6 +581,37 @@ impl Console {
                 )
             })
             .collect()
+    }
+
+    /// Per-manual UI state: index, name, first MIDI note, key count,
+    /// and the keys currently held on it (sorted). Held keys are the
+    /// player's — the origin manual of each press, not coupled echoes.
+    pub fn manual_states(&self) -> Vec<(usize, &str, u8, u16, Vec<u8>)> {
+        self.organ
+            .manuals
+            .iter()
+            .enumerate()
+            .map(|(index, manual)| {
+                let mut held: Vec<u8> = self
+                    .sounding
+                    .keys()
+                    .filter(|&&(m, _)| m == index)
+                    .map(|&(_, key)| key)
+                    .collect();
+                held.sort_unstable();
+                (
+                    index,
+                    manual.name.as_str(),
+                    manual.first_midi_note,
+                    manual.key_count,
+                    held,
+                )
+            })
+            .collect()
+    }
+
+    pub fn organ_name(&self) -> &str {
+        &self.organ.name
     }
 
     /// Forget everything sounding (the engine is told separately).

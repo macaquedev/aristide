@@ -63,7 +63,7 @@ fn respond(
                         } = &mut *state;
                         if let Control::Organ(console) = control {
                             let (start, stop) = console.set_coupler(index, on);
-                            send_noise(engine, start);
+                            send_start(engine, start);
                             if let Some(handle) = stop {
                                 engine.send(Command::StopVoice { handle });
                             }
@@ -132,6 +132,29 @@ fn respond(
             }
             json(state_json(state))
         }
+        (Method::Post, "/api/note") => {
+            let manual = param(query, "manual").and_then(|v| v.parse::<usize>().ok());
+            let key = param(query, "key").and_then(|v| v.parse::<u8>().ok());
+            let on = param(query, "on") == Some("1");
+            match (manual, key) {
+                (Some(manual), Some(key)) if key < 128 => {
+                    apply_note(state, manual, key, on);
+                    json(state_json(state))
+                }
+                _ => bad_request("missing manual/key"),
+            }
+        }
+        (Method::Post, "/api/panic") => {
+            let mut state = state.lock().expect("state poisoned");
+            let State {
+                engine, control, ..
+            } = &mut *state;
+            if let Control::Organ(console) = control {
+                console.all_off();
+            }
+            engine.send(Command::AllNotesOff);
+            json(state_json_locked(&state))
+        }
         (Method::Post, "/api/trem") => {
             let on = param(query, "on") == Some("1");
             apply_trem(state, on);
@@ -177,6 +200,30 @@ fn respond(
     }
 }
 
+/// A key press/release from the UI — same path as a MIDI note, but
+/// addressed by manual index rather than channel.
+fn apply_note(state: &Mutex<State>, manual: usize, key: u8, on: bool) {
+    let mut state = state.lock().expect("state poisoned");
+    let State {
+        engine, control, ..
+    } = &mut *state;
+    if let Control::Organ(console) = control {
+        if on {
+            let (starts, retriggered) = console.note_on_manual(manual, key);
+            for handle in retriggered {
+                engine.send(Command::StopVoice { handle });
+            }
+            for start in starts {
+                send_start(engine, Some(start));
+            }
+        } else {
+            for handle in console.note_off_manual(manual, key) {
+                engine.send(Command::StopVoice { handle });
+            }
+        }
+    }
+}
+
 fn apply_stop(state: &Mutex<State>, id: u32, on: bool) {
     let mut state = state.lock().expect("state poisoned");
     let State {
@@ -187,12 +234,12 @@ fn apply_stop(state: &Mutex<State>, id: u32, on: bool) {
         for handle in stopped {
             engine.send(Command::StopVoice { handle });
         }
-        send_noise(engine, noise);
+        send_start(engine, noise);
     }
 }
 
 /// Start a control-noise one-shot (drawstop thump, coupler clack).
-fn send_noise(engine: &mut aristide_engine::EngineHandle, noise: Option<crate::console::VoiceStart>) {
+fn send_start(engine: &mut aristide_engine::EngineHandle, noise: Option<crate::console::VoiceStart>) {
     if let Some(start) = noise {
         engine.send(Command::StartVoice {
             handle: start.handle,
@@ -221,7 +268,7 @@ fn apply_trem(state: &Mutex<State>, on: bool) {
         } = &mut *state;
         if let Control::Organ(console) = control {
             let (start, stop) = console.tremulant_toggle_noise(on);
-            send_noise(engine, start);
+            send_start(engine, start);
             if let Some(handle) = stop {
                 engine.send(Command::StopVoice { handle });
             }
@@ -265,10 +312,29 @@ fn state_json_locked(state: &State) -> String {
             ));
         }
     }
+    out.push_str("],\"manuals\":[");
+    if let Control::Organ(console) = &state.control {
+        let mut first = true;
+        for (idx, name, first_key, key_count, held) in console.manual_states() {
+            if !first {
+                out.push(',');
+            }
+            first = false;
+            let held: Vec<String> = held.iter().map(|k| k.to_string()).collect();
+            out.push_str(&format!(
+                "{{\"idx\":{idx},\"name\":{},\"first_key\":{first_key},\"key_count\":{key_count},\"held\":[{}]}}",
+                json_string(name),
+                held.join(",")
+            ));
+        }
+    }
     out.push_str(&format!(
         "],\"tremulant\":{},\"gain\":{}",
         state.trem_engaged, state.master_gain
     ));
+    if let Control::Organ(console) = &state.control {
+        out.push_str(&format!(",\"organ\":{}", json_string(console.organ_name())));
+    }
     if let Control::Organ(console) = &state.control {
         let tuning = console.tuning();
         out.push_str(&format!(
@@ -397,6 +463,37 @@ mod tests {
 
         respond(&state, &Method::Post, "/api/gain?v=0.5");
         assert!(state_json(&state).contains("\"gain\":0.5"));
+    }
+
+    #[test]
+    fn ui_notes_play_and_state_reports_held_keys() {
+        let Some(state) = demo_state() else { return };
+
+        let body = state_json(&state);
+        assert!(body.contains("\"manuals\":["), "manuals listed: {body}");
+        assert!(body.contains("\"organ\":"), "organ name present: {body}");
+        assert!(body.contains("\"first_key\":"), "keyboard compass present");
+
+        // Draw Montre 8' (id 16, First Manual) and press middle C
+        // through the API — the state must show the key held.
+        respond(&state, &Method::Post, "/api/stop?id=16&on=1");
+        respond(&state, &Method::Post, "/api/note?manual=1&key=60&on=1");
+        assert!(
+            state_json(&state).contains("\"held\":[60]"),
+            "pressed key reported held: {}",
+            state_json(&state)
+        );
+        respond(&state, &Method::Post, "/api/note?manual=1&key=60&on=0");
+        assert!(!state_json(&state).contains("\"held\":[60]"));
+
+        // Panic silences everything sounding.
+        respond(&state, &Method::Post, "/api/note?manual=1&key=62&on=1");
+        assert!(state_json(&state).contains("\"held\":[62]"));
+        respond(&state, &Method::Post, "/api/panic");
+        assert!(!state_json(&state).contains("\"held\":[62]"));
+
+        respond(&state, &Method::Post, "/api/note?manual=9&key=60&on=1");
+        assert!(!state_json(&state).contains("\"held\":[60]"), "bad manual ignored");
     }
 
     #[test]
