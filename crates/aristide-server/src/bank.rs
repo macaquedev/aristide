@@ -1274,6 +1274,110 @@ mod tests {
         }
     }
 
+    /// Render ~30 s of music in the French classical style on the plein
+    /// jeu registration (grand chords, suspension chain, cadential
+    /// trill, Picardy final) — a listening demo, not a stress test.
+    #[test]
+    #[ignore = "renders /tmp/plein_jeu_music.wav"]
+    fn render_plein_jeu_music() {
+        let Some(path) = demo_organ() else { return };
+        let organ = aristide_formats::grandorgue::load(&path).expect("loads").organ;
+        let device_rate = 44_100.0f32;
+        let loaded = build(&organ, device_rate).expect("bank builds");
+        let names: Vec<&str> = organ.stops.iter().map(|s| s.name.as_str()).collect();
+        let mut drawn: Vec<aristide_model::StopId> = Vec::new();
+        for pattern in ["bourdon 16", "montre", "prestant", "plein jeu"] {
+            for i in aristide_formats::sidecar::match_names(&names, pattern) {
+                drawn.push(organ.stops[i].id);
+            }
+        }
+        drawn.sort_by_key(|id| id.0);
+        drawn.dedup();
+        let mut console =
+            crate::console::Console::new(organ.clone(), loaded.specs.clone(), drawn, Vec::new());
+        let (mut engine, mut handle) =
+            aristide_engine::Engine::new(device_rate, std::sync::Arc::new(loaded.bank.clone()));
+        handle.send(aristide_engine::Command::SetMasterGain { linear: 0.4 });
+        let sr = device_rate as usize;
+        let beat = 0.68f64; // ~88 bpm
+
+        // (on_beat, off_beat, key)
+        let mut notes: Vec<(f64, f64, u8)> = vec![
+            // A: grand opening, D minor -> A (4-3 suspension) -> D minor
+            (0.0, 4.0, 50), (0.0, 4.0, 62), (0.0, 5.0, 65), (0.0, 8.0, 69), (0.0, 6.0, 74),
+            (4.0, 8.0, 57), (5.0, 8.0, 64), (6.0, 8.0, 73),
+            (8.0, 12.0, 50), (8.0, 12.0, 57), (8.0, 12.0, 62), (8.0, 12.0, 65), (8.0, 12.0, 74),
+            // B: descending chain Bb - Am - Gm - F - A
+            (12.0, 14.0, 46), (12.0, 14.0, 58), (12.0, 14.0, 65), (12.0, 15.0, 70),
+            (14.0, 16.0, 45), (14.0, 16.0, 57), (14.0, 16.0, 64), (15.0, 16.0, 69),
+            (16.0, 18.0, 43), (16.0, 18.0, 58), (16.0, 18.0, 62), (16.0, 18.0, 67),
+            (18.0, 20.0, 41), (18.0, 20.0, 57), (18.0, 20.0, 60), (18.0, 20.0, 65), (18.0, 20.0, 69),
+            (20.0, 24.0, 45), (20.0, 24.0, 57), (20.0, 24.0, 61), (20.0, 24.0, 64), (20.0, 24.0, 69),
+            // C: cadence
+            (24.0, 26.0, 53), (24.0, 26.0, 62), (24.0, 26.0, 69), (24.0, 26.0, 74),
+            (26.0, 28.0, 43), (26.0, 28.0, 58), (26.0, 28.0, 62), (26.0, 28.0, 67), (26.0, 28.0, 74),
+            (28.0, 32.0, 45), (28.0, 32.0, 57), (28.0, 32.0, 64), (28.0, 32.0, 69),
+            (28.0, 29.5, 74),
+        ];
+        // cadential trill 74/73, six alternations of ~0.18 beats
+        let mut tb = 29.5;
+        for i in 0..6 {
+            let key = if i % 2 == 0 { 73 } else { 74 };
+            notes.push((tb, tb + 0.18, key));
+            tb += 0.18;
+        }
+        notes.push((tb, 32.0, 73));
+        // final D major (Picardy), long hold into the room
+        for &k in &[38u8, 50, 57, 62, 66, 69, 74] {
+            notes.push((32.0, 39.0, k));
+        }
+
+        let mut events: Vec<(usize, u8, bool)> = Vec::new();
+        for &(on, off, key) in &notes {
+            events.push(((on * beat * sr as f64) as usize, key, true));
+            events.push(((off * beat * sr as f64) as usize, key, false));
+        }
+        events.sort_by_key(|e| e.0);
+        let total = (44.0 * beat * sr as f64) as usize;
+        let block = 512usize;
+        let mut output = Vec::new();
+        let mut buffer = vec![0.0f32; block * 2];
+        let mut next = 0usize;
+        let mut frame = 0usize;
+        while frame < total {
+            while next < events.len() && events[next].0 < frame + block {
+                let (_, key, on) = events[next];
+                next += 1;
+                if on {
+                    let (starts, retriggered) = console.note_on(0, key);
+                    for h in retriggered {
+                        handle.send(aristide_engine::Command::StopVoice { handle: h });
+                    }
+                    for st in starts {
+                        handle.send(aristide_engine::Command::StartVoice {
+                            handle: st.handle,
+                            sample: st.spec.sample,
+                            rate: st.spec.rate,
+                            gain: st.spec.gain,
+                            group: st.spec.group,
+                            wind_weight: st.spec.wind_weight,
+                            brightness: st.spec.brightness,
+                        });
+                    }
+                } else {
+                    for h in console.note_off(0, key) {
+                        handle.send(aristide_engine::Command::StopVoice { handle: h });
+                    }
+                }
+            }
+            engine.process(&mut buffer, 2);
+            output.extend_from_slice(&buffer);
+            frame += block;
+        }
+        write_wav_f32("/tmp/plein_jeu_music.wav", &output, 2, sr as u32);
+        println!("wrote /tmp/plein_jeu_music.wav");
+    }
+
     /// Diagnostic: render one pipe at several hold lengths and dump the
     /// release for offline envelope comparison against the raw tail.
     /// cargo test -p aristide-server release_envelope -- --ignored --nocapture
