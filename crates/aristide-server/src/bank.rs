@@ -528,6 +528,284 @@ mod tests {
         render(&events, 7 * sr, "/tmp/swell_release_freeze.wav");
     }
 
+    /// Render a musical tour of the swell boxes: different music,
+    /// registrations, boxes, and pedal behaviour on every take (the
+    /// user A/Bs these by ear; no keyboard needed).
+    #[test]
+    #[ignore = "renders /tmp swell music wavs"]
+    fn render_swell_music() {
+        let Some(path) = demo_organ() else { return };
+        let organ = aristide_formats::grandorgue::load(&path).expect("loads").organ;
+        let device_rate = 44_100.0f32;
+        let loaded = build(&organ, device_rate).expect("bank builds");
+        let sr = device_rate as usize;
+        let pick = |manual: usize, patterns: &[&str]| -> Vec<aristide_model::StopId> {
+            let id = organ.manuals[manual].id;
+            organ
+                .stops
+                .iter()
+                .filter(|s| {
+                    s.manual == id
+                        && !s.name.contains("noise")
+                        && patterns.iter().any(|p| s.name.contains(p))
+                })
+                .map(|s| s.id)
+                .collect()
+        };
+
+        enum Event {
+            /// (channel, key, on)
+            Note(u8, u8, bool),
+            /// (channel, position 0..1)
+            Pedal(u8, f32),
+        }
+        // Channel 0 → Récit (manual 2), channel 1 → Great (manual 1).
+        let render = |drawn: Vec<aristide_model::StopId>,
+                      events: &mut Vec<(usize, Event)>,
+                      total: usize,
+                      master: f32,
+                      out: &str| {
+            events.sort_by_key(|e| e.0);
+            let mut console = crate::console::Console::new(
+                organ.clone(),
+                loaded.specs.clone(),
+                drawn,
+                vec![2, 1],
+            );
+            let (mut engine, mut handle) =
+                aristide_engine::Engine::new(device_rate, std::sync::Arc::new(loaded.bank.clone()));
+            handle.send(aristide_engine::Command::SetMasterGain { linear: master });
+            for (index, enclosure) in organ.enclosures.iter().enumerate() {
+                handle.send(aristide_engine::Command::SetEnclosure {
+                    enclosure: index as u8,
+                    params: aristide_engine::enclosure::EnclosureParams {
+                        floor_db: 20.0
+                            * (enclosure.amp_minimum_level as f32 / 100.0).max(0.01).log10(),
+                        ..Default::default()
+                    },
+                });
+            }
+            let block = 512usize;
+            let mut output = Vec::new();
+            let mut buffer = vec![0.0f32; block * 2];
+            let (mut next, mut frame) = (0usize, 0usize);
+            let started = std::time::Instant::now();
+            while frame < total {
+                while next < events.len() && events[next].0 < frame + block {
+                    match events[next].1 {
+                        Event::Note(channel, key, true) => {
+                            let (starts, retriggered) = console.note_on(channel, key);
+                            for h in retriggered {
+                                handle.send(aristide_engine::Command::StopVoice { handle: h });
+                            }
+                            for st in starts {
+                                handle.send(aristide_engine::Command::StartVoice {
+                                    handle: st.handle,
+                                    sample: st.spec.sample,
+                                    rate: st.spec.rate,
+                                    gain: st.spec.gain,
+                                    group: st.spec.group,
+                                    wind_weight: st.spec.wind_weight,
+                                    brightness: st.spec.brightness,
+                                    enclosure: st.spec.enclosure,
+                                });
+                            }
+                        }
+                        Event::Note(channel, key, false) => {
+                            for h in console.note_off(channel, key) {
+                                handle.send(aristide_engine::Command::StopVoice { handle: h });
+                            }
+                        }
+                        Event::Pedal(channel, position) => {
+                            for (enclosure, position) in
+                                console.expression(channel, (position * 127.0) as u8)
+                            {
+                                handle.send(
+                                    aristide_engine::Command::SetEnclosurePosition {
+                                        enclosure,
+                                        position,
+                                    },
+                                );
+                            }
+                        }
+                    }
+                    next += 1;
+                }
+                engine.process(&mut buffer, 2);
+                output.extend_from_slice(&buffer);
+                frame += block;
+            }
+            let rtf = started.elapsed().as_secs_f64() / (total as f64 / device_rate as f64);
+            write_wav_f32(out, &output, 2, sr as u32);
+            println!("wrote {out} (realtime factor {rtf:.3})");
+        };
+        // Helpers: notes at seconds, pedal streamed in 20 steps like a
+        // real expression shoe.
+        let s = |t: f64| (t * sr as f64) as usize;
+        let note = |events: &mut Vec<(usize, Event)>, ch: u8, key: u8, at: f64, dur: f64| {
+            events.push((s(at), Event::Note(ch, key, true)));
+            events.push((s(at + dur), Event::Note(ch, key, false)));
+        };
+        let swell = |events: &mut Vec<(usize, Event)>, ch: u8, at: f64, dur: f64, from: f32, to: f32| {
+            for step in 0..=20 {
+                let t = step as f32 / 20.0;
+                events.push((
+                    s(at + dur * t as f64),
+                    Event::Pedal(ch, from + (to - from) * t),
+                ));
+            }
+        };
+
+        // Take 1 — hymn phrase, full Récit 8' chorus, the classic
+        // crescendo through the phrase and diminuendo to the cadence.
+        let mut ev: Vec<(usize, Event)> = vec![(0, Event::Pedal(0, 0.0))];
+        let chords: [(&[u8], f64, f64); 5] = [
+            (&[48, 60, 64, 67], 0.3, 1.6), // C
+            (&[45, 57, 60, 64], 1.9, 1.6), // Am
+            (&[41, 53, 57, 65], 3.5, 1.6), // F
+            (&[43, 55, 59, 62], 5.1, 1.6), // G
+            (&[48, 60, 64, 72], 6.7, 2.6), // C
+        ];
+        for (keys, at, dur) in chords {
+            for &k in keys {
+                note(&mut ev, 0, k, at, dur);
+            }
+        }
+        swell(&mut ev, 0, 0.3, 4.5, 0.0, 1.0);
+        swell(&mut ev, 0, 5.1, 3.5, 1.0, 0.15);
+        render(
+            pick(2, &["Bourdon 8", "Gamba 8", "Hautbois 8", "Trompette 8"]),
+            &mut ev,
+            s(11.5),
+            0.4,
+            "/tmp/swell_hymn.wav",
+        );
+
+        // Take 2 — Hautbois solo line, pedal riding the phrase shape
+        // (a reed exposes the muffle most).
+        let mut ev: Vec<(usize, Event)> = vec![(0, Event::Pedal(0, 0.25))];
+        let melody: [(u8, f64); 9] = [
+            (64, 0.6),
+            (67, 0.6),
+            (69, 0.6),
+            (72, 1.2),
+            (69, 0.6),
+            (67, 0.6),
+            (64, 0.6),
+            (62, 0.6),
+            (60, 1.8),
+        ];
+        let mut at = 0.3;
+        for (key, dur) in melody {
+            note(&mut ev, 0, key, at, dur * 0.95);
+            at += dur;
+        }
+        swell(&mut ev, 0, 0.3, 3.0, 0.25, 1.0);
+        swell(&mut ev, 0, 3.9, 3.6, 1.0, 0.1);
+        render(
+            pick(2, &["Hautbois 8"]),
+            &mut ev,
+            s(9.5),
+            0.9,
+            "/tmp/swell_oboe.wav",
+        );
+
+        // Take 3 — echo: a trumpet motif open, echoed shut, then open.
+        let mut ev: Vec<(usize, Event)> = Vec::new();
+        for (repeat, position) in [(0u32, 1.0f32), (1, 0.05), (2, 1.0)] {
+            let base = repeat as f64 * 2.8;
+            ev.push((s(base), Event::Pedal(0, position)));
+            for (i, key) in [55u8, 60, 64, 67].into_iter().enumerate() {
+                note(&mut ev, 0, key, base + 0.4 + i as f64 * 0.18, 0.16);
+            }
+            for &k in &[60u8, 64, 67] {
+                note(&mut ev, 0, k, base + 1.2, 1.2);
+            }
+        }
+        render(
+            pick(2, &["Trompette 8"]),
+            &mut ev,
+            s(10.0),
+            0.5,
+            "/tmp/swell_echo.wav",
+        );
+
+        // Take 4 — fast flute figuration with the pedal pumping: the
+        // inertia keeps it musical, and there must be zero zipper.
+        let mut ev: Vec<(usize, Event)> = vec![(0, Event::Pedal(0, 1.0))];
+        let pattern = [60u8, 64, 67, 72, 76, 72, 67, 64];
+        let step = 0.125;
+        let mut at = 0.3;
+        for cycle in 0..8 {
+            for &key in &pattern {
+                note(&mut ev, 0, key, at, step * 0.9);
+                at += step;
+            }
+            if cycle % 2 == 0 {
+                swell(&mut ev, 0, at - 1.0, 1.0, 1.0, 0.0);
+            } else {
+                swell(&mut ev, 0, at - 1.0, 1.0, 0.0, 1.0);
+            }
+        }
+        render(
+            pick(2, &["Bourdon 8", "Flute Oct"]),
+            &mut ev,
+            s(at + 3.0),
+            0.9,
+            "/tmp/swell_flutes.wav",
+        );
+
+        // Take 5 — the SECOND box (undisplayed "Grandorgue", chest 2,
+        // floor −10.5 dB): Great plein jeu chords swelling open.
+        let mut ev: Vec<(usize, Event)> = vec![(0, Event::Pedal(1, 0.0))];
+        for (i, keys) in [[48u8, 55, 64], [50, 57, 65], [48, 55, 64]].iter().enumerate() {
+            for &k in keys.iter() {
+                note(&mut ev, 1, k, 0.3 + i as f64 * 2.2, 2.0);
+            }
+        }
+        swell(&mut ev, 1, 0.5, 5.5, 0.0, 1.0);
+        render(
+            pick(1, &["Flute Harm", "Plein jeu III"]),
+            &mut ev,
+            s(9.5),
+            0.3,
+            "/tmp/swell_pleinjeu.wav",
+        );
+
+        // Take 6 — enclosed vs unenclosed at once: Great Montre drone
+        // (no box) under a swelling Récit line — only the Récit moves.
+        let mut ev: Vec<(usize, Event)> = vec![(0, Event::Pedal(0, 0.1))];
+        for &k in &[48u8, 55, 60] {
+            note(&mut ev, 1, k, 0.3, 10.5);
+        }
+        let line: [(u8, f64); 6] = [
+            (67, 0.9),
+            (72, 0.9),
+            (76, 1.8),
+            (74, 0.9),
+            (71, 0.9),
+            (67, 2.7),
+        ];
+        let mut at = 1.5;
+        for (key, dur) in line {
+            note(&mut ev, 0, key, at, dur * 0.95);
+            at += dur;
+        }
+        swell(&mut ev, 0, 1.5, 3.5, 0.1, 1.0);
+        swell(&mut ev, 0, 6.0, 3.5, 1.0, 0.1);
+        render(
+            [
+                pick(1, &["Montre 8"]),
+                pick(2, &["Gamba 8", "Hautbois 8"]),
+            ]
+            .concat(),
+            &mut ev,
+            s(13.0),
+            0.4,
+            "/tmp/swell_two_manuals.wav",
+        );
+    }
+
     /// Reproduce "fast spam distorts": hammer the plein jeu with rapid
     /// on/off pairs and measure what actually comes out — NaNs, clicks,
     /// peaks past the limiter ceiling, and the real-time cost.
