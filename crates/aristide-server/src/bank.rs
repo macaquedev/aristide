@@ -1159,6 +1159,117 @@ mod tests {
         render(&events, 15 * sr, "/tmp/demo_spam.wav");
     }
 
+    /// Render the user's mixture-staccato scenario: highest mixture
+    /// alone, short chords, releases exposed.
+    #[test]
+    #[ignore = "renders /tmp wavs"]
+    fn render_mixture_staccato() {
+        let Some(path) = demo_organ() else { return };
+        let organ = aristide_formats::grandorgue::load(&path).expect("loads").organ;
+        let device_rate = 44_100.0f32;
+        let loaded = build(&organ, device_rate).expect("bank builds");
+        let sr = device_rate as usize;
+        for (pattern, out) in [("plein", "/tmp/mixture_staccato.wav"), ("octavin", "/tmp/octavin_staccato.wav")] {
+            let stop = organ
+                .stops
+                .iter()
+                .find(|s| s.name.to_lowercase().contains(pattern))
+                .expect("stop");
+            let mut console = crate::console::Console::new(
+                organ.clone(),
+                loaded.specs.clone(),
+                vec![stop.id],
+                Vec::new(),
+            );
+            let channel = organ
+                .manuals
+                .iter()
+                .position(|m| m.id == stop.manual)
+                .unwrap()
+                .saturating_sub(1) as u8;
+            let (mut engine, mut handle) =
+                aristide_engine::Engine::new(device_rate, std::sync::Arc::new(loaded.bank.clone()));
+            handle.send(aristide_engine::Command::SetMasterGain { linear: 0.4 });
+            let chords: [&[u8]; 4] = [
+                &[60, 64, 67],
+                &[65, 69, 72],
+                &[67, 71, 74],
+                &[72, 76, 79],
+            ];
+            let mut events: Vec<(usize, u8, bool)> = Vec::new();
+            let mut t = sr / 4;
+            for _ in 0..2 {
+                for chord in chords {
+                    for &k in chord {
+                        events.push((t, k, true));
+                        events.push((t + sr / 8, k, false)); // 125 ms staccato
+                    }
+                    t += sr * 2 / 5; // 400 ms between chords
+                }
+            }
+            events.sort_by_key(|e| e.0);
+            let total = t + 2 * sr;
+            let block = 512usize;
+            let mut output = Vec::new();
+            let mut buffer = vec![0.0f32; block * 2];
+            let mut next = 0usize;
+            let mut frame = 0usize;
+            while frame < total {
+                while next < events.len() && events[next].0 < frame + block {
+                    let (_, key, on) = events[next];
+                    next += 1;
+                    if on {
+                        let (starts, retriggered) = console.note_on(channel, key);
+                        for h in retriggered {
+                            handle.send(aristide_engine::Command::StopVoice { handle: h });
+                        }
+                        for st in starts {
+                            handle.send(aristide_engine::Command::StartVoice {
+                                handle: st.handle,
+                                sample: st.spec.sample,
+                                rate: st.spec.rate,
+                                gain: st.spec.gain,
+                                group: st.spec.group,
+                                wind_weight: st.spec.wind_weight,
+                                brightness: st.spec.brightness,
+                            });
+                        }
+                    } else {
+                        for h in console.note_off(channel, key) {
+                            handle.send(aristide_engine::Command::StopVoice { handle: h });
+                        }
+                    }
+                }
+                engine.process(&mut buffer, 2);
+                output.extend_from_slice(&buffer);
+                frame += block;
+            }
+            write_wav_f32(out, &output, 2, sr as u32);
+            println!("wrote {out} ({})", stop.name);
+            let mut probe_console = crate::console::Console::new(
+                organ.clone(),
+                loaded.specs.clone(),
+                vec![stop.id],
+                Vec::new(),
+            );
+            for key in [67u8, 72, 76, 79] {
+                let (starts, _) = probe_console.note_on(channel, key);
+                for st in &starts {
+                    let smp = loaded.bank.get(st.spec.sample).unwrap();
+                    println!(
+                        "  key {key}: rate {:.3} lambda {:.1} dB/s tail {:.2}s (comp needed {:+.1}, clamp +-15)",
+                        st.spec.rate,
+                        smp.tail_decay_db_per_s(),
+                        (smp.frames() - smp.release_start().unwrap_or(0)) as f32
+                            / smp.sample_rate_hz(),
+                        smp.tail_decay_db_per_s() * (st.spec.rate - 1.0)
+                    );
+                }
+                for h in probe_console.note_off(channel, key) { let _ = h; }
+            }
+        }
+    }
+
     /// Diagnostic: render one pipe at several hold lengths and dump the
     /// release for offline envelope comparison against the raw tail.
     /// cargo test -p aristide-server release_envelope -- --ignored --nocapture

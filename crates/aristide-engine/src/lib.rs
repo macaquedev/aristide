@@ -203,6 +203,14 @@ struct SampledVoice {
     gain: f32,
     /// Crossfade progress 0→1.
     fade: f32,
+    /// Staccato room-charge: the tail's LATE diffuse field never built
+    /// up for a short note, but its early reflections and speech-off
+    /// did. Output is scaled by (charge + deficit) where deficit decays
+    /// from (1 - charge) to 0 over ~150 ms: full level at the splice,
+    /// settling to the charge level for the developed-reverb portion.
+    tail_charge: f32,
+    tail_charge_deficit: f32,
+    tail_charge_step: f32,
     /// Per-voice crossfade step, set at release() from the pipe's
     /// fundamental: ~9 periods, clamped 6–184 ms (GO/HW practice: bass
     /// splices need long fades, treble fades must be short or they smear
@@ -412,6 +420,24 @@ impl SampledVoice {
             }
         }
 
+        if self.tail_charge_deficit > 0.0
+            && !matches!(self.phase, SamplePhase::Held)
+        {
+            let factor = self.tail_charge + self.tail_charge_deficit;
+            left *= factor;
+            right *= factor;
+            self.tail_charge_deficit *= self.tail_charge_step;
+            if self.tail_charge_deficit < 1e-4 {
+                // Settled: fold the charge into the gain and stop paying
+                // the per-frame cost.
+                self.gain *= self.tail_charge;
+                self.tail_charge = 1.0;
+                self.tail_charge_deficit = 0.0;
+            }
+        } else if self.tail_charge != 1.0 && !matches!(self.phase, SamplePhase::Held) {
+            left *= self.tail_charge;
+            right *= self.tail_charge;
+        }
         // EOF guard: a tail must reach the end of its material silent.
         // Decay compensation can leave boosted level near EOF (and some
         // sets simply end hot); fade the final ~46 ms instead of cutting.
@@ -550,9 +576,18 @@ impl SampledVoice {
                 let tail_seconds =
                     (sample.frames().saturating_sub(tail)) as f32 / sample.sample_rate_hz();
                 let full_reverb_ms = (60.0 * tail_seconds + 40.0).clamp(100.0, 350.0);
+                let mut staccato_extra_db_per_s = 0.0f32;
                 if (age_ms as f32) < full_reverb_ms {
-                    let charge = 1.0 - (-(age_ms as f32) / (0.5 * full_reverb_ms)).exp();
-                    self.tail_gain = (self.tail_gain * charge).max(0.1);
+                    let charge =
+                        (1.0 - (-(age_ms as f32) / (0.5 * full_reverb_ms)).exp()).max(0.1);
+                    self.tail_charge = charge;
+                    self.tail_charge_deficit = 1.0 - charge;
+                    self.tail_charge_step = (-1.0 / (0.15 * output_rate)).exp();
+                    // Level scaling alone leaves a conspicuous shimmer
+                    // after high staccato (the diffuse field wasn't just
+                    // quieter, it never fully formed): also shorten the
+                    // late tail in proportion to how undeveloped it was.
+                    staccato_extra_db_per_s = (1.0 - charge) * 25.0;
                 }
                 // Repitching by R also plays the recorded room decay R×
                 // too fast (or slow) — ring time must not depend on the
@@ -563,8 +598,13 @@ impl SampledVoice {
                 let lambda = sample.tail_decay_db_per_s();
                 let repitch =
                     (self.rate as f32) * output_rate / sample.sample_rate_hz();
-                self.tail_decay = if lambda > 0.0 && (repitch - 1.0).abs() > 0.01 {
-                    let db_per_s = (lambda * (repitch - 1.0)).clamp(-15.0, 15.0);
+                let comp_db_per_s = if lambda > 0.0 && (repitch - 1.0).abs() > 0.01 {
+                    (lambda * (repitch - 1.0)).clamp(-25.0, 25.0)
+                } else {
+                    0.0
+                };
+                let db_per_s = comp_db_per_s - staccato_extra_db_per_s;
+                self.tail_decay = if db_per_s.abs() > 0.01 {
                     10.0f32.powf(db_per_s / (20.0 * output_rate))
                 } else {
                     1.0
@@ -976,6 +1016,9 @@ impl Engine {
                         gain,
                         fade: 0.0,
                         fade_step: 0.0,
+                        tail_charge: 1.0,
+                        tail_charge_deficit: 0.0,
+                        tail_charge_step: 1.0,
                         amplitude: 1.0,
                         envelope: 0.0,
                         tail_gain: 1.0,

@@ -283,11 +283,7 @@ impl Sample {
         if count < 3 {
             return 0.0;
         }
-        let mut xs = 0.0f64;
-        let mut ys = 0.0f64;
-        let mut xx = 0.0f64;
-        let mut xy = 0.0f64;
-        let mut n = 0.0f64;
+        let mut window_rms = Vec::with_capacity(count);
         for k in 0..count {
             let mut acc = 0.0f64;
             for i in 0..window {
@@ -295,9 +291,22 @@ impl Sample {
                 let v = ((l + r) * 0.5) as f64;
                 acc += v * v;
             }
-            let rms = (acc / window as f64).sqrt();
-            if rms < 1e-6 {
-                break; // below measurement floor; fit what rang
+            window_rms.push((acc / window as f64).sqrt());
+        }
+        // Fit only down to 45 dB below the tail's own peak: recordings
+        // carry a noise floor, and fitting into it flattens the slope
+        // (a 2' pipe once "measured" 23 dB/s because the fit ran deep
+        // into hiss).
+        let peak = window_rms.iter().cloned().fold(0.0f64, f64::max);
+        let floor = (peak * 10.0f64.powf(-45.0 / 20.0)).max(1e-6);
+        let mut xs = 0.0f64;
+        let mut ys = 0.0f64;
+        let mut xx = 0.0f64;
+        let mut xy = 0.0f64;
+        let mut n = 0.0f64;
+        for (k, &rms) in window_rms.iter().enumerate() {
+            if rms < floor {
+                break;
             }
             let x = k as f64 * window as f64 / sr;
             let y = 20.0 * rms.log10();
