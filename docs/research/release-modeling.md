@@ -49,6 +49,11 @@ too slowly, or at a key-dependent wrong rate reproduces that signature.
 
 ## Aristide's model (as of this session)
 
+0. **Staccato tail (2-part):** full matched level through speech-off +
+   early reflections (~150 ms deficit decay), settling to the room-
+   charge level, plus (1−charge)·25 dB/s extra decay — an undeveloped
+   diffuse field is quieter AND shorter. λ fits stop 45 dB below tail
+   peak (noise floors flattened treble measurements).
 1. **Splice:** quadrature phase alignment at the measured fundamental,
    raised-cosine (smoothstep) amplitude-preserving crossfade — correct
    for correlated material (Signalsmith crossfade analysis) — with
@@ -84,10 +89,11 @@ plus `crackle_hunt` unchanged at zero discontinuities.
 - Multi-release sets: selection exists (`MaxKeyPressTime`), but decay
   compensation only covers the embedded tail — extend λ measurement to
   separate release samples.
-- Release detune: partials relax from locked harmonics toward natural
-  inharmonic resonances during ring-down (F&R §16.6; Aeolus models this
-  as per-note release detune). A subtle pitch bend at note-off (small
-  pipes especially, per the Viscount patent) is cheap and physical.
+- ~~Release pitch sag~~ BUILT (a404213): pitch bends down at note-off,
+  12·sqrt(f0/100) cents clamped 3–38, tau ≈ 12 periods (15–80 ms) —
+  the bell/pipe discriminator (bells don't bend). Full per-partial
+  detune toward inharmonic resonances (F&R §16.6, Aeolus) remains
+  future work.
 - Frequency-dependent tail shaping for dry conversion (HW truncation
   shapes decays per pipe frequency; RT60 falls with frequency).
 - Per-partial release (additive) — highest ceiling, order-of-magnitude
