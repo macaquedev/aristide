@@ -90,7 +90,8 @@ plus `crackle_hunt` unchanged at zero discontinuities.
   compensation only covers the embedded tail — extend λ measurement to
   separate release samples.
 - ~~Release pitch sag~~ BUILT (a404213): pitch bends down at note-off,
-  12·sqrt(f0/100) cents clamped 3–38, tau ≈ 12 periods (15–80 ms) —
+  4·sqrt(f0/100) cents clamped 1–12 (user-tuned by ear: 38 was "far far
+  too much", 12 "really nice"), tau ≈ 12 periods (15–80 ms) —
   the bell/pipe discriminator (bells don't bend). Full per-partial
   detune toward inharmonic resonances (F&R §16.6, Aeolus) remains
   future work.

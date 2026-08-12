@@ -614,7 +614,7 @@ impl SampledVoice {
                     let f0 = sample.sample_rate_hz() as f64 / period;
                     // Depth grows with pipe pitch: ~35 cents at 1 kHz+,
                     // ~15 at 250 Hz, negligible for big pipes.
-                    let cents = (1.8 * (f0 / 100.0).sqrt()).clamp(0.5, 5.0);
+                    let cents = (4.0 * (f0 / 100.0).sqrt()).clamp(1.0, 12.0);
                     self.release_bend_depth = 1.0 - (-(cents as f32) / 1200.0).exp2();
                     // Pressure collapse: ~12 periods, 15-80 ms.
                     let tau_s = (12.0 * period / sample.sample_rate_hz() as f64)
