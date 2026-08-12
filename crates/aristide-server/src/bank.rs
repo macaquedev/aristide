@@ -1039,6 +1039,126 @@ mod tests {
         );
     }
 
+    /// Render listening demos: big loud chords + fast treble spam on the
+    /// full coupled registration (the user's torture setup).
+    #[test]
+    #[ignore = "renders /tmp demo wavs"]
+    fn render_listening_demos() {
+        let Some(path) = demo_organ() else { return };
+        let organ = aristide_formats::grandorgue::load(&path).expect("loads").organ;
+        let device_rate = 44_100.0f32;
+        let loaded = build(&organ, device_rate).expect("bank builds");
+        let great = organ.manuals[1].id;
+        let swell = organ.manuals[2].id;
+        let drawn: Vec<_> = organ
+            .stops
+            .iter()
+            .filter(|s| (s.manual == great || s.manual == swell) && !s.name.contains("noise"))
+            .map(|s| s.id)
+            .collect();
+        let couplers: Vec<usize> = organ
+            .couplers
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.from_manual == great && c.to_manual == swell)
+            .map(|(i, _)| i)
+            .collect();
+        let sr = device_rate as usize;
+
+        let render = |events: &[(usize, u8, bool)], total: usize, out: &str| {
+            let mut console = crate::console::Console::new(
+                organ.clone(),
+                loaded.specs.clone(),
+                drawn.clone(),
+                Vec::new(),
+            );
+            for &c in &couplers {
+                console.set_coupler(c, true);
+            }
+            let (mut engine, mut handle) =
+                aristide_engine::Engine::new(device_rate, std::sync::Arc::new(loaded.bank.clone()));
+            // "very loud": +9 dB over the default -15 dB master.
+            handle.send(aristide_engine::Command::SetMasterGain { linear: 0.5 });
+            let block = 512usize;
+            let mut output = Vec::new();
+            let mut buffer = vec![0.0f32; block * 2];
+            let mut next = 0usize;
+            let mut frame = 0usize;
+            while frame < total {
+                while next < events.len() && events[next].0 < frame + block {
+                    let (_, key, on) = events[next];
+                    next += 1;
+                    if on {
+                        let (starts, retriggered) = console.note_on(0, key);
+                        for h in retriggered {
+                            handle.send(aristide_engine::Command::StopVoice { handle: h });
+                        }
+                        for st in starts {
+                            handle.send(aristide_engine::Command::StartVoice {
+                                handle: st.handle,
+                                sample: st.spec.sample,
+                                rate: st.spec.rate,
+                                gain: st.spec.gain,
+                                group: st.spec.group,
+                                wind_weight: st.spec.wind_weight,
+                                brightness: st.spec.brightness,
+                            });
+                        }
+                    } else {
+                        for h in console.note_off(0, key) {
+                            handle.send(aristide_engine::Command::StopVoice { handle: h });
+                        }
+                    }
+                }
+                engine.process(&mut buffer, 2);
+                output.extend_from_slice(&buffer);
+                frame += block;
+            }
+            write_wav_f32(out, &output, 2, sr as u32);
+            println!("wrote {out}");
+        };
+
+        // Take 1: big chords, held ~1.6 s, clean gaps to expose releases.
+        let chords: [&[u8]; 4] = [
+            &[41, 53, 57, 60, 65, 69, 72],       // F major, wide
+            &[36, 48, 55, 60, 64, 67, 72, 76],   // C major, huge
+            &[43, 55, 62, 67, 71, 74, 79],       // G major, high
+            &[41, 53, 57, 60, 65, 69, 72, 77, 81], // F again, higher crown
+        ];
+        let mut events: Vec<(usize, u8, bool)> = Vec::new();
+        for (i, chord) in chords.iter().enumerate() {
+            let base = i * sr * 5 / 2 + sr / 4;
+            for &k in *chord {
+                events.push((base, k, true));
+                events.push((base + sr * 8 / 5, k, false));
+            }
+        }
+        events.sort_by_key(|e| e.0);
+        render(&events, chords.len() * sr * 5 / 2 + 2 * sr, "/tmp/demo_chords.wav");
+
+        // Take 2: fast spam with a heavy treble bias (the old "super
+        // high bells" register), 30-70 ms between onsets, 40-150 ms holds.
+        let mut rng = 0xDEAD_BEEFu32;
+        let mut rand = move |n: usize| {
+            rng ^= rng << 13;
+            rng ^= rng >> 17;
+            rng ^= rng << 5;
+            (rng as usize) % n
+        };
+        let keys = [60u8, 64, 67, 72, 74, 76, 79, 81, 84, 86, 88, 69, 71, 83];
+        let mut events: Vec<(usize, u8, bool)> = Vec::new();
+        let mut t = sr / 4;
+        while t < 12 * sr {
+            let key = keys[rand(keys.len())];
+            let hold = sr * (40 + rand(110)) / 1000;
+            events.push((t, key, true));
+            events.push((t + hold, key, false));
+            t += sr * (30 + rand(40)) / 1000;
+        }
+        events.sort_by_key(|e| e.0);
+        render(&events, 15 * sr, "/tmp/demo_spam.wav");
+    }
+
     /// Diagnostic: render one pipe at several hold lengths and dump the
     /// release for offline envelope comparison against the raw tail.
     /// cargo test -p aristide-server release_envelope -- --ignored --nocapture
