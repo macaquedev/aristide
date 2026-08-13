@@ -19,10 +19,41 @@
         <span class="rail-label">REVERB</span>
         <input id="reverb" type="range" min="0" max="1" step="0.01" />
       </label>
-      <div class="tuning" id="tuning"></div>
+      <button class="tuning" id="tuning" title="Tuning &amp; console settings"></button>
       <button id="panic" class="panic" title="Silence everything">PANIC</button>
     </div>
   </header>
+  <aside id="settings" class="settings hidden">
+    <label class="settings-row" id="temperament-row">
+      <span class="rail-label">TEMPERAMENT</span>
+      <select id="set-temperament">
+        <option value="equal">Equal</option>
+        <option value="werckmeister3">Werckmeister III</option>
+        <option value="kirnberger3">Kirnberger III</option>
+        <option value="meantone4">Meantone &frac14;-comma</option>
+        <option value="pythagorean">Pythagorean</option>
+      </select>
+    </label>
+    <label class="settings-row" id="pitch-row">
+      <span class="rail-label">PITCH a&prime;</span>
+      <span class="stepper"><input id="set-a4" type="number" min="300" max="500" step="0.5" /> Hz</span>
+    </label>
+    <div class="settings-row" id="transpose-row">
+      <span class="rail-label">TRANSPOSE</span>
+      <span class="stepper">
+        <button id="transpose-down">&minus;</button>
+        <span id="transpose-value">0</span>
+        <button id="transpose-up">+</button>
+      </span>
+    </div>
+    <div class="settings-row" id="noises-row">
+      <span class="rail-label">NOISES</span>
+      <span class="stepper">
+        <input id="noises-on" type="checkbox" title="Blower and action noises" />
+        <input id="noises-vol" type="range" min="0" max="1" step="0.01" />
+      </span>
+    </div>
+  </aside>
   <main id="console" class="console">
     <section id="jamb-left" class="jamb"></section>
     <section class="center">

@@ -126,7 +126,87 @@ input[type="range"]::-webkit-slider-thumb {
   color: var(--text-dim);
   font-variant: small-caps;
   letter-spacing: 1px;
+  background: none;
+  border: 0;
+  padding: 4px 2px;
+  cursor: pointer;
 }
+.tuning:hover { color: var(--brass); }
+
+/* ---- settings drawer -------------------------------------------------- */
+
+.settings {
+  position: fixed;
+  top: 53px;
+  right: 74px;
+  z-index: 9;
+  display: flex;
+  flex-direction: column;
+  gap: 13px;
+  min-width: 260px;
+  padding: 15px 17px;
+  border: 1px solid var(--brass-dim);
+  border-top: 0;
+  border-radius: 0 0 6px 6px;
+  background: linear-gradient(180deg, #2e2013, #1d130a);
+  box-shadow: 0 10px 24px #000d, inset 0 1px 0 #ffffff10;
+}
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.settings select,
+.settings input[type="number"] {
+  font: 12px var(--serif);
+  color: var(--ivory);
+  background: #140d07;
+  border: 1px solid #00000090;
+  border-radius: 3px;
+  padding: 4px 6px;
+}
+.settings select {
+  /* WebKit's native select chrome is a light gradient that fights the
+     walnut skin; draw our own chevron instead. */
+  -webkit-appearance: none;
+  appearance: none;
+  padding-right: 22px;
+  background-image: linear-gradient(45deg, transparent 50%, var(--brass) 50%),
+    linear-gradient(135deg, var(--brass) 50%, transparent 50%);
+  background-position: right 12px top 55%, right 8px top 55%;
+  background-size: 4px 4px;
+  background-repeat: no-repeat;
+}
+.settings input[type="number"] { width: 66px; text-align: right; }
+.settings input[type="range"] { width: 90px; }
+
+.stepper {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--serif);
+  font-size: 13px;
+  color: var(--text);
+}
+
+.stepper button {
+  width: 22px;
+  height: 22px;
+  border: 1px solid #00000090;
+  border-radius: 3px;
+  cursor: pointer;
+  color: var(--engrave);
+  font-size: 13px;
+  line-height: 1;
+  background: linear-gradient(180deg, #e6dcc2, #b3a37f);
+  box-shadow: 0 1px 2px #0009, inset 0 1px 0 #fff8;
+}
+.stepper button:active { transform: translateY(1px); }
+
+#transpose-value { min-width: 26px; text-align: center; }
 
 .panic {
   padding: 7px 16px;

@@ -26,8 +26,9 @@ export const commands = {
   gain: (v) => `/api/gain?v=${v}`,
   reverb: (wet) => `/api/reverb?wet=${wet}`,
   noises: (on, vol) => `/api/noises?on=${on ? 1 : 0}&vol=${vol}`,
-  tuning: (temperament, a4, transpose) =>
-    `/api/tuning?temperament=${temperament}&a4=${a4}&transpose=${transpose}`,
+  // Partial updates: the server only applies the params present, so a
+  // temperament change never has to re-send pitch or transposition.
+  tuning: (fields) => `/api/tuning?${new URLSearchParams(fields)}`,
   enclosure: (idx, value) => `/api/enclosure?idx=${idx}&v=${value}`,
   note: (manual, key, on) =>
     `/api/note?manual=${manual}&key=${key}&on=${on ? 1 : 0}`,
