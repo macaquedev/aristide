@@ -1,22 +1,24 @@
-/* The console skin: dark walnut case, ivory drawknobs, brass fittings.
+/* The console skin: flat dark surfaces, one electric accent.
    Everything is CSS — no image assets — so the theme stays greppable
-   and each material lives in one custom property. */
+   and each token lives in one custom property. */
 
 :root {
-  --case: #241811;
-  --case-deep: #170f09;
-  --ivory: #f1e7d0;
-  --ivory-deep: #d8c9a8;
-  --engrave: #43281a;
-  --brass: #c9a35c;
-  --brass-dim: #8a6f3f;
-  --amber: #e8b954;
-  --text: #d8cdb8;
-  --text-dim: #9a8c74;
-  --key-white: #f4efdf;
-  --key-black: #211c17;
-  --serif: Georgia, "DejaVu Serif", serif;
-  --sans: "DejaVu Sans", system-ui, sans-serif;
+  --bg: #0f1115;
+  --bg-deep: #0a0c0f;
+  --surface: #171a20;
+  --surface-2: #1e232b;
+  --border: #ffffff14;
+  --border-strong: #ffffff2c;
+  --text: #e6e9ee;
+  --text-dim: #8b93a1;
+  --accent: #45c4ff;
+  --accent-soft: #45c4ff1f;
+  --accent-glow: #45c4ff33;
+  --accent-ink: #08202e;
+  --danger: #e5484d;
+  --key-white: #e9ebef;
+  --key-black: #1b1e24;
+  --sans: "Inter", system-ui, "DejaVu Sans", sans-serif;
 }
 
 * { box-sizing: border-box; user-select: none; -webkit-user-select: none; }
@@ -27,10 +29,8 @@ html, body {
   color: var(--text);
   font-family: var(--sans);
   background:
-    radial-gradient(120% 90% at 50% 0%, #32221578 0%, transparent 60%),
-    repeating-linear-gradient(93deg,
-      #00000000 0 14px, #00000014 14px 15px, #ffffff05 15px 17px),
-    linear-gradient(180deg, var(--case) 0%, var(--case-deep) 100%);
+    radial-gradient(100% 70% at 50% 0%, #1a1f28 0%, transparent 60%),
+    linear-gradient(180deg, var(--bg) 0%, var(--bg-deep) 100%);
   overflow: auto;
 }
 
@@ -41,11 +41,10 @@ html, body {
   inset: 0 0 auto 0;
   z-index: 10;
   padding: 6px 16px;
-  background: #6d1f16;
-  color: #f5ded7;
+  background: var(--danger);
+  color: #fff;
   font-size: 13px;
   text-align: center;
-  box-shadow: 0 2px 8px #0009;
 }
 
 /* ---- header rail ---------------------------------------------------- */
@@ -56,26 +55,26 @@ html, body {
   justify-content: space-between;
   gap: 24px;
   padding: 10px 22px;
-  background: linear-gradient(180deg, #3a2a1b 0%, #2b1e12 100%);
-  border-bottom: 1px solid #000;
-  box-shadow: 0 3px 10px #0008, inset 0 1px 0 #ffffff14;
+  background: #14171c;
+  border-bottom: 1px solid var(--border);
 }
 
-.nameplate {
-  padding: 5px 22px;
-  border: 1px solid var(--brass-dim);
-  border-radius: 3px;
-  background: linear-gradient(180deg, #1c130c, #241a11);
-  box-shadow: inset 0 1px 4px #000c, 0 1px 0 #ffffff10;
+.nameplate { display: flex; align-items: center; gap: 10px; }
+
+/* accent tick in place of hardware branding */
+.nameplate::before {
+  content: "";
+  width: 4px;
+  height: 18px;
+  border-radius: 2px;
+  background: var(--accent);
 }
 
 .nameplate span {
-  font-family: var(--serif);
-  font-variant: small-caps;
-  letter-spacing: 3px;
-  font-size: 19px;
-  color: var(--brass);
-  text-shadow: 0 1px 1px #000;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  color: var(--text);
 }
 
 .rail-controls {
@@ -99,16 +98,16 @@ html, body {
   position: absolute;
   top: calc(100% + 10px);
   right: 0;
-  padding: 4px 10px;
-  border-radius: 4px;
+  padding: 5px 10px;
+  border-radius: 6px;
   white-space: nowrap;
   font-size: 10px;
   letter-spacing: 1.5px;
   text-transform: uppercase;
   color: var(--text);
-  background: linear-gradient(180deg, #2c1e12f6, #1a1109f6);
-  border: 1px solid #000000c0;
-  box-shadow: 0 3px 8px #000b, inset 0 1px 0 #ffffff14;
+  background: #22262ef2;
+  border: 1px solid var(--border-strong);
+  box-shadow: 0 6px 16px #000a;
   opacity: 0;
   transition: opacity 120ms ease 350ms;
   pointer-events: none;
@@ -136,48 +135,49 @@ input[type="range"] {
 input[type="range"]::-webkit-slider-runnable-track {
   height: 4px;
   border-radius: 2px;
-  background: linear-gradient(180deg, #0e0a06, #1d150c);
-  box-shadow: inset 0 1px 2px #000, 0 1px 0 #ffffff12;
+  background: #ffffff1a;
 }
 input[type="range"]::-webkit-slider-thumb {
   -webkit-appearance: none;
-  width: 16px;
-  height: 16px;
-  margin-top: -6px;
+  width: 14px;
+  height: 14px;
+  margin-top: -5px;
   border-radius: 50%;
-  border: 1px solid #7d6234;
-  background: radial-gradient(circle at 35% 30%, #fff8e8, var(--ivory) 55%, var(--ivory-deep));
-  box-shadow: 0 2px 4px #000a;
+  border: 0;
+  background: var(--text);
 }
+input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
 
-/* Engraved brass plate. ::after belongs to the data-tip tooltip, so the
-   screw heads are painted as background layers instead of pseudo-elements. */
+/* tuning readout: a quiet pill that doubles as the settings button */
 .tuning {
-  font-family: var(--serif);
+  font-family: var(--sans);
   font-size: 12px;
-  color: #4a3413;
-  font-variant: small-caps;
-  letter-spacing: 1.5px;
-  text-shadow: 0 1px 0 #f3dda2b0;
-  padding: 5px 22px;
-  border: 1px solid #55401d;
-  border-radius: 3px;
-  background:
-    radial-gradient(circle 3px at 10px 50%, #f7e7bb 0 25%, #6d5426 60%, #3d2d10 100%, transparent) no-repeat,
-    radial-gradient(circle 3px at calc(100% - 10px) 50%, #f7e7bb 0 25%, #6d5426 60%, #3d2d10 100%, transparent) no-repeat,
-    repeating-linear-gradient(180deg,
-      #00000000 0 2px, #ffffff10 2px 3px, #00000012 3px 4px),
-    linear-gradient(180deg, #e3c079 0%, #c49d55 45%, #a37f3d 100%);
-  box-shadow:
-    inset 0 1px 0 #ffedbe,
-    inset 0 -1px 2px #00000070,
-    inset 1px 0 1px #ffffff50,
-    inset -1px 0 1px #00000040,
-    0 2px 5px #000a;
+  letter-spacing: 0.5px;
+  color: var(--text);
+  padding: 6px 16px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-2);
+  cursor: pointer;
+  transition: border-color 0.1s ease;
+}
+.tuning:hover { border-color: var(--accent); }
+.tuning:active { background: #262c36; }
+
+.panic {
+  padding: 7px 16px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--danger);
+  color: #fff;
+  font-family: var(--sans);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 2px;
   cursor: pointer;
 }
-.tuning:hover { filter: brightness(1.09); }
-.tuning:active { filter: brightness(0.95); }
+.panic:hover { filter: brightness(1.1); }
+.panic:active { filter: brightness(0.9); }
 
 /* ---- settings drawer -------------------------------------------------- */
 
@@ -190,12 +190,12 @@ input[type="range"]::-webkit-slider-thumb {
   flex-direction: column;
   gap: 13px;
   min-width: 260px;
-  padding: 15px 17px;
-  border: 1px solid var(--brass-dim);
+  padding: 16px 18px;
+  border: 1px solid var(--border);
   border-top: 0;
-  border-radius: 0 0 6px 6px;
-  background: linear-gradient(180deg, #2e2013, #1d130a);
-  box-shadow: 0 10px 24px #000d, inset 0 1px 0 #ffffff10;
+  border-radius: 0 0 12px 12px;
+  background: #191d24;
+  box-shadow: 0 16px 40px #000c;
 }
 
 .settings-row {
@@ -207,22 +207,24 @@ input[type="range"]::-webkit-slider-thumb {
 
 .settings select,
 .settings input[type="number"] {
-  font: 12px var(--serif);
-  color: var(--ivory);
-  background: #140d07;
-  border: 1px solid #00000090;
-  border-radius: 3px;
-  padding: 4px 6px;
+  font: 12px var(--sans);
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 8px;
 }
+.settings select:focus,
+.settings input[type="number"]:focus { outline: none; border-color: var(--accent); }
 .settings select {
   /* WebKit's native select chrome is a light gradient that fights the
-     walnut skin; draw our own chevron instead. */
+     dark skin; draw our own chevron instead. */
   -webkit-appearance: none;
   appearance: none;
-  padding-right: 22px;
-  background-image: linear-gradient(45deg, transparent 50%, var(--brass) 50%),
-    linear-gradient(135deg, var(--brass) 50%, transparent 50%);
-  background-position: right 12px top 55%, right 8px top 55%;
+  padding-right: 24px;
+  background-image: linear-gradient(45deg, transparent 50%, var(--text-dim) 50%),
+    linear-gradient(135deg, var(--text-dim) 50%, transparent 50%);
+  background-position: right 13px top 55%, right 9px top 55%;
   background-size: 4px 4px;
   background-repeat: no-repeat;
 }
@@ -230,7 +232,7 @@ input[type="range"]::-webkit-slider-thumb {
 .settings input[type="number"]::-webkit-inner-spin-button { display: none; }
 .settings input[type="range"] { width: 90px; }
 
-/* the noises switch: a small ivory-on-walnut toggle, not the OS checkbox */
+/* the noises switch */
 .settings input[type="checkbox"] {
   -webkit-appearance: none;
   appearance: none;
@@ -239,36 +241,29 @@ input[type="range"]::-webkit-slider-thumb {
   margin: 0;
   border-radius: 9px;
   cursor: pointer;
-  background: linear-gradient(180deg, #0e0a06, #1d150c);
-  border: 1px solid #00000090;
-  box-shadow: inset 0 1px 3px #000c, 0 1px 0 #ffffff10;
+  background: #ffffff1f;
+  border: 0;
   position: relative;
   transition: background 0.1s ease;
 }
 .settings input[type="checkbox"]::before {
   content: "";
   position: absolute;
-  top: 1px;
-  left: 1px;
+  top: 2px;
+  left: 2px;
   width: 14px;
   height: 14px;
   border-radius: 50%;
-  border: 1px solid #7d6234;
-  background: radial-gradient(circle at 35% 30%, #fff8e8, var(--ivory) 55%, var(--ivory-deep));
-  box-shadow: 0 1px 3px #000a;
+  background: var(--text);
   transition: left 0.1s ease;
 }
-.settings input[type="checkbox"]:checked {
-  background: linear-gradient(180deg, #6e5426, #8a6f3f);
-  box-shadow: inset 0 1px 3px #0009, 0 0 8px #e8b95422;
-}
-.settings input[type="checkbox"]:checked::before { left: 17px; }
+.settings input[type="checkbox"]:checked { background: var(--accent); }
+.settings input[type="checkbox"]:checked::before { left: 18px; background: #fff; }
 
 .stepper {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-family: var(--serif);
   font-size: 13px;
   color: var(--text);
 }
@@ -276,32 +271,18 @@ input[type="range"]::-webkit-slider-thumb {
 .stepper button {
   width: 22px;
   height: 22px;
-  border: 1px solid #00000090;
-  border-radius: 3px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
   cursor: pointer;
-  color: var(--engrave);
+  color: var(--text);
   font-size: 13px;
   line-height: 1;
-  background: linear-gradient(180deg, #e6dcc2, #b3a37f);
-  box-shadow: 0 1px 2px #0009, inset 0 1px 0 #fff8;
+  background: var(--surface-2);
 }
-.stepper button:active { transform: translateY(1px); }
+.stepper button:hover { border-color: var(--accent); }
+.stepper button:active { background: #262c36; }
 
 #transpose-value { min-width: 26px; text-align: center; }
-
-.panic {
-  padding: 7px 16px;
-  border: 1px solid #300;
-  border-radius: 4px;
-  background: linear-gradient(180deg, #8c2a1c, #64180f);
-  color: #f7ddd3;
-  font-family: var(--sans);
-  font-size: 11px;
-  letter-spacing: 2px;
-  cursor: pointer;
-  box-shadow: 0 2px 5px #0009, inset 0 1px 0 #ffffff2a;
-}
-.panic:active { transform: translateY(1px); box-shadow: 0 1px 2px #0009; }
 
 /* ---- frame ----------------------------------------------------------- */
 
@@ -321,94 +302,79 @@ input[type="range"]::-webkit-slider-thumb {
 
 .jamb {
   display: flex;
-  gap: 14px;
-  padding: 14px 12px 18px;
-  border-radius: 6px;
-  background: linear-gradient(180deg, #33241733 0%, #00000026 100%);
-  border: 1px solid #00000080;
-  box-shadow: inset 0 1px 0 #ffffff0d, inset 0 0 18px #0007;
+  gap: 16px;
+  padding: 16px 14px 18px;
+  border-radius: 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
 }
 
 .division {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 13px;
+  gap: 10px;
 }
 
 .division h2 {
-  margin: 0 0 2px;
-  font-family: var(--serif);
-  font-variant: small-caps;
-  font-weight: normal;
-  font-size: 13px;
+  margin: 0 0 4px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
   letter-spacing: 2px;
-  color: var(--brass);
-  text-shadow: 0 1px 1px #000;
+  color: var(--text-dim);
   white-space: nowrap;
 }
 
+/* a stop is a flat toggle tile */
 .knob {
-  position: relative;
-  width: 74px;
-  height: 74px;
+  width: 86px;
+  min-height: 54px;
   padding: 0;
-  border: 0;
-  border-radius: 50%;
+  border: 1px solid var(--border);
+  border-radius: 10px;
   cursor: pointer;
-  /* the mounting well the knob sits in */
-  background: radial-gradient(circle at 50% 45%, #0b0703 30%, #241811 78%, #3a2a1b 100%);
-  box-shadow: inset 0 2px 6px #000d, inset 0 -1px 0 #ffffff10;
-  transition: transform 0.1s ease;
+  background: var(--surface-2);
+  transition: border-color 0.1s ease, background 0.1s ease, box-shadow 0.1s ease;
 }
+.knob:hover { border-color: var(--border-strong); }
 
 .knob .face {
-  position: absolute;
-  inset: 7px;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 1px;
-  border-radius: 50%;
-  background:
-    radial-gradient(circle at 36% 30%, #fffaf0 0%, var(--ivory) 45%, var(--ivory-deep) 82%, #b7a582 100%);
-  border: 2px solid #6b533156;
-  box-shadow: 0 1px 3px #0009;
-  color: var(--engrave);
-  font-family: var(--serif);
-  transition: box-shadow 0.1s ease, transform 0.1s ease, filter 0.1s ease;
-  filter: brightness(0.82) saturate(0.9);
+  gap: 3px;
+  padding: 8px 6px;
+  color: var(--text-dim);
+  transition: color 0.1s ease;
 }
 
 .stop-name {
-  font-size: 10.5px;
-  line-height: 1.05;
+  font-size: 11px;
+  line-height: 1.15;
   text-align: center;
-  /* The face is 56px across at its widest chord; keep the engraving
-     clear of the rim so long names ("Tremblant") don't touch it.
-     min-width: 0 lets max-width beat the flex-item minimum size —
+  /* min-width: 0 lets max-width beat the flex-item minimum size —
      otherwise the box grows to the word and fitLabels() sees no
      overflow (scrollWidth == clientWidth) and never shrinks it. */
   min-width: 0;
-  max-width: 50px;
+  max-width: 68px;
   /* Wrap at spaces only; fitLabels() shrinks long single words instead
      of letting them break mid-word. */
   overflow-wrap: normal;
 }
 
-.stop-pitch { font-size: 12px; font-weight: bold; }
+.stop-pitch { font-size: 11px; font-weight: 600; }
 
-/* drawn: the knob comes toward you — brighter, bigger, floating */
-.knob.on .face {
-  transform: scale(1.12);
-  filter: none;
-  box-shadow:
-    0 7px 14px #000c,
-    0 0 0 1px #00000055,
-    0 0 14px #e8b95428;
+/* drawn */
+.knob.on {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  box-shadow: 0 0 12px var(--accent-glow);
 }
-.knob:active .face { transform: scale(1.05); }
+.knob.on .face { color: var(--text); }
+.knob.on .stop-pitch { color: var(--accent); }
+.knob:active { background: #262c36; }
 
 /* ---- coupler rail ---------------------------------------------------- */
 
@@ -416,28 +382,25 @@ input[type="range"]::-webkit-slider-thumb {
   display: flex;
   justify-content: center;
   gap: 8px;
-  padding: 8px 14px;
-  margin-bottom: 14px;
-  border-radius: 5px;
-  background: linear-gradient(180deg, #1d140c, #2a1d12);
-  border: 1px solid #000000a0;
-  box-shadow: inset 0 2px 6px #0009, inset 0 -1px 0 #ffffff0e;
+  padding: 8px 12px;
+  margin-bottom: 16px;
+  border-radius: 999px;
+  background: var(--surface);
+  border: 1px solid var(--border);
 }
 
-/* Each coupler is an ivory tilting tablet resting in a felt-lined slot:
-   the button is the slot, the inner .tab is the tablet. The tilt is drawn,
-   not transformed — WebKit without compositing flattens rotateX, so the
-   receding edge is a clip-path trapezoid and the lighting a gradient. */
+/* couplers are flat chips */
 .rocker {
-  min-width: 66px;
-  height: 34px;
-  padding: 2px 3px;
-  border: 1px solid #000000c0;
-  border-radius: 3px;
+  min-width: 62px;
+  height: 30px;
+  padding: 0 4px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
   cursor: pointer;
-  background: linear-gradient(180deg, #100a05, #221610);
-  box-shadow: inset 0 2px 4px #000c, inset 0 -1px 0 #ffffff10;
+  background: var(--surface-2);
+  transition: border-color 0.1s ease, background 0.1s ease;
 }
+.rocker:hover { border-color: var(--border-strong); }
 
 .rocker .tab {
   display: flex;
@@ -445,27 +408,20 @@ input[type="range"]::-webkit-slider-thumb {
   justify-content: center;
   width: 100%;
   height: 100%;
-  font-family: var(--serif);
-  font-size: 11.5px;
-  color: var(--engrave);
-  text-shadow: 0 1px 0 #fff8;
-  /* at rest the tablet leans back at the top: the top edge recedes into
-     the slot (narrower, in shadow) and the bottom edge catches the light */
-  clip-path: polygon(5% 0, 95% 0, 100% 100%, 0% 100%);
-  background: linear-gradient(180deg, #9c8d69 0%, #cdbf9b 45%, #f0e6cc 100%);
-  box-shadow: inset 0 -1px 0 #fff9, inset 0 5px 4px -2px #00000060;
-  transition: clip-path 0.09s ease, box-shadow 0.09s ease;
+  font-size: 11px;
+  color: var(--text-dim);
+  transition: color 0.1s ease;
 }
 
-/* engaged: tablet tips the other way and lights amber */
-.rocker.on .tab {
-  clip-path: polygon(0% 0, 100% 0, 95% 100%, 5% 100%);
-  background: linear-gradient(180deg, #f6dc96 0%, #ddb65c 55%, #8f7336 100%);
-  color: #35220f;
-  box-shadow: inset 0 1px 0 #fff7, inset 0 -5px 4px -2px #00000060, 0 0 10px #e8b95433;
+.rocker.on {
+  background: var(--accent);
+  border-color: var(--accent);
 }
-/* mid-press: the tablet passes through flat */
-.rocker:active .tab { clip-path: polygon(0% 0, 100% 0, 100% 100%, 0% 100%); }
+.rocker.on .tab {
+  color: var(--accent-ink);
+  font-weight: 600;
+}
+.rocker:active { filter: brightness(0.9); }
 
 /* ---- keyboards -------------------------------------------------------- */
 
@@ -475,39 +431,38 @@ input[type="range"]::-webkit-slider-thumb {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 0;
+  gap: 6px;
 }
 
 .keyboard {
   display: flex;
   align-items: stretch;
-  padding: 8px 10px;
-  background: linear-gradient(180deg, #3b2b1c, #241811);
-  border: 1px solid #000;
-  border-radius: 3px;
-  box-shadow: 0 4px 10px #0008, inset 0 1px 0 #ffffff12;
+  padding: 10px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
 }
-.keyboard.manual { --nat-w: 23px; --kb-h: 96px; --sharp-w: 13px; margin-top: -2px; }
+.keyboard.manual { --nat-w: 23px; --kb-h: 96px; --sharp-w: 13px; }
 .keyboard.pedal { --nat-w: 27px; --kb-h: 84px; --sharp-w: 15px; }
 
 .cheek {
   writing-mode: vertical-rl;
   transform: rotate(180deg);
   text-align: center;
-  margin-right: 9px;
-  font-family: var(--serif);
-  font-variant: small-caps;
-  font-size: 11px;
-  letter-spacing: 1px;
-  color: var(--brass);
+  margin-right: 10px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 2px;
+  color: var(--text-dim);
 }
 
 .keys {
   position: relative;
   width: calc(var(--naturals) * var(--nat-w));
   height: var(--kb-h);
-  background: #0a0704;
-  border-radius: 0 0 2px 2px;
+  background: var(--bg-deep);
+  border-radius: 4px;
+  overflow: hidden;
 }
 
 .key { position: absolute; top: 0; cursor: pointer; }
@@ -517,8 +472,7 @@ input[type="range"]::-webkit-slider-thumb {
   width: calc(var(--nat-w) - 1px);
   height: 100%;
   border-radius: 0 0 3px 3px;
-  background: linear-gradient(180deg, #d9d2be 0%, var(--key-white) 12%, var(--key-white) 88%, #cfc7ae 100%);
-  box-shadow: inset 0 -3px 4px #00000028, inset -1px 0 0 #00000018;
+  background: var(--key-white);
 }
 
 .key.sharp {
@@ -526,43 +480,28 @@ input[type="range"]::-webkit-slider-thumb {
   width: var(--sharp-w);
   height: 62%;
   z-index: 2;
-  border-radius: 0 0 2px 2px;
-  background: linear-gradient(180deg, #4a4038 0%, var(--key-black) 20%, var(--key-black) 78%, #000 100%);
-  box-shadow: 0 3px 4px #000c, inset 0 -6px 0 #ffffff0f;
+  border-radius: 0 0 3px 3px;
+  background: var(--key-black);
+  box-shadow: 0 2px 4px #0009;
 }
 
-/* pressed: the front of the key dips out of sight, the top face tilts
-   away from the light — shorter silhouette, shadowed ivory */
-.key.natural.held {
-  height: calc(100% - 3px);
-  background: linear-gradient(180deg, #a99c78 0%, #cdc09a 18%, #d8cca6 100%);
-  box-shadow: inset 0 4px 6px #00000055, inset -1px 0 0 #00000022;
-}
-.key.sharp.held {
-  background: linear-gradient(180deg, #211b15 0%, #100d09 80%);
-  box-shadow: 0 1px 1px #000c, inset 0 3px 4px #000;
-  height: 58%;
-}
+/* pressed: the key lights in the accent */
+.key.natural.held { background: linear-gradient(180deg, #79d3ff, var(--accent)); }
+.key.sharp.held { background: #2496cf; }
 
-/* pedalboard reads as pale wood, not ivory */
-.keyboard.pedal .key.natural {
-  background: linear-gradient(180deg, #b39869 0%, #c8ad7c 10%, #bfa470 90%, #96794d 100%);
-}
-.keyboard.pedal .key.natural.held {
-  height: calc(100% - 3px);
-  background: linear-gradient(180deg, #7e6640 0%, #9a8054 80%);
-  box-shadow: inset 0 4px 6px #00000060;
-}
+/* pedal naturals read slightly darker than the manuals */
+.keyboard.pedal .key.natural { background: #c8cdd5; }
+.keyboard.pedal .key.natural.held { background: linear-gradient(180deg, #79d3ff, var(--accent)); }
 .keyboard.pedal .key.sharp { height: 55%; }
 
 .pedals {
   display: flex;
   align-items: flex-end;
   gap: 22px;
-  margin-top: 16px;
+  margin-top: 18px;
 }
 
-/* ---- swell shoes ------------------------------------------------------ */
+/* ---- swell shoes: vertical faders ------------------------------------- */
 
 .shoes { display: flex; gap: 14px; }
 
@@ -570,56 +509,44 @@ input[type="range"]::-webkit-slider-thumb {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
 }
 
 .shoe-track {
   position: relative;
-  width: 50px;
+  width: 36px;
   height: 128px;
-  border-radius: 6px;
+  border-radius: 8px;
   cursor: pointer;
-  /* the slot in the kick-board the shoe pivots in */
-  background: linear-gradient(90deg, #0a0602, #1a1108 18%, #1a1108 82%, #0a0602);
-  border: 1px solid #000;
-  box-shadow: inset 0 2px 10px #000e, inset 0 -1px 0 #ffffff12,
-    0 1px 0 #ffffff0d;
-  perspective: 240px;
+  background: var(--surface);
+  border: 1px solid var(--border);
   touch-action: none;
 }
 
 .shoe-fill {
   position: absolute;
-  inset: auto 2px 4px auto;
-  width: 2px;
+  left: 4px;
+  right: 4px;
+  bottom: 4px;
   height: calc((100% - 8px) * var(--open, 0));
-  border-radius: 2px;
-  background: linear-gradient(180deg, #e8b95470, #8a6f3f38);
+  border-radius: 5px;
+  background: var(--accent-soft);
 }
 
 .shoe-thumb {
   position: absolute;
-  left: 6px;
-  right: 6px;
-  height: 42px;
-  bottom: calc(5px + (100% - 52px) * var(--open, 0));
+  left: 4px;
+  right: 4px;
+  height: 8px;
+  bottom: calc(4px + (100% - 16px) * var(--open, 0));
   border-radius: 4px;
-  /* brass pedal plate with rubber tread ribs; heel-back when closed,
-     flattening out as it opens */
-  background: repeating-linear-gradient(180deg,
-      #00000026 0 2px, #ffffff12 2px 3px, transparent 3px 7px),
-    radial-gradient(120% 90% at 50% 20%, #e3c98a, transparent 60%),
-    linear-gradient(180deg, #d9bc78, #b0904f 45%, #8a6f3f);
-  border: 1px solid #3d2e14;
-  box-shadow: 0 3px 6px #000c, inset 0 1px 0 #ffe9b866;
-  transform: rotateX(calc(34deg - var(--open, 0) * 26deg));
+  background: var(--accent);
   pointer-events: none;
 }
 
 .shoe-label {
-  font-family: var(--serif);
-  font-variant: small-caps;
-  font-size: 11px;
-  letter-spacing: 1px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 2px;
   color: var(--text-dim);
 }
