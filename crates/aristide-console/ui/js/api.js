@@ -5,7 +5,7 @@
 // an immediate poll: the UI never waits out the poll interval to confirm
 // what it just did.
 
-const POLL_INTERVAL_MS = 250;
+const POLL_INTERVAL_MS = 120;
 
 /// Where the server is. Priority: CLI arg via the Tauri shell,
 /// `?server=` query param, then the page's own origin (for the day the
