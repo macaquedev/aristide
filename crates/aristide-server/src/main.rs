@@ -611,6 +611,13 @@ fn main() -> Result<()> {
     // (gap > 2x the nominal block time) are counted and reported — the
     // objective signal for delivery-layer glitches.
     let overruns = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    // DSP-load telemetry: the callback times engine.process() so the
+    // overrun report can say WHICH side missed — a too-slow engine and a
+    // preempted callback both arrive late, and only this measurement
+    // tells them apart.
+    let dsp_peak_ns = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let dsp_over_budget = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let dsp_budget_ns = Arc::new(std::sync::atomic::AtomicU64::new(0));
     // Recording tap: engine output -> lock-free ring -> writer thread.
     let mut tap_consumer = None;
     let record_requested = args.record.is_some();
@@ -642,22 +649,33 @@ fn main() -> Result<()> {
         let mut rt_ready = false;
         let mut last_callback: Option<std::time::Instant> = None;
         let overruns = Arc::clone(&overruns);
+        let dsp_peak_ns = Arc::clone(&dsp_peak_ns);
+        let dsp_over_budget = Arc::clone(&dsp_over_budget);
+        let dsp_budget_ns = Arc::clone(&dsp_budget_ns);
         let stream = device.build_output_stream(
             &stream_config,
             move |data: &mut [f32], _| {
+                use std::sync::atomic::Ordering::Relaxed;
                 if !rt_ready {
                     rt_ready = true;
                     audio_thread_setup(buffer_hint, sample_rate as u32);
                 }
                 let now = std::time::Instant::now();
+                let nominal = data.len() as f64 / channels as f64 / sample_rate as f64;
                 if let Some(previous) = last_callback {
-                    let nominal = data.len() as f64 / channels as f64 / sample_rate as f64;
                     if now.duration_since(previous).as_secs_f64() > nominal * 2.0 {
-                        overruns.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        overruns.fetch_add(1, Relaxed);
                     }
                 }
                 last_callback = Some(now);
-                engine.process(data, channels)
+                engine.process(data, channels);
+                let spent_ns = now.elapsed().as_nanos() as u64;
+                let budget_ns = (nominal * 1e9) as u64;
+                dsp_budget_ns.store(budget_ns, Relaxed);
+                dsp_peak_ns.fetch_max(spent_ns, Relaxed);
+                if spent_ns > budget_ns {
+                    dsp_over_budget.fetch_add(1, Relaxed);
+                }
             },
             |err| tracing::error!("audio stream error: {err}"),
             None,
@@ -807,13 +825,26 @@ fn main() -> Result<()> {
     let mut reported_overruns = 0u32;
     loop {
         std::thread::sleep(std::time::Duration::from_millis(500));
-        let total = overruns.load(std::sync::atomic::Ordering::Relaxed);
+        use std::sync::atomic::Ordering::Relaxed;
+        let total = overruns.load(Relaxed);
         if total > reported_overruns {
+            // Name the guilty side: the peak engine.process() time since
+            // the last report either fits the block budget (the OS starved
+            // us) or doesn't (the DSP is too heavy for this machine).
+            let peak_ms = dsp_peak_ns.swap(0, Relaxed) as f64 / 1e6;
+            let budget_ms = dsp_budget_ns.load(Relaxed) as f64 / 1e6;
+            let engine_over = dsp_over_budget.load(Relaxed);
+            let verdict = if engine_over == 0 {
+                "engine within budget — suspect OS scheduling / missing RT \
+                 priority / CPU frequency governor"
+            } else {
+                "the ENGINE is blowing its deadline — DSP overload on this \
+                 machine (try --safe or a larger --buffer)"
+            };
             tracing::warn!(
-                "audio callback arrived late {} time(s) — delivery-layer \
-                 glitches (CPU contention or missing RT priority), not \
-                 engine output",
-                total
+                "audio callback arrived late {total} time(s); engine DSP \
+                 peak {peak_ms:.2} ms of {budget_ms:.2} ms budget, \
+                 {engine_over} block(s) ever over — {verdict}"
             );
             reported_overruns = total;
         }

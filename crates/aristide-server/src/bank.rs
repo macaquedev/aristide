@@ -1472,6 +1472,163 @@ mod tests {
         );
     }
 
+    /// Real-time budget check under the PRODUCTION default: full organ
+    /// ("*" registration), 256-frame blocks (the app default), the same
+    /// fast-playing schedule as crackle_hunt. The user's live crackles
+    /// with a clean in-app recording mean device underruns: the recorder
+    /// taps rendered blocks before the device, so a callback that misses
+    /// its ~5.8 ms deadline glitches the speakers but not the file. This
+    /// measures per-block render cost so that regression is a number,
+    /// not an ear. Run with: cargo test --release -- --ignored render_budget
+    #[test]
+    #[ignore]
+    fn render_budget_under_full_organ() {
+        render_budget(false);
+    }
+
+    /// Same bench in the engine's lite ("safe") mode: linear
+    /// interpolation, no wind/tremulant/brightness/flow-noise. The gap
+    /// between this and the full run is the price of the realism DSP —
+    /// if the full run misses deadlines and this one doesn't, the engine
+    /// is the bottleneck; if BOTH fit comfortably, the environment is.
+    #[test]
+    #[ignore]
+    fn render_budget_lite_mode() {
+        render_budget(true);
+    }
+
+    fn render_budget(lite: bool) {
+        let Some(path) = demo_organ() else {
+            eprintln!("skipping: demo set not present");
+            return;
+        };
+        let organ = aristide_formats::grandorgue::load(&path)
+            .expect("demo set loads")
+            .organ;
+        let device_rate = 44_100.0f32;
+        let loaded = build(&organ, device_rate).expect("bank builds");
+        // Production default registration: "*" — every stop (Console
+        // itself retires the noise stops from the drawn list).
+        let drawn: Vec<_> = organ.stops.iter().map(|s| s.id).collect();
+        let mut console =
+            crate::console::Console::new(organ, loaded.specs, drawn, Vec::new());
+        let _ = loaded.bank.pre_fault();
+        let (mut engine, mut handle) =
+            aristide_engine::Engine::new(device_rate, std::sync::Arc::new(loaded.bank));
+        engine.set_lite(lite);
+
+        // Same deterministic schedule as crackle_hunt.
+        let sr = device_rate as usize;
+        let mut events: Vec<(usize, u8, bool)> = Vec::new();
+        let mut rng = 0xA5F1_5EEDu32;
+        let mut rand = move |n: usize| {
+            rng ^= rng << 13;
+            rng ^= rng >> 17;
+            rng ^= rng << 5;
+            (rng as usize) % n
+        };
+        let spam_keys = [48u8, 50, 52, 53, 55, 57, 59, 60, 62, 64, 65, 67, 69, 72];
+        let mut t = sr / 10;
+        while t < 3 * sr {
+            let key = spam_keys[rand(spam_keys.len())];
+            let hold = sr * (60 + rand(140)) / 1000;
+            events.push((t, key, true));
+            events.push((t + hold, key, false));
+            t += sr * (30 + rand(60)) / 1000;
+        }
+        let chord = [53u8, 57, 60, 65, 69, 72];
+        for round in 0..2usize {
+            let base = 3 * sr + round * (3 * sr / 2);
+            for &k in &chord {
+                events.push((base, k, true));
+            }
+            for &k in &chord {
+                events.push((base + sr * 4 / 5, k, false));
+            }
+            events.push((base + sr * 4 / 5 + sr * 15 / 100, 67, true));
+            events.push((base + sr * 4 / 5 + sr * 45 / 100, 67, false));
+        }
+        let mut t = 6 * sr;
+        let mut which = false;
+        while t < 8 * sr {
+            let key = if which { 60 } else { 62 };
+            events.push((t, key, true));
+            events.push((t + sr * 35 / 1000, key, false));
+            which = !which;
+            t += sr * 40 / 1000;
+        }
+        for &k in &chord {
+            events.push((8 * sr + sr / 10, k, true));
+        }
+        for &k in &chord {
+            events.push((9 * sr, k, false));
+        }
+        events.sort_by_key(|e| e.0);
+
+        // Render 16 s in PRODUCTION 256-frame blocks, timing each one.
+        let block = 256usize;
+        let budget_us = block as f64 / device_rate as f64 * 1e6;
+        let total_frames = sr * 16;
+        let mut buffer = vec![0.0f32; block * 2];
+        let mut next_event = 0usize;
+        let mut frame = 0usize;
+        let mut times_us: Vec<f64> = Vec::with_capacity(total_frames / block + 1);
+        let mut voices_started = 0usize;
+        while frame < total_frames {
+            while next_event < events.len() && events[next_event].0 < frame + block {
+                let (_, key, on) = events[next_event];
+                next_event += 1;
+                if on {
+                    let (starts, retriggered) = console.note_on(0, key);
+                    for h in retriggered {
+                        assert!(handle.send(aristide_engine::Command::StopVoice { handle: h }));
+                    }
+                    for start in starts {
+                        voices_started += 1;
+                        assert!(handle.send(aristide_engine::Command::StartVoice {
+                            handle: start.handle,
+                            sample: start.spec.sample,
+                            rate: start.spec.rate,
+                            gain: start.spec.gain,
+                            group: start.spec.group,
+                            wind_weight: start.spec.wind_weight,
+                            brightness: start.spec.brightness,
+                            enclosure: start.spec.enclosure,
+                        }));
+                    }
+                } else {
+                    for h in console.note_off(0, key) {
+                        assert!(handle.send(aristide_engine::Command::StopVoice { handle: h }));
+                    }
+                }
+            }
+            let t0 = std::time::Instant::now();
+            engine.process(&mut buffer, 2);
+            times_us.push(t0.elapsed().as_secs_f64() * 1e6);
+            frame += block;
+        }
+
+        let mut sorted = times_us.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let pct = |p: f64| sorted[((sorted.len() - 1) as f64 * p) as usize];
+        let over = times_us.iter().filter(|&&t| t > budget_us).count();
+        let over_half = times_us.iter().filter(|&&t| t > budget_us * 0.5).count();
+        println!(
+            "mode={} blocks={} budget={budget_us:.0}us voices_started={voices_started}\n\
+             p50={:.0}us p90={:.0}us p99={:.0}us max={:.0}us\n\
+             over budget: {over} blocks, over 50% budget: {over_half} blocks",
+            if lite { "lite" } else { "full" },
+            times_us.len(),
+            pct(0.50),
+            pct(0.90),
+            pct(0.99),
+            pct(1.0),
+        );
+        // Report-only: no assert — the point is the printed numbers on
+        // whatever machine this runs on. Underruns are a deployment
+        // observation; the gate lives in the printed headroom.
+    }
+
     /// A room's decay rate does not transpose: a pipe synthesized by
     /// repitching a neighbor's recording (+600 cents on this demo set)
     /// must ring at the RECORDING's measured decay rate, not 1.41x
