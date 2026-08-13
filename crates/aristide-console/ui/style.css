@@ -122,8 +122,9 @@ html, body {
 
 [data-tip]:hover::after { opacity: 1; }
 
-/* Never let a tip sit on top of the open drawer. */
-body:has(.settings:not(.hidden)) [data-tip]::after { opacity: 0; }
+/* Never let a tip sit on top of an open drawer. */
+body:has(.settings:not(.hidden)) [data-tip]::after,
+body:has(.keys-legend:not(.hidden)) [data-tip]::after { opacity: 0; }
 
 .slider-group {
   display: flex;
@@ -212,6 +213,7 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
 }
 
 .settings select,
+.keys-legend select,
 .settings input[type="number"] {
   font: 12px var(--sans);
   color: var(--text);
@@ -221,8 +223,10 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   padding: 5px 8px;
 }
 .settings select:focus,
+.keys-legend select:focus,
 .settings input[type="number"]:focus { outline: none; border-color: var(--accent); }
-.settings select {
+.settings select,
+.keys-legend select {
   /* WebKit's native select chrome is a light gradient that fights the
      dark skin; draw our own chevron instead. */
   -webkit-appearance: none;
@@ -289,6 +293,97 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
 .stepper button:active { background: #262c36; }
 
 #transpose-value { min-width: 26px; text-align: center; }
+
+/* ---- computer-keyboard legend ------------------------------------------ */
+
+/* same quiet pill as the tuning readout, in caption case */
+.keys-button {
+  padding: 6px 14px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text-dim);
+  font-family: var(--sans);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 2px;
+  cursor: pointer;
+  transition: border-color 0.1s ease, color 0.1s ease;
+}
+.keys-button:hover { border-color: var(--accent); }
+.keys-button.on {
+  color: var(--text);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.keys-legend {
+  position: fixed;
+  top: 53px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 9;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 18px 12px;
+  border: 1px solid var(--border);
+  border-top: 0;
+  border-radius: 0 0 12px 12px;
+  background: #191d24;
+  box-shadow: 0 16px 40px #000c;
+}
+
+.legend-head { display: flex; align-items: center; gap: 12px; }
+
+/* one row of caps per QWERTY row, in physical order */
+.legend-row { display: flex; gap: 4px; }
+
+.legend-cap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  width: 34px;
+  padding: 5px 0 4px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-2);
+}
+
+.legend-cap b {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.legend-cap i {
+  font-style: normal;
+  font-size: 9px;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+}
+
+/* caps that play a sharp read as the black keys do */
+.legend-cap.sharp { background: var(--key-black); border-color: #ffffff0d; }
+.legend-cap.sharp b { color: var(--text-dim); }
+
+/* past the end of the manual's compass */
+.legend-cap.out { opacity: 0.35; }
+
+.legend-cap.playing {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.legend-cap.playing b,
+.legend-cap.playing i { color: var(--accent-ink); }
+
+.legend-foot {
+  font-size: 10px;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
 
 /* ---- frame ----------------------------------------------------------- */
 

@@ -19,6 +19,8 @@
         <span class="rail-label">REVERB</span>
         <input id="reverb" type="range" min="0" max="1" step="0.01" />
       </label>
+      <button class="keys-button" id="keys" data-tip="Play with the computer keyboard"
+        aria-label="Computer keyboard mapping">KEYS</button>
       <button class="tuning" id="tuning" data-tip="Tuning &amp; console settings"
         aria-label="Tuning &amp; console settings"></button>
       <button id="panic" class="panic" data-tip="Silence everything">PANIC</button>
@@ -55,6 +57,7 @@
       </span>
     </div>
   </aside>
+  <aside id="keys-legend" class="keys-legend hidden" aria-label="Computer keyboard mapping"></aside>
   <main id="console" class="console">
     <section id="jamb-left" class="jamb"></section>
     <section class="center">
