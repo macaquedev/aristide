@@ -19,8 +19,9 @@
         <span class="rail-label">REVERB</span>
         <input id="reverb" type="range" min="0" max="1" step="0.01" />
       </label>
-      <button class="tuning" id="tuning" title="Tuning &amp; console settings"></button>
-      <button id="panic" class="panic" title="Silence everything">PANIC</button>
+      <button class="tuning" id="tuning" data-tip="Tuning &amp; console settings"
+        aria-label="Tuning &amp; console settings"></button>
+      <button id="panic" class="panic" data-tip="Silence everything">PANIC</button>
     </div>
   </header>
   <aside id="settings" class="settings hidden">
@@ -49,7 +50,7 @@
     <div class="settings-row" id="noises-row">
       <span class="rail-label">NOISES</span>
       <span class="stepper">
-        <input id="noises-on" type="checkbox" title="Blower and action noises" />
+        <input id="noises-on" type="checkbox" aria-label="Blower and action noises" />
         <input id="noises-vol" type="range" min="0" max="1" step="0.01" />
       </span>
     </div>
