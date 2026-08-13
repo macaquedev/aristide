@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Aristide</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="offline" class="offline hidden">no connection to the organ</div>
+  <header id="rail" class="rail">
+    <div class="nameplate"><span id="organ-name">Aristide</span></div>
+    <div class="rail-controls">
+      <label class="slider-group" id="gain-group">
+        <span class="rail-label">VOLUME</span>
+        <input id="gain" type="range" min="0" max="1" step="0.01" />
+      </label>
+      <label class="slider-group hidden" id="reverb-group">
+        <span class="rail-label">REVERB</span>
+        <input id="reverb" type="range" min="0" max="1" step="0.01" />
+      </label>
+      <div class="tuning" id="tuning"></div>
+      <button id="panic" class="panic" title="Silence everything">PANIC</button>
+    </div>
+  </header>
+  <main id="console" class="console">
+    <section id="jamb-left" class="jamb"></section>
+    <section class="center">
+      <div id="couplers" class="coupler-rail"></div>
+      <div id="manuals" class="manuals"></div>
+      <div id="pedals" class="pedals"></div>
+    </section>
+    <section id="jamb-right" class="jamb"></section>
+  </main>
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>

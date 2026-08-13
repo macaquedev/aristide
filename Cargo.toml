@@ -5,7 +5,7 @@ members = [
     "crates/aristide-formats",
     "crates/aristide-engine",
     "crates/aristide-server",
-    "crates/aristide-gui",
+    "crates/aristide-console",
 ]
 
 [workspace.package]

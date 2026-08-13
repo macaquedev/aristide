@@ -57,7 +57,7 @@ audible impact:
 │                 aristide-formats (lib): GO loader, HW(unenc) loader, sidecar read/write │
 └─────────────────────────────────────────────────────────────────────────────────────────┘
                                    ▲ IPC
-                        aristide-gui (bin): native console UI
+                aristide-console (bin): Tauri console UI (HTTP to server)
 ```
 
 - The **audio thread never allocates, locks, or touches disk**. Control → RT communication

@@ -24,7 +24,15 @@ pub fn spawn(state: Arc<Mutex<State>>, port: u16) -> std::io::Result<()> {
         .name("aristide-http".into())
         .spawn(move || {
             for request in server.incoming_requests() {
-                let response = respond(&state, request.method(), request.url());
+                // Consoles are web pages (Tauri webview, plain browser);
+                // they fetch this API cross-origin, so every response
+                // carries the permissive CORS header. The bind stays
+                // localhost-only, which is the actual access control.
+                let response = respond(&state, request.method(), request.url())
+                    .with_header(
+                        Header::from_bytes("Access-Control-Allow-Origin", "*")
+                            .expect("valid header"),
+                    );
                 let _ = request.respond(response);
             }
         })?;

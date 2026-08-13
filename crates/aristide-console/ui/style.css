@@ -1,0 +1,417 @@
+/* The console skin: dark walnut case, ivory drawknobs, brass fittings.
+   Everything is CSS — no image assets — so the theme stays greppable
+   and each material lives in one custom property. */
+
+:root {
+  --case: #241811;
+  --case-deep: #170f09;
+  --ivory: #f1e7d0;
+  --ivory-deep: #d8c9a8;
+  --engrave: #43281a;
+  --brass: #c9a35c;
+  --brass-dim: #8a6f3f;
+  --amber: #e8b954;
+  --text: #d8cdb8;
+  --text-dim: #9a8c74;
+  --key-white: #f4efdf;
+  --key-black: #211c17;
+  --serif: Georgia, "DejaVu Serif", serif;
+  --sans: "DejaVu Sans", system-ui, sans-serif;
+}
+
+* { box-sizing: border-box; user-select: none; -webkit-user-select: none; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  color: var(--text);
+  font-family: var(--sans);
+  background:
+    radial-gradient(120% 90% at 50% 0%, #32221578 0%, transparent 60%),
+    repeating-linear-gradient(93deg,
+      #00000000 0 14px, #00000014 14px 15px, #ffffff05 15px 17px),
+    linear-gradient(180deg, var(--case) 0%, var(--case-deep) 100%);
+  overflow: auto;
+}
+
+.hidden { display: none !important; }
+
+.offline {
+  position: fixed;
+  inset: 0 0 auto 0;
+  z-index: 10;
+  padding: 6px 16px;
+  background: #6d1f16;
+  color: #f5ded7;
+  font-size: 13px;
+  text-align: center;
+  box-shadow: 0 2px 8px #0009;
+}
+
+/* ---- header rail ---------------------------------------------------- */
+
+.rail {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 10px 22px;
+  background: linear-gradient(180deg, #3a2a1b 0%, #2b1e12 100%);
+  border-bottom: 1px solid #000;
+  box-shadow: 0 3px 10px #0008, inset 0 1px 0 #ffffff14;
+}
+
+.nameplate {
+  padding: 5px 22px;
+  border: 1px solid var(--brass-dim);
+  border-radius: 3px;
+  background: linear-gradient(180deg, #1c130c, #241a11);
+  box-shadow: inset 0 1px 4px #000c, 0 1px 0 #ffffff10;
+}
+
+.nameplate span {
+  font-family: var(--serif);
+  font-variant: small-caps;
+  letter-spacing: 3px;
+  font-size: 19px;
+  color: var(--brass);
+  text-shadow: 0 1px 1px #000;
+}
+
+.rail-controls {
+  display: flex;
+  align-items: center;
+  gap: 22px;
+}
+
+.rail-label {
+  font-size: 10px;
+  letter-spacing: 2px;
+  color: var(--text-dim);
+}
+
+.slider-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 130px;
+  height: 22px;
+  background: transparent;
+}
+input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 2px;
+  background: linear-gradient(180deg, #0e0a06, #1d150c);
+  box-shadow: inset 0 1px 2px #000, 0 1px 0 #ffffff12;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  margin-top: -6px;
+  border-radius: 50%;
+  border: 1px solid #7d6234;
+  background: radial-gradient(circle at 35% 30%, #fff8e8, var(--ivory) 55%, var(--ivory-deep));
+  box-shadow: 0 2px 4px #000a;
+}
+
+.tuning {
+  font-family: var(--serif);
+  font-size: 13px;
+  color: var(--text-dim);
+  font-variant: small-caps;
+  letter-spacing: 1px;
+}
+
+.panic {
+  padding: 7px 16px;
+  border: 1px solid #300;
+  border-radius: 4px;
+  background: linear-gradient(180deg, #8c2a1c, #64180f);
+  color: #f7ddd3;
+  font-family: var(--sans);
+  font-size: 11px;
+  letter-spacing: 2px;
+  cursor: pointer;
+  box-shadow: 0 2px 5px #0009, inset 0 1px 0 #ffffff2a;
+}
+.panic:active { transform: translateY(1px); box-shadow: 0 1px 2px #0009; }
+
+/* ---- frame ----------------------------------------------------------- */
+
+.console {
+  display: grid;
+  grid-template-columns: minmax(170px, auto) 1fr minmax(170px, auto);
+  gap: 18px;
+  padding: 20px 22px 26px;
+  align-items: start;
+  justify-items: center;
+}
+
+/* ---- stop jambs ------------------------------------------------------ */
+
+.jamb {
+  display: flex;
+  gap: 14px;
+  padding: 14px 12px 18px;
+  border-radius: 6px;
+  background: linear-gradient(180deg, #33241733 0%, #00000026 100%);
+  border: 1px solid #00000080;
+  box-shadow: inset 0 1px 0 #ffffff0d, inset 0 0 18px #0007;
+}
+
+.division {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 13px;
+}
+
+.division h2 {
+  margin: 0 0 2px;
+  font-family: var(--serif);
+  font-variant: small-caps;
+  font-weight: normal;
+  font-size: 13px;
+  letter-spacing: 2px;
+  color: var(--brass);
+  text-shadow: 0 1px 1px #000;
+  white-space: nowrap;
+}
+
+.knob {
+  position: relative;
+  width: 74px;
+  height: 74px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  cursor: pointer;
+  /* the mounting well the knob sits in */
+  background: radial-gradient(circle at 50% 45%, #0b0703 30%, #241811 78%, #3a2a1b 100%);
+  box-shadow: inset 0 2px 6px #000d, inset 0 -1px 0 #ffffff10;
+  transition: transform 0.1s ease;
+}
+
+.knob .face {
+  position: absolute;
+  inset: 7px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 36% 30%, #fffaf0 0%, var(--ivory) 45%, var(--ivory-deep) 82%, #b7a582 100%);
+  border: 2px solid #6b533156;
+  box-shadow: 0 1px 3px #0009;
+  color: var(--engrave);
+  font-family: var(--serif);
+  transition: box-shadow 0.1s ease, transform 0.1s ease, filter 0.1s ease;
+  filter: brightness(0.82) saturate(0.9);
+}
+
+.stop-name {
+  font-size: 10.5px;
+  line-height: 1.05;
+  text-align: center;
+  max-width: 56px;
+  overflow-wrap: break-word;
+}
+
+.stop-pitch { font-size: 12px; font-weight: bold; }
+
+/* drawn: the knob comes toward you — brighter, bigger, floating */
+.knob.on .face {
+  transform: scale(1.12);
+  filter: none;
+  box-shadow:
+    0 7px 14px #000c,
+    0 0 0 1px #00000055,
+    0 0 14px #e8b95428;
+}
+.knob:active .face { transform: scale(1.05); }
+
+/* ---- coupler rail ---------------------------------------------------- */
+
+.coupler-rail {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px 14px;
+  margin-bottom: 14px;
+  border-radius: 5px;
+  background: linear-gradient(180deg, #1d140c, #2a1d12);
+  border: 1px solid #000000a0;
+  box-shadow: inset 0 2px 6px #0009, inset 0 -1px 0 #ffffff0e;
+}
+
+.rocker {
+  min-width: 62px;
+  padding: 8px 10px 9px;
+  border: 1px solid #00000090;
+  border-radius: 4px;
+  cursor: pointer;
+  font-family: var(--serif);
+  font-size: 11.5px;
+  color: var(--engrave);
+  background: linear-gradient(180deg, #e6dcc2 0%, #cbbd9b 55%, #b3a37f 100%);
+  box-shadow: 0 2px 3px #0009, inset 0 1px 0 #fff8;
+  transition: all 0.08s ease;
+}
+
+/* engaged: bottom half tipped in, lit amber */
+.rocker.on {
+  background: linear-gradient(0deg, #f3d489 0%, #e0b95e 45%, #a98a45 100%);
+  box-shadow: inset 0 2px 5px #00000080, 0 0 10px #e8b95433;
+  color: #35220f;
+}
+
+/* ---- keyboards -------------------------------------------------------- */
+
+.center { display: flex; flex-direction: column; align-items: center; }
+
+.manuals {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0;
+}
+
+.keyboard {
+  display: flex;
+  align-items: stretch;
+  padding: 8px 10px;
+  background: linear-gradient(180deg, #3b2b1c, #241811);
+  border: 1px solid #000;
+  border-radius: 3px;
+  box-shadow: 0 4px 10px #0008, inset 0 1px 0 #ffffff12;
+}
+.keyboard.manual { --nat-w: 23px; --kb-h: 96px; --sharp-w: 13px; margin-top: -2px; }
+.keyboard.pedal { --nat-w: 27px; --kb-h: 84px; --sharp-w: 15px; }
+
+.cheek {
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+  text-align: center;
+  margin-right: 9px;
+  font-family: var(--serif);
+  font-variant: small-caps;
+  font-size: 11px;
+  letter-spacing: 1px;
+  color: var(--brass);
+}
+
+.keys {
+  position: relative;
+  width: calc(var(--naturals) * var(--nat-w));
+  height: var(--kb-h);
+  background: #0a0704;
+  border-radius: 0 0 2px 2px;
+}
+
+.key { position: absolute; top: 0; cursor: pointer; }
+
+.key.natural {
+  left: calc(var(--n) * var(--nat-w));
+  width: calc(var(--nat-w) - 1px);
+  height: 100%;
+  border-radius: 0 0 3px 3px;
+  background: linear-gradient(180deg, #d9d2be 0%, var(--key-white) 12%, var(--key-white) 88%, #cfc7ae 100%);
+  box-shadow: inset 0 -3px 4px #00000028, inset -1px 0 0 #00000018;
+}
+
+.key.sharp {
+  left: calc((var(--n) + 1) * var(--nat-w) - var(--sharp-w) / 2);
+  width: var(--sharp-w);
+  height: 62%;
+  z-index: 2;
+  border-radius: 0 0 2px 2px;
+  background: linear-gradient(180deg, #4a4038 0%, var(--key-black) 20%, var(--key-black) 78%, #000 100%);
+  box-shadow: 0 3px 4px #000c, inset 0 -6px 0 #ffffff0f;
+}
+
+.key.natural.held {
+  background: linear-gradient(180deg, #cabf9f 0%, #e3d9ba 15%, #e9dfc0 100%);
+  box-shadow: inset 0 3px 6px #00000045;
+}
+.key.sharp.held {
+  background: linear-gradient(180deg, #2b241d 0%, #16120d 80%);
+  box-shadow: 0 1px 2px #000c, inset 0 2px 3px #000;
+  height: 61%;
+}
+
+/* pedalboard reads as pale wood, not ivory */
+.keyboard.pedal .key.natural {
+  background: linear-gradient(180deg, #b39869 0%, #c8ad7c 10%, #bfa470 90%, #96794d 100%);
+}
+.keyboard.pedal .key.natural.held {
+  background: linear-gradient(180deg, #93794e 0%, #ab905f 80%);
+  box-shadow: inset 0 3px 6px #00000055;
+}
+.keyboard.pedal .key.sharp { height: 55%; }
+
+.pedals {
+  display: flex;
+  align-items: flex-end;
+  gap: 22px;
+  margin-top: 16px;
+}
+
+/* ---- swell shoes ------------------------------------------------------ */
+
+.shoes { display: flex; gap: 14px; }
+
+.shoe {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.shoe-track {
+  position: relative;
+  width: 40px;
+  height: 118px;
+  border-radius: 5px;
+  cursor: pointer;
+  background: linear-gradient(180deg, #0d0803, #1d140b);
+  border: 1px solid #000;
+  box-shadow: inset 0 2px 8px #000d, inset 0 -1px 0 #ffffff10;
+  touch-action: none;
+}
+
+.shoe-fill {
+  position: absolute;
+  inset: auto 5px 5px 5px;
+  height: calc((100% - 10px) * var(--open, 0));
+  border-radius: 3px;
+  background: linear-gradient(180deg, #e8b954a8, #8a6f3f88);
+}
+
+.shoe-thumb {
+  position: absolute;
+  left: 3px;
+  right: 3px;
+  height: 14px;
+  bottom: calc(3px + (100% - 20px) * var(--open, 0));
+  border-radius: 3px;
+  background: linear-gradient(180deg, #efe5cc, var(--ivory-deep));
+  border: 1px solid #00000090;
+  box-shadow: 0 2px 4px #000b;
+  pointer-events: none;
+}
+
+.shoe-label {
+  font-family: var(--serif);
+  font-variant: small-caps;
+  font-size: 11px;
+  letter-spacing: 1px;
+  color: var(--text-dim);
+}
