@@ -81,6 +81,20 @@ export class Console {
     this.buildJambs(snapshot);
     this.buildCouplers(snapshot);
     this.buildKeyboards(snapshot);
+    this.fitLabels();
+  }
+
+  /// Long stop names ("Trompette", "Tremblant") must never break
+  /// mid-word; instead the engraving shrinks until the widest word fits
+  /// on the knob face. Measured, not guessed, so it holds under any font.
+  fitLabels() {
+    for (const label of this.root.querySelectorAll(".stop-name")) {
+      label.style.fontSize = "";
+      for (let size = 10.5; label.scrollWidth > label.clientWidth && size > 7.5; ) {
+        size -= 0.5;
+        label.style.fontSize = `${size}px`;
+      }
+    }
   }
 
   buildJambs(snapshot) {
@@ -113,17 +127,20 @@ export class Console {
       }
     }
 
-    // The tremulant behaves like a stop; it lives at the bottom of the
-    // right jamb (or left, if the right is empty).
+    // The tremulant behaves like a stop; it joins the bottom of the last
+    // division column so the jamb reads as one rank of knobs.
     const jamb = this.el.jambRight.childElementCount
       ? this.el.jambRight
       : this.el.jambLeft;
-    const column = document.createElement("div");
-    column.className = "division";
+    let column = jamb.lastElementChild;
+    if (!column) {
+      column = document.createElement("div");
+      column.className = "division";
+      jamb.append(column);
+    }
     column.append(this.drawknob("Tremblant", "trem", (on) =>
       this.send(commands.tremulant(on))
     ));
-    jamb.append(column);
   }
 
   drawknob(name, key, flip) {

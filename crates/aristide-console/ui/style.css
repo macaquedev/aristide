@@ -221,8 +221,10 @@ input[type="range"]::-webkit-slider-thumb {
   font-size: 10.5px;
   line-height: 1.05;
   text-align: center;
-  max-width: 56px;
-  overflow-wrap: break-word;
+  max-width: 58px;
+  /* Wrap at spaces only; fitLabels() shrinks long single words instead
+     of letting them break mid-word. */
+  overflow-wrap: normal;
 }
 
 .stop-pitch { font-size: 12px; font-weight: bold; }
