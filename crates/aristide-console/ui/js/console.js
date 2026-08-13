@@ -189,7 +189,11 @@ export class Console {
       const rocker = document.createElement("button");
       rocker.className = "rocker";
       rocker.dataset.key = `coupler-${coupler.idx}`;
-      rocker.textContent = coupler.name;
+      // Inner face so the ivory tablet can tilt inside the button's slot.
+      const face = document.createElement("span");
+      face.className = "tab";
+      face.textContent = coupler.name;
+      rocker.append(face);
       rocker.addEventListener("click", () => {
         const on = !rocker.classList.contains("on");
         rocker.classList.toggle("on", on);

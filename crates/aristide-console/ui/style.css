@@ -369,7 +369,13 @@ input[type="range"]::-webkit-slider-thumb {
   font-size: 10.5px;
   line-height: 1.05;
   text-align: center;
-  max-width: 58px;
+  /* The face is 56px across at its widest chord; keep the engraving
+     clear of the rim so long names ("Tremblant") don't touch it.
+     min-width: 0 lets max-width beat the flex-item minimum size —
+     otherwise the box grows to the word and fitLabels() sees no
+     overflow (scrollWidth == clientWidth) and never shrinks it. */
+  min-width: 0;
+  max-width: 50px;
   /* Wrap at spaces only; fitLabels() shrinks long single words instead
      of letting them break mid-word. */
   overflow-wrap: normal;
@@ -402,26 +408,48 @@ input[type="range"]::-webkit-slider-thumb {
   box-shadow: inset 0 2px 6px #0009, inset 0 -1px 0 #ffffff0e;
 }
 
+/* Each coupler is an ivory tilting tablet resting in a felt-lined slot:
+   the button is the slot, the inner .tab is the tablet. The tilt is drawn,
+   not transformed — WebKit without compositing flattens rotateX, so the
+   receding edge is a clip-path trapezoid and the lighting a gradient. */
 .rocker {
-  min-width: 62px;
-  padding: 8px 10px 9px;
-  border: 1px solid #00000090;
-  border-radius: 4px;
+  min-width: 66px;
+  height: 34px;
+  padding: 2px 3px;
+  border: 1px solid #000000c0;
+  border-radius: 3px;
   cursor: pointer;
+  background: linear-gradient(180deg, #100a05, #221610);
+  box-shadow: inset 0 2px 4px #000c, inset 0 -1px 0 #ffffff10;
+}
+
+.rocker .tab {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
   font-family: var(--serif);
   font-size: 11.5px;
   color: var(--engrave);
-  background: linear-gradient(180deg, #e6dcc2 0%, #cbbd9b 55%, #b3a37f 100%);
-  box-shadow: 0 2px 3px #0009, inset 0 1px 0 #fff8;
-  transition: all 0.08s ease;
+  text-shadow: 0 1px 0 #fff8;
+  /* at rest the tablet leans back at the top: the top edge recedes into
+     the slot (narrower, in shadow) and the bottom edge catches the light */
+  clip-path: polygon(5% 0, 95% 0, 100% 100%, 0% 100%);
+  background: linear-gradient(180deg, #9c8d69 0%, #cdbf9b 45%, #f0e6cc 100%);
+  box-shadow: inset 0 -1px 0 #fff9, inset 0 5px 4px -2px #00000060;
+  transition: clip-path 0.09s ease, box-shadow 0.09s ease;
 }
 
-/* engaged: bottom half tipped in, lit amber */
-.rocker.on {
-  background: linear-gradient(0deg, #f3d489 0%, #e0b95e 45%, #a98a45 100%);
-  box-shadow: inset 0 2px 5px #00000080, 0 0 10px #e8b95433;
+/* engaged: tablet tips the other way and lights amber */
+.rocker.on .tab {
+  clip-path: polygon(0% 0, 100% 0, 95% 100%, 5% 100%);
+  background: linear-gradient(180deg, #f6dc96 0%, #ddb65c 55%, #8f7336 100%);
   color: #35220f;
+  box-shadow: inset 0 1px 0 #fff7, inset 0 -5px 4px -2px #00000060, 0 0 10px #e8b95433;
 }
+/* mid-press: the tablet passes through flat */
+.rocker:active .tab { clip-path: polygon(0% 0, 100% 0, 100% 100%, 0% 100%); }
 
 /* ---- keyboards -------------------------------------------------------- */
 
