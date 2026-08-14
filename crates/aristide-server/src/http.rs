@@ -24,6 +24,13 @@ pub fn spawn(state: Arc<Mutex<State>>, port: u16) -> std::io::Result<()> {
         .name("aristide-http".into())
         .spawn(move || {
             for request in server.incoming_requests() {
+                // Log every non-poll request so phantom traffic (e.g. a
+                // client sending note-ons nobody asked for) shows up in
+                // the server log with a timestamp. /api/state is the UI's
+                // steady poll and would drown everything else out.
+                if request.url() != "/api/state" {
+                    tracing::info!("http {} {}", request.method(), request.url());
+                }
                 // Consoles are web pages (Tauri webview, plain browser);
                 // they fetch this API cross-origin, so every response
                 // carries the permissive CORS header. The bind stays

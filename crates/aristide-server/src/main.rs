@@ -903,12 +903,22 @@ fn pick_f32_config(device: &cpal::Device) -> Result<cpal::StreamConfig> {
     best.context("audio device offers no f32 output format")
 }
 
+/// Hardware consoles and flaky cables can dump a burst of stale note-ons
+/// the instant a client subscribes to their port — heard as a random-note
+/// bang at every server start. Note-ons arriving within this window of a
+/// port's subscription are swallowed (note-offs and CCs still pass, so
+/// held-key state and pedals stay sane).
+const MIDI_CONNECT_GRACE: std::time::Duration = std::time::Duration::from_millis(400);
+
 fn connect_all_midi_inputs(state: &Arc<Mutex<State>>) -> Result<Vec<MidiInputConnection<()>>> {
+    use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
+
     let mut probe = MidiInput::new("aristide-probe")?;
     probe.ignore(Ignore::All);
     let port_count = probe.ports().len();
 
     let mut connections = Vec::new();
+    let mut grace_counters: Vec<(String, Arc<AtomicU32>)> = Vec::new();
     for index in 0..port_count {
         let mut input = MidiInput::new("aristide")?;
         input.ignore(Ignore::All);
@@ -919,18 +929,48 @@ fn connect_all_midi_inputs(state: &Arc<Mutex<State>>) -> Result<Vec<MidiInputCon
             .port_name(&port)
             .unwrap_or_else(|_| format!("port {index}"));
         let state = Arc::clone(state);
+        let suppressed = Arc::new(AtomicU32::new(0));
+        let counter = Arc::clone(&suppressed);
+        let subscribed_at = Instant::now();
         match input.connect(
             &port,
             "aristide-in",
-            move |_, message, _| handle_midi(message, &state),
+            move |_, message, _| {
+                if subscribed_at.elapsed() < MIDI_CONNECT_GRACE
+                    && matches!(message, &[status, _, velocity]
+                        if status & 0xF0 == 0x90 && velocity > 0)
+                {
+                    counter.fetch_add(1, Relaxed);
+                    return;
+                }
+                handle_midi(message, &state)
+            },
             (),
         ) {
             Ok(connection) => {
                 tracing::info!("midi: connected to {name}");
                 connections.push(connection);
+                grace_counters.push((name, suppressed));
             }
             Err(err) => tracing::warn!("midi: failed to connect to {name}: {err}"),
         }
+    }
+
+    // Report once the grace has passed on every port; a count of 0 in the
+    // log rules the connect-time burst out, a nonzero count confirms it.
+    if !grace_counters.is_empty() {
+        std::thread::Builder::new()
+            .name("aristide-midi-grace".into())
+            .spawn(move || {
+                std::thread::sleep(MIDI_CONNECT_GRACE + MIDI_CONNECT_GRACE / 4);
+                for (name, suppressed) in grace_counters {
+                    let count = suppressed.load(Relaxed);
+                    tracing::info!(
+                        "midi: suppressed {count} note-on(s) during connect grace on {name}"
+                    );
+                }
+            })
+            .ok();
     }
     Ok(connections)
 }
@@ -952,6 +992,12 @@ fn handle_midi(message: &[u8], state: &Mutex<State>) {
         }
     };
 
+    // Note-ons are the one message class that makes sound out of nowhere,
+    // so each gets a timestamped log line — that's what lets a user tell
+    // "phantom notes came in over MIDI" apart from every other suspect.
+    if status & 0xF0 == 0x90 && data2 > 0 {
+        tracing::info!("midi: note-on ch={channel} key={data1} vel={data2}");
+    }
     match (status & 0xF0, data1, data2) {
         (0x90, key, velocity) if velocity > 0 => match control {
             Control::Tone => send(Command::NoteOn {
