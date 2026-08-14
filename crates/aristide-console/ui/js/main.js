@@ -1,6 +1,9 @@
 import { resolveBase, connect } from "./api.js";
 import { Console } from "./console.js";
 import { PianoKeys } from "./keys.js";
+import { wireTheme } from "./theme.js";
+
+wireTheme(document);
 
 const base = await resolveBase();
 let send;

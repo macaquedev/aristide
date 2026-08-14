@@ -11,9 +11,12 @@
   --border-strong: #ffffff2c;
   --text: #e6e9ee;
   --text-dim: #8b93a1;
+  /* Accent tokens are overridden as a set by theme.js when the user
+     picks a different colour in the drawer. */
   --accent: #45c4ff;
   --accent-soft: #45c4ff1f;
   --accent-glow: #45c4ff33;
+  --accent-deep: #2b9fd8;
   --accent-ink: #08202e;
   --danger: #e5484d;
   --key-white: #e9ebef;
@@ -293,6 +296,48 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
 .stepper button:active { background: #262c36; }
 
 #transpose-value { min-width: 26px; text-align: center; }
+
+/* accent picker: one dot per colour */
+.swatches { display: flex; gap: 8px; }
+
+.swatch {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 50%;
+  cursor: pointer;
+  background: var(--c);
+}
+.swatch.on {
+  outline: 2px solid var(--text);
+  outline-offset: 2px;
+}
+
+/* density picker: a small segmented pill */
+.segment {
+  display: flex;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.segment button {
+  padding: 5px 10px;
+  border: 0;
+  cursor: pointer;
+  background: transparent;
+  color: var(--text-dim);
+  font-family: var(--sans);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 1px;
+}
+.segment button + button { border-left: 1px solid var(--border); }
+.segment button.on {
+  background: var(--accent-soft);
+  color: var(--text);
+}
 
 /* ---- computer-keyboard legend ------------------------------------------ */
 
@@ -583,7 +628,19 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   overflow: hidden;
 }
 
-.key { position: absolute; top: 0; cursor: pointer; }
+/* Press animation: a fast dip-and-light on the way down, a slower
+   release, scaled from the top so the rounded bottom edge stays visible. */
+.key {
+  position: absolute;
+  top: 0;
+  cursor: pointer;
+  transform-origin: top;
+  transition: background-color 150ms ease, transform 150ms ease;
+}
+.key.held {
+  transform: scaleY(0.97);
+  transition-duration: 40ms;
+}
 
 .key.natural {
   left: calc(var(--n) * var(--nat-w));
@@ -605,7 +662,7 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
 
 /* pressed: the key lights in the accent, flat */
 .key.natural.held { background: var(--accent); }
-.key.sharp.held { background: #2b9fd8; }
+.key.sharp.held { background: var(--accent-deep); }
 
 /* pedal naturals read slightly darker than the manuals */
 .keyboard.pedal .key.natural { background: #c8cdd5; }
@@ -673,3 +730,31 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   letter-spacing: 2px;
   color: var(--text-dim);
 }
+
+/* ---- density presets --------------------------------------------------- */
+
+/* Two overlays on the regular layout, set as body[data-density] by
+   theme.js. Key geometry scales cleanly because every x position is
+   derived from --nat-w. */
+
+body[data-density="compact"] .console { gap: 14px; padding: 14px 16px 18px; }
+body[data-density="compact"] .jamb { gap: 12px; padding: 12px 10px 14px; }
+body[data-density="compact"] .division { gap: 7px; }
+body[data-density="compact"] .knob { width: 78px; min-height: 46px; }
+body[data-density="compact"] .coupler-rail { margin-bottom: 12px; padding: 6px 10px; }
+body[data-density="compact"] .rocker { min-width: 58px; height: 28px; }
+body[data-density="compact"] .keyboard.manual { --nat-w: 20px; --kb-h: 84px; --sharp-w: 11px; }
+body[data-density="compact"] .keyboard.pedal { --nat-w: 24px; --kb-h: 72px; --sharp-w: 13px; }
+body[data-density="compact"] .shoe-track { height: 108px; }
+body[data-density="compact"] .pedals { margin-top: 14px; }
+
+body[data-density="spacious"] .console { gap: 24px; padding: 26px 30px 34px; }
+body[data-density="spacious"] .jamb { gap: 20px; padding: 20px 18px 22px; }
+body[data-density="spacious"] .division { gap: 13px; }
+body[data-density="spacious"] .knob { width: 98px; min-height: 58px; }
+body[data-density="spacious"] .coupler-rail { margin-bottom: 20px; padding: 10px 14px; }
+body[data-density="spacious"] .rocker { min-width: 70px; height: 36px; }
+body[data-density="spacious"] .keyboard.manual { --nat-w: 26px; --kb-h: 108px; --sharp-w: 15px; }
+body[data-density="spacious"] .keyboard.pedal { --nat-w: 30px; --kb-h: 94px; --sharp-w: 17px; }
+body[data-density="spacious"] .shoe-track { height: 146px; }
+body[data-density="spacious"] .pedals { margin-top: 22px; }
