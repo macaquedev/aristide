@@ -78,6 +78,12 @@ pub struct Sample {
     /// rate does not transpose (Rucz 2015; Angster and Miklos). Voices
     /// use this to gain-compensate so ring time stays key-invariant.
     tail_decay_db_per_s: f32,
+    /// Level of the tail's final stretch relative to its loudest stretch,
+    /// in dB (≤ 0). A recording truncated mid-decay — or a mislabeled
+    /// release that never decays — is still audible when the data runs
+    /// out, and the voice would end in a hard cut. Voices add whatever
+    /// extra decay settles the tail to silence by EOF.
+    tail_eof_level_db: f32,
 }
 
 /// A separate recorded release, selectable by how long the note was
@@ -148,6 +154,7 @@ impl Sample {
             releases: Vec::new(),
             tail_reference_level: 0.0,
             tail_decay_db_per_s: 0.0,
+            tail_eof_level_db: -120.0,
         };
         if let Some(tail) = sample.release_start() {
             // Short window (~12 ms at 44.1 k): high pipes' room decay is
@@ -155,7 +162,9 @@ impl Sample {
             // level, making the level matcher boost it — a ping.
             let window = 512.min(sample.frames() - tail);
             sample.tail_reference_level = sample.mean_abs(tail, window);
-            sample.tail_decay_db_per_s = sample.measure_tail_decay(tail);
+            let (decay, eof_db) = sample.measure_tail(tail);
+            sample.tail_decay_db_per_s = decay;
+            sample.tail_eof_level_db = eof_db;
         }
         Ok(sample)
     }
@@ -266,22 +275,24 @@ impl Sample {
         self.measured_period
     }
 
-    /// Least-squares slope of the tail's log-envelope (50 ms RMS
-    /// windows), skipping the first 150 ms — the drive-collapse plateau
-    /// before the exponential knee (Rucz 2015, fig. 2.5b) — and stopping
-    /// at the measurement floor. Returns 0 (no compensation) when the
-    /// tail is too short or too quiet to fit.
-    fn measure_tail_decay(&self, tail: u64) -> f32 {
+    /// Tail log-envelope measurement over 50 ms RMS windows, skipping
+    /// the first 150 ms — the drive-collapse plateau before the
+    /// exponential knee (Rucz 2015, fig. 2.5b). Returns:
+    /// - the least-squares decay slope (dB/s, positive = decaying;
+    ///   fitted down to the measurement floor), 0 when unfittable;
+    /// - the final window's level relative to the tail's loudest window
+    ///   (dB, ≤ 0) — how loud the recording still is when it runs out.
+    fn measure_tail(&self, tail: u64) -> (f32, f32) {
         let sr = self.sample_rate_hz as f64;
         let window = (0.05 * sr) as u64;
         let skip = (0.15 * sr) as u64;
         let start = tail + skip;
         if window == 0 || self.frames() < start + 3 * window {
-            return 0.0;
+            return (0.0, -120.0);
         }
         let count = ((self.frames() - start) / window).saturating_sub(1) as usize;
         if count < 3 {
-            return 0.0;
+            return (0.0, -120.0);
         }
         let mut window_rms = Vec::with_capacity(count);
         for k in 0..count {
@@ -298,6 +309,12 @@ impl Sample {
         // (a 2' pipe once "measured" 23 dB/s because the fit ran deep
         // into hiss).
         let peak = window_rms.iter().cloned().fold(0.0f64, f64::max);
+        let eof_db = if peak > 1e-7 {
+            let last = window_rms.last().copied().unwrap_or(0.0).max(peak * 1e-6);
+            ((20.0 * (last / peak).log10()) as f32).clamp(-120.0, 0.0)
+        } else {
+            -120.0
+        };
         let floor = (peak * 10.0f64.powf(-45.0 / 20.0)).max(1e-6);
         let mut xs = 0.0f64;
         let mut ys = 0.0f64;
@@ -317,18 +334,22 @@ impl Sample {
             n += 1.0;
         }
         if n < 3.0 {
-            return 0.0;
+            return (0.0, eof_db);
         }
         let denominator = n * xx - xs * xs;
         if denominator.abs() < 1e-12 {
-            return 0.0;
+            return (0.0, eof_db);
         }
         let slope = (n * xy - xs * ys) / denominator; // dB/s, negative when decaying
-        (-slope as f32).clamp(0.0, 120.0)
+        ((-slope as f32).clamp(0.0, 120.0), eof_db)
     }
 
     pub fn tail_reference_level(&self) -> f32 {
         self.tail_reference_level
+    }
+
+    pub fn tail_eof_level_db(&self) -> f32 {
+        self.tail_eof_level_db
     }
 
     /// Control-side analysis: build the [`ReleaseAlignment`] table for a

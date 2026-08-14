@@ -661,7 +661,20 @@ impl SampledVoice {
                 } else {
                     0.0
                 };
-                let db_per_s = comp_db_per_s - staccato_extra_db_per_s;
+                // A tail still audible when its recording runs out ends
+                // in a hard cut — the demo set's mixture has a rank 50 dB
+                // hot at EOF that rings bell-like and then vanishes. Add
+                // whatever decay settles the tail to ≈ -60 dB by EOF,
+                // counting the level the decay compensation adds back.
+                let out_tail_seconds = tail_seconds / repitch.max(0.01);
+                let settle_db_per_s = if out_tail_seconds > 0.3 {
+                    let eof_db =
+                        sample.tail_eof_level_db() + comp_db_per_s * out_tail_seconds;
+                    ((eof_db + 60.0) / out_tail_seconds).clamp(0.0, 60.0)
+                } else {
+                    0.0
+                };
+                let db_per_s = comp_db_per_s - staccato_extra_db_per_s - settle_db_per_s;
                 self.tail_decay = if db_per_s.abs() > 0.01 {
                     10.0f32.powf(db_per_s / (20.0 * output_rate))
                 } else {
