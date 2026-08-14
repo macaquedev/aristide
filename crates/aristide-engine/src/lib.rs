@@ -966,8 +966,10 @@ impl Engine {
                     // Swell box: a Held voice tracks its box each block
                     // (gain ramped per frame — pedal sweeps would zipper
                     // otherwise); any released/fading voice keeps the
-                    // factors frozen from its last Held block.
-                    let enclosed = !lite && sampled.enclosure != ENCLOSURE_NONE;
+                    // factors frozen from its last Held block. Lite mode
+                    // keeps the broadband gain (the pedal must still do
+                    // something) and only skips the shutter filter.
+                    let enclosed = sampled.enclosure != ENCLOSURE_NONE;
                     if enclosed && sampled.phase == SamplePhase::Held {
                         let box_state = &enclosures[sampled.enclosure as usize];
                         sampled.enc_gain_target = box_state.gain();
@@ -1036,11 +1038,13 @@ impl Engine {
                                     right = lp[1] + treble * (right - lp[1]);
                                 }
                                 if enclosed {
-                                    let lp = &mut sampled.enc_lowpass;
-                                    lp[0] += sampled.enc_coeff * (left - lp[0]);
-                                    lp[1] += sampled.enc_coeff * (right - lp[1]);
-                                    left = lp[0] + sampled.enc_hi_gain * (left - lp[0]);
-                                    right = lp[1] + sampled.enc_hi_gain * (right - lp[1]);
+                                    if !lite {
+                                        let lp = &mut sampled.enc_lowpass;
+                                        lp[0] += sampled.enc_coeff * (left - lp[0]);
+                                        lp[1] += sampled.enc_coeff * (right - lp[1]);
+                                        left = lp[0] + sampled.enc_hi_gain * (left - lp[0]);
+                                        right = lp[1] + sampled.enc_hi_gain * (right - lp[1]);
+                                    }
                                     sampled.enc_gain += *enc_ramp
                                         * (sampled.enc_gain_target - sampled.enc_gain);
                                     left *= sampled.enc_gain;
