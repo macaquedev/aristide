@@ -495,7 +495,7 @@ mod tests {
         for &k in &chord {
             events.push((sr / 4, Event::Note(k, true)));
         }
-        let mut stream = |events: &mut Vec<(usize, Event)>, at: usize, from: f32, to: f32| {
+        let stream = |events: &mut Vec<(usize, Event)>, at: usize, from: f32, to: f32| {
             for step in 0..=20 {
                 let t = step as f32 / 20.0;
                 events.push((
@@ -1954,6 +1954,149 @@ mod tests {
                     );
                 }
                 for h in probe_console.note_off(channel, key) { let _ = h; }
+            }
+        }
+    }
+
+    /// Dump each probe stop's RAW embedded release material (from
+    /// release_start to EOF, native rate, no engine processing) so the
+    /// recorded tail can be compared against the engine's rendered one.
+    #[test]
+    #[ignore = "renders /tmp/rawtail_*.wav"]
+    fn dump_raw_release_tails() {
+        let Some(path) = demo_organ() else { return };
+        let organ = aristide_formats::grandorgue::load(&path).expect("loads").organ;
+        let device_rate = 44_100.0f32;
+        let loaded = build(&organ, device_rate).expect("bank builds");
+        for (pattern, tag) in [("flute harm", "flharm"), ("plein jeu iii", "plein")] {
+            let stop = organ
+                .stops
+                .iter()
+                .find(|s| s.name.to_lowercase().contains(pattern))
+                .expect("stop");
+            let channel = organ
+                .manuals
+                .iter()
+                .position(|m| m.id == stop.manual)
+                .unwrap()
+                .saturating_sub(1) as u8;
+            let mut console = crate::console::Console::new(
+                organ.clone(),
+                loaded.specs.clone(),
+                vec![stop.id],
+                Vec::new(),
+            );
+            let (starts, _) = console.note_on(channel, 67);
+            for (i, st) in starts.iter().enumerate() {
+                let smp = loaded.bank.get(st.spec.sample).unwrap();
+                let frames = smp.frames();
+                println!(
+                    "{tag}#{i}: frames {frames} sr {} loop {:?} release_start {:?} \
+                     ref_level {:.4} lambda {:.1} options {}",
+                    smp.sample_rate_hz(),
+                    smp.sustain_loop(),
+                    smp.release_start(),
+                    smp.tail_reference_level(),
+                    smp.tail_decay_db_per_s(),
+                    smp.release_options().len(),
+                );
+                let Some(tail) = smp.release_start() else { continue };
+                let mut out = Vec::new();
+                for pos in tail..frames {
+                    let (l, r) = smp.read(pos as f64);
+                    out.push(l);
+                    out.push(r);
+                }
+                let path = format!("/tmp/rawtail_{tag}_{i}.wav");
+                write_wav_f32(&path, &out, 2, smp.sample_rate_hz() as u32);
+                println!("wrote {path}");
+            }
+            for h in console.note_off(channel, 67) {
+                let _ = h;
+            }
+        }
+    }
+
+    /// Solo-note release probes for per-partial decay measurement:
+    /// native-pitch key vs worst-case repitched keys, long release
+    /// window, one wav per (stop, key). Analyzed offline for band-wise
+    /// tail decay rates (the "bell-like release" investigation).
+    #[test]
+    #[ignore = "renders /tmp/release_probe_*.wav"]
+    fn render_release_probes() {
+        let Some(path) = demo_organ() else { return };
+        let organ = aristide_formats::grandorgue::load(&path).expect("loads").organ;
+        let device_rate = 44_100.0f32;
+        let loaded = build(&organ, device_rate).expect("bank builds");
+        let sr = device_rate as usize;
+        for (pattern, tag) in [("flute harm", "flharm"), ("plein jeu iii", "plein")] {
+            let stop = organ
+                .stops
+                .iter()
+                .find(|s| s.name.to_lowercase().contains(pattern))
+                .expect("stop");
+            let channel = organ
+                .manuals
+                .iter()
+                .position(|m| m.id == stop.manual)
+                .unwrap()
+                .saturating_sub(1) as u8;
+            for key in [67u8, 72, 73] {
+                let mut console = crate::console::Console::new(
+                    organ.clone(),
+                    loaded.specs.clone(),
+                    vec![stop.id],
+                    Vec::new(),
+                );
+                let (mut engine, mut handle) = aristide_engine::Engine::new(
+                    device_rate,
+                    std::sync::Arc::new(loaded.bank.clone()),
+                );
+                handle.send(aristide_engine::Command::SetMasterGain { linear: 0.4 });
+                let on_at = sr / 4;
+                let off_at = on_at + 12 * sr / 10; // 1.2 s hold
+                let total = off_at + 4 * sr; // 4 s release window
+                let block = 512usize;
+                let mut output = Vec::new();
+                let mut buffer = vec![0.0f32; block * 2];
+                let mut frame = 0usize;
+                while frame < total {
+                    if frame <= on_at && on_at < frame + block {
+                        let (starts, _) = console.note_on(channel, key);
+                        for st in &starts {
+                            let smp = loaded.bank.get(st.spec.sample).unwrap();
+                            println!(
+                                "{tag} key {key}: rate {:.3} lambda {:.1} dB/s f0 {:.1} Hz",
+                                st.spec.rate,
+                                smp.tail_decay_db_per_s(),
+                                smp.measured_period()
+                                    .map(|p| smp.sample_rate_hz() as f64 / p)
+                                    .unwrap_or(0.0),
+                            );
+                            handle.send(aristide_engine::Command::StartVoice {
+                                handle: st.handle,
+                                sample: st.spec.sample,
+                                rate: st.spec.rate,
+                                gain: st.spec.gain,
+                                group: st.spec.group,
+                                wind_weight: st.spec.wind_weight,
+                                brightness: st.spec.brightness,
+                                enclosure: st.spec.enclosure,
+                            });
+                        }
+                    }
+                    if frame <= off_at && off_at < frame + block {
+                        for h in console.note_off(channel, key) {
+                            handle.send(aristide_engine::Command::StopVoice { handle: h });
+                        }
+                    }
+                    engine.process(&mut buffer, 2);
+                    output.extend_from_slice(&buffer);
+                    frame += block;
+                }
+                let out = format!("/tmp/release_probe_{tag}_{key}.wav");
+                write_wav_f32(&out, &output, 2, sr as u32);
+                println!("wrote {out} ({})", stop.name);
             }
         }
     }
