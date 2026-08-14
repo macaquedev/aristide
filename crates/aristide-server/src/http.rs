@@ -238,11 +238,13 @@ fn apply_stop(state: &Mutex<State>, id: u32, on: bool) {
         engine, control, ..
     } = &mut *state;
     if let Control::Organ(console) = control {
-        let (stopped, noise) = console.set_drawn(aristide_model::StopId(id), on);
+        let (stopped, starts) = console.set_drawn(aristide_model::StopId(id), on);
         for handle in stopped {
             engine.send(Command::StopVoice { handle });
         }
-        send_start(engine, noise);
+        for start in starts {
+            send_start(engine, Some(start));
+        }
     }
 }
 
@@ -528,19 +530,20 @@ mod tests {
             .find(|(_, name, _, _)| *name == "Montre 8'")
             .map(|(id, _, _, _)| *id)
             .expect("Montre 8' visible");
-        let (stopped, noise) = console.set_drawn(montre, true);
+        let (stopped, mut noise) = console.set_drawn(montre, true);
         assert!(stopped.is_empty());
-        let noise = noise.expect("drawstop noise mapped and produced");
+        assert_eq!(noise.len(), 1, "drawstop noise mapped and produced");
+        let noise = noise.remove(0);
         assert_eq!(noise.spec.wind_weight, 0.0, "noises draw no wind");
 
         // Redundant draw: no second thump.
         let (_, again) = console.set_drawn(montre, true);
-        assert!(again.is_none());
+        assert!(again.is_empty());
 
         // Retiring releases the noise voice (its note-off = the
         // push-in thump).
         let (stopped, on_retire) = console.set_drawn(montre, false);
-        assert!(on_retire.is_none());
+        assert!(on_retire.is_empty());
         assert!(
             stopped.contains(&noise.handle),
             "retire must note-off the open noise voice"
@@ -557,6 +560,6 @@ mod tests {
         let kills = console.set_noises(false, 0.7);
         assert!(!kills.is_empty(), "open noise voices killed on disable");
         let (_, silent) = console.set_drawn(montre, false);
-        assert!(silent.is_none());
+        assert!(silent.is_empty());
     }
 }

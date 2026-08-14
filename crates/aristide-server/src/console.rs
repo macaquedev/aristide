@@ -434,9 +434,10 @@ impl Console {
                 }
             }
         }
-        if !held.is_empty() {
-            self.sounding.insert((manual_index, key), held);
-        }
+        // Track the key even when no stops are drawn: the UI lights it,
+        // note-off clears it, and drawing a stop mid-hold must find it
+        // to start pipes under it.
+        self.sounding.insert((manual_index, key), held);
         // Expedites can duplicate handles already queued by the
         // retrigger drain; the engine tolerates it but keep it clean.
         retriggered.sort_unstable();
@@ -482,20 +483,26 @@ impl Console {
 
     /// Draw or retire a stop. Returns the handles of voices to stop
     /// (retired pipes, or the noise voice whose note-off plays the
-    /// push-in thump) and the pull-thump noise voice to start.
-    pub fn set_drawn(&mut self, stop: StopId, drawn: bool) -> (Vec<u64>, Option<VoiceStart>) {
+    /// push-in thump) and the voices to start: the pull-thump noise,
+    /// plus — the pallets under held keys being open — the stop's own
+    /// pipes on those keys, as on a tracker.
+    pub fn set_drawn(&mut self, stop: StopId, drawn: bool) -> (Vec<u64>, Vec<VoiceStart>) {
         // Noise stops aren't directly drawable, and a no-op change
         // shouldn't thump.
         if self.noise_stops.contains(&stop) || self.drawn.contains(&stop) == drawn {
-            return (Vec::new(), None);
+            return (Vec::new(), Vec::new());
         }
         if drawn {
             self.drawn.push(stop);
-            let noise = self.open_noise(self.stop_noise.get(&stop).copied());
-            if let Some(start) = &noise {
-                self.stop_noise_open.insert(stop, start.handle);
+            let mut starts = Vec::new();
+            if let Some(noise) = self.open_noise(self.stop_noise.get(&stop).copied()) {
+                self.stop_noise_open.insert(stop, noise.handle);
+                starts.push(noise);
             }
-            return (Vec::new(), noise);
+            let mut expedited = self.start_stop_under_held_keys(stop, &mut starts);
+            expedited.sort_unstable();
+            expedited.dedup();
+            return (expedited, starts);
         }
         self.drawn.retain(|&id| id != stop);
         let mut to_release: Vec<(RankId, u16)> = Vec::new();
@@ -517,7 +524,79 @@ impl Console {
         }
         // Note-off on the open noise voice = the push-in thump.
         released.extend(self.stop_noise_open.remove(&stop));
-        (released, None)
+        (released, Vec::new())
+    }
+
+    /// Start `stop`'s pipes under every currently held key (coupling
+    /// expanded with the *current* coupler state, like a fresh press).
+    /// Appends the new voices to `starts` and returns handles of
+    /// previous pipe voices to expedite (see `note_on_manual`).
+    fn start_stop_under_held_keys(&mut self, stop: StopId, starts: &mut Vec<VoiceStart>) -> Vec<u64> {
+        let mut expedited = Vec::new();
+        let held_keys: Vec<(usize, u8)> = self.sounding.keys().copied().collect();
+        for (manual_index, key) in held_keys {
+            let origin = self.organ.manuals[manual_index].id;
+            let played = key as i16 + self.tuning.transpose as i16;
+            let mut new_entries = Vec::new();
+            for (manual_id, midi_key) in self.couple(origin, played) {
+                let Some(manual) = self.organ.manuals.iter().find(|m| m.id == manual_id) else {
+                    continue;
+                };
+                let key_index = midi_key - manual.first_midi_note as i16;
+                if key_index < 0 || key_index as u16 >= manual.key_count {
+                    continue;
+                }
+                let key_index = key_index as u16;
+                let Some(stop_def) = self
+                    .organ
+                    .stops
+                    .iter()
+                    .find(|s| s.id == stop && s.manual == manual_id)
+                else {
+                    continue;
+                };
+                for range in &stop_def.ranks {
+                    if key_index < range.first_key
+                        || key_index >= range.first_key + range.key_count
+                    {
+                        continue;
+                    }
+                    let pipe = range.first_pipe + (key_index - range.first_key);
+                    let Some(spec) = self.specs.get(&(range.rank, pipe)) else {
+                        continue;
+                    };
+                    // One-shots strike on key press, not on drawing the
+                    // stop mid-hold.
+                    if spec.percussive {
+                        continue;
+                    }
+                    new_entries.push((stop, range.rank, pipe));
+                    match self.speaking.get_mut(&(range.rank, pipe)) {
+                        Some((_, holders)) => *holders += 1,
+                        None => {
+                            let handle = self.next_handle;
+                            self.next_handle += 1;
+                            self.speaking.insert((range.rank, pipe), (handle, 1));
+                            if let Some(previous) =
+                                self.last_pipe_voice.insert((range.rank, pipe), handle)
+                            {
+                                expedited.push(previous);
+                            }
+                            let mut spec = *spec;
+                            spec.rate *= self.tuning.rate_multiplier(midi_key as u8);
+                            starts.push(VoiceStart { handle, spec });
+                        }
+                    }
+                }
+            }
+            if !new_entries.is_empty() {
+                self.sounding
+                    .entry((manual_index, key))
+                    .or_default()
+                    .extend(new_entries);
+            }
+        }
+        expedited
     }
 
     /// Engage or release a coupler by its index in `organ.couplers`.
@@ -822,6 +901,55 @@ mod tests {
             stops,
             starts.iter().map(|s| s.handle).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn drawing_a_stop_starts_pipes_under_held_keys() {
+        let mut console = test_console();
+        // With nothing drawn a press starts no voices but is still
+        // tracked: the key lights and can be released cleanly.
+        console.set_drawn(StopId(1), false);
+        console.set_drawn(StopId(2), false);
+        let (starts, _) = console.note_on(0, 60);
+        assert!(starts.is_empty());
+        assert_eq!(console.manual_states()[0].4, vec![60]);
+
+        // Drawing a stop mid-hold speaks immediately under the key.
+        let (stopped, starts) = console.set_drawn(StopId(1), true);
+        assert!(stopped.is_empty());
+        assert_eq!(starts.len(), 1);
+        let first = starts[0].handle;
+
+        // A second stop adds its own rank without restarting the first.
+        let (_, starts) = console.set_drawn(StopId(2), true);
+        assert_eq!(starts.len(), 1);
+        let second = starts[0].handle;
+
+        // Pushing a stop in releases only its pipe, via the normal
+        // note-off path (release tail, not a cut).
+        let (released, starts) = console.set_drawn(StopId(1), false);
+        assert!(starts.is_empty());
+        assert_eq!(released, vec![first]);
+
+        // Releasing the key stops the remaining pipe and clears the light.
+        assert_eq!(console.note_off(0, 60), vec![second]);
+        assert!(console.manual_states()[0].4.is_empty());
+    }
+
+    #[test]
+    fn drawing_a_stop_reaches_held_keys_through_couplers() {
+        let mut console = coupled_console();
+        console.set_drawn(StopId(1), false);
+        console.set_drawn(StopId(2), false);
+        console.set_coupler(0, true); // II/I
+        assert!(console.note_on(0, 60).0.is_empty());
+
+        // The Swell stop drawn mid-hold sounds through the coupler.
+        let (_, starts) = console.set_drawn(StopId(2), true);
+        assert_eq!(starts.len(), 1);
+        assert_eq!(starts[0].spec.sample, 1, "rank 2's sample expected");
+        let handle = starts[0].handle;
+        assert_eq!(console.note_off(0, 60), vec![handle]);
     }
 
     #[test]
