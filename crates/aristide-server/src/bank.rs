@@ -1786,11 +1786,20 @@ mod tests {
         // observation; the gate lives in the printed headroom.
     }
 
-    /// A room's decay rate does not transpose: a pipe synthesized by
-    /// repitching a neighbor's recording (+600 cents on this demo set)
-    /// must ring at the RECORDING's measured decay rate, not 1.41x
-    /// faster. Uncompensated, this was the "artificial/bell" release:
-    /// every key rang at a different, wrong speed.
+    /// A room's decay rate does not transpose. The demo set builds every
+    /// pipe by repitching one of twelve F♯/G recordings, so one
+    /// recording serves keys a tritone below it and a tritone above —
+    /// rates 0.71 and 1.41 on the same tail. Played raw, that recorded
+    /// room would ring twice as long on the low key as on the high one:
+    /// the "artificial/bell" release, ring time following the key. The
+    /// engine compensates the tail decay per voice, so the two must ring
+    /// for comparable times.
+    ///
+    /// The reference key also pins the extended-compass mapping at the
+    /// engine's end: middle C takes pipe 37 of the 85-pipe rank (a
+    /// tritone below its recording, rate 0.71). While the loader clamped
+    /// that rank to key 0 = pipe 1, middle C sounded pipe 25 — an octave
+    /// low, at rate 1.41.
     #[test]
     fn repitched_release_rings_at_native_decay_rate() {
         let Some(path) = demo_organ() else {
@@ -1799,82 +1808,105 @@ mod tests {
         };
         let organ = aristide_formats::grandorgue::load(&path).expect("loads").organ;
         let device_rate = 44_100.0f32;
+        let sr = device_rate as usize;
         let loaded = build(&organ, device_rate).expect("bank builds");
+        let bank = std::sync::Arc::new(loaded.bank.clone());
         let great = organ.manuals[1].id;
         let montre = organ
             .stops
             .iter()
             .find(|s| s.manual == great && s.name.contains("Montre"))
             .expect("montre");
-        let sr = device_rate as usize;
-        let mut console = crate::console::Console::new(
-            organ.clone(),
-            loaded.specs.clone(),
-            vec![montre.id],
-            Vec::new(),
-        );
-        let (mut engine, mut handle) =
-            aristide_engine::Engine::new(device_rate, std::sync::Arc::new(loaded.bank.clone()));
-        engine.set_release_stagger(0.0);
-        let (starts, _) = console.note_on(0, 60);
-        let voice = starts.first().expect("voice");
+
+        // (sample, rate, seconds from key-off to 40 dB down).
+        let ring = |key: u8| -> (u32, f64, f64) {
+            let mut console = crate::console::Console::new(
+                organ.clone(),
+                loaded.specs.clone(),
+                vec![montre.id],
+                Vec::new(),
+            );
+            let (mut engine, mut handle) =
+                aristide_engine::Engine::new(device_rate, bank.clone());
+            engine.set_release_stagger(0.0);
+            let (starts, _) = console.note_on(0, key);
+            let voice = starts.first().expect("voice");
+            let (sample, rate) = (voice.spec.sample, voice.spec.rate as f64);
+            for st in starts {
+                handle.send(aristide_engine::Command::StartVoice {
+                    handle: st.handle,
+                    sample: st.spec.sample,
+                    rate: st.spec.rate,
+                    gain: st.spec.gain,
+                    group: st.spec.group,
+                    wind_weight: st.spec.wind_weight,
+                    brightness: st.spec.brightness,
+                    enclosure: st.spec.enclosure,
+                });
+            }
+            let block = 512usize;
+            let mut buffer = vec![0.0f32; block * 2];
+            let hold = 2 * sr;
+            let mut output = Vec::new();
+            let mut frame = 0usize;
+            let mut released = false;
+            while frame < hold + 5 * sr {
+                if !released && frame >= hold {
+                    released = true;
+                    for h in console.note_off(0, key) {
+                        handle.send(aristide_engine::Command::StopVoice { handle: h });
+                    }
+                }
+                engine.process(&mut buffer, 2);
+                output.extend_from_slice(&buffer);
+                frame += block;
+            }
+            let rms_db = |t: f64| -> f64 {
+                let start = ((2.0 + t) * sr as f64) as usize;
+                let window = sr / 20;
+                let mut acc = 0.0f64;
+                for i in 0..window {
+                    let v = (output[(start + i) * 2] + output[(start + i) * 2 + 1]) as f64 * 0.5;
+                    acc += v * v;
+                }
+                10.0 * (acc / window as f64).max(1e-14).log10()
+            };
+            // Ring time: measured from just after key-off, so the level
+            // the tail starts at (which does vary by key) cancels out.
+            let at_release = rms_db(0.02);
+            let mut t = 0.02;
+            while t < 4.0 && rms_db(t) > at_release - 40.0 {
+                t += 0.01;
+            }
+            (sample, rate, t)
+        };
+
+        let (sample, rate, low_ring) = ring(60);
         assert!(
-            (voice.spec.rate - 1.414).abs() < 0.01,
-            "expected the +600-cent demo pipe, got rate {}",
-            voice.spec.rate
+            (rate - 0.7071).abs() < 0.01,
+            "middle C should take the tritone-down pipe, got rate {rate}"
         );
-        let lambda = loaded
-            .bank
-            .get(voice.spec.sample)
+        let lambda = bank
+            .get(sample)
             .expect("sample")
             .tail_decay_db_per_s() as f64;
         assert!(lambda > 10.0, "tail decay unmeasured: {lambda}");
-        for st in starts {
-            handle.send(aristide_engine::Command::StartVoice {
-                handle: st.handle,
-                sample: st.spec.sample,
-                rate: st.spec.rate,
-                gain: st.spec.gain,
-                group: st.spec.group,
-                wind_weight: st.spec.wind_weight,
-                brightness: st.spec.brightness,
-                        enclosure: st.spec.enclosure,
-            });
-        }
-        let block = 512usize;
-        let mut buffer = vec![0.0f32; block * 2];
-        let hold = 2 * sr;
-        let mut output = Vec::new();
-        let mut frame = 0usize;
-        let mut released = false;
-        while frame < hold + 2 * sr {
-            if !released && frame >= hold {
-                released = true;
-                for h in console.note_off(0, 60) {
-                    handle.send(aristide_engine::Command::StopVoice { handle: h });
-                }
-            }
-            engine.process(&mut buffer, 2);
-            output.extend_from_slice(&buffer);
-            frame += block;
-        }
-        let rms_db = |t: f64| -> f64 {
-            let start = ((2.0 + t) * sr as f64) as usize;
-            let window = sr / 20;
-            let mut acc = 0.0f64;
-            for i in 0..window {
-                let v = (output[(start + i) * 2] + output[(start + i) * 2 + 1]) as f64 * 0.5;
-                acc += v * v;
-            }
-            10.0 * (acc / window as f64).max(1e-14).log10()
-        };
-        let slope = (rms_db(0.3) - rms_db(0.9)) / 0.6; // dB/s, positive
-        // Uncompensated the +600-cent repitch decays at lambda*1.414
-        // (~51 dB/s here); compensation (clamped +-15 dB/s) brings it
-        // back toward lambda. Allow generous measurement slack.
+
+        // An octave up: the same recording, now a tritone the other way.
+        let (same, up_rate, high_ring) = ring(72);
+        assert_eq!(same, sample, "keys 60 and 72 share one recording");
+        assert!((up_rate - 1.4142).abs() < 0.01, "got rate {up_rate}");
+
         assert!(
-            (slope - lambda).abs() < 10.0,
-            "repitched tail decays at {slope:.1} dB/s; recording decays at {lambda:.1}"
+            (0.3..4.0).contains(&low_ring) && (0.3..4.0).contains(&high_ring),
+            "implausible ring times: {low_ring:.2}s and {high_ring:.2}s"
+        );
+        // Uncompensated these differ by the full rate ratio (2.0x).
+        let spread = low_ring.max(high_ring) / low_ring.min(high_ring);
+        assert!(
+            spread < 1.6,
+            "ring time follows the key: {low_ring:.2}s at rate {rate:.3} vs \
+             {high_ring:.2}s at rate {up_rate:.3} ({spread:.2}x apart)"
         );
     }
 
