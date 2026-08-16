@@ -6,9 +6,10 @@
 channels = ["First Manual", "Second Manual", "Pedal"]
 
 [registration]
-# Full organ: "*" draws every stop. (Plein jeu alternative:
-# ["Bourdon 16'", "Montre 8'", "Prestant 4'", "Plein jeu III"])
-default = ["*"]
+# Empty = cancelled: the organ starts with no stop drawn. "*" draws
+# every stop; a plein jeu would be
+# ["Bourdon 16'", "Montre 8'", "Prestant 4'", "Plein jeu III"]
+default = []
 
 [wind]
 # Steady full-chorus pitch sag in cents (0 = off); transient dips go a

@@ -119,16 +119,11 @@ fn load_organ(path: &std::path::Path) -> Result<Organ> {
 /// Stop patterns (from `--stops` or the sidecar) resolve exact-first,
 /// then shortest-substring (see `sidecar::match_names`), so "plein jeu"
 /// draws the mixture and not its drawstop noise. With no patterns at
-/// all, each manual's first stop is drawn so a fresh start makes sound
-/// on every keyboard.
+/// all the organ starts cancelled — no stop drawn, as an organist finds
+/// it — and the player registers from silence.
 fn choose_registration(organ: &Organ, patterns: &[String]) -> Vec<StopId> {
     let drawn: Vec<StopId> = if patterns.is_empty() {
-        organ
-            .manuals
-            .iter()
-            .filter_map(|m| organ.stops.iter().find(|s| s.manual == m.id))
-            .map(|s| s.id)
-            .collect()
+        Vec::new()
     } else {
         let names: Vec<&str> = organ.stops.iter().map(|s| s.name.as_str()).collect();
         let mut drawn: Vec<StopId> = patterns
@@ -152,7 +147,11 @@ fn choose_registration(organ: &Organ, patterns: &[String]) -> Vec<StopId> {
         }
     }
     if drawn.is_empty() {
-        tracing::warn!("no stops matched — keys will be silent");
+        if patterns.is_empty() {
+            tracing::info!("registration cancelled — draw stops in the console");
+        } else {
+            tracing::warn!("no stops matched — keys will be silent");
+        }
     }
     drawn
 }
@@ -1064,7 +1063,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn demo_sidecar_draws_full_organ_and_maps_channels() {
+    fn demo_sidecar_starts_cancelled_and_maps_channels() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../testsets/grandorgue-demo/demo.organ");
         if !path.is_file() {
@@ -1079,8 +1078,11 @@ mod tests {
             .expect("sidecar present");
 
         let drawn = choose_registration(&organ, &sidecar.registration.default);
-        // The sidecar default is "*": the full organ, every stop drawn.
-        assert_eq!(drawn.len(), organ.stops.len(), "every stop drawn");
+        // The sidecar names no stops: the organ starts cancelled.
+        assert!(drawn.is_empty(), "no stop drawn at startup");
+        // "*" is still available as an explicit full-organ pattern.
+        let full = choose_registration(&organ, &["*".into()]);
+        assert_eq!(full.len(), organ.stops.len(), "\"*\" draws every stop");
 
         // A named pattern still narrows to exactly what it says.
         let plein = choose_registration(&organ, &["plein jeu".into()]);

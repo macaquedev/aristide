@@ -1629,8 +1629,8 @@ mod tests {
         );
     }
 
-    /// Real-time budget check under the PRODUCTION default: full organ
-    /// ("*" registration), 256-frame blocks (the app default), the same
+    /// Real-time budget check under the WORST CASE a player can reach:
+    /// full organ ("*"), 256-frame blocks (the app default), the same
     /// fast-playing schedule as crackle_hunt. The user's live crackles
     /// with a clean in-app recording mean device underruns: the recorder
     /// taps rendered blocks before the device, so a callback that misses
@@ -1664,7 +1664,7 @@ mod tests {
             .organ;
         let device_rate = 44_100.0f32;
         let loaded = build(&organ, device_rate).expect("bank builds");
-        // Production default registration: "*" — every stop (Console
+        // Full organ, as "*" draws it — every stop (Console
         // itself retires the noise stops from the drawn list).
         let drawn: Vec<_> = organ.stops.iter().map(|s| s.id).collect();
         let mut console =
