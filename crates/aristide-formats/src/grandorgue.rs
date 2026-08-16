@@ -492,12 +492,19 @@ impl Builder<'_> {
         // are unplayable from the keys, so the range starts at key 0
         // and skips them via `first_pipe` instead.
         let base_key = first_key_logical - first_accessible_logical;
+        // …and however many pipes its ranges cover, a stop sounds at
+        // most `NumberOfAccessiblePipes` keys from its first — GO drops
+        // the rest in `GOStop::SetKeyState`'s outer guard
+        // (model/GOStop.cpp lines 120-126).
+        let past_last_key = base_key + accessible_pipes;
         let clip = |first_key: i64, key_count: i64, first_pipe: i64| {
             let below = (-first_key).max(0);
+            let start = first_key.max(0);
+            let end = (first_key + key_count).min(past_last_key);
             RankRange {
                 rank: RankId(0),
-                first_key: first_key.max(0) as u16,
-                key_count: (key_count - below).max(0) as u16,
+                first_key: start as u16,
+                key_count: (end - start).max(0) as u16,
                 first_pipe: (first_pipe + below).max(0) as u16,
             }
         };
@@ -553,7 +560,7 @@ impl Builder<'_> {
             ranks.push(rank);
             stop.ranks.push(RankRange {
                 rank: rank_id,
-                ..clip(base_key, pipe_count.min(accessible_pipes), 0)
+                ..clip(base_key, pipe_count, 0)
             });
         }
         Ok(stop)
@@ -861,6 +868,125 @@ Pipe002=037-Cis.wav
         // Derived first MIDI note should equal the manual's first note.
         assert!((organ.ranks[0].pipes[0].nominal_frequency_hz - midi_to_hz(36.0)).abs() < 1e-9);
         assert_eq!(organ.stops[0].ranks[0].key_count, 2);
+    }
+
+    /// The extended-compass mapping, key by key. A stop whose pipes
+    /// start below the keyboard (85 pipes from logical key 1 under a
+    /// 61-key manual whose first key is logical 13, as the GrandOrgue
+    /// demo set's Montre 8' does) must still sound written pitch: key
+    /// MIDI 36 takes pipe 13, not pipe 1. Getting this wrong shifts the
+    /// whole stop an octave down — silently, since the pipes exist and
+    /// speak. GO's chain: manual key → `GOStop::SetKeyState`
+    /// (`keyIndex = logical − FirstAccessiblePipeLogicalKeyNumber`) →
+    /// `SetRankKeyState` (`pipe = keyIndex + FirstPipeNumber −
+    /// FirstAccessibleKeyNumber`), with the rank's pitch origin at
+    /// `FirstLogicalKeyMIDINoteNumber` (model/GOStop.cpp lines 83-126,
+    /// GOManual.cpp lines 267, 316-326).
+    #[test]
+    fn extended_compass_stop_sounds_written_pitch() {
+        let mut text = String::from(
+            "\
+[Organ]
+ChurchName=Extended
+HasPedals=N
+NumberOfManuals=1
+NumberOfWindchestGroups=1
+
+[WindchestGroup001]
+Name=W
+
+[Manual001]
+Name=Great
+NumberOfLogicalKeys=85
+FirstAccessibleKeyLogicalKeyNumber=13
+FirstAccessibleKeyMIDINoteNumber=36
+NumberOfAccessibleKeys=61
+NumberOfStops=1
+Stop001=1
+
+[Stop001]
+Name=Montre 8
+FirstAccessiblePipeLogicalKeyNumber=1
+NumberOfAccessiblePipes=85
+FirstAccessiblePipeLogicalPipeNumber=1
+",
+        );
+        for pipe in 1..=85 {
+            text.push_str(&format!("Pipe{pipe:03}=p{pipe}.wav\n"));
+        }
+
+        let result = parse_str(&text);
+        let organ = &result.organ;
+        let rank = &organ.ranks[0];
+        assert_eq!(rank.pipes.len(), 85);
+        // Pitch origin: logical key 1 = MIDI 24, an octave below the
+        // keyboard's lowest key — those twelve pipes are the extension.
+        assert!((rank.pipes[0].nominal_frequency_hz - midi_to_hz(24.0)).abs() < 1e-9);
+
+        let range = &organ.stops[0].ranks[0];
+        assert_eq!(range.first_key, 0, "range starts at the lowest key");
+        assert_eq!(range.first_pipe, 12, "…on the thirteenth pipe");
+        assert_eq!(range.key_count, 73, "85 pipes less the 12 below the keys");
+
+        // Every playable key sounds the pipe pitched to that key.
+        let manual = &organ.manuals[0];
+        for key_index in 0..manual.key_count {
+            let key_midi = f64::from(manual.first_midi_note) + f64::from(key_index);
+            let pipe = &rank.pipes[(range.first_pipe + key_index) as usize];
+            assert!(
+                (pipe.nominal_frequency_hz - midi_to_hz(key_midi)).abs() < 1e-9,
+                "key {key_midi} sounds {} Hz, want {} Hz",
+                pipe.nominal_frequency_hz,
+                midi_to_hz(key_midi)
+            );
+        }
+    }
+
+    /// A stop sounds `NumberOfAccessiblePipes` keys and no more, even
+    /// when the rank range it references runs on past them
+    /// (`GOStop::SetKeyState`'s outer guard, model/GOStop.cpp:120).
+    #[test]
+    fn stop_range_stops_at_the_last_accessible_pipe() {
+        let text = "\
+[Organ]
+ChurchName=Capped
+HasPedals=N
+NumberOfManuals=1
+NumberOfWindchestGroups=1
+NumberOfRanks=1
+
+[WindchestGroup001]
+Name=W
+
+[Rank001]
+Name=Principal 8
+FirstMidiNoteNumber=36
+NumberOfLogicalPipes=4
+WindchestGroup=1
+Pipe001=a.wav
+Pipe002=b.wav
+Pipe003=c.wav
+Pipe004=d.wav
+
+[Manual001]
+Name=Great
+NumberOfLogicalKeys=4
+FirstAccessibleKeyLogicalKeyNumber=1
+FirstAccessibleKeyMIDINoteNumber=36
+NumberOfAccessibleKeys=4
+NumberOfStops=1
+Stop001=1
+
+[Stop001]
+Name=Principal 8
+NumberOfRanks=1
+FirstAccessiblePipeLogicalKeyNumber=1
+NumberOfAccessiblePipes=2
+Rank001=1
+";
+        let range = &parse_str(text).organ.stops[0].ranks[0];
+        assert_eq!(range.first_key, 0);
+        assert_eq!(range.key_count, 2, "four pipes, two accessible keys");
     }
 
     #[test]
