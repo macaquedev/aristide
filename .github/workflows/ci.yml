@@ -1,0 +1,72 @@
+name: ci
+
+# main must always build and pass tests: it is what the test rig pulls and
+# runs, and what `git bisect` walks when an audio regression turns up by ear
+# days later. This workflow is the gate that keeps that true.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # ALSA for cpal/midir, WavPack for the sample loader's build script.
+      - name: System libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libasound2-dev libwavpack-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The GrandOrgue demo set is gitignored (21 MB) and the loader tests skip
+      # gracefully without it — so this is best-effort. If the download fails,
+      # CI still passes, it just covers less. The hash in the filename pins the
+      # contents, which is also why the cache key can be a constant.
+      - name: Cache demo sample set
+        id: demo-cache
+        uses: actions/cache@v4
+        with:
+          path: testsets/grandorgue-demo
+          key: demo-set-4232D4C616E4B99145537F02B34D342D4E3E3808
+
+      - name: Fetch demo sample set
+        if: steps.demo-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          url=https://raw.githubusercontent.com/GrandOrgue/grandorgue/master/packages/demo-4232D4C616E4B99145537F02B34D342D4E3E3808.orgue
+          curl -sSLf -o /tmp/demo.orgue "$url"
+          unzip -q /tmp/demo.orgue -d /tmp/demo
+          src=$(dirname "$(find /tmp/demo -name demo.organ -print -quit)")
+          # Copy the contents, not the directory: testsets/grandorgue-demo
+          # already exists here because its Aristide sidecar is versioned.
+          mkdir -p testsets/grandorgue-demo
+          cp -r "$src"/. testsets/grandorgue-demo/
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      # aristide-console is a Tauri shell needing webkit2gtk; it carries no
+      # tests and is built on demand rather than on every PR.
+      - name: Clippy
+        run: cargo clippy --workspace --exclude aristide-console --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --workspace --exclude aristide-console

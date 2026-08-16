@@ -26,4 +26,35 @@ milestone plan (M0–M7). Do not re-litigate locked decisions without the user.
   here; anything audible is verified by the user pulling to their desktop and running
   `cargo run --release -p aristide-server`. Never assume an audio device exists.
 - Commit style: conventional commits, atomic, imperative subject ≤50 chars.
-  Push to `main` on green tests unless mid-refactor.
+
+## Git workflow — read before you write code
+
+`main` must always build and pass tests: it is what the user's test rig pulls to
+hear anything, and what `git bisect` walks when an audio regression turns up by
+ear days later. GitHub enforces it — **direct pushes to `main` are rejected**.
+
+Every task, no exceptions:
+
+1. **Claim.** `gh issue list` for what's queued; `git fetch --prune && git branch -r`
+   plus `gh pr list` for what other sessions already took. Every agent pushes as the
+   same GitHub account, so the remote branch list — not the assignee — is the claim
+   register. Push your branch early to stake it.
+2. **Branch** `<type>/<slug>`, type from the commit-message set (`feat/sinc-tails`).
+   If another session may be active, get your own checkout instead of sharing this
+   one: `scripts/new-worktree.sh feat/sinc-tails` (three worktrees max — 4 cores).
+3. **PR.** `git push -u origin <branch>`, then `gh pr create` with a body following
+   `.github/pull_request_template.md` (not `--fill`, which skips it). Say what CI
+   cannot: what this changes about the *sound*, and how to hear it.
+4. **Merge it yourself** once `ci` is green: rebase on `origin/main`, then
+   `gh pr merge --squash --delete-branch`.
+
+**Stop and ask the user instead of self-merging** when the change touches a locked
+`DESIGN.md` decision or the legal boundary, weakens the RT invariants, alters how the
+organ sounds by default, breaks the sidecar/HTTP surface, adds a dependency, or
+removes a feature. For audible changes, prefer merging behind a flag that defaults to
+today's behaviour over blocking on a listen.
+
+End a session with a **new** file `docs/progress/YYYY-MM-DD-slug.md` plus one link
+line atop `docs/PROGRESS.md` — never by editing someone else's entry.
+
+Full detail — worktrees, conflict lanes, what CI can't check: `docs/workflow.md`.
