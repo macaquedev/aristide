@@ -44,7 +44,8 @@ fn measure_f0(x: &[f32], rate: f64) -> f64 {
     let mut best = (0.0, f64::MIN);
     let mut hz = 20.0;
     while hz < 1200.0 {
-        let score = spectrum_mag(hz).ln() + spectrum_mag(2.0 * hz).ln() + spectrum_mag(3.0 * hz).ln();
+        let score =
+            spectrum_mag(hz).ln() + spectrum_mag(2.0 * hz).ln() + spectrum_mag(3.0 * hz).ln();
         if score > best.1 {
             best = (hz, score);
         }

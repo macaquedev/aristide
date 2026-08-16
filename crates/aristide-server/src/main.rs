@@ -173,8 +173,7 @@ fn audio_thread_setup(buffer_frames: u32, sample_rate: u32) {
     #[cfg(target_os = "linux")]
     unsafe {
         let param = libc::sched_param { sched_priority: 70 };
-        let result =
-            libc::pthread_setschedparam(libc::pthread_self(), libc::SCHED_FIFO, &param);
+        let result = libc::pthread_setschedparam(libc::pthread_self(), libc::SCHED_FIFO, &param);
         if result == 0 {
             tracing::info!("audio thread: SCHED_FIFO real-time priority acquired");
         } else {
@@ -267,9 +266,7 @@ fn promote_audio_thread_via_rtkit() {
         .output();
     let policy = unsafe { libc::sched_getscheduler(tid as libc::pid_t) };
     if policy == libc::SCHED_FIFO || policy == libc::SCHED_RR {
-        tracing::info!(
-            "audio thread: real-time priority {max_priority} acquired via RealtimeKit"
-        );
+        tracing::info!("audio thread: real-time priority {max_priority} acquired via RealtimeKit");
     } else {
         let detail = match request {
             Ok(out) if !out.status.success() => {
@@ -358,6 +355,9 @@ fn resolve_channel_map(organ: &Organ, channel_names: &[String]) -> Vec<usize> {
 }
 
 /// What MIDI input drives: the sampled organ console, or the M1 tone.
+// Boxing `Console` would put a heap allocation on the control-thread
+// swap path; the size skew is fine off the audio thread.
+#[allow(clippy::large_enum_variant)]
 pub enum Control {
     Tone,
     Organ(Console),
@@ -417,7 +417,11 @@ fn main() -> Result<()> {
     tracing::info!(
         "=== DIAGNOSTIC: commit {} | {} | device '{}' | {} Hz | {} ch | {} frame buffer ({:.1} ms) — paste this line when reporting audio issues ===",
         option_env!("ARISTIDE_COMMIT").unwrap_or("unknown"),
-        if cfg!(debug_assertions) { "DEBUG BUILD (bad!)" } else { "release" },
+        if cfg!(debug_assertions) {
+            "DEBUG BUILD (bad!)"
+        } else {
+            "release"
+        },
         device.name().unwrap_or_else(|_| "<unnamed>".into()),
         config.sample_rate.0,
         channels,
@@ -661,10 +665,10 @@ fn main() -> Result<()> {
                 }
                 let now = std::time::Instant::now();
                 let nominal = data.len() as f64 / channels as f64 / sample_rate as f64;
-                if let Some(previous) = last_callback {
-                    if now.duration_since(previous).as_secs_f64() > nominal * 2.0 {
-                        overruns.fetch_add(1, Relaxed);
-                    }
+                if let Some(previous) = last_callback
+                    && now.duration_since(previous).as_secs_f64() > nominal * 2.0
+                {
+                    overruns.fetch_add(1, Relaxed);
                 }
                 last_callback = Some(now);
                 engine.process(data, channels);
@@ -681,19 +685,21 @@ fn main() -> Result<()> {
         )?;
         Ok((stream, handle))
     };
-    let (stream, mut handle) =
-        match build_stream(cpal::BufferSize::Fixed(args.buffer_frames), &mut tap_consumer) {
-            Ok(pair) => pair,
-            Err(err) => {
-                tracing::warn!(
-                    "device refused a {}-frame buffer ({err}); using its default \
+    let (stream, mut handle) = match build_stream(
+        cpal::BufferSize::Fixed(args.buffer_frames),
+        &mut tap_consumer,
+    ) {
+        Ok(pair) => pair,
+        Err(err) => {
+            tracing::warn!(
+                "device refused a {}-frame buffer ({err}); using its default \
                      (expect higher latency — try another --buffer value)",
-                    args.buffer_frames
-                );
-                tap_consumer = None;
-                build_stream(cpal::BufferSize::Default, &mut tap_consumer)?
-            }
-        };
+                args.buffer_frames
+            );
+            tap_consumer = None;
+            build_stream(cpal::BufferSize::Default, &mut tap_consumer)?
+        }
+    };
     stream.play()?;
     #[cfg(target_os = "linux")]
     std::thread::spawn(promote_audio_thread_via_rtkit);
@@ -707,7 +713,11 @@ fn main() -> Result<()> {
             params.sag_depth * 100.0,
             params.natural_hz,
             params.damping,
-            if params.sag_depth == 0.0 { " (off)" } else { "" }
+            if params.sag_depth == 0.0 {
+                " (off)"
+            } else {
+                ""
+            }
         );
         for group in 0..aristide_engine::wind::MAX_WIND_GROUPS as u8 {
             handle.send(Command::SetWind { group, params });

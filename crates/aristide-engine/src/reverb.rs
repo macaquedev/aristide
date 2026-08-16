@@ -88,11 +88,7 @@ impl PreparedIr {
 
         // Normalize: unity total energy per channel pair, so the wet
         // level is comparable across IRs and wet=1 doesn't clip badly.
-        let energy: f32 = resampled
-            .iter()
-            .flat_map(|c| c.iter())
-            .map(|v| v * v)
-            .sum();
+        let energy: f32 = resampled.iter().flat_map(|c| c.iter()).map(|v| v * v).sum();
         let scale = if energy > 1e-12 {
             (2.0 / energy).sqrt()
         } else {

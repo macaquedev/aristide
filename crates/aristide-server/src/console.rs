@@ -50,6 +50,9 @@ pub struct Console {
     /// (manual index, MIDI key) → pipes held by that key, tagged with
     /// the stop that engaged them (so retiring a stop can release
     /// them). `percussive` voices are excluded (they stop themselves).
+    // The nested tuple/Vec is inherent to this key→holders mapping; a
+    // type alias would just move the complexity rather than reduce it.
+    #[allow(clippy::type_complexity)]
     sounding: HashMap<(usize, u8), Vec<(StopId, RankId, u16)>>,
     /// The most recent voice handle started per pipe — used to expedite
     /// a still-releasing (pallet-staggered) predecessor when the pipe
@@ -119,11 +122,7 @@ impl Console {
             if self.noise_stops.contains(&stop.id) {
                 continue;
             }
-            let Some(manual_index) = self
-                .organ
-                .manuals
-                .iter()
-                .position(|m| m.id == stop.manual)
+            let Some(manual_index) = self.organ.manuals.iter().position(|m| m.id == stop.manual)
             else {
                 continue;
             };
@@ -172,8 +171,7 @@ impl Console {
     pub fn set_enclosure(&mut self, index: usize, position: f32) -> Option<(u8, f32)> {
         let position = position.clamp(0.0, 1.0);
         *self.enclosure_positions.get_mut(index)? = position;
-        (index < aristide_engine::enclosure::MAX_ENCLOSURES)
-            .then_some((index as u8, position))
+        (index < aristide_engine::enclosure::MAX_ENCLOSURES).then_some((index as u8, position))
     }
 
     /// (model index, name, position, displayed) per enclosure, for UIs.
@@ -212,9 +210,11 @@ impl Console {
             let Some(noise_stop) = self.organ.stops.iter().find(|s| s.id == noise_id) else {
                 continue;
             };
-            let Some(spec) = noise_stop.ranks.first().and_then(|range| {
-                self.specs.get(&(range.rank, range.first_pipe)).copied()
-            }) else {
+            let Some(spec) = noise_stop
+                .ranks
+                .first()
+                .and_then(|range| self.specs.get(&(range.rank, range.first_pipe)).copied())
+            else {
                 continue;
             };
             let name = noise_stop.name.to_lowercase();
@@ -232,10 +232,10 @@ impl Console {
                     .enumerate()
                     .map(|(index, coupler)| (index, name_match_score(&stripped, &coupler.name)))
                     .max_by(|a, b| a.1.total_cmp(&b.1));
-                if let Some((index, score)) = best {
-                    if score >= 0.5 {
-                        self.coupler_noise.insert(index, spec);
-                    }
+                if let Some((index, score)) = best
+                    && score >= 0.5
+                {
+                    self.coupler_noise.insert(index, spec);
                 }
                 continue;
             }
@@ -249,10 +249,10 @@ impl Console {
                 .filter(|s| s.manual == noise_stop.manual && !self.noise_stops.contains(&s.id))
                 .map(|s| (s.id, name_match_score(&stripped, &s.name)))
                 .max_by(|a, b| a.1.total_cmp(&b.1));
-            if let Some((id, score)) = best {
-                if score >= 0.45 {
-                    self.stop_noise.insert(id, spec);
-                }
+            if let Some((id, score)) = best
+                && score >= 0.45
+            {
+                self.stop_noise.insert(id, spec);
             }
         }
     }
@@ -393,8 +393,7 @@ impl Console {
                     continue;
                 }
                 for range in &stop.ranks {
-                    if key_index < range.first_key
-                        || key_index >= range.first_key + range.key_count
+                    if key_index < range.first_key || key_index >= range.first_key + range.key_count
                     {
                         continue;
                     }
@@ -406,7 +405,10 @@ impl Console {
                         // One-shots (noises) aren't refcounted.
                         let handle = self.next_handle;
                         self.next_handle += 1;
-                        starts.push(VoiceStart { handle, spec: *spec });
+                        starts.push(VoiceStart {
+                            handle,
+                            spec: *spec,
+                        });
                         continue;
                     }
                     held.push((stop.id, range.rank, pipe));
@@ -531,7 +533,11 @@ impl Console {
     /// expanded with the *current* coupler state, like a fresh press).
     /// Appends the new voices to `starts` and returns handles of
     /// previous pipe voices to expedite (see `note_on_manual`).
-    fn start_stop_under_held_keys(&mut self, stop: StopId, starts: &mut Vec<VoiceStart>) -> Vec<u64> {
+    fn start_stop_under_held_keys(
+        &mut self,
+        stop: StopId,
+        starts: &mut Vec<VoiceStart>,
+    ) -> Vec<u64> {
         let mut expedited = Vec::new();
         let held_keys: Vec<(usize, u8)> = self.sounding.keys().copied().collect();
         for (manual_index, key) in held_keys {
@@ -556,8 +562,7 @@ impl Console {
                     continue;
                 };
                 for range in &stop_def.ranks {
-                    if key_index < range.first_key
-                        || key_index >= range.first_key + range.key_count
+                    if key_index < range.first_key || key_index >= range.first_key + range.key_count
                     {
                         continue;
                     }
@@ -602,10 +607,12 @@ impl Console {
     /// Engage or release a coupler by its index in `organ.couplers`.
     /// Sounding notes keep their current coupling; new presses use the
     /// new state. Returns (clack voice to start, noise handle to stop).
-    pub fn set_coupler(&mut self, index: usize, engaged: bool) -> (Option<VoiceStart>, Option<u64>) {
-        if index >= self.organ.couplers.len()
-            || self.engaged_couplers.contains(&index) == engaged
-        {
+    pub fn set_coupler(
+        &mut self,
+        index: usize,
+        engaged: bool,
+    ) -> (Option<VoiceStart>, Option<u64>) {
+        if index >= self.organ.couplers.len() || self.engaged_couplers.contains(&index) == engaged {
             return (None, None);
         }
         if engaged {
@@ -893,11 +900,7 @@ mod tests {
             key_count: 32,
         };
         let organ = Organ {
-            manuals: vec![
-                manual(0, "Pedal"),
-                manual(1, "Great"),
-                manual(2, "Swell"),
-            ],
+            manuals: vec![manual(0, "Pedal"), manual(1, "Great"), manual(2, "Swell")],
             ..Organ::default()
         };
         assert_eq!(default_channel_map(&organ), vec![1, 2, 0]);
@@ -916,10 +919,7 @@ mod tests {
         assert_eq!(starts.len(), 2);
         let stops = console.note_off(0, 60);
         assert_eq!(stops.len(), 2);
-        assert_eq!(
-            stops,
-            starts.iter().map(|s| s.handle).collect::<Vec<_>>()
-        );
+        assert_eq!(stops, starts.iter().map(|s| s.handle).collect::<Vec<_>>());
     }
 
     #[test]
@@ -1168,8 +1168,7 @@ mod tests {
         // Immediately press 60 → its direct pipe IS 72's coupled pipe.
         let (_, expedited) = console.note_on(0, 60);
         assert!(
-            expedited.contains(&shared_pipe_voice)
-                || released.contains(&shared_pipe_voice),
+            expedited.contains(&shared_pipe_voice) || released.contains(&shared_pipe_voice),
             "the shared pipe's previous voice must be expedited on re-press"
         );
         assert!(
@@ -1205,10 +1204,7 @@ mod tests {
 
         // Note-off stops only the live (second) voices.
         let stopped = console.note_off(0, 60);
-        assert_eq!(
-            stopped,
-            second.iter().map(|s| s.handle).collect::<Vec<_>>()
-        );
+        assert_eq!(stopped, second.iter().map(|s| s.handle).collect::<Vec<_>>());
         assert!(console.note_off(0, 60).is_empty());
     }
 }
