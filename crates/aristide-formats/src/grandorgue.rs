@@ -486,7 +486,21 @@ impl Builder<'_> {
         let first_key_logical = section.int("FirstAccessiblePipeLogicalKeyNumber")?;
         let accessible_pipes = section.int("NumberOfAccessiblePipes")?;
         // Key index relative to the manual's accessible-key range.
-        let base_key = (first_key_logical - first_accessible_logical).max(0);
+        // Negative for extended-compass stops whose pipes start below
+        // the keyboard (e.g. 85 pipes from logical key 1 under a
+        // 61-key manual starting at logical key 13): those low pipes
+        // are unplayable from the keys, so the range starts at key 0
+        // and skips them via `first_pipe` instead.
+        let base_key = first_key_logical - first_accessible_logical;
+        let clip = |first_key: i64, key_count: i64, first_pipe: i64| {
+            let below = (-first_key).max(0);
+            RankRange {
+                rank: RankId(0),
+                first_key: first_key.max(0) as u16,
+                key_count: (key_count - below).max(0) as u16,
+                first_pipe: (first_pipe + below).max(0) as u16,
+            }
+        };
 
         let referenced_ranks = section.int_or("NumberOfRanks", 0)?;
         let mut stop = Stop {
@@ -516,9 +530,7 @@ impl Builder<'_> {
                     section.int_or(&format!("Rank{slot:03}FirstAccessibleKeyNumber"), 1)?;
                 stop.ranks.push(RankRange {
                     rank: rank_id,
-                    first_key: (base_key + first_accessible_key - 1) as u16,
-                    key_count: pipe_count.max(0) as u16,
-                    first_pipe: (first_pipe - 1).max(0) as u16,
+                    ..clip(base_key + first_accessible_key - 1, pipe_count, first_pipe - 1)
                 });
             }
         } else {
@@ -541,9 +553,7 @@ impl Builder<'_> {
             ranks.push(rank);
             stop.ranks.push(RankRange {
                 rank: rank_id,
-                first_key: base_key as u16,
-                key_count: pipe_count.min(accessible_pipes) as u16,
-                first_pipe: 0,
+                ..clip(base_key, pipe_count.min(accessible_pipes), 0)
             });
         }
         Ok(stop)

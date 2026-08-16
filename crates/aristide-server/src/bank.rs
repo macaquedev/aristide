@@ -1260,6 +1260,163 @@ mod tests {
         assert_eq!(energy, 0.0, "voices should have ended after release");
     }
 
+    /// Parse the footage a stop's name advertises ("Montre 8'" → 8).
+    /// Mixtures and noise effects carry no footage and return None.
+    fn footage_from_name(name: &str) -> Option<f64> {
+        name.split_whitespace().last()?.strip_suffix('\'')?.parse().ok()
+    }
+
+    /// Locate the fundamental of a rendered sustain near an expected
+    /// pitch: harmonic-product scores over a ±17-semitone grid pick the
+    /// octave (preferring the lowest candidate within a hair of the
+    /// best — the standard guard against octave-up errors on
+    /// harmonic-rich strings and reeds), then a fine scan settles cents.
+    fn measured_f0(mono: &[f32], rate: f64, expected_hz: f64) -> f64 {
+        let n = mono.len();
+        let mag = |hz: f64| -> Option<f64> {
+            if hz <= 10.0 || hz >= rate * 0.45 {
+                return None;
+            }
+            let (mut re, mut im) = (0.0f64, 0.0f64);
+            for (i, &s) in mono.iter().enumerate() {
+                let w = 0.5 - 0.5 * (std::f64::consts::TAU * i as f64 / n as f64).cos();
+                let phase = std::f64::consts::TAU * hz * i as f64 / rate;
+                re += s as f64 * w * phase.cos();
+                im += s as f64 * w * phase.sin();
+            }
+            Some((re * re + im * im).sqrt())
+        };
+        let score = |hz: f64| -> f64 {
+            let mut sum = 0.0;
+            let mut used = 0u32;
+            for h in 1..=4u32 {
+                if let Some(m) = mag(hz * h as f64) {
+                    sum += (m + 1e-12).ln();
+                    used += 1;
+                }
+            }
+            if used == 0 { f64::MIN } else { sum / used as f64 }
+        };
+        let candidates: Vec<f64> = (-17..=17)
+            .map(|s| expected_hz * (s as f64 / 12.0).exp2())
+            .collect();
+        let scores: Vec<f64> = candidates.iter().map(|&c| score(c)).collect();
+        let funds: Vec<f64> = candidates
+            .iter()
+            .map(|&c| mag(c).unwrap_or(0.0))
+            .collect();
+        let best = scores.iter().copied().fold(f64::MIN, f64::max);
+        let loudest = funds.iter().copied().fold(0.0, f64::max);
+        // A low near-tie must have real energy at its own fundamental —
+        // near-sinusoidal flute tones score their silent subharmonic
+        // within the margin because half its probed harmonics coincide
+        // with true partials.
+        let coarse = candidates
+            .iter()
+            .zip(scores.iter().zip(&funds))
+            .find(|&(_, (&s, &f))| s >= best - 1.0 && f >= loudest * 0.05)
+            .map(|(&c, _)| c)
+            .expect("at least one candidate scored");
+        let mut fine = (coarse, f64::MIN);
+        let mut cents = -60.0f64;
+        while cents <= 60.0 {
+            let hz = coarse * (cents / 1200.0).exp2();
+            if let Some(m) = mag(hz) {
+                if m > fine.1 {
+                    fine = (hz, m);
+                }
+            }
+            cents += 5.0;
+        }
+        fine.0
+    }
+
+    /// Every footage-labelled stop, drawn alone and played from its own
+    /// manual, must sound at written pitch: 8' = unison at the key's
+    /// MIDI note, 16' an octave below, 4' one above. Renders the lowest
+    /// and a middle key of each stop through the real console→engine
+    /// path and measures the fundamental. Catches key→pipe octave slips
+    /// like the extended-compass stops (Montre 8', Bourdon 8',
+    /// Trompette 8' run 85 pipes from logical key 1, twelve below the
+    /// keyboard) sounding a rank-sharing octave off everywhere.
+    #[test]
+    fn every_stop_fundamental_matches_footage() {
+        let Some(path) = demo_organ() else {
+            eprintln!("skipping: demo set not present");
+            return;
+        };
+        let organ = aristide_formats::grandorgue::load(&path).expect("loads").organ;
+        let loaded = build(&organ, 48_000.0).expect("bank builds");
+        let bank = std::sync::Arc::new(loaded.bank);
+        let mut failures = Vec::new();
+        let mut probed = 0;
+        for stop in &organ.stops {
+            let Some(footage) = footage_from_name(&stop.name) else {
+                continue;
+            };
+            let manual_index = organ
+                .manuals
+                .iter()
+                .position(|m| m.id == stop.manual)
+                .expect("stop's manual exists");
+            let manual = &organ.manuals[manual_index];
+            let range = stop.ranks.first().expect("stop has a rank");
+            let low = range.first_key;
+            let high = (range.first_key + range.key_count).min(manual.key_count);
+            assert!(low < high, "{}: no playable keys", stop.name);
+            for key_index in [low, (low + high) / 2] {
+                let midi = manual.first_midi_note as u16 + key_index;
+                let expected = 440.0 * ((midi as f64 - 69.0) / 12.0).exp2() * 8.0 / footage;
+                let mut console = crate::console::Console::new(
+                    organ.clone(),
+                    loaded.specs.clone(),
+                    vec![stop.id],
+                    Vec::new(),
+                );
+                let (starts, _) = console.note_on_manual(manual_index, midi as u8);
+                assert!(!starts.is_empty(), "{} key {key_index}: silent", stop.name);
+                let (mut engine, mut handle) =
+                    aristide_engine::Engine::new(48_000.0, bank.clone());
+                for start in &starts {
+                    assert!(handle.send(aristide_engine::Command::StartVoice {
+                        handle: start.handle,
+                        sample: start.spec.sample,
+                        rate: start.spec.rate,
+                        gain: start.spec.gain,
+                        group: start.spec.group,
+                        wind_weight: start.spec.wind_weight,
+                        brightness: start.spec.brightness,
+                        enclosure: start.spec.enclosure,
+                    }));
+                }
+                let mut buffer = vec![0.0f32; 4800 * 2];
+                let mut mono = Vec::with_capacity(4800 * 13);
+                for _ in 0..13 {
+                    engine.process(&mut buffer, 2);
+                    mono.extend(buffer.chunks(2).map(|f| (f[0] + f[1]) * 0.5));
+                }
+                // Skip the attack transient, keep 1 s of sustain.
+                let sustain = &mono[12_000..60_000];
+                let f0 = measured_f0(sustain, 48_000.0, expected);
+                let cents = 1_200.0 * (f0 / expected).log2();
+                probed += 1;
+                if cents.abs() > 100.0 {
+                    failures.push(format!(
+                        "{} ({footage}') key {key_index} (MIDI {midi}): expected {expected:.1} Hz, \
+                         measured {f0:.1} Hz ({cents:+.0} cents)",
+                        stop.name
+                    ));
+                }
+            }
+        }
+        assert!(probed > 20, "probed only {probed} notes — demo set changed?");
+        assert!(
+            failures.is_empty(),
+            "stops sounding off their written pitch:\n{}",
+            failures.join("\n")
+        );
+    }
+
     /// The user's machine, numerically: 44.1 kHz device rate, full
     /// Great+Swell coupled at 8'+16', PRODUCTION release stagger (every
     /// other cleanliness test zeroes it — the staggered
