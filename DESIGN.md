@@ -24,6 +24,25 @@ MIDI/audio routing. Free forever, GPLv3.
 off-limits — no decryption, ever. We read only the open GrandOrgue format and
 unencrypted HW v1/v2-era packages, and we say so clearly in user-facing docs.
 
+**Keyboard compass (locked):** a stop sounds only its own manual's accessible keys.
+A manual 8′ speaks from the keyboard's bottom key to its top and nowhere else, and
+that holds after coupling: an octave coupler that lands outside the compass sounds
+nothing rather than reaching past it.
+
+Sample sets routinely define ranks longer than the keyboard — GO's demo set gives
+Montre 8′ 85 pipes starting twelve keys below middle-C-2, so its extension is there
+for *other* stops to borrow (a pedal 16′, an extended unit rank). Those pipes are
+loaded and addressable through whatever stop legitimately covers them; they are not
+reachable from a manual stop whose compass ends above them. The loader therefore
+clips each stop's key range to the keyboard (range starts at key 0, skipping the
+sub-compass pipes via `first_pipe`) and caps it at `NumberOfAccessiblePipes` at the
+top.
+
+This is a deliberate divergence from GrandOrgue, which lets a sub-octave coupler
+drive logical keys below the accessible range and speak the extension pipes. We
+treat the keyboard's compass as the instrument's compass; borrowing is how a rank
+gets played outside it.
+
 ## Why we will sound better (engine-side quality)
 
 Fidelity comes from the renderer, not the file format. The plan, roughly in order of
