@@ -621,6 +621,25 @@ impl Console {
         }
     }
 
+    /// General cancel: retire every drawn stop and release every
+    /// engaged coupler, as the cancel piston does on a real console.
+    /// Returns the voice handles to stop — retired pipes, plus the open
+    /// noise voices whose note-off is the push-in thump / coupler clack.
+    /// Keys held through a cancel keep sounding only what survives it,
+    /// which is nothing: the organ goes silent.
+    pub fn cancel(&mut self) -> Vec<u64> {
+        let mut stopped = Vec::new();
+        for stop in self.drawn.clone() {
+            let (released, _) = self.set_drawn(stop, false);
+            stopped.extend(released);
+        }
+        for index in self.engaged_couplers.clone() {
+            let (_, noise) = self.set_coupler(index, false);
+            stopped.extend(noise);
+        }
+        stopped
+    }
+
     /// Every coupler with its engaged state, for UIs.
     pub fn coupler_states(&self) -> Vec<(usize, &str, bool)> {
         self.organ

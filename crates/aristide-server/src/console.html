@@ -40,6 +40,7 @@
   <input id="transpose" type="number" min="-12" max="12" step="1" style="width:3.5rem">
 </div>
 <div class="row">
+  <button id="cancel" class="stop">General cancel</button>
   <button id="trem" class="stop">Tremulant</button>
   <label for="gain" style="color:#8b93a1;font-size:0.8rem">GAIN</label>
   <input id="gain" type="range" min="0.05" max="1.2" step="0.05">
@@ -115,6 +116,8 @@ async function refresh(data) {
     }
     root.appendChild(div);
   }
+  document.getElementById('cancel').onclick = async () => refresh(await (await fetch(
+    '/api/cancel', {method: 'POST'})).json());
   const trem = document.getElementById('trem');
   trem.classList.toggle('on', data.tremulant);
   trem.onclick = async () => refresh(await (await fetch(

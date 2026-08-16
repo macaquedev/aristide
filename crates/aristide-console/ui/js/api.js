@@ -33,6 +33,7 @@ export const commands = {
   note: (manual, key, on) =>
     `/api/note?manual=${manual}&key=${key}&on=${on ? 1 : 0}`,
   panic: () => "/api/panic",
+  cancel: () => "/api/cancel",
 };
 
 /// Start the client. Calls `onState(snapshot)` for every fresh snapshot

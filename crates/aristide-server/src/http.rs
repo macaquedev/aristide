@@ -66,6 +66,20 @@ fn respond(
                 None => bad_request("missing id"),
             }
         }
+        (Method::Post, "/api/cancel") => {
+            {
+                let mut state = state.lock().expect("state poisoned");
+                let State {
+                    engine, control, ..
+                } = &mut *state;
+                if let Control::Organ(console) = control {
+                    for handle in console.cancel() {
+                        engine.send(Command::StopVoice { handle });
+                    }
+                }
+            }
+            json(state_json(state))
+        }
         (Method::Post, "/api/coupler") => {
             let index = param(query, "idx").and_then(|v| v.parse::<usize>().ok());
             let on = param(query, "on") == Some("1");
@@ -480,6 +494,30 @@ mod tests {
 
         respond(&state, &Method::Post, "/api/gain?v=0.5");
         assert!(state_json(&state).contains("\"gain\":0.5"));
+    }
+
+    #[test]
+    fn general_cancel_clears_stops_and_couplers() {
+        let Some(state) = demo_state() else { return };
+
+        // Registration = the stops and couplers arrays, which come
+        // first in the snapshot; "noises" carries its own "on" flag.
+        let registration = |body: &str| -> String {
+            body[..body.find("\"manuals\"").expect("manuals follow")].to_string()
+        };
+
+        respond(&state, &Method::Post, "/api/stop?id=1&on=1");
+        respond(&state, &Method::Post, "/api/stop?id=16&on=1");
+        respond(&state, &Method::Post, "/api/coupler?idx=0&on=1");
+        let drawn = registration(&state_json(&state));
+        assert_eq!(drawn.matches("\"on\":true").count(), 3, "two stops + a coupler");
+
+        respond(&state, &Method::Post, "/api/cancel");
+        let cancelled = registration(&state_json(&state));
+        assert!(
+            !cancelled.contains("\"on\":true"),
+            "cancel left something drawn: {cancelled}"
+        );
     }
 
     #[test]

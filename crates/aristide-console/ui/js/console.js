@@ -201,6 +201,29 @@ export class Console {
       });
       this.el.couplers.append(rocker);
     }
+    this.el.couplers.append(this.cancelPiston());
+  }
+
+  /// General cancel: pushes in every stop and releases every coupler.
+  /// Momentary — it never lights, so it carries no `on` state; the
+  /// tremulant is a separate control and survives it.
+  cancelPiston() {
+    const piston = document.createElement("button");
+    piston.className = "rocker cancel";
+    piston.dataset.key = "cancel";
+    const face = document.createElement("span");
+    face.className = "tab";
+    face.textContent = "Cancel";
+    piston.append(face);
+    piston.addEventListener("click", () => {
+      for (const control of this.root.querySelectorAll(
+        '.knob.on:not([data-key="trem"]), .rocker.on'
+      )) {
+        control.classList.remove("on"); // optimistic
+      }
+      this.send(commands.cancel());
+    });
+    return piston;
   }
 
   buildKeyboards(snapshot) {
