@@ -29,40 +29,28 @@ function splitLabel(name) {
 }
 
 export class Console {
-  constructor(root, send) {
+  /// `openPreferences(tab)` is how the console reaches the settings that
+  /// no longer live on the bar itself — the tuning readout is a button
+  /// onto its own preferences tab.
+  constructor(root, send, openPreferences) {
     this.root = root;
     this.send = send;
+    this.openPreferences = openPreferences;
     this.signature = null;
     this.dragging = new Set(); // control ids the pointer currently owns
     this.el = {
       offline: root.getElementById("offline"),
       organName: root.getElementById("organ-name"),
       gain: root.getElementById("gain"),
-      reverb: root.getElementById("reverb"),
-      reverbGroup: root.getElementById("reverb-group"),
       tuning: root.getElementById("tuning"),
       panic: root.getElementById("panic"),
-      settings: root.getElementById("settings"),
-      temperament: root.getElementById("set-temperament"),
-      a4: root.getElementById("set-a4"),
-      temperamentRow: root.getElementById("temperament-row"),
-      pitchRow: root.getElementById("pitch-row"),
-      transposeRow: root.getElementById("transpose-row"),
-      transposeDown: root.getElementById("transpose-down"),
-      transposeUp: root.getElementById("transpose-up"),
-      transposeValue: root.getElementById("transpose-value"),
-      noisesRow: root.getElementById("noises-row"),
-      noisesOn: root.getElementById("noises-on"),
-      noisesVol: root.getElementById("noises-vol"),
       jambLeft: root.getElementById("jamb-left"),
       jambRight: root.getElementById("jamb-right"),
       couplers: root.getElementById("couplers"),
       manuals: root.getElementById("manuals"),
       pedals: root.getElementById("pedals"),
     };
-    this.tuning = null; // last snapshot's tuning, for the transpose stepper
     this.wireRail();
-    this.wireSettings();
   }
 
   offline(message) {
@@ -91,7 +79,6 @@ export class Console {
 
   build(snapshot) {
     this.el.organName.textContent = snapshot.organ ?? "Aristide";
-    this.el.reverbGroup.classList.toggle("hidden", snapshot.reverb == null);
     this.buildJambs(snapshot);
     this.buildCouplers(snapshot);
     this.buildKeyboards(snapshot);
@@ -215,15 +202,21 @@ export class Console {
     face.className = "tab";
     face.textContent = "Cancel";
     piston.append(face);
-    piston.addEventListener("click", () => {
-      for (const control of this.root.querySelectorAll(
-        '.knob.on:not([data-key="trem"]), .rocker.on'
-      )) {
-        control.classList.remove("on"); // optimistic
-      }
-      this.send(commands.cancel());
-    });
+    piston.addEventListener("click", () => this.cancel());
     return piston;
+  }
+
+  cancel() {
+    for (const control of this.root.querySelectorAll(
+      '.knob.on:not([data-key="trem"]), .rocker.on'
+    )) {
+      control.classList.remove("on"); // optimistic
+    }
+    this.send(commands.cancel());
+  }
+
+  panic() {
+    this.send(commands.panic());
   }
 
   buildKeyboards(snapshot) {
@@ -380,40 +373,13 @@ export class Console {
     }
 
     if (!this.dragging.has("gain")) this.el.gain.value = snapshot.gain;
-    if (snapshot.reverb != null && !this.dragging.has("reverb")) {
-      this.el.reverb.value = snapshot.reverb;
-    }
 
     const tuning = snapshot.tuning;
-    this.tuning = tuning ?? null;
     this.el.tuning.textContent = tuning
       ? `${tuning.temperament} · a′ ${tuning.a4.toFixed(0)} Hz` +
         (tuning.transpose ? ` · ${tuning.transpose > 0 ? "+" : ""}${tuning.transpose}` : "")
       : "";
-    this.refreshSettings(tuning, snapshot.noises);
-  }
-
-  /// The drawer mirrors the snapshot like every other control, except
-  /// inputs the user is touching right now: a focused field or a
-  /// mid-drag slider keeps its local value until the pointer lets go.
-  refreshSettings(tuning, noises) {
-    for (const row of [this.el.temperamentRow, this.el.pitchRow, this.el.transposeRow]) {
-      row.classList.toggle("hidden", !tuning);
-    }
-    if (tuning) {
-      if (this.root.activeElement !== this.el.temperament) {
-        this.el.temperament.value = tuning.temperament;
-      }
-      if (this.root.activeElement !== this.el.a4) this.el.a4.value = tuning.a4;
-      this.el.transposeValue.textContent =
-        tuning.transpose > 0 ? `+${tuning.transpose}` : `${tuning.transpose}`;
-    }
-
-    this.el.noisesRow.classList.toggle("hidden", !noises);
-    if (noises) {
-      this.el.noisesOn.checked = noises.on;
-      if (!this.dragging.has("noises-vol")) this.el.noisesVol.value = noises.vol;
-    }
+    this.el.tuning.classList.toggle("hidden", !tuning);
   }
 
   setToggle(key, on) {
@@ -421,85 +387,25 @@ export class Console {
     if (control) control.classList.toggle("on", on);
   }
 
-  // ---- header rail ---------------------------------------------------
+  // ---- menu bar ------------------------------------------------------
 
   wireRail() {
-    for (const [slider, command] of [
-      [this.el.gain, commands.gain],
-      [this.el.reverb, commands.reverb],
-    ]) {
-      const key = slider.id;
-      let lastSent = 0;
-      slider.addEventListener("pointerdown", () => this.dragging.add(key));
-      slider.addEventListener("input", () => {
-        const now = performance.now();
-        if (now - lastSent > 33) {
-          lastSent = now;
-          this.send(command(slider.value));
-        }
-      });
-      slider.addEventListener("change", () => {
-        this.dragging.delete(key);
-        this.send(command(slider.value));
-      });
-    }
-    this.el.panic.addEventListener("click", () => this.send(commands.panic()));
-  }
-
-  // ---- settings drawer -------------------------------------------------
-
-  wireSettings() {
-    this.el.tuning.addEventListener("click", () => {
-      this.el.settings.classList.toggle("hidden");
-    });
-
-    this.el.temperament.addEventListener("change", () => {
-      this.send(commands.tuning({ temperament: this.el.temperament.value }));
-      this.el.temperament.blur(); // hand the field back to the snapshot
-    });
-
-    this.el.a4.addEventListener("change", () => {
-      const a4 = Math.min(500, Math.max(300, Number(this.el.a4.value) || 440));
-      this.el.a4.value = a4;
-      this.send(commands.tuning({ a4 }));
-      this.el.a4.blur();
-    });
-
-    for (const [button, step] of [
-      [this.el.transposeDown, -1],
-      [this.el.transposeUp, +1],
-    ]) {
-      button.addEventListener("click", () => {
-        const at = this.tuning?.transpose ?? 0;
-        const transpose = Math.min(12, Math.max(-12, at + step));
-        if (transpose === at) return;
-        // Optimistic, so rapid clicks step from the value just sent
-        // rather than the last poll.
-        if (this.tuning) this.tuning = { ...this.tuning, transpose };
-        this.el.transposeValue.textContent =
-          transpose > 0 ? `+${transpose}` : `${transpose}`;
-        this.send(commands.tuning({ transpose }));
-      });
-    }
-
-    const sendNoises = () =>
-      this.send(commands.noises(this.el.noisesOn.checked, this.el.noisesVol.value));
-    this.el.noisesOn.addEventListener("change", sendNoises);
-
+    const slider = this.el.gain;
     let lastSent = 0;
-    this.el.noisesVol.addEventListener("pointerdown", () =>
-      this.dragging.add("noises-vol")
-    );
-    this.el.noisesVol.addEventListener("input", () => {
+    slider.addEventListener("pointerdown", () => this.dragging.add("gain"));
+    slider.addEventListener("input", () => {
       const now = performance.now();
       if (now - lastSent > 33) {
         lastSent = now;
-        sendNoises();
+        this.send(commands.gain(slider.value));
       }
     });
-    this.el.noisesVol.addEventListener("change", () => {
-      this.dragging.delete("noises-vol");
-      sendNoises();
+    slider.addEventListener("change", () => {
+      this.dragging.delete("gain");
+      this.send(commands.gain(slider.value));
     });
+
+    this.el.panic.addEventListener("click", () => this.panic());
+    this.el.tuning.addEventListener("click", () => this.openPreferences("tuning"));
   }
 }

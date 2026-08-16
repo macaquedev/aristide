@@ -5,7 +5,8 @@
 // Each accent carries its own dark ink (text over the accent) and a
 // deeper shade (held sharps), picked by eye rather than derived, so
 // every choice keeps contrast. The 1f/33 alpha suffixes match the
-// soft/glow tokens in style.css.
+// soft/glow tokens in style.css. The pickers live in Preferences →
+// Appearance.
 const ACCENTS = {
   cyan: { accent: "#45c4ff", deep: "#2b9fd8", ink: "#08202e" },
   mint: { accent: "#3ddc97", deep: "#25b77a", ink: "#06231a" },
@@ -47,8 +48,8 @@ function applyDensity(name) {
   document.body.dataset.density = DENSITIES.includes(name) ? name : "regular";
 }
 
-/// Builds the two picker rows in the settings drawer and restores the
-/// saved choices. Call once at startup.
+/// Builds the two picker rows in Preferences → Appearance and restores
+/// the saved choices. Call once at startup.
 export function wireTheme(root) {
   const swatches = root.getElementById("accent-swatches");
   const segment = root.getElementById("density-segment");

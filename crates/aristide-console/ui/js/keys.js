@@ -63,11 +63,7 @@ export class PianoKeys {
     this.manuals = [];
     this.target = null; // the manual notes go to
     this.signature = null;
-    this.el = {
-      button: root.getElementById("keys"),
-      panel: root.getElementById("keys-legend"),
-      settings: root.getElementById("settings"),
-    };
+    this.el = { panel: root.getElementById("keys-legend") };
     this.buildLegend();
     this.wire();
   }
@@ -141,10 +137,16 @@ export class PianoKeys {
 
   // ---- input -----------------------------------------------------------
 
+  /// The organ has the keyboard only when no dialog is up: inside
+  /// Preferences a stray "z" must not sound a pipe.
+  get busy() {
+    return document.body.classList.contains("modal-open");
+  }
+
   wire() {
     window.addEventListener("keydown", (event) => {
       if (event.repeat || event.ctrlKey || event.metaKey || event.altKey) return;
-      if (typing(event.target)) return;
+      if (typing(event.target) || this.busy) return;
       if (event.code === OCTAVE_DOWN || event.code === OCTAVE_UP) {
         event.preventDefault();
         this.shift(event.code === OCTAVE_UP ? +1 : -1);
@@ -167,28 +169,34 @@ export class PianoKeys {
       if (document.hidden) this.releaseAll();
     });
 
-    this.el.button.addEventListener("click", () => this.toggle());
-    // The settings drawer opens in the same strip of window; whichever
-    // was asked for last is the one on screen.
-    this.root.getElementById("tuning").addEventListener("click", () => this.close());
     this.el.manual.addEventListener("change", () => {
-      this.releaseAll();
-      const idx = Number(this.el.manual.value);
-      this.target = this.manuals.find((m) => m.idx === idx) ?? this.target;
-      this.paintLegend();
+      this.setTarget(Number(this.el.manual.value));
       this.el.manual.blur(); // give the keys back to the organ
     });
   }
 
+  get isOpen() {
+    return !this.el.panel.classList.contains("hidden");
+  }
+
   toggle() {
-    const closed = this.el.panel.classList.toggle("hidden");
-    this.el.button.classList.toggle("on", !closed);
-    if (!closed) this.el.settings.classList.add("hidden"); // one drawer at a time
+    this.el.panel.classList.toggle("hidden");
   }
 
   close() {
     this.el.panel.classList.add("hidden");
-    this.el.button.classList.remove("on");
+  }
+
+  /// Point the computer keyboard at a manual by index. Notes held on the
+  /// old manual are released first — nothing must be left speaking on a
+  /// keyboard the player has stopped addressing.
+  setTarget(idx) {
+    const manual = this.manuals.find((m) => m.idx === idx);
+    if (!manual || manual === this.target) return;
+    this.releaseAll();
+    this.target = manual;
+    this.el.manual.value = String(idx);
+    this.paintLegend();
   }
 
   // ---- legend -----------------------------------------------------------

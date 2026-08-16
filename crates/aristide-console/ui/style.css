@@ -22,6 +22,7 @@
   --key-white: #e9ebef;
   --key-black: #1b1e24;
   --sans: "Inter", system-ui, "DejaVu Sans", sans-serif;
+  --bar-h: 46px;
 }
 
 * { box-sizing: border-box; user-select: none; -webkit-user-select: none; }
@@ -48,7 +49,7 @@ html, body {
 .offline {
   position: fixed;
   inset: 0 0 auto 0;
-  z-index: 10;
+  z-index: 50;
   padding: 6px 16px;
   background: var(--danger);
   color: #fff;
@@ -56,22 +57,25 @@ html, body {
   text-align: center;
 }
 
-/* ---- header rail ---------------------------------------------------- */
+/* ---- menu bar -------------------------------------------------------- */
 
-.rail {
+.menubar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 24px;
-  padding: 10px 22px;
+  gap: 18px;
+  height: var(--bar-h);
+  padding: 0 18px;
   background: #14171c;
   border-bottom: 1px solid var(--border);
 }
 
-.nameplate { display: flex; align-items: center; gap: 10px; }
+.brand { display: flex; align-items: center; gap: 10px; }
 
 /* accent tick in place of hardware branding */
-.nameplate::before {
+.brand::before {
   content: "";
   width: 4px;
   height: 18px;
@@ -79,17 +83,114 @@ html, body {
   background: var(--accent);
 }
 
-.nameplate span {
+.brand span {
   font-size: 15px;
   font-weight: 600;
   letter-spacing: 0.5px;
   color: var(--text);
+  white-space: nowrap;
+}
+
+.menus { display: flex; align-items: stretch; gap: 2px; }
+
+.menu { position: relative; }
+
+.menu-title {
+  height: 26px;
+  padding: 0 11px;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+  background: transparent;
+  color: var(--text-dim);
+  font-family: var(--sans);
+  font-size: 12.5px;
+  transition: background 0.1s ease, color 0.1s ease;
+}
+.menu-title:hover { color: var(--text); background: #ffffff0f; }
+.menu-title.on { color: var(--text); background: var(--accent-soft); }
+
+/* the pull-down itself */
+.menu-list {
+  position: absolute;
+  top: calc(100% + 7px);
+  left: 0;
+  z-index: 25;
+  display: flex;
+  flex-direction: column;
+  min-width: 232px;
+  padding: 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: #191d24;
+  box-shadow: 0 18px 44px #000c;
+}
+
+.menu-list hr {
+  height: 1px;
+  margin: 5px 8px;
+  border: 0;
+  background: var(--border-strong);
+}
+
+.menu-heading {
+  padding: 7px 10px 4px;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 2px;
+  color: var(--text-dim);
+}
+
+.menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  /* the indent is the gutter every checkmark and radio dot sits in */
+  padding: 7px 10px 7px 26px;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+  background: transparent;
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 12.5px;
+  text-align: left;
+  position: relative;
+}
+.menu-item:hover { background: var(--accent-soft); }
+.menu-item:disabled { color: var(--text-dim); cursor: default; background: none; }
+
+.menu-item.checked::before {
+  content: "";
+  position: absolute;
+  left: 10px;
+  width: 6px;
+  height: 10px;
+  border: solid var(--accent);
+  border-width: 0 2px 2px 0;
+  transform: translateY(-1px) rotate(45deg);
+}
+.menu-item.radio.checked::before {
+  width: 7px;
+  height: 7px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--accent);
+  transform: none;
+}
+
+.menu-item kbd {
+  font: 10px var(--sans);
+  letter-spacing: 1px;
+  color: var(--text-dim);
 }
 
 .rail-controls {
   display: flex;
   align-items: center;
-  gap: 22px;
+  gap: 18px;
+  margin-left: auto;
 }
 
 .rail-label {
@@ -98,8 +199,8 @@ html, body {
   color: var(--text-dim);
 }
 
-/* In-theme replacement for native tooltips, which float over the
-   settings drawer (the header stacks above it). */
+/* In-theme replacement for native tooltips, which float over open
+   panels (the bar stacks above them). */
 [data-tip] { position: relative; }
 
 [data-tip]::after {
@@ -125,8 +226,9 @@ html, body {
 
 [data-tip]:hover::after { opacity: 1; }
 
-/* Never let a tip sit on top of an open drawer. */
-body:has(.settings:not(.hidden)) [data-tip]::after,
+/* Never let a tip sit on top of an open panel or menu. */
+body.modal-open [data-tip]::after,
+body:has(.menu-list:not(.hidden)) [data-tip]::after,
 body:has(.keys-legend:not(.hidden)) [data-tip]::after { opacity: 0; }
 
 .slider-group {
@@ -189,24 +291,203 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
 .panic:hover { filter: brightness(1.1); }
 .panic:active { filter: brightness(0.9); }
 
-/* ---- settings drawer -------------------------------------------------- */
+/* ---- preferences dialog ------------------------------------------------ */
 
-.settings {
+.modal {
   position: fixed;
-  top: 53px;
-  right: 74px;
-  z-index: 9;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: #05070ab8;
+  backdrop-filter: blur(2px);
+}
+
+.modal-card {
+  position: relative;
   display: flex;
   flex-direction: column;
-  gap: 13px;
-  min-width: 260px;
-  padding: 16px 18px;
-  border: 1px solid var(--border);
-  border-top: 0;
-  border-radius: 0 0 12px 12px;
-  background: #191d24;
-  box-shadow: 0 16px 40px #000c;
+  width: min(720px, 100%);
+  /* Fixed, so switching tabs never resizes the dialog under the cursor. */
+  height: min(500px, 100%);
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
+  background: #171b21;
+  box-shadow: 0 30px 80px #000d;
+  overflow: hidden;
 }
+
+.modal-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 16px 18px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.modal-head h1 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+}
+
+/* the organ these preferences belong to */
+.modal-subject {
+  font-size: 11px;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.modal-close {
+  margin-left: auto;
+  width: 26px;
+  height: 26px;
+  border: 0;
+  border-radius: 7px;
+  cursor: pointer;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 18px;
+  line-height: 1;
+}
+.modal-close:hover { background: #ffffff12; color: var(--text); }
+
+.modal-body { display: flex; flex: 1; min-height: 0; }
+
+.tabs {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 0 0 148px;
+  padding: 12px 10px;
+  border-right: 1px solid var(--border);
+  background: #14171c;
+}
+
+.tabs button {
+  padding: 8px 12px;
+  border: 0;
+  border-radius: 7px;
+  cursor: pointer;
+  background: transparent;
+  color: var(--text-dim);
+  font-family: var(--sans);
+  font-size: 12px;
+  letter-spacing: 0.5px;
+  text-align: left;
+}
+.tabs button:hover { color: var(--text); background: #ffffff0d; }
+.tabs button.on { color: var(--text); background: var(--accent-soft); }
+
+.pane {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px 20px 22px;
+  overflow-y: auto;
+}
+
+.pane h2 {
+  margin: 0;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 2.5px;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.pane-head { display: flex; align-items: center; justify-content: space-between; }
+
+.pane-note {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--text-dim);
+}
+.pane-note em { color: var(--text); font-style: normal; }
+
+.pane-empty {
+  margin: 0;
+  padding: 14px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 10px;
+  font-size: 12px;
+  color: var(--text-dim);
+  text-align: center;
+}
+
+.ghost {
+  padding: 5px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+  background: var(--surface-2);
+  color: var(--text-dim);
+  font-family: var(--sans);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+}
+.ghost:hover { border-color: var(--accent); color: var(--text); }
+
+/* one row per MIDI input: listen switch, name, where it plays */
+.midi-ports { display: flex; flex-direction: column; gap: 8px; }
+
+.midi-port {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+.midi-port.muted .port-name { color: var(--text-dim); text-decoration: line-through; }
+
+.port-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.port-route { flex: 0 0 auto; max-width: 200px; }
+
+/* the channel map: sixteen small assignments, two or three per row */
+.midi-channels {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 8px;
+}
+
+.midi-channel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+.midi-channel select { max-width: 130px; }
+
+.about-card { width: min(420px, 100%); height: auto; }
+.about-body { display: block; padding: 18px 20px 22px; font-size: 12.5px; line-height: 1.6; }
+.about-body p { margin: 0 0 10px; }
 
 .settings-row {
   display: flex;
@@ -215,9 +496,9 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   gap: 16px;
 }
 
-.settings select,
+.pane select,
 .keys-legend select,
-.settings input[type="number"] {
+.pane input[type="number"] {
   font: 12px var(--sans);
   color: var(--text);
   background: var(--bg);
@@ -225,10 +506,10 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   border-radius: 6px;
   padding: 5px 8px;
 }
-.settings select:focus,
+.pane select:focus,
 .keys-legend select:focus,
-.settings input[type="number"]:focus { outline: none; border-color: var(--accent); }
-.settings select,
+.pane input[type="number"]:focus { outline: none; border-color: var(--accent); }
+.pane select,
 .keys-legend select {
   /* WebKit's native select chrome is a light gradient that fights the
      dark skin; draw our own chevron instead. */
@@ -241,12 +522,12 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   background-size: 4px 4px;
   background-repeat: no-repeat;
 }
-.settings input[type="number"] { width: 66px; text-align: right; }
-.settings input[type="number"]::-webkit-inner-spin-button { display: none; }
-.settings input[type="range"] { width: 90px; }
+.pane input[type="number"] { width: 66px; text-align: right; }
+.pane input[type="number"]::-webkit-inner-spin-button { display: none; }
+.pane input[type="range"] { width: 120px; }
 
-/* the noises switch */
-.settings input[type="checkbox"] {
+/* the noises switch, and the per-device listen switch */
+.pane input[type="checkbox"] {
   -webkit-appearance: none;
   appearance: none;
   width: 34px;
@@ -259,7 +540,7 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   position: relative;
   transition: background 0.1s ease;
 }
-.settings input[type="checkbox"]::before {
+.pane input[type="checkbox"]::before {
   content: "";
   position: absolute;
   top: 2px;
@@ -270,8 +551,8 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   background: var(--text);
   transition: left 0.1s ease;
 }
-.settings input[type="checkbox"]:checked { background: var(--accent); }
-.settings input[type="checkbox"]:checked::before { left: 18px; background: #fff; }
+.pane input[type="checkbox"]:checked { background: var(--accent); }
+.pane input[type="checkbox"]:checked::before { left: 18px; background: #fff; }
 
 .stepper {
   display: flex;
@@ -339,32 +620,21 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   color: var(--text);
 }
 
-/* ---- computer-keyboard legend ------------------------------------------ */
-
-/* same quiet pill as the tuning readout, in caption case */
-.keys-button {
-  padding: 6px 14px;
-  border: 1px solid var(--border);
+/* dark scrollbars: the default light ones cut a hole in the skin */
+.pane::-webkit-scrollbar { width: 10px; }
+.pane::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
   border-radius: 999px;
-  background: var(--surface-2);
-  color: var(--text-dim);
-  font-family: var(--sans);
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 2px;
-  cursor: pointer;
-  transition: border-color 0.1s ease, color 0.1s ease;
+  background: #ffffff26;
+  background-clip: content-box;
 }
-.keys-button:hover { border-color: var(--accent); }
-.keys-button.on {
-  color: var(--text);
-  border-color: var(--accent);
-  background: var(--accent-soft);
-}
+.pane::-webkit-scrollbar-track { background: transparent; }
+
+/* ---- computer-keyboard legend ------------------------------------------ */
 
 .keys-legend {
   position: fixed;
-  top: 53px;
+  top: var(--bar-h);
   left: 50%;
   transform: translateX(-50%);
   z-index: 9;
@@ -437,9 +707,9 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   grid-template-columns: minmax(170px, auto) 1fr minmax(170px, auto);
   gap: 18px;
   padding: 20px 22px 26px;
-  /* fill the window below the rail and seat the jambs and manuals mid-case
+  /* fill the window below the bar and seat the jambs and manuals mid-case
      instead of leaving a bare apron under the pedalboard */
-  min-height: calc(100vh - 53px);
+  min-height: calc(100vh - var(--bar-h));
   align-items: center;
   justify-items: center;
 }

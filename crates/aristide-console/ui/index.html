@@ -8,64 +8,141 @@
 </head>
 <body>
   <div id="offline" class="offline hidden">no connection to the organ</div>
-  <header id="rail" class="rail">
-    <div class="nameplate"><span id="organ-name">Aristide</span></div>
+  <header id="menubar" class="menubar">
+    <div class="brand"><span id="organ-name">Aristide</span></div>
+    <nav id="menus" class="menus" aria-label="Main menu"></nav>
     <div class="rail-controls">
       <label class="slider-group" id="gain-group">
         <span class="rail-label">VOLUME</span>
         <input id="gain" type="range" min="0" max="1" step="0.01" />
       </label>
-      <label class="slider-group hidden" id="reverb-group">
-        <span class="rail-label">REVERB</span>
-        <input id="reverb" type="range" min="0" max="1" step="0.01" />
-      </label>
-      <button class="keys-button" id="keys" data-tip="Play with the computer keyboard"
-        aria-label="Computer keyboard mapping">KEYS</button>
-      <button class="tuning" id="tuning" data-tip="Tuning &amp; console settings"
-        aria-label="Tuning &amp; console settings"></button>
+      <button class="tuning" id="tuning" data-tip="Tuning &amp; temperament"
+        aria-label="Tuning preferences"></button>
       <button id="panic" class="panic" data-tip="Silence everything">PANIC</button>
     </div>
   </header>
-  <aside id="settings" class="settings hidden">
-    <label class="settings-row" id="temperament-row">
-      <span class="rail-label">TEMPERAMENT</span>
-      <select id="set-temperament">
-        <option value="equal">Equal</option>
-        <option value="werckmeister3">Werckmeister III</option>
-        <option value="kirnberger3">Kirnberger III</option>
-        <option value="meantone4">Meantone &frac14;-comma</option>
-        <option value="pythagorean">Pythagorean</option>
-      </select>
-    </label>
-    <label class="settings-row" id="pitch-row">
-      <span class="rail-label">PITCH a&prime;</span>
-      <span class="stepper"><input id="set-a4" type="number" min="300" max="500" step="0.5" /> Hz</span>
-    </label>
-    <div class="settings-row" id="transpose-row">
-      <span class="rail-label">TRANSPOSE</span>
-      <span class="stepper">
-        <button id="transpose-down">&minus;</button>
-        <span id="transpose-value">0</span>
-        <button id="transpose-up">+</button>
-      </span>
-    </div>
-    <div class="settings-row" id="accent-row">
-      <span class="rail-label">ACCENT</span>
-      <span class="swatches" id="accent-swatches"></span>
-    </div>
-    <div class="settings-row" id="density-row">
-      <span class="rail-label">DENSITY</span>
-      <span class="segment" id="density-segment"></span>
-    </div>
-    <div class="settings-row" id="noises-row">
-      <span class="rail-label">NOISES</span>
-      <span class="stepper">
-        <input id="noises-on" type="checkbox" aria-label="Blower and action noises" />
-        <input id="noises-vol" type="range" min="0" max="1" step="0.01" />
-      </span>
-    </div>
-  </aside>
   <aside id="keys-legend" class="keys-legend hidden" aria-label="Computer keyboard mapping"></aside>
+
+  <div id="prefs" class="modal hidden" role="dialog" aria-modal="true"
+    aria-labelledby="prefs-title">
+    <div class="modal-backdrop" data-close></div>
+    <div class="modal-card">
+      <header class="modal-head">
+        <h1 id="prefs-title">Preferences</h1>
+        <span class="modal-subject" id="prefs-subject"></span>
+        <button class="modal-close" data-close aria-label="Close preferences">&times;</button>
+      </header>
+      <div class="modal-body">
+        <nav class="tabs" id="prefs-tabs" role="tablist">
+          <button role="tab" data-tab="midi">MIDI</button>
+          <button role="tab" data-tab="tuning">Tuning</button>
+          <button role="tab" data-tab="sound">Sound</button>
+          <button role="tab" data-tab="appearance">Appearance</button>
+        </nav>
+
+        <section class="pane" data-pane="midi">
+          <div class="pane-head">
+            <h2>Inputs</h2>
+            <button class="ghost" id="midi-rescan">Rescan</button>
+          </div>
+          <p class="pane-note">
+            Every input plays the manual its MIDI channel selects below. Pin a
+            device to one manual instead when it speaks on a single channel —
+            two ordinary keyboards then become two manuals.
+          </p>
+          <div id="midi-ports" class="midi-ports"></div>
+          <h2>Channel map</h2>
+          <p class="pane-note">
+            Which manual each MIDI channel plays. Devices set to
+            <em>follow channel map</em> obey this; pinned devices ignore it.
+          </p>
+          <div id="midi-channels" class="midi-channels"></div>
+        </section>
+
+        <section class="pane hidden" data-pane="tuning">
+          <h2>Temperament &amp; pitch</h2>
+          <label class="settings-row" id="temperament-row">
+            <span class="rail-label">TEMPERAMENT</span>
+            <select id="set-temperament">
+              <option value="equal">Equal</option>
+              <option value="werckmeister3">Werckmeister III</option>
+              <option value="kirnberger3">Kirnberger III</option>
+              <option value="meantone4">Meantone &frac14;-comma</option>
+              <option value="pythagorean">Pythagorean</option>
+            </select>
+          </label>
+          <label class="settings-row" id="pitch-row">
+            <span class="rail-label">PITCH a&prime;</span>
+            <span class="stepper"><input id="set-a4" type="number" min="300" max="500" step="0.5" /> Hz</span>
+          </label>
+          <div class="settings-row" id="transpose-row">
+            <span class="rail-label">TRANSPOSE</span>
+            <span class="stepper">
+              <button id="transpose-down">&minus;</button>
+              <span id="transpose-value">0</span>
+              <button id="transpose-up">+</button>
+            </span>
+          </div>
+          <p class="pane-note">
+            Transposition shifts the keys, not the pipes: the organ keeps its
+            own pitch and temperament.
+          </p>
+        </section>
+
+        <section class="pane hidden" data-pane="sound">
+          <h2>Room &amp; mechanism</h2>
+          <label class="settings-row" id="reverb-row">
+            <span class="rail-label">REVERB</span>
+            <input id="reverb" type="range" min="0" max="1" step="0.01" />
+          </label>
+          <div class="settings-row" id="noises-row">
+            <span class="rail-label">NOISES</span>
+            <span class="stepper">
+              <input id="noises-on" type="checkbox" aria-label="Blower and action noises" />
+              <input id="noises-vol" type="range" min="0" max="1" step="0.01" />
+            </span>
+          </div>
+          <p class="pane-note">
+            Blower, drawstop and coupler noises come from the set's own
+            recordings — they sound only where the sample set provides them.
+          </p>
+        </section>
+
+        <section class="pane hidden" data-pane="appearance">
+          <h2>Console skin</h2>
+          <div class="settings-row" id="accent-row">
+            <span class="rail-label">ACCENT</span>
+            <span class="swatches" id="accent-swatches"></span>
+          </div>
+          <div class="settings-row" id="density-row">
+            <span class="rail-label">DENSITY</span>
+            <span class="segment" id="density-segment"></span>
+          </div>
+          <p class="pane-note">
+            Appearance is local to this console and is remembered here, not in
+            the organ.
+          </p>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <div id="about" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="about-title">
+    <div class="modal-backdrop" data-close></div>
+    <div class="modal-card about-card">
+      <header class="modal-head">
+        <h1 id="about-title">Aristide</h1>
+        <button class="modal-close" data-close aria-label="Close">&times;</button>
+      </header>
+      <div class="modal-body about-body">
+        <p>An open-source virtual pipe organ, named for Aristide Cavaill&eacute;-Coll.</p>
+        <p class="pane-note">
+          Free software under the GPLv3 &middot; github.com/macaquedev/aristide
+        </p>
+      </div>
+    </div>
+  </div>
+
   <main id="console" class="console">
     <section id="jamb-left" class="jamb"></section>
     <section class="center">
