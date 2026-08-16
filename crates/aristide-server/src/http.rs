@@ -161,6 +161,64 @@ fn respond(
             }
             json(state_json(state))
         }
+        // Input routing. `route=-1` hands the port back to the channel
+        // map; any other value pins it to that manual.
+        (Method::Post, "/api/midi/port") => {
+            let id = param(query, "id").and_then(|v| v.parse::<usize>().ok());
+            match id {
+                Some(id) => {
+                    {
+                        let mut state = state.lock().expect("state poisoned");
+                        let manuals = match &state.control {
+                            Control::Organ(console) => console.manual_states().len(),
+                            Control::Tone => 0,
+                        };
+                        if let Some(port) = state.midi_ports.get_mut(id) {
+                            if let Some(on) = param(query, "enabled") {
+                                port.enabled = on == "1";
+                            }
+                            if let Some(route) =
+                                param(query, "route").and_then(|v| v.parse::<isize>().ok())
+                            {
+                                port.route = (route >= 0 && (route as usize) < manuals)
+                                    .then_some(route as usize);
+                            }
+                            tracing::info!(
+                                "midi: {} {} → {}",
+                                port.name,
+                                if port.enabled { "on" } else { "muted" },
+                                match port.route {
+                                    Some(manual) => format!("manual {manual}"),
+                                    None => "channel map".into(),
+                                }
+                            );
+                        }
+                    }
+                    json(state_json(state))
+                }
+                None => bad_request("missing id"),
+            }
+        }
+        (Method::Post, "/api/midi/channel") => {
+            let channel = param(query, "ch").and_then(|v| v.parse::<u8>().ok());
+            let manual = param(query, "manual").and_then(|v| v.parse::<usize>().ok());
+            match (channel, manual) {
+                (Some(channel), Some(manual)) => {
+                    {
+                        let mut state = state.lock().expect("state poisoned");
+                        if let Control::Organ(console) = &mut state.control {
+                            console.set_channel(channel, manual);
+                        }
+                    }
+                    json(state_json(state))
+                }
+                _ => bad_request("missing ch/manual"),
+            }
+        }
+        (Method::Post, "/api/midi/rescan") => {
+            crate::request_midi_rescan();
+            json(state_json(state))
+        }
         (Method::Post, "/api/note") => {
             let manual = param(query, "manual").and_then(|v| v.parse::<usize>().ok());
             let key = param(query, "key").and_then(|v| v.parse::<u8>().ok());
@@ -378,6 +436,28 @@ fn state_json_locked(state: &State) -> String {
     if let Some(wet) = state.reverb_wet {
         out.push_str(&format!(",\"reverb\":{wet}"));
     }
+    out.push_str(",\"midi\":{\"ports\":[");
+    for (id, port) in state.midi_ports.iter().enumerate() {
+        if id > 0 {
+            out.push(',');
+        }
+        out.push_str(&format!(
+            "{{\"id\":{id},\"name\":{},\"enabled\":{},\"route\":{}}}",
+            json_string(&port.name),
+            port.enabled,
+            port.route.map(|m| m as isize).unwrap_or(-1)
+        ));
+    }
+    out.push_str("],\"channels\":[");
+    if let Control::Organ(console) = &state.control {
+        let map: Vec<String> = console
+            .channel_map()
+            .iter()
+            .map(|m| m.to_string())
+            .collect();
+        out.push_str(&map.join(","));
+    }
+    out.push_str("]}");
     if let Control::Organ(console) = &state.control {
         let (enabled, volume) = console.noises();
         out.push_str(&format!(
@@ -463,6 +543,7 @@ mod tests {
         Some(Arc::new(Mutex::new(State {
             engine: handle,
             control: Control::Organ(console),
+            midi_ports: Vec::new(),
             trem_groups: vec![0, 1],
             trem_engaged: false,
             master_gain: 0.178,
@@ -549,6 +630,53 @@ mod tests {
 
         respond(&state, &Method::Post, "/api/note?manual=9&key=60&on=1");
         assert!(!state_json(&state).contains("\"held\":[60]"), "bad manual ignored");
+    }
+
+    #[test]
+    fn midi_routing_survives_the_api() {
+        let Some(state) = demo_state() else { return };
+
+        // Demo set: First Manual, Second Manual, Pedal — the default map
+        // puts the keyboards first, so channel 1 plays manual 1.
+        let body = state_json(&state);
+        assert!(
+            body.contains("\"midi\":{\"ports\":[]"),
+            "no inputs on a test rig: {body}"
+        );
+        assert!(
+            body.contains("\"channels\":[1,2,0,1,2"),
+            "map wraps over 16 channels: {body}"
+        );
+
+        respond(&state, &Method::Post, "/api/midi/channel?ch=0&manual=0");
+        assert!(state_json(&state).contains("\"channels\":[0,2,0,1,2"));
+        // A manual that doesn't exist is refused, not clamped into range.
+        respond(&state, &Method::Post, "/api/midi/channel?ch=0&manual=9");
+        assert!(state_json(&state).contains("\"channels\":[0,2,0,1,2"));
+
+        state.lock().expect("state").midi_ports = vec![crate::MidiPort {
+            name: "Test Keyboard".into(),
+            enabled: true,
+            route: None,
+        }];
+        respond(
+            &state,
+            &Method::Post,
+            "/api/midi/port?id=0&route=2&enabled=0",
+        );
+        let body = state_json(&state);
+        assert!(
+            body.contains("{\"id\":0,\"name\":\"Test Keyboard\",\"enabled\":false,\"route\":2}"),
+            "port pinned to a manual and muted: {body}"
+        );
+        // -1 hands the device back to the channel map; an out-of-range
+        // manual does the same rather than routing notes nowhere.
+        respond(&state, &Method::Post, "/api/midi/port?id=0&route=-1");
+        assert!(state_json(&state).contains("\"route\":-1"));
+        respond(&state, &Method::Post, "/api/midi/port?id=0&route=7");
+        assert!(state_json(&state).contains("\"route\":-1"));
+        // An unknown port id is a no-op, not a panic.
+        respond(&state, &Method::Post, "/api/midi/port?id=42&route=1");
     }
 
     #[test]

@@ -157,6 +157,15 @@ impl Console {
         let Some(manual_index) = self.manual_index(channel) else {
             return Vec::new();
         };
+        self.expression_manual(manual_index, value)
+    }
+
+    /// The same pedal move addressed by manual — used when an input
+    /// device is pinned to one manual and its channel means nothing.
+    pub fn expression_manual(&mut self, manual_index: usize, value: u8) -> Vec<(u8, f32)> {
+        if manual_index >= self.manual_enclosures.len() {
+            return Vec::new();
+        }
         let position = value.min(127) as f32 / 127.0;
         let mut moves = Vec::new();
         for &enclosure in &self.manual_enclosures[manual_index] {
@@ -343,6 +352,27 @@ impl Console {
         }
         let mapped = self.channel_map[channel as usize % self.channel_map.len()];
         (mapped < self.organ.manuals.len()).then_some(mapped)
+    }
+
+    /// The map as all 16 channels, wrap resolved — what a UI edits.
+    /// Short maps wrap (3 manuals: channel 4 plays what channel 1 does),
+    /// which is invisible until someone wants to change one channel; so
+    /// the editable form is always the full sixteen.
+    pub fn channel_map(&self) -> Vec<usize> {
+        (0..16)
+            .map(|channel| self.manual_index(channel).unwrap_or(0))
+            .collect()
+    }
+
+    /// Point one MIDI channel at one manual. Expands the map to all
+    /// sixteen channels first, so the edit means exactly what it says.
+    pub fn set_channel(&mut self, channel: u8, manual_index: usize) {
+        if manual_index >= self.organ.manuals.len() || channel >= 16 {
+            return;
+        }
+        let mut map = self.channel_map();
+        map[channel as usize] = manual_index;
+        self.channel_map = map;
     }
 
     /// Voices retired by this press: a re-press before the note-off
