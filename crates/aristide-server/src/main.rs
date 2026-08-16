@@ -363,9 +363,24 @@ pub enum Control {
     Organ(Console),
 }
 
+/// One MIDI input as the console sees it: what it is called, whether we
+/// listen to it, and where its notes land. `route: None` means "obey the
+/// channel map" — the classic behaviour, right for a console whose
+/// manuals already speak on separate channels. `Some(manual)` pins every
+/// note from that device to one manual, which is what makes two plain
+/// single-channel keyboards into a two-manual organ.
+pub struct MidiPort {
+    pub name: String,
+    pub enabled: bool,
+    pub route: Option<usize>,
+}
+
 pub struct State {
     pub engine: EngineHandle,
     pub control: Control,
+    /// MIDI inputs in connection order; the index is the port id the
+    /// HTTP API and the input callbacks both use.
+    pub midi_ports: Vec<MidiPort>,
     /// Wind groups the tremulant acts on (from the sidecar; empty when
     /// no set is loaded).
     pub trem_groups: Vec<u8>,
@@ -750,6 +765,7 @@ fn main() -> Result<()> {
     let state = Arc::new(Mutex::new(State {
         engine: handle,
         control,
+        midi_ports: Vec::new(),
         trem_groups,
         trem_engaged: false,
         master_gain: args.master_gain.unwrap_or(0.178),
@@ -761,15 +777,7 @@ fn main() -> Result<()> {
     }
     // MIDI is optional: the console UI can play notes on its own, so a
     // box with no sequencer access still gets a working instrument.
-    let connections = connect_all_midi_inputs(&state).unwrap_or_else(|err| {
-        tracing::warn!("MIDI unavailable ({err}) — console UI input only");
-        Vec::new()
-    });
-    if connections.is_empty() {
-        tracing::warn!("no MIDI inputs found — plug in the console and restart");
-    } else {
-        tracing::info!("listening on {} MIDI input(s) — play!", connections.len());
-    }
+    spawn_midi_supervisor(Arc::clone(&state));
 
     // Recorder thread: drain the tap into a WAV (16-bit PCM).
     let recording = args.record.clone();
@@ -909,24 +917,114 @@ fn pick_f32_config(device: &cpal::Device) -> Result<cpal::StreamConfig> {
 /// held-key state and pedals stay sane).
 const MIDI_CONNECT_GRACE: std::time::Duration = std::time::Duration::from_millis(400);
 
-fn connect_all_midi_inputs(state: &Arc<Mutex<State>>) -> Result<Vec<MidiInputConnection<()>>> {
-    use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
+/// How often the supervisor re-reads the port list. A keyboard plugged
+/// in mid-session should appear in Preferences without a restart, and a
+/// second of latency is imperceptible for that.
+const MIDI_SCAN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1000);
 
+/// Set by the HTTP API to force a reconnect even when the port list
+/// looks unchanged (a cable re-seated behind an unchanged name).
+static MIDI_RESCAN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn request_midi_rescan() {
+    MIDI_RESCAN.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Owns every open MIDI input for the life of the process. Connections
+/// are not `Send`-friendly to pass around, and they must outlive the
+/// call that made them, so one thread holds them and rebuilds the whole
+/// set whenever the hardware changes — that is also the cheapest correct
+/// answer to hot-plug.
+fn spawn_midi_supervisor(state: Arc<Mutex<State>>) {
+    std::thread::Builder::new()
+        .name("aristide-midi".into())
+        .spawn(move || {
+            let mut connections: Vec<MidiInputConnection<()>> = Vec::new();
+            let mut known: Vec<String> = Vec::new();
+            loop {
+                let forced = MIDI_RESCAN.swap(false, std::sync::atomic::Ordering::Relaxed);
+                match port_names() {
+                    Ok(names) if forced || names != known => {
+                        // Drop first: a port can only be subscribed once,
+                        // and the old callbacks index the old port list.
+                        connections.clear();
+                        if !known.is_empty() || !names.is_empty() {
+                            tracing::info!("midi: {} input(s) found", names.len());
+                        }
+                        connections = connect_all_midi_inputs(&state, &names);
+                        if connections.is_empty() {
+                            tracing::warn!(
+                                "no MIDI inputs connected — console UI and computer \
+                                 keyboard still play"
+                            );
+                        }
+                        known = names;
+                    }
+                    Ok(_) => {}
+                    Err(err) => {
+                        if !known.is_empty() || connections.is_empty() {
+                            tracing::warn!("MIDI unavailable ({err}) — console UI input only");
+                        }
+                        known.clear();
+                    }
+                }
+                if SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
+                    return;
+                }
+                std::thread::sleep(MIDI_SCAN_INTERVAL);
+            }
+        })
+        .ok();
+}
+
+fn port_names() -> Result<Vec<String>> {
     let mut probe = MidiInput::new("aristide-probe")?;
     probe.ignore(Ignore::All);
-    let port_count = probe.ports().len();
+    Ok(probe
+        .ports()
+        .iter()
+        .enumerate()
+        .map(|(index, port)| {
+            probe
+                .port_name(port)
+                .unwrap_or_else(|_| format!("port {index}"))
+        })
+        .collect())
+}
 
+/// Connect every input and publish the port list into the shared state.
+/// Per-port settings survive a rescan by name, so unplugging one
+/// keyboard never re-routes the others.
+fn connect_all_midi_inputs(
+    state: &Arc<Mutex<State>>,
+    names: &[String],
+) -> Vec<MidiInputConnection<()>> {
+    use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
+
+    let previous: Vec<MidiPort> =
+        std::mem::take(&mut state.lock().expect("state poisoned").midi_ports);
+    let mut ports: Vec<MidiPort> = Vec::new();
     let mut connections = Vec::new();
     let mut grace_counters: Vec<(String, Arc<AtomicU32>)> = Vec::new();
-    for index in 0..port_count {
-        let mut input = MidiInput::new("aristide")?;
+
+    for (index, name) in names.iter().enumerate() {
+        let settings = previous.iter().find(|p| &p.name == name);
+        let enabled = settings.map(|p| p.enabled).unwrap_or(true);
+        let route = settings.and_then(|p| p.route);
+        // The port id the callback carries is this port's slot in
+        // `state.midi_ports`, which is what the UI edits.
+        let id = ports.len();
+        let mut input = match MidiInput::new("aristide") {
+            Ok(input) => input,
+            Err(err) => {
+                tracing::warn!("midi: {name}: {err}");
+                continue;
+            }
+        };
         input.ignore(Ignore::All);
         let Some(port) = input.ports().into_iter().nth(index) else {
             continue;
         };
-        let name = input
-            .port_name(&port)
-            .unwrap_or_else(|_| format!("port {index}"));
         let state = Arc::clone(state);
         let suppressed = Arc::new(AtomicU32::new(0));
         let counter = Arc::clone(&suppressed);
@@ -942,18 +1040,24 @@ fn connect_all_midi_inputs(state: &Arc<Mutex<State>>) -> Result<Vec<MidiInputCon
                     counter.fetch_add(1, Relaxed);
                     return;
                 }
-                handle_midi(message, &state)
+                handle_midi(message, id, &state)
             },
             (),
         ) {
             Ok(connection) => {
                 tracing::info!("midi: connected to {name}");
                 connections.push(connection);
-                grace_counters.push((name, suppressed));
+                grace_counters.push((name.clone(), suppressed));
+                ports.push(MidiPort {
+                    name: name.clone(),
+                    enabled,
+                    route,
+                });
             }
             Err(err) => tracing::warn!("midi: failed to connect to {name}: {err}"),
         }
     }
+    state.lock().expect("state poisoned").midi_ports = ports;
 
     // Report once the grace has passed on every port; a count of 0 in the
     // log rules the connect-time burst out, a nonzero count confirms it.
@@ -971,16 +1075,23 @@ fn connect_all_midi_inputs(state: &Arc<Mutex<State>>) -> Result<Vec<MidiInputCon
             })
             .ok();
     }
-    Ok(connections)
+    connections
 }
 
-fn handle_midi(message: &[u8], state: &Mutex<State>) {
+fn handle_midi(message: &[u8], port: usize, state: &Mutex<State>) {
     let &[status, data1, data2] = message else {
         return;
     };
     let channel = status & 0x0F;
     let mut state = state.lock().expect("state poisoned");
     let expression_cc = state.expression_cc;
+    // A port muted in Preferences is deaf to everything, including
+    // note-offs: it sent no note-ons either, so nothing can hang.
+    let route = match state.midi_ports.get(port) {
+        Some(port) if !port.enabled => return,
+        Some(port) => port.route,
+        None => None,
+    };
     let State {
         engine, control, ..
     } = &mut *state;
@@ -1004,7 +1115,10 @@ fn handle_midi(message: &[u8], state: &Mutex<State>) {
                 freq_hz: midi_note_to_hz(key),
             }),
             Control::Organ(console) => {
-                let (starts, retriggered) = console.note_on(channel, key);
+                let (starts, retriggered) = match route {
+                    Some(manual) => console.note_on_manual(manual, key),
+                    None => console.note_on(channel, key),
+                };
                 for handle in retriggered {
                     send(Command::StopVoice { handle });
                 }
@@ -1025,7 +1139,11 @@ fn handle_midi(message: &[u8], state: &Mutex<State>) {
         (0x80, key, _) | (0x90, key, 0) => match control {
             Control::Tone => send(Command::NoteOff { key }),
             Control::Organ(console) => {
-                for handle in console.note_off(channel, key) {
+                let released = match route {
+                    Some(manual) => console.note_off_manual(manual, key),
+                    None => console.note_off(channel, key),
+                };
+                for handle in released {
                     send(Command::StopVoice { handle });
                 }
             }
@@ -1039,7 +1157,11 @@ fn handle_midi(message: &[u8], state: &Mutex<State>) {
         // Expression pedal: drive the swell boxes of the channel's manual.
         (0xB0, cc, value) if cc == expression_cc => {
             if let Control::Organ(console) = control {
-                for (enclosure, position) in console.expression(channel, value) {
+                let moves = match route {
+                    Some(manual) => console.expression_manual(manual, value),
+                    None => console.expression(channel, value),
+                };
+                for (enclosure, position) in moves {
                     send(Command::SetEnclosurePosition {
                         enclosure,
                         position,
@@ -1061,6 +1183,103 @@ fn midi_note_to_hz(key: u8) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A live state on the demo set, with `stop` drawn so notes make
+    /// voices (held keys are only recorded for pipes that speak).
+    fn demo_state(stop: &str) -> Option<(Arc<Mutex<State>>, usize)> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testsets/grandorgue-demo/demo.organ");
+        if !path.is_file() {
+            eprintln!("skipping: demo set not present");
+            return None;
+        }
+        let organ = aristide_formats::grandorgue::load(&path)
+            .expect("demo set loads")
+            .organ;
+        let target = organ
+            .stops
+            .iter()
+            .find(|s| s.name == stop)
+            .expect("named stop exists");
+        let manual = organ
+            .manuals
+            .iter()
+            .position(|m| m.id == target.manual)
+            .expect("its manual exists");
+        let drawn = vec![target.id];
+        let loaded = bank::build(&organ, 48000.0).expect("bank builds");
+        let console = Console::new(organ, loaded.specs, drawn, Vec::new());
+        let (_engine, engine) = Engine::new(48000.0, Arc::new(loaded.bank));
+        let state = Arc::new(Mutex::new(State {
+            engine,
+            control: Control::Organ(console),
+            midi_ports: vec![MidiPort {
+                name: "Test Keyboard".into(),
+                enabled: true,
+                route: None,
+            }],
+            trem_groups: Vec::new(),
+            trem_engaged: false,
+            master_gain: 0.178,
+            reverb_wet: None,
+            expression_cc: 11,
+        }));
+        Some((state, manual))
+    }
+
+    fn held_on(state: &Mutex<State>, manual: usize) -> Vec<u8> {
+        let state = state.lock().expect("state poisoned");
+        let Control::Organ(console) = &state.control else {
+            panic!("organ expected");
+        };
+        console.manual_states()[manual].4.clone()
+    }
+
+    /// The point of per-device routing: a plain keyboard that only ever
+    /// speaks on channel 1 can still be the second manual.
+    #[test]
+    fn a_pinned_device_ignores_the_channel_map() {
+        // "Gamba 8'" lives on the demo's Second Manual, which the
+        // default map reaches from channel 2, not channel 0.
+        let Some((state, manual)) = demo_state("Gamba 8'") else {
+            return;
+        };
+        assert_eq!(manual, 2, "the fixture's stop is on the second manual");
+
+        handle_midi(&[0x90, 60, 100], 0, &state);
+        assert!(
+            held_on(&state, 2).is_empty(),
+            "channel 0 is not that manual"
+        );
+        handle_midi(&[0x80, 60, 0], 0, &state);
+
+        state.lock().expect("state").midi_ports[0].route = Some(2);
+        handle_midi(&[0x90, 60, 100], 0, &state);
+        assert_eq!(
+            held_on(&state, 2),
+            vec![60],
+            "pinned device plays its manual"
+        );
+        handle_midi(&[0x80, 60, 0], 0, &state);
+        assert!(held_on(&state, 2).is_empty(), "and releases it again");
+    }
+
+    #[test]
+    fn a_muted_device_is_silent() {
+        let Some((state, manual)) = demo_state("Gamba 8'") else {
+            return;
+        };
+        {
+            let mut state = state.lock().expect("state");
+            state.midi_ports[0].enabled = false;
+            state.midi_ports[0].route = Some(manual);
+        }
+        handle_midi(&[0x90, 60, 100], 0, &state);
+        assert!(
+            held_on(&state, manual).is_empty(),
+            "muted input plays nothing"
+        );
+    }
 
     #[test]
     fn demo_sidecar_starts_cancelled_and_maps_channels() {

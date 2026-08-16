@@ -3,6 +3,8 @@
 Newest first. One entry per work session; keep entries factual and short.
 Milestones refer to DESIGN.md.
 
+- [2026-08-16 — menu bar + preferences, per-device MIDI routing](progress/2026-08-16-menu-bar-preferences.md)
+
 ## 2026-08-12 — enclosures / swell boxes (gap analysis §1)
 
 Research mandate ("lots and lots of active research"): three parallel
