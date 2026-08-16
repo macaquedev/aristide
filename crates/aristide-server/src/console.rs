@@ -375,6 +375,28 @@ impl Console {
         self.channel_map = map;
     }
 
+    /// Replace the whole map (restoring a saved one). Entries naming a
+    /// manual this organ hasn't got are dropped back to the default,
+    /// so an edited config file can't silence a channel by typo.
+    pub fn set_channel_map(&mut self, map: Vec<usize>) {
+        let default = default_channel_map(&self.organ);
+        let manuals = self.organ.manuals.len();
+        self.channel_map = map
+            .into_iter()
+            .enumerate()
+            .map(|(channel, manual)| {
+                if manual < manuals {
+                    manual
+                } else {
+                    default[channel % default.len()]
+                }
+            })
+            .collect();
+        if self.channel_map.is_empty() {
+            self.channel_map = default;
+        }
+    }
+
     /// Voices retired by this press: a re-press before the note-off
     /// (key bounce, fast repetition) must release the previous voices —
     /// a pipe can't speak twice, and doubling correlated audio jumps

@@ -26,6 +26,7 @@ export class Preferences {
       tabs: root.getElementById("prefs-tabs"),
       panes: [...root.querySelectorAll("#prefs .pane")],
       ports: root.getElementById("midi-ports"),
+      unassigned: root.getElementById("midi-unassigned"),
       channels: root.getElementById("midi-channels"),
       rescan: root.getElementById("midi-rescan"),
       temperament: root.getElementById("set-temperament"),
@@ -129,11 +130,16 @@ export class Preferences {
     for (const port of midi.ports) {
       const row = this.el.ports.querySelector(`[data-port="${port.id}"]`);
       if (!row) continue;
-      row.classList.toggle("muted", !port.enabled);
-      row.querySelector(".port-enabled").checked = port.enabled;
+      row.classList.toggle("unassigned", port.route === "none");
       const route = row.querySelector(".port-route");
-      if (this.root.activeElement !== route) route.value = String(port.route);
+      if (this.root.activeElement !== route) route.value = port.route;
     }
+
+    // Silence is the honest default for an organ nobody has set up, but
+    // it looks like a fault unless the dialog says so.
+    const nothingAssigned =
+      midi.ports.length > 0 && midi.ports.every((p) => p.route === "none");
+    this.el.unassigned.classList.toggle("hidden", !nothingAssigned);
 
     midi.channels.forEach((manual, channel) => {
       const select = this.el.channels.querySelector(`[data-channel="${channel}"]`);
@@ -156,25 +162,24 @@ export class Preferences {
       row.className = "midi-port";
       row.dataset.port = port.id;
 
-      const listen = document.createElement("input");
-      listen.type = "checkbox";
-      listen.className = "port-enabled";
-      listen.title = "Listen to this device";
-      listen.addEventListener("change", () =>
-        this.send(commands.midiPort(port.id, { enabled: listen.checked ? 1 : 0 }))
-      );
-
       const name = document.createElement("span");
       name.className = "port-name";
       name.textContent = port.name;
       name.title = port.name;
 
+      // One control, three states: silent, channel-driven, or pinned.
+      // A separate mute switch would only be a second way to say "none".
       const route = document.createElement("select");
       route.className = "port-route";
-      const auto = document.createElement("option");
-      auto.value = "-1";
-      auto.textContent = "follow channel map";
-      route.append(auto);
+      for (const [value, label] of [
+        ["none", "not assigned"],
+        ["channels", "follow channel map"],
+      ]) {
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = label;
+        route.append(option);
+      }
       for (const manual of this.manuals) {
         const option = document.createElement("option");
         option.value = String(manual.idx);
@@ -182,11 +187,11 @@ export class Preferences {
         route.append(option);
       }
       route.addEventListener("change", () => {
-        this.send(commands.midiPort(port.id, { route: route.value }));
+        this.send(commands.midiPort(port.id, route.value));
         route.blur();
       });
 
-      row.append(listen, name, route);
+      row.append(name, route);
       this.el.ports.append(row);
     }
   }

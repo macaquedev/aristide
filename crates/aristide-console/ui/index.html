@@ -46,15 +46,22 @@
             <button class="ghost" id="midi-rescan">Rescan</button>
           </div>
           <p class="pane-note">
-            Every input plays the manual its MIDI channel selects below. Pin a
-            device to one manual instead when it speaks on a single channel —
-            two ordinary keyboards then become two manuals.
+            Assignments are kept per organ, and an input starts unassigned on
+            an organ you haven't set up: it stays silent until you place it.
+            A console whose manuals speak on separate MIDI channels wants
+            <em>follow channel map</em>; a keyboard that only ever sends one
+            channel wants a manual of its own.
+          </p>
+          <p class="pane-warn hidden" id="midi-unassigned">
+            Nothing is assigned — this organ will not sound from MIDI until you
+            give an input somewhere to play.
           </p>
           <div id="midi-ports" class="midi-ports"></div>
           <h2>Channel map</h2>
           <p class="pane-note">
             Which manual each MIDI channel plays. Devices set to
             <em>follow channel map</em> obey this; pinned devices ignore it.
+            Saved with this organ.
           </p>
           <div id="midi-channels" class="midi-channels"></div>
         </section>

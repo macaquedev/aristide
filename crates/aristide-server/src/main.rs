@@ -1,4 +1,5 @@
 mod bank;
+mod config;
 mod console;
 mod http;
 mod tuning;
@@ -363,16 +364,37 @@ pub enum Control {
     Organ(Console),
 }
 
-/// One MIDI input as the console sees it: what it is called, whether we
-/// listen to it, and where its notes land. `route: None` means "obey the
-/// channel map" — the classic behaviour, right for a console whose
-/// manuals already speak on separate channels. `Some(manual)` pins every
-/// note from that device to one manual, which is what makes two plain
-/// single-channel keyboards into a two-manual organ.
+/// Where one input's notes land.
+///
+/// `Unassigned` is the default for an organ nobody has configured, and
+/// it is silent: an input the player has not placed must not guess. The
+/// other two are the two shapes real hardware comes in — a console whose
+/// manuals already speak on separate MIDI channels (`ChannelMap`), and a
+/// plain keyboard that only ever sends one channel and therefore has to
+/// be pinned (`Manual`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Route {
+    #[default]
+    Unassigned,
+    ChannelMap,
+    Manual(usize),
+}
+
+impl Route {
+    /// The wire form, shared by the HTTP API and the config file.
+    pub fn as_str(&self) -> String {
+        match self {
+            Route::Unassigned => "none".into(),
+            Route::ChannelMap => crate::config::FOLLOW_CHANNELS.into(),
+            Route::Manual(manual) => manual.to_string(),
+        }
+    }
+}
+
+/// One MIDI input as the console sees it.
 pub struct MidiPort {
     pub name: String,
-    pub enabled: bool,
-    pub route: Option<usize>,
+    pub route: Route,
 }
 
 pub struct State {
@@ -381,6 +403,14 @@ pub struct State {
     /// MIDI inputs in connection order; the index is the port id the
     /// HTTP API and the input callbacks both use.
     pub midi_ports: Vec<MidiPort>,
+    /// Saved assignments for every organ this machine has played.
+    pub midi_config: config::MidiConfig,
+    /// Where to write them back. `None` in tests and when the user has
+    /// no config directory: assignments then last only for this run.
+    pub config_path: Option<PathBuf>,
+    /// The loaded organ's name — the key its assignments are stored
+    /// under, so one rig can drive many instruments differently.
+    pub organ_key: String,
     /// Wind groups the tremulant acts on (from the sidecar; empty when
     /// no set is loaded).
     pub trem_groups: Vec<u8>,
@@ -390,6 +420,81 @@ pub struct State {
     pub reverb_wet: Option<f32>,
     /// MIDI controller number driving swell boxes (sidecar `[enclosures] cc`).
     pub expression_cc: u8,
+}
+
+impl State {
+    fn manual_names(&self) -> Vec<String> {
+        match &self.control {
+            Control::Organ(console) => console
+                .manual_states()
+                .iter()
+                .map(|(_, name, _, _, _)| name.to_string())
+                .collect(),
+            Control::Tone => Vec::new(),
+        }
+    }
+
+    /// What the config file says this port plays on this organ. A
+    /// manual that the loaded set doesn't have leaves the device
+    /// unassigned — silent — rather than sounding the wrong division.
+    fn saved_route(&self, port: &str) -> Route {
+        let Some(assignment) = self
+            .midi_config
+            .organ(&self.organ_key)
+            .and_then(|organ| organ.devices.get(port))
+        else {
+            return Route::Unassigned;
+        };
+        if assignment == config::FOLLOW_CHANNELS {
+            return Route::ChannelMap;
+        }
+        let names = self.manual_names();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        match aristide_formats::sidecar::match_names(&names, assignment).as_slice() {
+            [manual] => Route::Manual(*manual),
+            _ => {
+                tracing::warn!(
+                    "midi: {port:?} is saved as {assignment:?}, which this organ \
+                     has no manual for — leaving it unassigned"
+                );
+                Route::Unassigned
+            }
+        }
+    }
+
+    /// Write the live assignments back for this organ. Called after any
+    /// change from the console, so quitting never loses one.
+    fn persist(&mut self) {
+        let Some(path) = self.config_path.clone() else {
+            return;
+        };
+        let names = self.manual_names();
+        let organ = self.organ_key.clone();
+        let assignments: Vec<(String, Option<String>)> = self
+            .midi_ports
+            .iter()
+            .map(|port| {
+                let value = match port.route {
+                    Route::Unassigned => None,
+                    Route::ChannelMap => Some(config::FOLLOW_CHANNELS.to_string()),
+                    // Stored by name, so it survives a set that renumbers
+                    // its manuals and reads as English in the file.
+                    Route::Manual(manual) => names.get(manual).cloned(),
+                };
+                (port.name.clone(), value)
+            })
+            .collect();
+        for (port, value) in assignments {
+            self.midi_config.set_device(&organ, &port, value.as_deref());
+        }
+        if let Control::Organ(console) = &self.control {
+            let channels = console.channel_map();
+            self.midi_config.set_channels(&organ, channels);
+        }
+        if let Err(err) = config::save(&path, &self.midi_config) {
+            tracing::warn!("midi assignments not saved: {err}");
+        }
+    }
 }
 
 fn main() -> Result<()> {
@@ -446,7 +551,7 @@ fn main() -> Result<()> {
     let mut expression_cc = 11u8;
     let mut reverb_ir: Option<Arc<aristide_engine::reverb::PreparedIr>> = None;
     let mut reverb_wet = 0.0f32;
-    let (sample_bank, control) = match &args.set {
+    let (sample_bank, mut control) = match &args.set {
         Some(path) => {
             let organ = load_organ(path)?;
             let sidecar = match aristide_formats::sidecar::load_for(path) {
@@ -762,10 +867,39 @@ fn main() -> Result<()> {
         None => Vec::new(),
     };
 
+    // Assignments are per organ, so the loaded set's own name is the
+    // key; with no set loaded there is nothing to assign to.
+    let organ_key = match &control {
+        Control::Organ(console) => console.organ_name().to_string(),
+        Control::Tone => String::new(),
+    };
+    let config_path = config::default_path();
+    let midi_config = match &config_path {
+        Some(path) => config::load(path).unwrap_or_else(|err| {
+            tracing::warn!("midi assignments unreadable, starting empty: {err}");
+            Default::default()
+        }),
+        None => {
+            tracing::warn!(
+                "no config directory (XDG_CONFIG_HOME/HOME unset) — MIDI \
+                 assignments will last only for this run"
+            );
+            Default::default()
+        }
+    };
+    if let (Control::Organ(console), Some(organ)) = (&mut control, midi_config.organ(&organ_key))
+        && !organ.channels.is_empty()
+    {
+        console.set_channel_map(organ.channels.clone());
+    }
+
     let state = Arc::new(Mutex::new(State {
         engine: handle,
         control,
         midi_ports: Vec::new(),
+        midi_config,
+        config_path,
+        organ_key,
         trem_groups,
         trem_engaged: false,
         master_gain: args.master_gain.unwrap_or(0.178),
@@ -1001,16 +1135,15 @@ fn connect_all_midi_inputs(
 ) -> Vec<MidiInputConnection<()>> {
     use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
-    let previous: Vec<MidiPort> =
-        std::mem::take(&mut state.lock().expect("state poisoned").midi_ports);
     let mut ports: Vec<MidiPort> = Vec::new();
     let mut connections = Vec::new();
     let mut grace_counters: Vec<(String, Arc<AtomicU32>)> = Vec::new();
 
     for (index, name) in names.iter().enumerate() {
-        let settings = previous.iter().find(|p| &p.name == name);
-        let enabled = settings.map(|p| p.enabled).unwrap_or(true);
-        let route = settings.and_then(|p| p.route);
+        // Assignments come from the config file, keyed by this organ:
+        // a device the player has not placed on THIS instrument is
+        // unassigned, and silent, however it was set on another.
+        let route = state.lock().expect("state poisoned").saved_route(name);
         // The port id the callback carries is this port's slot in
         // `state.midi_ports`, which is what the UI edits.
         let id = ports.len();
@@ -1048,9 +1181,17 @@ fn connect_all_midi_inputs(
                 tracing::info!("midi: connected to {name}");
                 connections.push(connection);
                 grace_counters.push((name.clone(), suppressed));
+                match route {
+                    Route::Unassigned => tracing::info!(
+                        "midi: {name} is unassigned — assign it in Preferences → MIDI"
+                    ),
+                    Route::ChannelMap => tracing::info!("midi: {name} → channel map"),
+                    Route::Manual(manual) => {
+                        tracing::info!("midi: {name} → manual {manual}")
+                    }
+                }
                 ports.push(MidiPort {
                     name: name.clone(),
-                    enabled,
                     route,
                 });
             }
@@ -1085,13 +1226,17 @@ fn handle_midi(message: &[u8], port: usize, state: &Mutex<State>) {
     let channel = status & 0x0F;
     let mut state = state.lock().expect("state poisoned");
     let expression_cc = state.expression_cc;
-    // A port muted in Preferences is deaf to everything, including
-    // note-offs: it sent no note-ons either, so nothing can hang.
-    let route = match state.midi_ports.get(port) {
-        Some(port) if !port.enabled => return,
-        Some(port) => port.route,
-        None => None,
+    // An unassigned port is deaf to everything, including note-offs:
+    // it sent no note-ons either, so nothing can hang. The M1 test tone
+    // has no manuals to assign to and always sounds.
+    let route = match (&state.control, state.midi_ports.get(port)) {
+        (Control::Tone, _) => Route::ChannelMap,
+        (_, Some(port)) => port.route,
+        (_, None) => Route::Unassigned,
     };
+    if route == Route::Unassigned {
+        return;
+    }
     let State {
         engine, control, ..
     } = &mut *state;
@@ -1116,8 +1261,8 @@ fn handle_midi(message: &[u8], port: usize, state: &Mutex<State>) {
             }),
             Control::Organ(console) => {
                 let (starts, retriggered) = match route {
-                    Some(manual) => console.note_on_manual(manual, key),
-                    None => console.note_on(channel, key),
+                    Route::Manual(manual) => console.note_on_manual(manual, key),
+                    _ => console.note_on(channel, key),
                 };
                 for handle in retriggered {
                     send(Command::StopVoice { handle });
@@ -1140,8 +1285,8 @@ fn handle_midi(message: &[u8], port: usize, state: &Mutex<State>) {
             Control::Tone => send(Command::NoteOff { key }),
             Control::Organ(console) => {
                 let released = match route {
-                    Some(manual) => console.note_off_manual(manual, key),
-                    None => console.note_off(channel, key),
+                    Route::Manual(manual) => console.note_off_manual(manual, key),
+                    _ => console.note_off(channel, key),
                 };
                 for handle in released {
                     send(Command::StopVoice { handle });
@@ -1158,8 +1303,8 @@ fn handle_midi(message: &[u8], port: usize, state: &Mutex<State>) {
         (0xB0, cc, value) if cc == expression_cc => {
             if let Control::Organ(console) = control {
                 let moves = match route {
-                    Some(manual) => console.expression_manual(manual, value),
-                    None => console.expression(channel, value),
+                    Route::Manual(manual) => console.expression_manual(manual, value),
+                    _ => console.expression(channel, value),
                 };
                 for (enclosure, position) in moves {
                     send(Command::SetEnclosurePosition {
@@ -1215,9 +1360,11 @@ mod tests {
             control: Control::Organ(console),
             midi_ports: vec![MidiPort {
                 name: "Test Keyboard".into(),
-                enabled: true,
-                route: None,
+                route: Route::ChannelMap,
             }],
+            midi_config: Default::default(),
+            config_path: None,
+            organ_key: "test organ".into(),
             trem_groups: Vec::new(),
             trem_engaged: false,
             master_gain: 0.178,
@@ -1253,7 +1400,7 @@ mod tests {
         );
         handle_midi(&[0x80, 60, 0], 0, &state);
 
-        state.lock().expect("state").midi_ports[0].route = Some(2);
+        state.lock().expect("state").midi_ports[0].route = Route::Manual(2);
         handle_midi(&[0x90, 60, 100], 0, &state);
         assert_eq!(
             held_on(&state, 2),
@@ -1264,21 +1411,55 @@ mod tests {
         assert!(held_on(&state, 2).is_empty(), "and releases it again");
     }
 
+    /// The default on an organ nobody has configured: an input the
+    /// player has not placed sounds nothing at all, rather than guessing
+    /// a division from its MIDI channel.
     #[test]
-    fn a_muted_device_is_silent() {
+    fn an_unassigned_device_is_silent() {
         let Some((state, manual)) = demo_state("Gamba 8'") else {
             return;
         };
-        {
-            let mut state = state.lock().expect("state");
-            state.midi_ports[0].enabled = false;
-            state.midi_ports[0].route = Some(manual);
-        }
+        state.lock().expect("state").midi_ports[0].route = Route::Unassigned;
         handle_midi(&[0x90, 60, 100], 0, &state);
-        assert!(
-            held_on(&state, manual).is_empty(),
-            "muted input plays nothing"
-        );
+        for index in 0..=manual {
+            assert!(
+                held_on(&state, index).is_empty(),
+                "unassigned input plays nothing, manual {index}"
+            );
+        }
+    }
+
+    /// Assignments are per organ and are stored by name, so the same
+    /// keyboard can be the Récit here and the Great on another set.
+    #[test]
+    fn saved_assignments_resolve_against_the_loaded_organ() {
+        let Some((state, manual)) = demo_state("Gamba 8'") else {
+            return;
+        };
+        let mut state = state.lock().expect("state");
+        let organ = state.organ_key.clone();
+        state
+            .midi_config
+            .set_device(&organ, "Test Keyboard", Some("Second Manual"));
+        assert_eq!(state.saved_route("Test Keyboard"), Route::Manual(manual));
+
+        state
+            .midi_config
+            .set_device(&organ, "Test Keyboard", Some(config::FOLLOW_CHANNELS));
+        assert_eq!(state.saved_route("Test Keyboard"), Route::ChannelMap);
+
+        // A manual this organ hasn't got, and a device saved under a
+        // different organ, both leave it unassigned rather than sounding
+        // the wrong division.
+        state
+            .midi_config
+            .set_device(&organ, "Test Keyboard", Some("Positif de dos"));
+        assert_eq!(state.saved_route("Test Keyboard"), Route::Unassigned);
+        state
+            .midi_config
+            .set_device("Another Organ", "Test Keyboard", Some("Second Manual"));
+        state.midi_config.set_device(&organ, "Test Keyboard", None);
+        assert_eq!(state.saved_route("Test Keyboard"), Route::Unassigned);
     }
 
     #[test]

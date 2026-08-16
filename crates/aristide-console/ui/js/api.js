@@ -30,9 +30,10 @@ export const commands = {
   // temperament change never has to re-send pitch or transposition.
   tuning: (fields) => `/api/tuning?${new URLSearchParams(fields)}`,
   enclosure: (idx, value) => `/api/enclosure?idx=${idx}&v=${value}`,
-  // Input routing. `route = -1` hands the device back to the channel map.
-  midiPort: (id, fields) =>
-    `/api/midi/port?id=${id}&${new URLSearchParams(fields)}`,
+  // Input routing: "none" (unassigned, and silent), "channels" (obey
+  // the channel map), or a manual index.
+  midiPort: (id, route) =>
+    `/api/midi/port?id=${id}&route=${encodeURIComponent(route)}`,
   midiChannel: (channel, manual) =>
     `/api/midi/channel?ch=${channel}&manual=${manual}`,
   midiRescan: () => "/api/midi/rescan",
