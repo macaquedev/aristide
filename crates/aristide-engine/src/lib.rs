@@ -25,10 +25,10 @@ pub mod wind;
 use std::sync::Arc;
 
 use bank::{Sample, SampleBank};
-use enclosure::{Enclosure, EnclosureParams, ENCLOSURE_NONE, MAX_ENCLOSURES};
+use enclosure::{ENCLOSURE_NONE, Enclosure, EnclosureParams, MAX_ENCLOSURES};
 use resample::SincTable;
 use rtrb::{Consumer, Producer, RingBuffer};
-use wind::{WindGroup, WindParams, MAX_WIND_GROUPS};
+use wind::{MAX_WIND_GROUPS, WindGroup, WindParams};
 
 pub const MAX_VOICES: usize = 2048;
 const COMMAND_QUEUE_CAPACITY: usize = 8192;
@@ -95,14 +95,20 @@ pub enum Command {
         enclosure: u8,
     },
     /// Reconfigure one wind group's supply model.
-    SetWind { group: u8, params: WindParams },
+    SetWind {
+        group: u8,
+        params: WindParams,
+    },
     /// Configure one wind group's tremulant.
     SetTremulantParams {
         group: u8,
         params: wind::TremulantParams,
     },
     /// Engage/disengage one wind group's tremulant (ramped).
-    SetTremulant { group: u8, engaged: bool },
+    SetTremulant {
+        group: u8,
+        engaged: bool,
+    },
     /// Reconfigure one enclosure's box model.
     SetEnclosure {
         enclosure: u8,
@@ -110,21 +116,37 @@ pub enum Command {
     },
     /// Move one enclosure's pedal (0 = closed, 1 = open); the shutter
     /// inertia model slews toward it.
-    SetEnclosurePosition { enclosure: u8, position: f32 },
+    SetEnclosurePosition {
+        enclosure: u8,
+        position: f32,
+    },
     /// Release the voice started with `handle`. Loop-less (percussive)
     /// voices ignore this and play to their end.
-    StopVoice { handle: u64 },
+    StopVoice {
+        handle: u64,
+    },
     /// Silence a voice quickly WITHOUT its release tail (a short fade) —
     /// for retiring control-noise voices silently.
-    KillVoice { handle: u64 },
+    KillVoice {
+        handle: u64,
+    },
     /// Start/stop the built-in additive test tone (no-set mode).
-    NoteOn { key: u8, freq_hz: f32 },
-    NoteOff { key: u8 },
+    NoteOn {
+        key: u8,
+        freq_hz: f32,
+    },
+    NoteOff {
+        key: u8,
+    },
     /// Fade out every sounding voice.
     AllNotesOff,
-    SetMasterGain { linear: f32 },
+    SetMasterGain {
+        linear: f32,
+    },
     /// Convolution reverb wet level (0 bypasses entirely).
-    SetReverbWet { wet: f32 },
+    SetReverbWet {
+        wet: f32,
+    },
 }
 
 /// Control-plane side of the engine. Not RT-constrained.
@@ -367,14 +389,14 @@ impl SampledVoice {
         let current_loop = ctx.current_loop;
         let looping = ctx.looping;
         // A scheduled release fires when its pallet-delay runs out.
-        if self.phase == SamplePhase::Held {
-            if let Some((delay, age_ms)) = self.pending_release {
-                if delay == 0 {
-                    self.pending_release = None;
-                    self.release(sample, age_ms, ctx.output_sr);
-                } else {
-                    self.pending_release = Some((delay - 1, age_ms));
-                }
+        if self.phase == SamplePhase::Held
+            && let Some((delay, age_ms)) = self.pending_release
+        {
+            if delay == 0 {
+                self.pending_release = None;
+                self.release(sample, age_ms, ctx.output_sr);
+            } else {
+                self.pending_release = Some((delay - 1, age_ms));
             }
         }
         // During a crossfade into a separate release sample, the tail
@@ -465,9 +487,7 @@ impl SampledVoice {
             }
         }
 
-        if self.tail_charge_deficit > 0.0
-            && !matches!(self.phase, SamplePhase::Held)
-        {
+        if self.tail_charge_deficit > 0.0 && !matches!(self.phase, SamplePhase::Held) {
             let factor = self.tail_charge + self.tail_charge_deficit;
             left *= factor;
             right *= factor;
@@ -506,31 +526,28 @@ impl SampledVoice {
             // cursor has left it for the release material. On each pass
             // a fresh loop is drawn at random (multi-loop sets), which
             // decorrelates repetition.
-            if self.phase != SamplePhase::Tail && !self.past_loop {
-                if let Some((start, end)) = current_loop {
-                    if self.position >= end as f64 {
-                        // Wrap to THIS loop's own start — the only splice
-                        // the set's author guaranteed seamless. Loop
-                        // variety comes from choosing which loop's end we
-                        // run toward next (all loops live in one
-                        // continuous recording, so playing from here to
-                        // any later end is seamless too). Jumping into a
-                        // different loop's start pops audibly.
-                        let overshoot = self.position - end as f64;
-                        self.position = (start as f64 + overshoot).min(end as f64 - 1.0);
-                        let count = sample.loop_count();
-                        if count > 1 {
-                            let candidate = (wind::xorshift_unit(&mut self.rng) * count as f32)
-                                as u8
-                                % count as u8;
-                            if let Some((_, candidate_end)) =
-                                sample.loop_at(candidate as usize)
-                            {
-                                if (candidate_end as f64) > self.position {
-                                    self.loop_index = candidate;
-                                }
-                            }
-                        }
+            if self.phase != SamplePhase::Tail
+                && !self.past_loop
+                && let Some((start, end)) = current_loop
+                && self.position >= end as f64
+            {
+                // Wrap to THIS loop's own start — the only splice
+                // the set's author guaranteed seamless. Loop
+                // variety comes from choosing which loop's end we
+                // run toward next (all loops live in one
+                // continuous recording, so playing from here to
+                // any later end is seamless too). Jumping into a
+                // different loop's start pops audibly.
+                let overshoot = self.position - end as f64;
+                self.position = (start as f64 + overshoot).min(end as f64 - 1.0);
+                let count = sample.loop_count();
+                if count > 1 {
+                    let candidate =
+                        (wind::xorshift_unit(&mut self.rng) * count as f32) as u8 % count as u8;
+                    if let Some((_, candidate_end)) = sample.loop_at(candidate as usize)
+                        && (candidate_end as f64) > self.position
+                    {
+                        self.loop_index = candidate;
                     }
                 }
             }
@@ -623,8 +640,7 @@ impl SampledVoice {
                 let full_reverb_ms = (60.0 * tail_seconds + 40.0).clamp(100.0, 350.0);
                 let mut staccato_extra_db_per_s = 0.0f32;
                 if (age_ms as f32) < full_reverb_ms {
-                    let charge =
-                        (1.0 - (-(age_ms as f32) / (0.5 * full_reverb_ms)).exp()).max(0.1);
+                    let charge = (1.0 - (-(age_ms as f32) / (0.5 * full_reverb_ms)).exp()).max(0.1);
                     self.tail_charge = charge;
                     self.tail_charge_deficit = 1.0 - charge;
                     self.tail_charge_step = (-1.0 / (0.15 * output_rate)).exp();
@@ -647,15 +663,13 @@ impl SampledVoice {
                     let cents = (4.0 * (f0 / 100.0).sqrt()).clamp(1.0, 12.0);
                     self.release_bend_depth = 1.0 - (-(cents as f32) / 1200.0).exp2();
                     // Pressure collapse: ~12 periods, 15-80 ms.
-                    let tau_s = (12.0 * period / sample.sample_rate_hz() as f64)
-                        .clamp(0.015, 0.080);
-                    self.release_bend_step =
-                        1.0 - (-1.0 / (tau_s as f32 * output_rate)).exp();
+                    let tau_s =
+                        (12.0 * period / sample.sample_rate_hz() as f64).clamp(0.015, 0.080);
+                    self.release_bend_step = 1.0 - (-1.0 / (tau_s as f32 * output_rate)).exp();
                     self.release_bend = 0.0;
                 }
                 let lambda = sample.tail_decay_db_per_s();
-                let repitch =
-                    (self.rate as f32) * output_rate / sample.sample_rate_hz();
+                let repitch = (self.rate as f32) * output_rate / sample.sample_rate_hz();
                 let comp_db_per_s = if lambda > 0.0 && (repitch - 1.0).abs() > 0.01 {
                     (lambda * (repitch - 1.0)).clamp(-25.0, 25.0)
                 } else {
@@ -668,8 +682,7 @@ impl SampledVoice {
                 // counting the level the decay compensation adds back.
                 let out_tail_seconds = tail_seconds / repitch.max(0.01);
                 let settle_db_per_s = if out_tail_seconds > 0.3 {
-                    let eof_db =
-                        sample.tail_eof_level_db() + comp_db_per_s * out_tail_seconds;
+                    let eof_db = sample.tail_eof_level_db() + comp_db_per_s * out_tail_seconds;
                     ((eof_db + 60.0) / out_tail_seconds).clamp(0.0, 60.0)
                 } else {
                     0.0
@@ -680,7 +693,7 @@ impl SampledVoice {
                 } else {
                     1.0
                 };
-self.fade = 0.0;
+                self.fade = 0.0;
                 self.phase = SamplePhase::Crossfade;
             }
             Some(_) => {} // already crossfading
@@ -797,18 +810,15 @@ impl Engine {
             let max_stagger =
                 (self.release_stagger_frames * batch_scale).min(0.025 * self.sample_rate);
             for voice in self.voices.iter_mut() {
-                if let Voice::Sampled(sampled) = voice {
-                    if self.stop_batch.binary_search(&sampled.handle).is_ok() {
-                        let age_ms = (sampled.age_frames as f32 / per_ms) as u32;
-                        if sampled.phase == SamplePhase::Held
-                            && sampled.pending_release.is_none()
-                        {
-                            let delay = (wind::xorshift_unit(&mut sampled.rng)
-                                * max_stagger) as u16;
-                            sampled.pending_release = Some((delay, age_ms));
-                        } else if let Some(sample) = self.bank.get(sampled.sample) {
-                            sampled.release(sample, age_ms, self.sample_rate);
-                        }
+                if let Voice::Sampled(sampled) = voice
+                    && self.stop_batch.binary_search(&sampled.handle).is_ok()
+                {
+                    let age_ms = (sampled.age_frames as f32 / per_ms) as u32;
+                    if sampled.phase == SamplePhase::Held && sampled.pending_release.is_none() {
+                        let delay = (wind::xorshift_unit(&mut sampled.rng) * max_stagger) as u16;
+                        sampled.pending_release = Some((delay, age_ms));
+                    } else if let Some(sample) = self.bank.get(sampled.sample) {
+                        sampled.release(sample, age_ms, self.sample_rate);
                     }
                 }
             }
@@ -825,10 +835,10 @@ impl Engine {
         // the fresh attacks but still cost full render time).
         let mut tail_count = 0usize;
         for voice in self.voices.iter() {
-            if let Voice::Sampled(sampled) = voice {
-                if matches!(sampled.phase, SamplePhase::Tail | SamplePhase::Crossfade) {
-                    tail_count += 1;
-                }
+            if let Voice::Sampled(sampled) = voice
+                && matches!(sampled.phase, SamplePhase::Tail | SamplePhase::Crossfade)
+            {
+                tail_count += 1;
             }
         }
         if tail_count > TAIL_VOICE_BUDGET {
@@ -938,9 +948,7 @@ impl Engine {
                     // fine, but ±2 % deviations are firmly linear).
                     let mut deviation = 0.0;
                     if !lite && params.flow_noise > 0.0 && sampled.wind_weight > 0.0 {
-                        sampled
-                            .wander
-                            .step(dt, params.flow_noise, &mut sampled.rng);
+                        sampled.wander.step(dt, params.flow_noise, &mut sampled.rng);
                         deviation = sampled.wander.deviation();
                     }
                     let (rate_scale, gain, treble) = if lite {
@@ -949,9 +957,7 @@ impl Engine {
                         (
                             (chest.rate_factor() * (1.0 + params.pitch_exponent * deviation))
                                 as f64,
-                            master
-                                * chest.gain_factor()
-                                * (1.0 + params.gain_exponent * deviation),
+                            master * chest.gain_factor() * (1.0 + params.gain_exponent * deviation),
                             (chest.brightness_factor()
                                 * (1.0 + params.brightness_exponent * deviation))
                                 .clamp(0.25, 2.0),
@@ -999,7 +1005,7 @@ impl Engine {
                                     current_loop_index = sampled.loop_index;
                                     ctx = sampled.block_context(current, external, rate_scale);
                                     ctx.lite = lite;
-                    ctx.output_sr = output_sr;
+                                    ctx.output_sr = output_sr;
                                 }
                                 None => {
                                     *voice = Voice::Idle;
@@ -1015,7 +1021,7 @@ impl Engine {
                             external = current_external_id.and_then(|id| bank.get(id));
                             ctx = sampled.block_context(current, external, rate_scale);
                             ctx.lite = lite;
-                    ctx.output_sr = output_sr;
+                            ctx.output_sr = output_sr;
                         }
                         match sampled.tick(
                             current,
@@ -1045,8 +1051,8 @@ impl Engine {
                                         left = lp[0] + sampled.enc_hi_gain * (left - lp[0]);
                                         right = lp[1] + sampled.enc_hi_gain * (right - lp[1]);
                                     }
-                                    sampled.enc_gain += *enc_ramp
-                                        * (sampled.enc_gain_target - sampled.enc_gain);
+                                    sampled.enc_gain +=
+                                        *enc_ramp * (sampled.enc_gain_target - sampled.enc_gain);
                                     left *= sampled.enc_gain;
                                     right *= sampled.enc_gain;
                                 }
@@ -1081,8 +1087,7 @@ impl Engine {
             for value in frame.iter() {
                 peak = peak.max(value.abs());
             }
-            self.limiter_envelope =
-                peak.max(self.limiter_envelope * self.limiter_release);
+            self.limiter_envelope = peak.max(self.limiter_envelope * self.limiter_release);
             if self.limiter_envelope > LIMITER_CEILING {
                 let gain = LIMITER_CEILING / self.limiter_envelope;
                 for value in frame.iter_mut() {
@@ -1112,7 +1117,7 @@ impl Engine {
                 brightness,
                 enclosure,
             } => {
-                if self.bank.get(sample).is_none() || !(rate > 0.0) {
+                if self.bank.get(sample).is_none() || rate.is_nan() || rate <= 0.0 {
                     return;
                 }
                 let enclosure = if (enclosure as usize) < MAX_ENCLOSURES {
@@ -1206,12 +1211,13 @@ impl Engine {
             }
             Command::KillVoice { handle } => {
                 for voice in self.voices.iter_mut() {
-                    if let Voice::Sampled(sampled) = voice {
-                        if sampled.handle == handle && sampled.phase != SamplePhase::FadeOut {
-                            sampled.amplitude = 1.0;
-                            sampled.fade_scale = 1.0;
-                            sampled.phase = SamplePhase::FadeOut;
-                        }
+                    if let Voice::Sampled(sampled) = voice
+                        && sampled.handle == handle
+                        && sampled.phase != SamplePhase::FadeOut
+                    {
+                        sampled.amplitude = 1.0;
+                        sampled.fade_scale = 1.0;
+                        sampled.phase = SamplePhase::FadeOut;
                     }
                 }
             }
@@ -1228,12 +1234,11 @@ impl Engine {
             }
             Command::NoteOff { key } => {
                 for voice in self.voices.iter_mut() {
-                    if let Voice::Tone(tone) = voice {
-                        if tone.key == key
-                            && (tone.stage == ToneStage::Attack || tone.stage == ToneStage::Sustain)
-                        {
-                            tone.stage = ToneStage::Release;
-                        }
+                    if let Voice::Tone(tone) = voice
+                        && tone.key == key
+                        && (tone.stage == ToneStage::Attack || tone.stage == ToneStage::Sustain)
+                    {
+                        tone.stage = ToneStage::Release;
                     }
                 }
             }
@@ -1320,7 +1325,11 @@ impl Engine {
             .iter()
             .filter(|v| matches!(v, Voice::Idle))
             .count();
-        assert_eq!(idle, self.free_slots.len(), "idle voices lost from free list");
+        assert_eq!(
+            idle,
+            self.free_slots.len(),
+            "idle voices lost from free list"
+        );
     }
 
     /// Current shutter position of an enclosure (diagnostics and tests).
@@ -1333,10 +1342,7 @@ impl Engine {
 
     /// Current pressure of a wind group (diagnostics and tests).
     pub fn wind_pressure(&self, group: usize) -> f32 {
-        self.wind
-            .get(group)
-            .map(|w| w.pressure())
-            .unwrap_or(1.0)
+        self.wind.get(group).map(|w| w.pressure()).unwrap_or(1.0)
     }
 
     /// A free slot in O(1); with the pool exhausted, steal a voice
@@ -1777,7 +1783,7 @@ mod tests {
                 // smooth descent between the loops (the engine plays
                 // through here when switching toward loop B)
                 200..=299 => 0.8 - 0.5 * (index - 199) as f32 / 100.0,
-                300..=399 => 0.3, // loop B
+                300..=399 => 0.3,                              // loop B
                 _ => 0.3 - 0.3 * (index - 399) as f32 / 200.0, // tail out
             };
         }
@@ -2131,8 +2137,10 @@ mod tests {
             let (mut engine, mut handle) = Engine::new(48000.0, sine_pipe_bank(period, true));
             engine.set_release_stagger(0.0);
             // Kill per-voice noise so the comparison is deterministic.
-            let mut params = wind::WindParams::default();
-            params.flow_noise = 0.0;
+            let params = wind::WindParams {
+                flow_noise: 0.0,
+                ..Default::default()
+            };
             for group in 0..wind::MAX_WIND_GROUPS as u8 {
                 handle.send(Command::SetWind { group, params });
             }
@@ -2193,9 +2201,11 @@ mod tests {
         let measure_spread = |noise: f32| -> f64 {
             let (mut engine, mut handle) = Engine::new(48000.0, sine_pipe_bank(period, true));
             engine.set_release_stagger(0.0);
-            let mut params = wind::WindParams::default();
-            params.sag_depth = 0.0; // isolate the per-voice noise
-            params.flow_noise = noise;
+            let params = wind::WindParams {
+                sag_depth: 0.0, // isolate the per-voice noise
+                flow_noise: noise,
+                ..Default::default()
+            };
             handle.send(Command::SetWind { group: 0, params });
             handle.send(Command::StartVoice {
                 handle: 1,
@@ -2275,8 +2285,7 @@ mod tests {
                     1.0
                 };
                 (0.3 * (core::f64::consts::TAU * 100.0 * t).sin()
-                    + 0.3 * (core::f64::consts::TAU * 6_000.0 * t).sin())
-                    as f32
+                    + 0.3 * (core::f64::consts::TAU * 6_000.0 * t).sin()) as f32
                     * envelope as f32
             })
             .collect();
@@ -2347,12 +2356,12 @@ mod tests {
         // 0.2 s windows late in each second (filters settled), whole
         // cycles of both tones.
         let (skip, window) = (sr / 2, sr / 5);
-        let low_db =
-            10.0 * (band_power(&out_closed, skip, window, 100.0, sr as f32)
+        let low_db = 10.0
+            * (band_power(&out_closed, skip, window, 100.0, sr as f32)
                 / band_power(&out_open, skip, window, 100.0, sr as f32))
             .log10();
-        let high_db =
-            10.0 * (band_power(&out_closed, skip, window, 6_000.0, sr as f32)
+        let high_db = 10.0
+            * (band_power(&out_closed, skip, window, 6_000.0, sr as f32)
                 / band_power(&out_open, skip, window, 6_000.0, sr as f32))
             .log10();
         let p = enclosure::EnclosureParams::default();

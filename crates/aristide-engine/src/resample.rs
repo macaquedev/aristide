@@ -376,7 +376,9 @@ mod tests {
         // 0.2 cycles/frame = 40% of Nyquist, where linear interp hurts.
         let omega = std::f64::consts::TAU * 0.2;
         let frames = 8192usize;
-        let data: Vec<f32> = (0..frames).map(|n| (omega * n as f64).sin() as f32).collect();
+        let data: Vec<f32> = (0..frames)
+            .map(|n| (omega * n as f64).sin() as f32)
+            .collect();
         let sample = mono_sample(data);
 
         let rate = 44100.0 / 48000.0; // the everyday case
@@ -415,7 +417,9 @@ mod tests {
         let loop_start = 128usize;
         let loop_end = loop_start + period * 8; // 384
         let frames = 512usize;
-        let data: Vec<f32> = (0..frames).map(|n| (omega * n as f64).sin() as f32).collect();
+        let data: Vec<f32> = (0..frames)
+            .map(|n| (omega * n as f64).sin() as f32)
+            .collect();
         let sample = mono_sample(data);
         let table = SincTable::new();
 

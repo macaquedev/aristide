@@ -47,7 +47,7 @@ pub struct EnclosureParams {
     pub corner_closed_hz: f32,
     /// Exponent on closedness for both dB laws: 1 = dB-linear (HW).
     /// >1 concentrates change near closed (raw-physics lean), <1 the
-    /// opposite.
+    /// > opposite.
     pub taper: f32,
     /// Full-sweep settle time of the shutter inertia model, seconds.
     /// ≤0 disables (pedal drives the shutters directly).
@@ -193,7 +193,11 @@ mod tests {
         e.set_target(0.0);
         settle(&mut e, 3.0, 44_100.0);
         let p = *e.params();
-        assert!((e.position() - 0.0).abs() < 0.01, "position {}", e.position());
+        assert!(
+            (e.position() - 0.0).abs() < 0.01,
+            "position {}",
+            e.position()
+        );
         assert!(
             (20.0 * e.gain().log10() - p.floor_db).abs() < 0.2,
             "gain {} dB vs floor {}",

@@ -20,7 +20,10 @@ fn main() -> anyhow::Result<()> {
             (sum / (end - start) as f64) as f32
         };
         println!("{path}");
-        println!("  frames {frames} ({:.2} s)", frames as f64 / info.sample_rate as f64);
+        println!(
+            "  frames {frames} ({:.2} s)",
+            frames as f64 / info.sample_rate as f64
+        );
         for l in &info.loops {
             println!(
                 "  loop {}..{} (ends {:.2} s before EOF)",

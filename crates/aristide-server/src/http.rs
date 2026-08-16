@@ -35,22 +35,16 @@ pub fn spawn(state: Arc<Mutex<State>>, port: u16) -> std::io::Result<()> {
                 // they fetch this API cross-origin, so every response
                 // carries the permissive CORS header. The bind stays
                 // localhost-only, which is the actual access control.
-                let response = respond(&state, request.method(), request.url())
-                    .with_header(
-                        Header::from_bytes("Access-Control-Allow-Origin", "*")
-                            .expect("valid header"),
-                    );
+                let response = respond(&state, request.method(), request.url()).with_header(
+                    Header::from_bytes("Access-Control-Allow-Origin", "*").expect("valid header"),
+                );
                 let _ = request.respond(response);
             }
         })?;
     Ok(())
 }
 
-fn respond(
-    state: &Mutex<State>,
-    method: &Method,
-    url: &str,
-) -> Response<std::io::Cursor<Vec<u8>>> {
+fn respond(state: &Mutex<State>, method: &Method, url: &str) -> Response<std::io::Cursor<Vec<u8>>> {
     let (path, query) = url.split_once('?').unwrap_or((url, ""));
     match (method, path) {
         (Method::Get, "/") => html(PAGE),
@@ -152,8 +146,7 @@ fn respond(
                     if let Some(a4) = param(query, "a4").and_then(|v| v.parse::<f64>().ok()) {
                         tuning.a4_hz = a4.clamp(300.0, 500.0);
                     }
-                    if let Some(t) = param(query, "transpose").and_then(|v| v.parse::<i8>().ok())
-                    {
+                    if let Some(t) = param(query, "transpose").and_then(|v| v.parse::<i8>().ok()) {
                         tuning.transpose = t.clamp(-12, 12);
                     }
                     console.set_tuning(tuning);
@@ -199,15 +192,13 @@ fn respond(
                         let State {
                             engine, control, ..
                         } = &mut *state;
-                        if let Control::Organ(console) = control {
-                            if let Some((enclosure, position)) =
-                                console.set_enclosure(index, value)
-                            {
-                                engine.send(Command::SetEnclosurePosition {
-                                    enclosure,
-                                    position,
-                                });
-                            }
+                        if let Control::Organ(console) = control
+                            && let Some((enclosure, position)) = console.set_enclosure(index, value)
+                        {
+                            engine.send(Command::SetEnclosurePosition {
+                                enclosure,
+                                position,
+                            });
                         }
                     }
                     json(state_json(state))
@@ -215,16 +206,17 @@ fn respond(
                 _ => bad_request("bad enclosure move"),
             }
         }
-        (Method::Post, "/api/gain") => match param(query, "v").and_then(|v| v.parse::<f32>().ok())
-        {
-            Some(v) if (0.0..=2.0).contains(&v) => {
-                let mut state = state.lock().expect("state poisoned");
-                state.master_gain = v;
-                state.engine.send(Command::SetMasterGain { linear: v });
-                json(state_json_locked(&state))
+        (Method::Post, "/api/gain") => {
+            match param(query, "v").and_then(|v| v.parse::<f32>().ok()) {
+                Some(v) if (0.0..=2.0).contains(&v) => {
+                    let mut state = state.lock().expect("state poisoned");
+                    state.master_gain = v;
+                    state.engine.send(Command::SetMasterGain { linear: v });
+                    json(state_json_locked(&state))
+                }
+                _ => bad_request("bad gain"),
             }
-            _ => bad_request("bad gain"),
-        },
+        }
         _ => Response::from_string("not found").with_status_code(404),
     }
 }
@@ -270,7 +262,10 @@ fn apply_stop(state: &Mutex<State>, id: u32, on: bool) {
 }
 
 /// Start a control-noise one-shot (drawstop thump, coupler clack).
-fn send_start(engine: &mut aristide_engine::EngineHandle, noise: Option<crate::console::VoiceStart>) {
+fn send_start(
+    engine: &mut aristide_engine::EngineHandle,
+    noise: Option<crate::console::VoiceStart>,
+) {
     if let Some(start) = noise {
         engine.send(Command::StartVoice {
             handle: start.handle,
@@ -291,7 +286,9 @@ fn apply_trem(state: &Mutex<State>, on: bool) {
     state.trem_engaged = on;
     let groups = state.trem_groups.clone();
     for group in groups {
-        state.engine.send(Command::SetTremulant { group, engaged: on });
+        state
+            .engine
+            .send(Command::SetTremulant { group, engaged: on });
     }
     if changed {
         let State {
@@ -431,9 +428,8 @@ fn html(body: &str) -> Response<std::io::Cursor<Vec<u8>>> {
 }
 
 fn json(body: String) -> Response<std::io::Cursor<Vec<u8>>> {
-    Response::from_string(body).with_header(
-        Header::from_bytes("Content-Type", "application/json").expect("valid header"),
-    )
+    Response::from_string(body)
+        .with_header(Header::from_bytes("Content-Type", "application/json").expect("valid header"))
 }
 
 fn bad_request(reason: &str) -> Response<std::io::Cursor<Vec<u8>>> {
@@ -446,8 +442,8 @@ mod tests {
     use std::path::Path;
 
     fn demo_state() -> Option<Arc<Mutex<State>>> {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../testsets/grandorgue-demo/demo.organ");
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testsets/grandorgue-demo/demo.organ");
         if !path.is_file() {
             eprintln!("skipping: demo set not present");
             return None;
@@ -456,8 +452,7 @@ mod tests {
             .expect("demo set loads")
             .organ;
         let loaded = crate::bank::build(&organ, 48000.0).expect("bank builds");
-        let console =
-            crate::console::Console::new(organ, loaded.specs, Vec::new(), Vec::new());
+        let console = crate::console::Console::new(organ, loaded.specs, Vec::new(), Vec::new());
         let (_engine, handle) =
             aristide_engine::Engine::new(48000.0, std::sync::Arc::new(loaded.bank));
         Some(Arc::new(Mutex::new(State {
@@ -510,7 +505,11 @@ mod tests {
         respond(&state, &Method::Post, "/api/stop?id=16&on=1");
         respond(&state, &Method::Post, "/api/coupler?idx=0&on=1");
         let drawn = registration(&state_json(&state));
-        assert_eq!(drawn.matches("\"on\":true").count(), 3, "two stops + a coupler");
+        assert_eq!(
+            drawn.matches("\"on\":true").count(),
+            3,
+            "two stops + a coupler"
+        );
 
         respond(&state, &Method::Post, "/api/cancel");
         let cancelled = registration(&state_json(&state));
@@ -548,7 +547,10 @@ mod tests {
         assert!(!state_json(&state).contains("\"held\":[62]"));
 
         respond(&state, &Method::Post, "/api/note?manual=9&key=60&on=1");
-        assert!(!state_json(&state).contains("\"held\":[60]"), "bad manual ignored");
+        assert!(
+            !state_json(&state).contains("\"held\":[60]"),
+            "bad manual ignored"
+        );
     }
 
     #[test]

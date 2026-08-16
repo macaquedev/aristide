@@ -122,7 +122,7 @@ impl Sample {
         if channels == 0 {
             return Err("zero channels".into());
         }
-        if data.len() % channels as usize != 0 {
+        if !data.len().is_multiple_of(channels as usize) {
             return Err(format!(
                 "data length {} not a multiple of {channels} channels",
                 data.len()
@@ -132,12 +132,12 @@ impl Sample {
         if frames == 0 {
             return Err("empty sample".into());
         }
-        if let Some((start, end)) = sustain_loop {
-            if start >= end || end > frames {
-                return Err(format!(
-                    "loop {start}..{end} out of bounds for {frames} frames"
-                ));
-            }
+        if let Some((start, end)) = sustain_loop
+            && (start >= end || end > frames)
+        {
+            return Err(format!(
+                "loop {start}..{end} out of bounds for {frames} frames"
+            ));
         }
         if !(sample_rate_hz.is_finite() && sample_rate_hz > 0.0) {
             return Err(format!("bad sample rate {sample_rate_hz}"));
@@ -195,7 +195,7 @@ impl Sample {
         let (loop_start, loop_end) = self.sustain_loop?;
         let ch = self.channels as usize;
         let loop_len = (loop_end - loop_start) as f64;
-        if !(nominal >= 4.0) || loop_len < nominal * 2.5 {
+        if nominal.is_nan() || nominal < 4.0 || loop_len < nominal * 2.5 {
             return None;
         }
         let window = (2048.0_f64).min(loop_len / 2.0) as u64;
@@ -364,7 +364,7 @@ impl Sample {
         let Some((loop_start, _)) = self.sustain_loop else {
             return;
         };
-        if !(fundamental_hz > 0.0) {
+        if fundamental_hz.is_nan() || fundamental_hz <= 0.0 {
             return;
         }
         // The nominal pitch is 12-EDO bookkeeping; real pipes sit cents
@@ -472,12 +472,7 @@ impl Sample {
     /// `target_index`), selectable when the note was held at most
     /// `max_hold_ms`. Builds the cross-file phase map when this sample's
     /// period has been measured (call [`Sample::align_release`] first).
-    pub fn attach_release(
-        &mut self,
-        target: &Sample,
-        target_index: u32,
-        max_hold_ms: Option<u32>,
-    ) {
+    pub fn attach_release(&mut self, target: &Sample, target_index: u32, max_hold_ms: Option<u32>) {
         let level = target.mean_abs(0, 512.min(target.frames()));
         let alignment = match (self.measured_period, self.sustain_loop) {
             (Some(period), Some((loop_start, _))) => {
@@ -490,8 +485,7 @@ impl Sample {
                     let theta_target = target.quadrature_phase(0, window, period);
                     let offsets = (0..ALIGNMENT_BUCKETS)
                         .map(|bucket| {
-                            let turns = (theta_target - theta_loop)
-                                / core::f64::consts::TAU
+                            let turns = (theta_target - theta_loop) / core::f64::consts::TAU
                                 + bucket as f64 / ALIGNMENT_BUCKETS as f64;
                             let delta = (period * turns.rem_euclid(1.0)).round() as u64;
                             delta.min(period_frames.saturating_sub(1)) as u32
@@ -515,11 +509,13 @@ impl Sample {
         let position = self
             .releases
             .iter()
-            .position(|existing| match (existing.max_hold_ms, option.max_hold_ms) {
-                (None, _) => true,
-                (Some(_), None) => false,
-                (Some(a), Some(b)) => a > b,
-            })
+            .position(
+                |existing| match (existing.max_hold_ms, option.max_hold_ms) {
+                    (None, _) => true,
+                    (Some(_), None) => false,
+                    (Some(a), Some(b)) => a > b,
+                },
+            )
             .unwrap_or(self.releases.len());
         self.releases.insert(position, option);
     }

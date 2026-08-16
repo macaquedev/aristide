@@ -530,7 +530,11 @@ impl Builder<'_> {
                     section.int_or(&format!("Rank{slot:03}FirstAccessibleKeyNumber"), 1)?;
                 stop.ranks.push(RankRange {
                     rank: rank_id,
-                    ..clip(base_key + first_accessible_key - 1, pipe_count, first_pipe - 1)
+                    ..clip(
+                        base_key + first_accessible_key - 1,
+                        pipe_count,
+                        first_pipe - 1,
+                    )
                 });
             }
         } else {

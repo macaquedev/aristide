@@ -26,14 +26,16 @@ pub enum Temperament {
 
 impl Temperament {
     pub fn parse(name: &str) -> Option<Temperament> {
-        Some(match name.to_lowercase().replace(['-', '_', ' '], "").as_str() {
-            "equal" | "et" | "12edo" => Temperament::Equal,
-            "werckmeister3" | "werckmeisteriii" | "werckmeister" => Temperament::Werckmeister3,
-            "kirnberger3" | "kirnbergeriii" | "kirnberger" => Temperament::Kirnberger3,
-            "meantone4" | "meantone" | "quartercommameantone" => Temperament::Meantone4,
-            "pythagorean" => Temperament::Pythagorean,
-            _ => return None,
-        })
+        Some(
+            match name.to_lowercase().replace(['-', '_', ' '], "").as_str() {
+                "equal" | "et" | "12edo" => Temperament::Equal,
+                "werckmeister3" | "werckmeisteriii" | "werckmeister" => Temperament::Werckmeister3,
+                "kirnberger3" | "kirnbergeriii" | "kirnberger" => Temperament::Kirnberger3,
+                "meantone4" | "meantone" | "quartercommameantone" => Temperament::Meantone4,
+                "pythagorean" => Temperament::Pythagorean,
+                _ => return None,
+            },
+        )
     }
 
     pub fn name(&self) -> &'static str {
@@ -60,8 +62,7 @@ impl Temperament {
         match self {
             Temperament::Equal => [0.0; 12],
             Temperament::Werckmeister3 => [
-                11.730, 1.955, 3.910, 5.865, 1.955, 9.775, 0.000, 7.820, 3.910, 0.000, 7.820,
-                3.910,
+                11.730, 1.955, 3.910, 5.865, 1.955, 9.775, 0.000, 7.820, 3.910, 0.000, 7.820, 3.910,
             ],
             Temperament::Kirnberger3 => [
                 10.265, 0.490, 3.422, 4.400, -3.421, 8.310, 0.489, 6.843, 2.445, 0.000, 6.355,
@@ -72,8 +73,8 @@ impl Temperament {
                 17.108, -6.843,
             ],
             Temperament::Pythagorean => [
-                -5.865, 7.820, -1.955, -11.730, 1.955, -7.820, 5.865, -3.910, 9.775, 0.000,
-                -9.775, 3.910,
+                -5.865, 7.820, -1.955, -11.730, 1.955, -7.820, 5.865, -3.910, 9.775, 0.000, -9.775,
+                3.910,
             ],
         }
     }
@@ -106,8 +107,8 @@ impl Tuning {
     /// top of the pipe's own playback rate).
     pub fn rate_multiplier(&self, key: u8) -> f32 {
         let class = (key % 12) as usize;
-        let cents = self.temperament.offsets_cents()[class] as f64
-            + 1200.0 * (self.a4_hz / 440.0).log2();
+        let cents =
+            self.temperament.offsets_cents()[class] as f64 + 1200.0 * (self.a4_hz / 440.0).log2();
         ((cents / 1200.0).exp2()) as f32
     }
 }
