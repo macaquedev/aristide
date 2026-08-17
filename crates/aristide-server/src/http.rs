@@ -161,54 +161,75 @@ fn respond(
             }
             json(state_json(state))
         }
-        // Input routing. `route` is "none" (unassigned, and silent),
-        // "channels" (obey the channel map), or a manual index.
-        (Method::Post, "/api/midi/port") => {
-            let id = param(query, "id").and_then(|v| v.parse::<usize>().ok());
-            match (id, param(query, "route")) {
-                (Some(id), Some(route)) => {
-                    {
-                        let mut state = state.lock().expect("state poisoned");
-                        let manuals = match &state.control {
-                            Control::Organ(console) => console.manual_states().len(),
-                            Control::Tone => 0,
-                        };
-                        let route = match route {
-                            crate::config::FOLLOW_CHANNELS => crate::Route::ChannelMap,
-                            other => match other.parse::<usize>() {
-                                Ok(manual) if manual < manuals => crate::Route::Manual(manual),
-                                // Anything else — "none", or a manual this
-                                // organ hasn't got — leaves it unassigned.
-                                _ => crate::Route::Unassigned,
-                            },
-                        };
-                        if let Some(port) = state.midi_ports.get_mut(id) {
-                            port.route = route;
-                            tracing::info!("midi: {} → {}", port.name, route.as_str());
-                            state.persist();
-                        }
+        // Input routing, addressed the way the player thinks about it:
+        // *this manual* listens to *that device*. `slot` numbers a
+        // manual's inputs (a manual may have several); a slot past the
+        // end adds one. `ch` is 1-16, or absent for any channel.
+        (Method::Post, "/api/midi/bind") => {
+            let manual = param(query, "manual").and_then(|v| v.parse::<usize>().ok());
+            let slot = param(query, "slot").and_then(|v| v.parse::<usize>().ok());
+            // Devices travel by name, not by port number: a manual may
+            // be pointed at a keyboard that is currently unplugged, and
+            // port numbers shift under a rescan anyway.
+            let device = param(query, "device").map(unescape);
+            match (manual, slot, device) {
+                (Some(manual), Some(slot), Some(device)) if !device.is_empty() => {
+                    let mut state = state.lock().expect("state poisoned");
+                    // No channel given means "whatever the set suggests
+                    // for this manual, else every channel" — the sidecar
+                    // knows how the real console was wired.
+                    let channel = match param(query, "ch") {
+                        Some("any") => None,
+                        Some(value) => value.parse::<u8>().ok().filter(|c| (1..=16).contains(c)),
+                        None => state.suggested_channels.get(manual).copied().flatten(),
+                    };
+                    state.learn = None;
+                    if !state.set_input(manual, slot, crate::config::Input { device, channel }) {
+                        return bad_request("no such manual");
                     }
-                    json(state_json(state))
+                    json(state_json_locked(&state))
                 }
-                _ => bad_request("missing id/route"),
+                _ => bad_request("missing manual/slot/device"),
             }
         }
-        (Method::Post, "/api/midi/channel") => {
-            let channel = param(query, "ch").and_then(|v| v.parse::<u8>().ok());
+        (Method::Post, "/api/midi/unbind") => {
             let manual = param(query, "manual").and_then(|v| v.parse::<usize>().ok());
-            match (channel, manual) {
-                (Some(channel), Some(manual)) => {
-                    {
-                        let mut state = state.lock().expect("state poisoned");
-                        if let Control::Organ(console) = &mut state.control {
-                            console.set_channel(channel, manual);
-                        }
-                        state.persist();
+            let slot = param(query, "slot").and_then(|v| v.parse::<usize>().ok());
+            match (manual, slot) {
+                (Some(manual), Some(slot)) => {
+                    let mut state = state.lock().expect("state poisoned");
+                    state.learn = None;
+                    if !state.remove_input(manual, slot) {
+                        return bad_request("no such manual");
                     }
-                    json(state_json(state))
+                    json(state_json_locked(&state))
                 }
-                _ => bad_request("missing ch/manual"),
+                _ => bad_request("missing manual/slot"),
             }
+        }
+        // Auto-detect: wait for a key press and bind whatever port and
+        // channel it arrives on. Assigning by hand is still there for a
+        // keyboard that isn't plugged in yet.
+        (Method::Post, "/api/midi/learn") => {
+            let mut state = state.lock().expect("state poisoned");
+            let manual = param(query, "manual").and_then(|v| v.parse::<usize>().ok());
+            let slot = param(query, "slot").and_then(|v| v.parse::<usize>().ok());
+            match (manual, slot) {
+                (Some(manual), Some(slot)) => {
+                    let manuals = match &state.control {
+                        Control::Organ(console) => console.manual_states().len(),
+                        Control::Tone => 0,
+                    };
+                    if manual >= manuals {
+                        return bad_request("no such manual");
+                    }
+                    tracing::info!("midi: listening for a key to assign to manual {manual}");
+                    state.listen(manual, slot);
+                }
+                // No target = stop listening.
+                _ => state.learn = None,
+            }
+            json(state_json_locked(&state))
         }
         (Method::Post, "/api/midi/rescan") => {
             crate::request_midi_rescan();
@@ -431,27 +452,54 @@ fn state_json_locked(state: &State) -> String {
     if let Some(wet) = state.reverb_wet {
         out.push_str(&format!(",\"reverb\":{wet}"));
     }
+    // MIDI, as the dialog reads it: the inputs this machine has, and
+    // what each of the organ's manuals listens to. Bindings name a
+    // device even while it is unplugged, so `connected` says whether
+    // this one is actually there.
     out.push_str(",\"midi\":{\"ports\":[");
     for (id, port) in state.midi_ports.iter().enumerate() {
         if id > 0 {
             out.push(',');
         }
         out.push_str(&format!(
-            "{{\"id\":{id},\"name\":{},\"route\":{}}}",
-            json_string(&port.name),
-            json_string(&port.route.as_str())
+            "{{\"id\":{id},\"name\":{}}}",
+            json_string(&port.name)
         ));
     }
-    out.push_str("],\"channels\":[");
+    out.push_str("],\"manuals\":[");
     if let Control::Organ(console) = &state.control {
-        let map: Vec<String> = console
-            .channel_map()
-            .iter()
-            .map(|m| m.to_string())
-            .collect();
-        out.push_str(&map.join(","));
+        for (position, (idx, name, _, _, _)) in console.manual_states().iter().enumerate() {
+            if position > 0 {
+                out.push(',');
+            }
+            out.push_str(&format!(
+                "{{\"idx\":{idx},\"name\":{},\"inputs\":[",
+                json_string(name)
+            ));
+            for (slot, input) in state.manual_inputs(*idx).iter().enumerate() {
+                if slot > 0 {
+                    out.push(',');
+                }
+                let connected = state.midi_ports.iter().any(|p| p.name == input.device);
+                let channel = input
+                    .channel
+                    .map_or_else(|| "null".to_string(), |c| c.to_string());
+                out.push_str(&format!(
+                    "{{\"slot\":{slot},\"device\":{},\"channel\":{channel},\"connected\":{connected}}}",
+                    json_string(&input.device)
+                ));
+            }
+            out.push_str("]}");
+        }
     }
-    out.push_str("]}");
+    out.push(']');
+    if let Some(learn) = state.learn {
+        out.push_str(&format!(
+            ",\"learning\":{{\"manual\":{},\"slot\":{}}}",
+            learn.manual, learn.slot
+        ));
+    }
+    out.push('}');
     if let Control::Organ(console) = &state.control {
         let (enabled, volume) = console.noises();
         out.push_str(&format!(
@@ -488,6 +536,33 @@ fn json_string(value: &str) -> String {
     }
     out.push('"');
     out
+}
+
+/// Percent-decoding, for the one parameter that carries free text: a
+/// MIDI port name ("Midiplus AKM320 MIDI 1"). Malformed escapes are
+/// left as they are rather than dropped — a name that round-trips
+/// wrongly is easier to diagnose than one that silently loses a byte.
+fn unescape(value: &str) -> String {
+    let mut out = Vec::with_capacity(value.len());
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'+' => out.push(b' '),
+            b'%' if index + 2 < bytes.len() => {
+                match u8::from_str_radix(&value[index + 1..index + 3], 16) {
+                    Ok(byte) => {
+                        out.push(byte);
+                        index += 2;
+                    }
+                    Err(_) => out.push(b'%'),
+                }
+            }
+            byte => out.push(byte),
+        }
+        index += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn param<'a>(query: &'a str, key: &str) -> Option<&'a str> {
@@ -530,8 +605,7 @@ mod tests {
             .expect("demo set loads")
             .organ;
         let loaded = crate::bank::build(&organ, 48000.0).expect("bank builds");
-        let console =
-            crate::console::Console::new(organ, loaded.specs, Vec::new(), Vec::new());
+        let console = crate::console::Console::new(organ, loaded.specs, Vec::new());
         let (_engine, handle) =
             aristide_engine::Engine::new(48000.0, std::sync::Arc::new(loaded.bank));
         Some(Arc::new(Mutex::new(State {
@@ -542,6 +616,8 @@ mod tests {
             // Tests must never touch the user's real assignments.
             config_path: None,
             organ_key: "test organ".into(),
+            suggested_channels: vec![Some(3), Some(1), Some(2)],
+            learn: None,
             trem_groups: vec![0, 1],
             trem_engaged: false,
             master_gain: 0.178,
@@ -631,53 +707,90 @@ mod tests {
     }
 
     #[test]
-    fn midi_routing_survives_the_api() {
+    fn midi_assignments_survive_the_api() {
         let Some(state) = demo_state() else { return };
 
-        // Demo set: First Manual, Second Manual, Pedal — the default map
-        // puts the keyboards first, so channel 1 plays manual 1.
         let body = state_json(&state);
         assert!(
             body.contains("\"midi\":{\"ports\":[]"),
             "no inputs on a test rig: {body}"
         );
+        // Demo set: First Manual, Second Manual, Pedal — every one of
+        // them listed, every one of them empty.
         assert!(
-            body.contains("\"channels\":[1,2,0,1,2"),
-            "map wraps over 16 channels: {body}"
+            body.contains("{\"idx\":1,\"name\":\"First Manual\",\"inputs\":[]}"),
+            "manuals listed with nothing assigned: {body}"
         );
+        assert!(!body.contains("\"learning\""), "not listening yet");
 
-        respond(&state, &Method::Post, "/api/midi/channel?ch=0&manual=0");
-        assert!(state_json(&state).contains("\"channels\":[0,2,0,1,2"));
-        // A manual that doesn't exist is refused, not clamped into range.
-        respond(&state, &Method::Post, "/api/midi/channel?ch=0&manual=9");
-        assert!(state_json(&state).contains("\"channels\":[0,2,0,1,2"));
-
-        state.lock().expect("state").midi_ports = vec![crate::MidiPort {
-            name: "Test Keyboard".into(),
-            route: crate::Route::Unassigned,
-        }];
-        // Unassigned until the player says otherwise.
+        respond(
+            &state,
+            &Method::Post,
+            "/api/midi/bind?manual=2&slot=0&device=Test%20Keyboard&ch=4",
+        );
         let body = state_json(&state);
         assert!(
-            body.contains("{\"id\":0,\"name\":\"Test Keyboard\",\"route\":\"none\"}"),
-            "a new device starts unassigned: {body}"
+            body.contains(
+                "{\"slot\":0,\"device\":\"Test Keyboard\",\"channel\":4,\"connected\":false}"
+            ),
+            "assigned by name, and honest that it isn't plugged in: {body}"
         );
 
-        respond(&state, &Method::Post, "/api/midi/port?id=0&route=2");
-        assert!(
-            state_json(&state).contains("\"route\":\"2\""),
-            "pinned to a manual"
+        // No channel given falls back to what the set suggests for that
+        // manual (Second Manual speaks on channel 2 in the demo sidecar).
+        respond(
+            &state,
+            &Method::Post,
+            "/api/midi/bind?manual=2&slot=0&device=Test%20Keyboard",
         );
-        respond(&state, &Method::Post, "/api/midi/port?id=0&route=channels");
-        assert!(state_json(&state).contains("\"route\":\"channels\""));
-        // A manual this organ hasn't got leaves it silent rather than
-        // sounding some other division.
-        respond(&state, &Method::Post, "/api/midi/port?id=0&route=7");
-        assert!(state_json(&state).contains("\"route\":\"none\""));
-        respond(&state, &Method::Post, "/api/midi/port?id=0&route=none");
-        assert!(state_json(&state).contains("\"route\":\"none\""));
-        // An unknown port id is a no-op, not a panic.
-        respond(&state, &Method::Post, "/api/midi/port?id=42&route=1");
+        assert!(state_json(&state).contains("\"channel\":2"));
+        respond(
+            &state,
+            &Method::Post,
+            "/api/midi/bind?manual=2&slot=0&device=Test%20Keyboard&ch=any",
+        );
+        assert!(state_json(&state).contains("\"channel\":null"));
+
+        // A slot past the end adds an input: two keyboards, one manual.
+        respond(
+            &state,
+            &Method::Post,
+            "/api/midi/bind?manual=2&slot=9&device=Second%20Keyboard&ch=2",
+        );
+        assert!(state_json(&state).contains("\"slot\":1,\"device\":\"Second Keyboard\""));
+
+        respond(&state, &Method::Post, "/api/midi/unbind?manual=2&slot=0");
+        let body = state_json(&state);
+        assert!(
+            body.contains("{\"slot\":0,\"device\":\"Second Keyboard\",\"channel\":2"),
+            "removing the first input renumbers the rest: {body}"
+        );
+        respond(&state, &Method::Post, "/api/midi/unbind?manual=2&slot=0");
+        assert!(state_json(&state).contains("\"name\":\"Second Manual\",\"inputs\":[]}"));
+
+        // A manual this organ hasn't got is refused, not clamped.
+        respond(
+            &state,
+            &Method::Post,
+            "/api/midi/bind?manual=9&slot=0&device=Test%20Keyboard",
+        );
+        respond(&state, &Method::Post, "/api/midi/unbind?manual=9&slot=0");
+
+        // Auto-detect is a mode the snapshot reports, so the dialog can
+        // show which row is waiting.
+        respond(&state, &Method::Post, "/api/midi/learn?manual=1&slot=0");
+        assert!(state_json(&state).contains("\"learning\":{\"manual\":1,\"slot\":0}"));
+        respond(&state, &Method::Post, "/api/midi/learn");
+        assert!(!state_json(&state).contains("\"learning\""), "cancelled");
+        respond(&state, &Method::Post, "/api/midi/learn?manual=9&slot=0");
+        assert!(!state_json(&state).contains("\"learning\""), "no such manual");
+    }
+
+    #[test]
+    fn port_names_survive_the_query_string() {
+        assert_eq!(unescape("Midiplus%20AKM320%20MIDI%201"), "Midiplus AKM320 MIDI 1");
+        assert_eq!(unescape("R%C3%A9cit+din"), "Récit din");
+        assert_eq!(unescape("100%"), "100%", "a stray percent is kept");
     }
 
     #[test]

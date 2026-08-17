@@ -42,28 +42,26 @@
 
         <section class="pane" data-pane="midi">
           <div class="pane-head">
-            <h2>Inputs</h2>
+            <h2>Manuals</h2>
             <button class="ghost" id="midi-rescan">Rescan</button>
           </div>
           <p class="pane-note">
-            Assignments are kept per organ, and an input starts unassigned on
-            an organ you haven't set up: it stays silent until you place it.
-            A console whose manuals speak on separate MIDI channels wants
-            <em>follow channel map</em>; a keyboard that only ever sends one
-            channel wants a manual of its own.
+            Give each of this organ's manuals a keyboard to listen to. The
+            quickest way is <em>Listen</em>: press it, then play a key on the
+            keyboard you mean, and it takes the port and channel from the note
+            itself. Assignments are kept per organ.
           </p>
           <p class="pane-warn hidden" id="midi-unassigned">
-            Nothing is assigned — this organ will not sound from MIDI until you
-            give an input somewhere to play.
+            No manual has an input — this organ will not sound from MIDI until
+            you give one a keyboard.
+          </p>
+          <div id="midi-manuals" class="midi-manuals"></div>
+          <h2>Detected inputs</h2>
+          <p class="pane-note">
+            The MIDI inputs this machine can see. A manual can listen to a
+            keyboard that isn't plugged in yet; it simply stays quiet.
           </p>
           <div id="midi-ports" class="midi-ports"></div>
-          <h2>Channel map</h2>
-          <p class="pane-note">
-            Which manual each MIDI channel plays. Devices set to
-            <em>follow channel map</em> obey this; pinned devices ignore it.
-            Saved with this organ.
-          </p>
-          <div id="midi-channels" class="midi-channels"></div>
         </section>
 
         <section class="pane hidden" data-pane="tuning">

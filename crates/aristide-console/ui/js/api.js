@@ -30,12 +30,17 @@ export const commands = {
   // temperament change never has to re-send pitch or transposition.
   tuning: (fields) => `/api/tuning?${new URLSearchParams(fields)}`,
   enclosure: (idx, value) => `/api/enclosure?idx=${idx}&v=${value}`,
-  // Input routing: "none" (unassigned, and silent), "channels" (obey
-  // the channel map), or a manual index.
-  midiPort: (id, route) =>
-    `/api/midi/port?id=${id}&route=${encodeURIComponent(route)}`,
-  midiChannel: (channel, manual) =>
-    `/api/midi/channel?ch=${channel}&manual=${manual}`,
+  // Input routing, manual first: this manual listens to that input.
+  // `slot` numbers a manual's inputs; one past the end adds another.
+  // `channel` is 1-16 or "any"; omitting it lets the server pick the
+  // channel the sample set suggests for that manual.
+  midiBind: (manual, slot, device, channel) =>
+    `/api/midi/bind?manual=${manual}&slot=${slot}&device=${encodeURIComponent(device)}` +
+    (channel == null ? "" : `&ch=${channel}`),
+  midiUnbind: (manual, slot) => `/api/midi/unbind?manual=${manual}&slot=${slot}`,
+  // With no target, stop listening.
+  midiLearn: (manual, slot) =>
+    manual == null ? "/api/midi/learn" : `/api/midi/learn?manual=${manual}&slot=${slot}`,
   midiRescan: () => "/api/midi/rescan",
   note: (manual, key, on) =>
     `/api/note?manual=${manual}&key=${key}&on=${on ? 1 : 0}`,

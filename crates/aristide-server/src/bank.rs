@@ -317,6 +317,22 @@ mod tests {
         path.is_file().then_some(path)
     }
 
+    /// The manual MIDI channel `channel` used to reach under the old
+    /// keyboards-first default map: a pedalboard, when present, is
+    /// `manuals[0]` and sits at the end.
+    fn default_manual(organ: &aristide_model::Organ, channel: u8) -> usize {
+        let count = organ.manuals.len();
+        if count == 0 {
+            return 0;
+        }
+        let map: Vec<usize> = if count > 1 && organ.manuals[0].id == aristide_model::ManualId(0) {
+            (1..count).chain(std::iter::once(0)).collect()
+        } else {
+            (0..count).collect()
+        };
+        map[channel as usize % map.len()]
+    }
+
     /// The demo set's two ODF enclosures must reach the voice specs:
     /// Récit chest (3) → enclosure 0, enclosed Great chest (2) →
     /// enclosure 1, unenclosed chest (1) → none. And an expression
@@ -360,8 +376,8 @@ mod tests {
 
         // Channel 0 → Second Manual (Récit): the pedal reaches box 0.
         let mut console =
-            crate::console::Console::new(organ.clone(), loaded.specs.clone(), Vec::new(), vec![2]);
-        let moves = console.expression(0, 64);
+            crate::console::Console::new(organ.clone(), loaded.specs.clone(), Vec::new());
+        let moves = console.expression_manual(2, 64);
         assert!(
             moves.iter().any(|&(e, p)| e == 0 && (p - 64.0 / 127.0).abs() < 1e-6),
             "Récit pedal did not move box 0: {moves:?}"
@@ -404,7 +420,6 @@ mod tests {
                 organ.clone(),
                 loaded.specs.clone(),
                 drawn.clone(),
-                vec![2],
             );
             let (mut engine, mut handle) =
                 aristide_engine::Engine::new(device_rate, std::sync::Arc::new(loaded.bank.clone()));
@@ -430,7 +445,7 @@ mod tests {
                 while next < events.len() && events[next].0 < frame + block {
                     match events[next].1 {
                         Event::Note(key, true) => {
-                            let (starts, retriggered) = console.note_on(0, key);
+                            let (starts, retriggered) = console.note_on_manual(2, key);
                             for h in retriggered {
                                 handle.send(aristide_engine::Command::StopVoice { handle: h });
                             }
@@ -448,13 +463,13 @@ mod tests {
                             }
                         }
                         Event::Note(key, false) => {
-                            for h in console.note_off(0, key) {
+                            for h in console.note_off_manual(2, key) {
                                 handle.send(aristide_engine::Command::StopVoice { handle: h });
                             }
                         }
                         Event::Pedal(position) => {
                             for (enclosure, position) in
-                                console.expression(0, (position * 127.0) as u8)
+                                console.expression_manual(2, (position * 127.0) as u8)
                             {
                                 handle.send(
                                     aristide_engine::Command::SetEnclosurePosition {
@@ -570,8 +585,9 @@ mod tests {
                 organ.clone(),
                 loaded.specs.clone(),
                 drawn,
-                vec![2, 1],
             );
+            // The old channel map: channel 0 → manual 2, channel 1 → manual 1.
+            let manual_of = |channel: u8| -> usize { [2usize, 1][channel as usize % 2] };
             let (mut engine, mut handle) =
                 aristide_engine::Engine::new(device_rate, std::sync::Arc::new(loaded.bank.clone()));
             handle.send(aristide_engine::Command::SetMasterGain { linear: master });
@@ -594,7 +610,8 @@ mod tests {
                 while next < events.len() && events[next].0 < frame + block {
                     match events[next].1 {
                         Event::Note(channel, key, true) => {
-                            let (starts, retriggered) = console.note_on(channel, key);
+                            let (starts, retriggered) =
+                                console.note_on_manual(manual_of(channel), key);
                             for h in retriggered {
                                 handle.send(aristide_engine::Command::StopVoice { handle: h });
                             }
@@ -612,13 +629,13 @@ mod tests {
                             }
                         }
                         Event::Note(channel, key, false) => {
-                            for h in console.note_off(channel, key) {
+                            for h in console.note_off_manual(manual_of(channel), key) {
                                 handle.send(aristide_engine::Command::StopVoice { handle: h });
                             }
                         }
                         Event::Pedal(channel, position) => {
-                            for (enclosure, position) in
-                                console.expression(channel, (position * 127.0) as u8)
+                            for (enclosure, position) in console
+                                .expression_manual(manual_of(channel), (position * 127.0) as u8)
                             {
                                 handle.send(
                                     aristide_engine::Command::SetEnclosurePosition {
@@ -832,8 +849,8 @@ mod tests {
             .map(|s| s.id)
             .collect();
         assert_eq!(drawn.len(), 4);
-        let mut console =
-            crate::console::Console::new(organ, loaded.specs, drawn, Vec::new());
+        let manual_index = default_manual(&organ, 0);
+        let mut console = crate::console::Console::new(organ, loaded.specs, drawn);
         let (mut engine, mut handle) =
             aristide_engine::Engine::new(48000.0, std::sync::Arc::new(loaded.bank));
 
@@ -852,10 +869,10 @@ mod tests {
             if b % 8 == 0 {
                 // toggle a rotating pair of keys
                 let key = keys[(b / 8) % keys.len()];
-                for handle_id in console.note_off(0, key) {
+                for handle_id in console.note_off_manual(manual_index, key) {
                     handle.send(aristide_engine::Command::StopVoice { handle: handle_id });
                 }
-                let (starts, retriggered) = console.note_on(0, key);
+                let (starts, retriggered) = console.note_on_manual(manual_index, key);
                 for handle_id in retriggered {
                     handle.send(aristide_engine::Command::StopVoice { handle: handle_id });
                 }
@@ -940,8 +957,8 @@ mod tests {
             .map(|(i, _)| i)
             .collect();
         assert!(couplers.len() >= 2, "need II/I and 16' II/I couplers");
-        let mut console =
-            crate::console::Console::new(organ, loaded.specs, drawn, Vec::new());
+        let manual_index = default_manual(&organ, 0);
+        let mut console = crate::console::Console::new(organ, loaded.specs, drawn);
         for &c in &couplers {
             console.set_coupler(c, true);
         }
@@ -960,7 +977,7 @@ mod tests {
                               on: bool| {
             for &key in &keys {
                 if on {
-                    let (starts, _) = console.note_on(0, key);
+                    let (starts, _) = console.note_on_manual(manual_index, key);
                     voices_started += starts.len();
                     for start in starts {
                         handle.send(aristide_engine::Command::StartVoice {
@@ -975,7 +992,7 @@ mod tests {
                         });
                     }
                 } else {
-                    for h in console.note_off(0, key) {
+                    for h in console.note_off_manual(manual_index, key) {
                         handle.send(aristide_engine::Command::StopVoice { handle: h });
                     }
                 }
@@ -1045,8 +1062,8 @@ mod tests {
             .filter(|(_, c)| c.from_manual == great && c.to_manual == swell)
             .map(|(i, _)| i)
             .collect();
-        let mut console =
-            crate::console::Console::new(organ, loaded.specs, drawn, Vec::new());
+        let manual_index = default_manual(&organ, 0);
+        let mut console = crate::console::Console::new(organ, loaded.specs, drawn);
         for &c in &couplers {
             console.set_coupler(c, true);
         }
@@ -1060,7 +1077,7 @@ mod tests {
         let mut buffer = vec![0.0f32; block * 2];
         for cycle in 0..6 {
             for &key in &chord {
-                let (starts, retriggered) = console.note_on(0, key);
+                let (starts, retriggered) = console.note_on_manual(manual_index, key);
                 for h in retriggered {
                     handle.send(aristide_engine::Command::StopVoice { handle: h });
                 }
@@ -1084,7 +1101,7 @@ mod tests {
             }
             // Release in a different order than pressed (legato-ish).
             for &key in chord.iter().rev() {
-                for h in console.note_off(0, key) {
+                for h in console.note_off_manual(manual_index, key) {
                     handle.send(aristide_engine::Command::StopVoice { handle: h });
                 }
                 engine.process(&mut buffer, 2);
@@ -1143,8 +1160,8 @@ mod tests {
             .filter(|s| s.manual == manual_id && !s.name.contains("noise"))
             .map(|s| s.id)
             .collect();
-        let mut console =
-            crate::console::Console::new(organ, loaded.specs, drawn, Vec::new());
+        let manual_index = default_manual(&organ, 0);
+        let mut console = crate::console::Console::new(organ, loaded.specs, drawn);
         let (mut engine, mut handle) =
             aristide_engine::Engine::new(48000.0, std::sync::Arc::new(loaded.bank));
 
@@ -1152,7 +1169,7 @@ mod tests {
         // release everything in one burst.
         let keys = [48u8, 50, 52, 53, 55, 57, 59, 60, 62, 64];
         for &key in &keys {
-            let (starts, _) = console.note_on(0, key);
+            let (starts, _) = console.note_on_manual(manual_index, key);
             for start in starts {
                 handle.send(aristide_engine::Command::StartVoice {
                     handle: start.handle,
@@ -1172,7 +1189,7 @@ mod tests {
             engine.process(&mut buffer, 2);
         }
         for &key in &keys {
-            for handle_id in console.note_off(0, key) {
+            for handle_id in console.note_off_manual(manual_index, key) {
                 handle.send(aristide_engine::Command::StopVoice { handle: handle_id });
             }
         }
@@ -1214,9 +1231,10 @@ mod tests {
         // Every sampled and borrowed pipe got a playback spec.
         assert_eq!(loaded.specs.len(), 853 + 497, "spec count");
 
-        // Default channel map: channel 0 → the Great (manuals[1], since
-        // the pedal is manuals[0]). Draw its first stop, press middle C.
+        // The Great is manuals[1] (the pedal, manuals[0], is silent
+        // here). Draw its first stop, press middle C.
         let manual_id = organ.manuals[1].id;
+        let manual_index = default_manual(&organ, 0);
         let drawn = vec![
             organ
                 .stops
@@ -1225,8 +1243,8 @@ mod tests {
                 .expect("manual has stops")
                 .id,
         ];
-        let mut console = crate::console::Console::new(organ, loaded.specs, drawn, Vec::new());
-        let (starts, _) = console.note_on(0, 60);
+        let mut console = crate::console::Console::new(organ, loaded.specs, drawn);
+        let (starts, _) = console.note_on_manual(manual_index, 60);
         assert!(!starts.is_empty(), "middle C should sound");
 
         let (mut engine, mut handle) =
@@ -1249,7 +1267,7 @@ mod tests {
         assert!(energy > 0.0, "the organ should make sound");
 
         // Release: voices splice to their tails and eventually go quiet.
-        for handle_id in console.note_off(0, 60) {
+        for handle_id in console.note_off_manual(manual_index, 60) {
             handle.send(aristide_engine::Command::StopVoice { handle: handle_id });
         }
         // Long releases: give it a generous 30 s of rendering.
@@ -1371,7 +1389,6 @@ mod tests {
                     organ.clone(),
                     loaded.specs.clone(),
                     vec![stop.id],
-                    Vec::new(),
                 );
                 let (starts, _) = console.note_on_manual(manual_index, midi as u8);
                 assert!(!starts.is_empty(), "{} key {key_index}: silent", stop.name);
@@ -1458,8 +1475,8 @@ mod tests {
             .filter(|(_, c)| c.from_manual == great && c.to_manual == swell)
             .map(|(i, _)| i)
             .collect();
-        let mut console =
-            crate::console::Console::new(organ, loaded.specs, drawn, Vec::new());
+        let manual_index = default_manual(&organ, 0);
+        let mut console = crate::console::Console::new(organ, loaded.specs, drawn);
         for &c in &couplers {
             console.set_coupler(c, true);
         }
@@ -1540,7 +1557,7 @@ mod tests {
                 let (_, key, on) = events[next_event];
                 next_event += 1;
                 if on {
-                    let (starts, retriggered) = console.note_on(0, key);
+                    let (starts, retriggered) = console.note_on_manual(manual_index, key);
                     for h in retriggered {
                         assert!(handle.send(aristide_engine::Command::StopVoice { handle: h }));
                     }
@@ -1557,7 +1574,7 @@ mod tests {
                         }));
                     }
                 } else {
-                    for h in console.note_off(0, key) {
+                    for h in console.note_off_manual(manual_index, key) {
                         assert!(handle.send(aristide_engine::Command::StopVoice { handle: h }));
                     }
                 }
@@ -1667,8 +1684,8 @@ mod tests {
         // Full organ, as "*" draws it — every stop (Console
         // itself retires the noise stops from the drawn list).
         let drawn: Vec<_> = organ.stops.iter().map(|s| s.id).collect();
-        let mut console =
-            crate::console::Console::new(organ, loaded.specs, drawn, Vec::new());
+        let manual_index = default_manual(&organ, 0);
+        let mut console = crate::console::Console::new(organ, loaded.specs, drawn);
         let _ = loaded.bank.pre_fault();
         let (mut engine, mut handle) =
             aristide_engine::Engine::new(device_rate, std::sync::Arc::new(loaded.bank));
@@ -1736,7 +1753,7 @@ mod tests {
                 let (_, key, on) = events[next_event];
                 next_event += 1;
                 if on {
-                    let (starts, retriggered) = console.note_on(0, key);
+                    let (starts, retriggered) = console.note_on_manual(manual_index, key);
                     for h in retriggered {
                         assert!(handle.send(aristide_engine::Command::StopVoice { handle: h }));
                     }
@@ -1754,7 +1771,7 @@ mod tests {
                         }));
                     }
                 } else {
-                    for h in console.note_off(0, key) {
+                    for h in console.note_off_manual(manual_index, key) {
                         assert!(handle.send(aristide_engine::Command::StopVoice { handle: h }));
                     }
                 }
@@ -1818,18 +1835,18 @@ mod tests {
             .find(|s| s.manual == great && s.name.contains("Montre"))
             .expect("montre");
 
+        let manual_index = default_manual(&organ, 0);
         // (sample, rate, seconds from key-off to 40 dB down).
         let ring = |key: u8| -> (u32, f64, f64) {
             let mut console = crate::console::Console::new(
                 organ.clone(),
                 loaded.specs.clone(),
                 vec![montre.id],
-                Vec::new(),
             );
             let (mut engine, mut handle) =
                 aristide_engine::Engine::new(device_rate, bank.clone());
             engine.set_release_stagger(0.0);
-            let (starts, _) = console.note_on(0, key);
+            let (starts, _) = console.note_on_manual(manual_index, key);
             let voice = starts.first().expect("voice");
             let (sample, rate) = (voice.spec.sample, voice.spec.rate as f64);
             for st in starts {
@@ -1853,7 +1870,7 @@ mod tests {
             while frame < hold + 5 * sr {
                 if !released && frame >= hold {
                     released = true;
-                    for h in console.note_off(0, key) {
+                    for h in console.note_off_manual(manual_index, key) {
                         handle.send(aristide_engine::Command::StopVoice { handle: h });
                     }
                 }
@@ -1935,13 +1952,13 @@ mod tests {
             .map(|(i, _)| i)
             .collect();
         let sr = device_rate as usize;
+        let manual_index = default_manual(&organ, 0);
 
         let render = |events: &[(usize, u8, bool)], total: usize, out: &str| {
             let mut console = crate::console::Console::new(
                 organ.clone(),
                 loaded.specs.clone(),
                 drawn.clone(),
-                Vec::new(),
             );
             for &c in &couplers {
                 console.set_coupler(c, true);
@@ -1960,7 +1977,7 @@ mod tests {
                     let (_, key, on) = events[next];
                     next += 1;
                     if on {
-                        let (starts, retriggered) = console.note_on(0, key);
+                        let (starts, retriggered) = console.note_on_manual(manual_index, key);
                         for h in retriggered {
                             handle.send(aristide_engine::Command::StopVoice { handle: h });
                         }
@@ -1977,7 +1994,7 @@ mod tests {
                             });
                         }
                     } else {
-                        for h in console.note_off(0, key) {
+                        for h in console.note_off_manual(manual_index, key) {
                             handle.send(aristide_engine::Command::StopVoice { handle: h });
                         }
                     }
@@ -2051,14 +2068,12 @@ mod tests {
                 organ.clone(),
                 loaded.specs.clone(),
                 vec![stop.id],
-                Vec::new(),
             );
-            let channel = organ
+            let manual = organ
                 .manuals
                 .iter()
                 .position(|m| m.id == stop.manual)
-                .unwrap()
-                .saturating_sub(1) as u8;
+                .unwrap();
             let (mut engine, mut handle) =
                 aristide_engine::Engine::new(device_rate, std::sync::Arc::new(loaded.bank.clone()));
             handle.send(aristide_engine::Command::SetMasterGain { linear: 0.4 });
@@ -2095,7 +2110,7 @@ mod tests {
                     let (_, key, on) = events[next];
                     next += 1;
                     if on {
-                        let (starts, retriggered) = console.note_on(channel, key);
+                        let (starts, retriggered) = console.note_on_manual(manual, key);
                         for h in retriggered {
                             handle.send(aristide_engine::Command::StopVoice { handle: h });
                         }
@@ -2112,7 +2127,7 @@ mod tests {
                             });
                         }
                     } else {
-                        for h in console.note_off(channel, key) {
+                        for h in console.note_off_manual(manual, key) {
                             handle.send(aristide_engine::Command::StopVoice { handle: h });
                         }
                     }
@@ -2127,10 +2142,9 @@ mod tests {
                 organ.clone(),
                 loaded.specs.clone(),
                 vec![stop.id],
-                Vec::new(),
             );
             for key in [67u8, 72, 76, 79] {
-                let (starts, _) = probe_console.note_on(channel, key);
+                let (starts, _) = probe_console.note_on_manual(manual, key);
                 for st in &starts {
                     let smp = loaded.bank.get(st.spec.sample).unwrap();
                     println!(
@@ -2142,7 +2156,7 @@ mod tests {
                         smp.tail_decay_db_per_s() * (st.spec.rate - 1.0)
                     );
                 }
-                for h in probe_console.note_off(channel, key) { let _ = h; }
+                for h in probe_console.note_off_manual(manual, key) { let _ = h; }
             }
         }
     }
@@ -2163,19 +2177,17 @@ mod tests {
                 .iter()
                 .find(|s| s.name.to_lowercase().contains(pattern))
                 .expect("stop");
-            let channel = organ
+            let manual = organ
                 .manuals
                 .iter()
                 .position(|m| m.id == stop.manual)
-                .unwrap()
-                .saturating_sub(1) as u8;
+                .unwrap();
             let mut console = crate::console::Console::new(
                 organ.clone(),
                 loaded.specs.clone(),
                 vec![stop.id],
-                Vec::new(),
             );
-            let (starts, _) = console.note_on(channel, 67);
+            let (starts, _) = console.note_on_manual(manual, 67);
             for (i, st) in starts.iter().enumerate() {
                 let smp = loaded.bank.get(st.spec.sample).unwrap();
                 let frames = smp.frames();
@@ -2200,7 +2212,7 @@ mod tests {
                 write_wav_f32(&path, &out, 2, smp.sample_rate_hz() as u32);
                 println!("wrote {path}");
             }
-            for h in console.note_off(channel, 67) {
+            for h in console.note_off_manual(manual, 67) {
                 let _ = h;
             }
         }
@@ -2224,18 +2236,16 @@ mod tests {
                 .iter()
                 .find(|s| s.name.to_lowercase().contains(pattern))
                 .expect("stop");
-            let channel = organ
+            let manual = organ
                 .manuals
                 .iter()
                 .position(|m| m.id == stop.manual)
-                .unwrap()
-                .saturating_sub(1) as u8;
+                .unwrap();
             for key in [67u8, 72, 73] {
                 let mut console = crate::console::Console::new(
                     organ.clone(),
                     loaded.specs.clone(),
                     vec![stop.id],
-                    Vec::new(),
                 );
                 let (mut engine, mut handle) = aristide_engine::Engine::new(
                     device_rate,
@@ -2251,7 +2261,7 @@ mod tests {
                 let mut frame = 0usize;
                 while frame < total {
                     if frame <= on_at && on_at < frame + block {
-                        let (starts, _) = console.note_on(channel, key);
+                        let (starts, _) = console.note_on_manual(manual, key);
                         for st in &starts {
                             let smp = loaded.bank.get(st.spec.sample).unwrap();
                             println!(
@@ -2275,7 +2285,7 @@ mod tests {
                         }
                     }
                     if frame <= off_at && off_at < frame + block {
-                        for h in console.note_off(channel, key) {
+                        for h in console.note_off_manual(manual, key) {
                             handle.send(aristide_engine::Command::StopVoice { handle: h });
                         }
                     }
@@ -2309,8 +2319,9 @@ mod tests {
         }
         drawn.sort_by_key(|id| id.0);
         drawn.dedup();
+        let manual_index = default_manual(&organ, 0);
         let mut console =
-            crate::console::Console::new(organ.clone(), loaded.specs.clone(), drawn, Vec::new());
+            crate::console::Console::new(organ.clone(), loaded.specs.clone(), drawn);
         let (mut engine, mut handle) =
             aristide_engine::Engine::new(device_rate, std::sync::Arc::new(loaded.bank.clone()));
         handle.send(aristide_engine::Command::SetMasterGain { linear: 0.4 });
@@ -2365,7 +2376,7 @@ mod tests {
                 let (_, key, on) = events[next];
                 next += 1;
                 if on {
-                    let (starts, retriggered) = console.note_on(0, key);
+                    let (starts, retriggered) = console.note_on_manual(manual_index, key);
                     for h in retriggered {
                         handle.send(aristide_engine::Command::StopVoice { handle: h });
                     }
@@ -2382,7 +2393,7 @@ mod tests {
                         });
                     }
                 } else {
-                    for h in console.note_off(0, key) {
+                    for h in console.note_off_manual(manual_index, key) {
                         handle.send(aristide_engine::Command::StopVoice { handle: h });
                     }
                 }
@@ -2413,9 +2424,10 @@ mod tests {
             .expect("montre");
         let drawn = vec![montre.id];
         let sr = device_rate as usize;
+        let manual_index = default_manual(&organ, 0);
         for hold_ms in [80usize, 200, 500, 2000] {
             let mut console =
-                crate::console::Console::new(organ.clone(), loaded.specs.clone(), drawn.clone(), Vec::new());
+                crate::console::Console::new(organ.clone(), loaded.specs.clone(), drawn.clone());
             let (mut engine, mut handle) =
                 aristide_engine::Engine::new(device_rate, std::sync::Arc::new(loaded.bank.clone()));
             let block = 512usize;
@@ -2429,7 +2441,7 @@ mod tests {
             while frame < total {
                 if !on {
                     on = true;
-                    let (starts, _) = console.note_on(0, 60);
+                    let (starts, _) = console.note_on_manual(manual_index, 60);
                     for st in starts {
                         handle.send(aristide_engine::Command::StartVoice {
                             handle: st.handle,
@@ -2445,7 +2457,7 @@ mod tests {
                 }
                 if !off && frame >= hold_frames {
                     off = true;
-                    for h in console.note_off(0, 60) {
+                    for h in console.note_off_manual(manual_index, 60) {
                         handle.send(aristide_engine::Command::StopVoice { handle: h });
                     }
                 }
@@ -2474,8 +2486,8 @@ mod tests {
             .map(|(_, v)| *v);
         // Find the montre middle-C spec through the console instead.
         let mut console =
-            crate::console::Console::new(organ.clone(), loaded.specs.clone(), drawn.clone(), Vec::new());
-        let (starts, _) = console.note_on(0, 60);
+            crate::console::Console::new(organ.clone(), loaded.specs.clone(), drawn.clone());
+        let (starts, _) = console.note_on_manual(manual_index, 60);
         let st = starts.first().expect("montre voice");
         let sample = loaded.bank.get(st.spec.sample).expect("sample");
         let tail = sample.release_start().unwrap_or(0);
@@ -2525,7 +2537,7 @@ mod tests {
         // Lite render (wind/tilt/wander off) of the 2 s hold isolates
         // whether the accelerating decay lives in the full-mode path.
         let mut console =
-            crate::console::Console::new(organ.clone(), loaded.specs.clone(), drawn.clone(), Vec::new());
+            crate::console::Console::new(organ.clone(), loaded.specs.clone(), drawn.clone());
         let (mut engine, mut handle) =
             aristide_engine::Engine::new(device_rate, std::sync::Arc::new(loaded.bank.clone()));
         engine.set_lite(true);
@@ -2540,7 +2552,7 @@ mod tests {
         while frame < total {
             if !sent_on {
                 sent_on = true;
-                let (starts, _) = console.note_on(0, 60);
+                let (starts, _) = console.note_on_manual(manual_index, 60);
                 for st in starts {
                     handle.send(aristide_engine::Command::StartVoice {
                         handle: st.handle,
@@ -2556,7 +2568,7 @@ mod tests {
             }
             if !sent_off && frame >= hold_frames {
                 sent_off = true;
-                for h in console.note_off(0, 60) {
+                for h in console.note_off_manual(manual_index, 60) {
                     handle.send(aristide_engine::Command::StopVoice { handle: h });
                 }
             }

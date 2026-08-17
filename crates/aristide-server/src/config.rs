@@ -11,10 +11,17 @@
 //! machine's half, keyed by organ so one rig can drive many instruments
 //! differently.
 //!
-//! An organ the file has never seen has no assignments, and an
-//! unassigned input is silent (see `Route`). That is deliberate: the
-//! alternative — guessing from MIDI channels — is what makes a strange
-//! keyboard blast a random division the first time it is plugged in.
+//! The table is written **manual first**: an organ's manual lists the
+//! inputs that play it. That direction is the one the player thinks in
+//! ("what drives the Récit?"), and it is the one that generalises — a
+//! manual holds a *list*, so two keyboards can share one division, and
+//! each entry has room to grow a key range or a transposition without
+//! disturbing anything else.
+//!
+//! A manual with no inputs is silent, and that is the default for an
+//! organ the file has never seen. That is deliberate: the alternative —
+//! guessing from MIDI channels — is what makes a strange keyboard blast
+//! a random division the first time it is plugged in.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -26,18 +33,22 @@ use serde::{Deserialize, Serialize};
 const HEADER: &str = "\
 # Aristide — MIDI input assignments, per organ.
 #
-# Each input device is named by its MIDI port, exactly as the operating
-# system reports it. Its value is one of:
+# Each entry gives one of an organ's manuals an input to listen to:
 #
-#   \"channels\"     obey the organ's channel map (a console whose
-#                  manuals speak on separate MIDI channels)
-#   \"<manual>\"     pin every note from this device to that manual
-#                  (a plain keyboard that only ever sends one channel)
+#   device       the MIDI port, named exactly as the operating system
+#                reports it
+#   channel      1-16; omit it to accept every channel (a plain USB
+#                keyboard that only ever sends one)
 #
-# A device that is not listed here is unassigned and stays silent.
-# Manual names are matched against the loaded organ's own names, so a
-# renamed or missing manual leaves the device unassigned rather than
-# playing the wrong division.
+# A manual may list several inputs — two keyboards playing one division
+# is a valid thing to want — and one device may drive several manuals by
+# giving each a different channel, which is how a DIN console with its
+# manuals on separate channels is set up.
+#
+# A manual that is not listed here has no input and stays silent. Manual
+# names are matched against the loaded organ's own names, so a renamed
+# or missing manual drops its inputs rather than playing the wrong
+# division.
 #
 # Aristide rewrites this file whenever you change an assignment in
 # Preferences → MIDI. Hand edits are read back on the next start.
@@ -53,39 +64,77 @@ pub struct MidiConfig {
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct OrganConfig {
-    /// Port name → `"channels"` or a manual name.
+    /// Manual name → the inputs that play it, in the order the player
+    /// added them. The order is the slot numbering the UI edits by.
     #[serde(default)]
-    pub devices: BTreeMap<String, String>,
-    /// The 16-channel map as manual indices; empty = the organ's default.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub channels: Vec<usize>,
+    pub manuals: BTreeMap<String, Vec<Input>>,
 }
 
-/// The value stored for a device that follows the channel map. Manual
-/// names are stored verbatim, so this is the one reserved word.
-pub const FOLLOW_CHANNELS: &str = "channels";
+/// One source of notes for one manual.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Input {
+    /// MIDI port name, as the OS reports it. Kept even while the device
+    /// is unplugged — a config that forgets a keyboard because it was
+    /// off at startup would be worse than useless.
+    pub device: String,
+    /// MIDI channel 1-16, as printed on hardware. `None` = any channel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<u8>,
+}
 
 impl MidiConfig {
     pub fn organ(&self, organ: &str) -> Option<&OrganConfig> {
         self.organs.get(organ)
     }
 
-    /// Record one device's assignment. `None` removes it — an organ's
-    /// table lists only what the player has actually assigned.
-    pub fn set_device(&mut self, organ: &str, port: &str, assignment: Option<&str>) {
-        let entry = self.organs.entry(organ.to_string()).or_default();
-        match assignment {
-            Some(value) => {
-                entry.devices.insert(port.to_string(), value.to_string());
-            }
-            None => {
-                entry.devices.remove(port);
-            }
+    /// Every (manual name, inputs) pair saved for one organ.
+    pub fn assignments(&self, organ: &str) -> impl Iterator<Item = (&str, &[Input])> {
+        self.organs
+            .get(organ)
+            .into_iter()
+            .flat_map(|organ| organ.manuals.iter())
+            .map(|(name, inputs)| (name.as_str(), inputs.as_slice()))
+    }
+
+    pub fn inputs(&self, organ: &str, manual: &str) -> &[Input] {
+        self.organs
+            .get(organ)
+            .and_then(|organ| organ.manuals.get(manual))
+            .map_or(&[], Vec::as_slice)
+    }
+
+    /// Replace the input at `slot`, or append when `slot` is past the
+    /// end — one call covers "change this row" and "add a row".
+    pub fn set_input(&mut self, organ: &str, manual: &str, slot: usize, input: Input) {
+        let inputs = self
+            .organs
+            .entry(organ.to_string())
+            .or_default()
+            .manuals
+            .entry(manual.to_string())
+            .or_default();
+        match inputs.get_mut(slot) {
+            Some(existing) => *existing = input,
+            None => inputs.push(input),
         }
     }
 
-    pub fn set_channels(&mut self, organ: &str, channels: Vec<usize>) {
-        self.organs.entry(organ.to_string()).or_default().channels = channels;
+    /// Remove one input. A manual left with none drops out of the file
+    /// entirely: unassigned is the absence of an entry, not an entry
+    /// saying nothing.
+    pub fn remove_input(&mut self, organ: &str, manual: &str, slot: usize) {
+        let Some(organ_config) = self.organs.get_mut(organ) else {
+            return;
+        };
+        let Some(inputs) = organ_config.manuals.get_mut(manual) else {
+            return;
+        };
+        if slot < inputs.len() {
+            inputs.remove(slot);
+        }
+        if inputs.is_empty() {
+            organ_config.manuals.remove(manual);
+        }
     }
 }
 
@@ -129,13 +178,25 @@ pub fn save(path: &Path, config: &MidiConfig) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    fn input(device: &str, channel: Option<u8>) -> Input {
+        Input {
+            device: device.into(),
+            channel,
+        }
+    }
+
     #[test]
     fn assignments_round_trip_per_organ() {
         let mut config = MidiConfig::default();
-        config.set_device("Friesach", "Johannus DIN IN", Some(FOLLOW_CHANNELS));
-        config.set_device("Friesach", "AKM320 MIDI 1", Some("Second Manual"));
-        config.set_channels("Friesach", vec![1, 2, 0]);
-        config.set_device("Sankt Nikolaus", "AKM320 MIDI 1", Some("Récit"));
+        // One DIN console split across channels, plus a USB keyboard
+        // doubling the Great — the two shapes the file has to hold.
+        let din = input("Johannus DIN IN", Some(1));
+        let usb = input("AKM320 MIDI 1", None);
+        config.set_input("Friesach", "First Manual", 0, din);
+        config.set_input("Friesach", "First Manual", 1, usb.clone());
+        let din2 = input("Johannus DIN IN", Some(2));
+        config.set_input("Friesach", "Second Manual", 0, din2);
+        config.set_input("Sankt Nikolaus", "Récit", 0, usb);
 
         let path = std::env::temp_dir().join("aristide-midi-test.toml");
         save(&path, &config).expect("config saves");
@@ -143,27 +204,45 @@ mod tests {
         assert!(text.starts_with("# Aristide"), "header explains the file");
 
         let read = load(&path).expect("config loads");
-        let friesach = read.organ("Friesach").expect("organ remembered");
-        assert_eq!(friesach.devices["AKM320 MIDI 1"], "Second Manual");
-        assert_eq!(friesach.devices["Johannus DIN IN"], FOLLOW_CHANNELS);
-        assert_eq!(friesach.channels, vec![1, 2, 0]);
+        assert_eq!(
+            read.inputs("Friesach", "First Manual"),
+            [
+                input("Johannus DIN IN", Some(1)),
+                input("AKM320 MIDI 1", None),
+            ]
+        );
+        assert_eq!(
+            read.inputs("Friesach", "Second Manual"),
+            [input("Johannus DIN IN", Some(2))]
+        );
         // Assignments are per organ: the same keyboard plays a different
         // manual on a different instrument, and knows nothing about an
         // organ that was never configured.
         assert_eq!(
-            read.organs["Sankt Nikolaus"].devices["AKM320 MIDI 1"],
-            "Récit"
+            read.inputs("Sankt Nikolaus", "Récit"),
+            [input("AKM320 MIDI 1", None)]
         );
         assert!(read.organ("Some Other Organ").is_none());
-
-        let mut cleared = read;
-        cleared.set_device("Friesach", "AKM320 MIDI 1", None);
-        assert!(
-            !cleared.organs["Friesach"]
-                .devices
-                .contains_key("AKM320 MIDI 1")
-        );
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn a_slot_past_the_end_appends_and_the_last_removal_clears_the_manual() {
+        let mut config = MidiConfig::default();
+        config.set_input("Organ", "Great", 7, input("Keyboard", None));
+        let great = config.inputs("Organ", "Great");
+        assert_eq!(great.len(), 1, "a slot past the end appends, not sparse");
+
+        config.set_input("Organ", "Great", 0, input("Keyboard", Some(3)));
+        assert_eq!(config.inputs("Organ", "Great"), [input("Keyboard", Some(3))]);
+
+        config.remove_input("Organ", "Great", 0);
+        assert!(config.inputs("Organ", "Great").is_empty());
+        assert!(
+            !config.organs["Organ"].manuals.contains_key("Great"),
+            "a manual with no inputs leaves no entry behind"
+        );
+        config.remove_input("Organ", "Great", 0);
     }
 
     #[test]

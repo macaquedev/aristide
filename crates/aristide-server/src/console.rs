@@ -37,9 +37,6 @@ pub struct Console {
     trem_noise_open: Option<u64>,
     noises_enabled: bool,
     noise_volume: f32,
-    /// `channel_map[c]` = index into `organ.manuals` MIDI channel `c`
-    /// plays; channels past the end wrap.
-    channel_map: Vec<usize>,
     /// Per manual index: the enclosures (engine indices) its stops sit
     /// inside — an expression pedal on that manual's channel drives
     /// them. Derived from stop→rank→windchest→enclosure membership.
@@ -69,13 +66,7 @@ impl Console {
         organ: Organ,
         specs: HashMap<(RankId, u16), VoiceSpec>,
         drawn: Vec<StopId>,
-        channel_map: Vec<usize>,
     ) -> Console {
-        let channel_map = if channel_map.is_empty() {
-            default_channel_map(&organ)
-        } else {
-            channel_map
-        };
         let mut console = Console {
             organ,
             specs,
@@ -91,7 +82,6 @@ impl Console {
             trem_noise_open: None,
             noises_enabled: true,
             noise_volume: 0.7,
-            channel_map,
             manual_enclosures: Vec::new(),
             enclosure_positions: Vec::new(),
             next_handle: 0,
@@ -150,18 +140,9 @@ impl Console {
         }
     }
 
-    /// Expression pedal on `channel`: move every enclosure that
-    /// channel's manual encloses. Returns (engine index, position)
-    /// pairs for the control loop to forward.
-    pub fn expression(&mut self, channel: u8, value: u8) -> Vec<(u8, f32)> {
-        let Some(manual_index) = self.manual_index(channel) else {
-            return Vec::new();
-        };
-        self.expression_manual(manual_index, value)
-    }
-
-    /// The same pedal move addressed by manual — used when an input
-    /// device is pinned to one manual and its channel means nothing.
+    /// Expression pedal: move every enclosure this manual's stops sit
+    /// inside. Returns (engine index, position) pairs for the control
+    /// loop to forward.
     pub fn expression_manual(&mut self, manual_index: usize, value: u8) -> Vec<(u8, f32)> {
         if manual_index >= self.manual_enclosures.len() {
             return Vec::new();
@@ -346,68 +327,10 @@ impl Console {
         targets
     }
 
-    fn manual_index(&self, channel: u8) -> Option<usize> {
-        if self.channel_map.is_empty() {
-            return None;
-        }
-        let mapped = self.channel_map[channel as usize % self.channel_map.len()];
-        (mapped < self.organ.manuals.len()).then_some(mapped)
-    }
-
-    /// The map as all 16 channels, wrap resolved — what a UI edits.
-    /// Short maps wrap (3 manuals: channel 4 plays what channel 1 does),
-    /// which is invisible until someone wants to change one channel; so
-    /// the editable form is always the full sixteen.
-    pub fn channel_map(&self) -> Vec<usize> {
-        (0..16)
-            .map(|channel| self.manual_index(channel).unwrap_or(0))
-            .collect()
-    }
-
-    /// Point one MIDI channel at one manual. Expands the map to all
-    /// sixteen channels first, so the edit means exactly what it says.
-    pub fn set_channel(&mut self, channel: u8, manual_index: usize) {
-        if manual_index >= self.organ.manuals.len() || channel >= 16 {
-            return;
-        }
-        let mut map = self.channel_map();
-        map[channel as usize] = manual_index;
-        self.channel_map = map;
-    }
-
-    /// Replace the whole map (restoring a saved one). Entries naming a
-    /// manual this organ hasn't got are dropped back to the default,
-    /// so an edited config file can't silence a channel by typo.
-    pub fn set_channel_map(&mut self, map: Vec<usize>) {
-        let default = default_channel_map(&self.organ);
-        let manuals = self.organ.manuals.len();
-        self.channel_map = map
-            .into_iter()
-            .enumerate()
-            .map(|(channel, manual)| {
-                if manual < manuals {
-                    manual
-                } else {
-                    default[channel % default.len()]
-                }
-            })
-            .collect();
-        if self.channel_map.is_empty() {
-            self.channel_map = default;
-        }
-    }
-
     /// Voices retired by this press: a re-press before the note-off
     /// (key bounce, fast repetition) must release the previous voices —
     /// a pipe can't speak twice, and doubling correlated audio jumps
     /// +6 dB into clipping.
-    pub fn note_on(&mut self, channel: u8, key: u8) -> (Vec<VoiceStart>, Vec<u64>) {
-        let Some(manual_index) = self.manual_index(channel) else {
-            return (Vec::new(), Vec::new());
-        };
-        self.note_on_manual(manual_index, key)
-    }
-
     /// `note_on` addressed by manual index — the coordinate UIs speak
     /// (a clicked on-screen key has no MIDI channel).
     pub fn note_on_manual(&mut self, manual_index: usize, key: u8) -> (Vec<VoiceStart>, Vec<u64>) {
@@ -495,13 +418,6 @@ impl Console {
         retriggered.sort_unstable();
         retriggered.dedup();
         (starts, retriggered)
-    }
-
-    pub fn note_off(&mut self, channel: u8, key: u8) -> Vec<u64> {
-        let Some(manual_index) = self.manual_index(channel) else {
-            return Vec::new();
-        };
-        self.note_off_manual(manual_index, key)
     }
 
     /// `note_off` addressed by manual index (see `note_on_manual`).
@@ -770,19 +686,6 @@ impl Console {
         self.speaking.clear();
     }
 
-    /// The manual each MIDI channel plays, for logging.
-    pub fn channel_names(&self) -> Vec<(usize, &str)> {
-        self.channel_map
-            .iter()
-            .enumerate()
-            .filter_map(|(channel, &index)| {
-                self.organ
-                    .manuals
-                    .get(index)
-                    .map(|m| (channel, m.name.as_str()))
-            })
-            .collect()
-    }
 }
 
 /// "Montre 8' stop noise" → "Montre 8'"; "I/P coupler stop noise" → "I/P".
@@ -835,25 +738,6 @@ fn name_match_score(noise: &str, candidate: &str) -> f32 {
         }
     }
     matched as f32 / ta.len().max(tb.len()) as f32
-}
-
-/// Keyboards first (in model order), pedal last: channel 0 lands on the
-/// Great rather than the pedalboard, which is what a single keyboard
-/// plugged into a fresh setup almost always wants.
-pub fn default_channel_map(organ: &Organ) -> Vec<usize> {
-    let manual_count = organ.manuals.len();
-    if manual_count == 0 {
-        return Vec::new();
-    }
-    // The GO convention: a pedalboard, when present, is manuals[0].
-    let has_pedal = organ.manuals[0].id == aristide_model::ManualId(0);
-    if has_pedal && manual_count > 1 {
-        let mut map: Vec<usize> = (1..manual_count).collect();
-        map.push(0);
-        map
-    } else {
-        (0..manual_count).collect()
-    }
 }
 
 #[cfg(test)]
@@ -933,40 +817,15 @@ mod tests {
                 );
             }
         }
-        Console::new(organ, specs, vec![StopId(1), StopId(2)], Vec::new())
-    }
-
-    #[test]
-    fn default_channel_map_puts_keyboards_before_pedal() {
-        let manual = |id: u32, name: &str| Manual {
-            id: ManualId(id),
-            name: name.into(),
-            first_midi_note: 36,
-            key_count: 32,
-        };
-        let organ = Organ {
-            manuals: vec![
-                manual(0, "Pedal"),
-                manual(1, "Great"),
-                manual(2, "Swell"),
-            ],
-            ..Organ::default()
-        };
-        assert_eq!(default_channel_map(&organ), vec![1, 2, 0]);
-
-        let no_pedal = Organ {
-            manuals: vec![manual(1, "Great")],
-            ..Organ::default()
-        };
-        assert_eq!(default_channel_map(&no_pedal), vec![0]);
+        Console::new(organ, specs, vec![StopId(1), StopId(2)])
     }
 
     #[test]
     fn note_on_starts_one_voice_per_drawn_stop() {
         let mut console = test_console();
-        let (starts, _) = console.note_on(0, 60);
+        let (starts, _) = console.note_on_manual(0, 60);
         assert_eq!(starts.len(), 2);
-        let stops = console.note_off(0, 60);
+        let stops = console.note_off_manual(0, 60);
         assert_eq!(stops.len(), 2);
         assert_eq!(
             stops,
@@ -981,7 +840,7 @@ mod tests {
         // tracked: the key lights and can be released cleanly.
         console.set_drawn(StopId(1), false);
         console.set_drawn(StopId(2), false);
-        let (starts, _) = console.note_on(0, 60);
+        let (starts, _) = console.note_on_manual(0, 60);
         assert!(starts.is_empty());
         assert_eq!(console.manual_states()[0].4, vec![60]);
 
@@ -1003,7 +862,7 @@ mod tests {
         assert_eq!(released, vec![first]);
 
         // Releasing the key stops the remaining pipe and clears the light.
-        assert_eq!(console.note_off(0, 60), vec![second]);
+        assert_eq!(console.note_off_manual(0, 60), vec![second]);
         assert!(console.manual_states()[0].4.is_empty());
     }
 
@@ -1013,22 +872,22 @@ mod tests {
         console.set_drawn(StopId(1), false);
         console.set_drawn(StopId(2), false);
         console.set_coupler(0, true); // II/I
-        assert!(console.note_on(0, 60).0.is_empty());
+        assert!(console.note_on_manual(0, 60).0.is_empty());
 
         // The Swell stop drawn mid-hold sounds through the coupler.
         let (_, starts) = console.set_drawn(StopId(2), true);
         assert_eq!(starts.len(), 1);
         assert_eq!(starts[0].spec.sample, 1, "rank 2's sample expected");
         let handle = starts[0].handle;
-        assert_eq!(console.note_off(0, 60), vec![handle]);
+        assert_eq!(console.note_off_manual(0, 60), vec![handle]);
     }
 
     #[test]
     fn keys_outside_the_manual_are_ignoredable() {
         let mut console = test_console();
-        assert!(console.note_on(0, 20).0.is_empty());
-        assert!(console.note_on(0, 120).0.is_empty());
-        assert!(console.note_off(0, 20).is_empty());
+        assert!(console.note_on_manual(0, 20).0.is_empty());
+        assert!(console.note_on_manual(0, 120).0.is_empty());
+        assert!(console.note_off_manual(0, 20).is_empty());
     }
 
     /// Two manuals with one stop each, plus II/I unison, 16' I (self,
@@ -1103,38 +962,38 @@ mod tests {
                 );
             }
         }
-        Console::new(organ, specs, vec![StopId(1), StopId(2)], Vec::new())
+        Console::new(organ, specs, vec![StopId(1), StopId(2)])
     }
 
     #[test]
     fn couplers_route_between_manuals_and_octaves() {
         let mut console = coupled_console();
         // Channel 0 → Great (no pedal in this organ → identity map).
-        assert_eq!(console.note_on(0, 60).0.len(), 1, "no couplers yet");
-        console.note_off(0, 60);
+        assert_eq!(console.note_on_manual(0, 60).0.len(), 1, "no couplers yet");
+        console.note_off_manual(0, 60);
 
         console.set_coupler(0, true); // II/I
-        assert_eq!(console.note_on(0, 60).0.len(), 2, "unison coupler adds II");
-        assert_eq!(console.note_off(0, 60).len(), 2, "note-off kills both");
+        assert_eq!(console.note_on_manual(0, 60).0.len(), 2, "unison coupler adds II");
+        assert_eq!(console.note_off_manual(0, 60).len(), 2, "note-off kills both");
 
         console.set_coupler(1, true); // 16' I (self, −12)
         // Great C + Swell C (II/I) + Great C−12 (16' I). Coupled notes
         // don't re-couple, so the sub-octave stays on the Great.
-        assert_eq!(console.note_on(0, 60).0.len(), 3);
-        console.note_off(0, 60);
+        assert_eq!(console.note_on_manual(0, 60).0.len(), 3);
+        console.note_off_manual(0, 60);
 
         // Out-of-compass shifted notes drop out quietly.
-        assert_eq!(console.note_on(0, 37).0.len(), 2, "37-12 is below compass");
-        console.note_off(0, 37);
+        assert_eq!(console.note_on_manual(0, 37).0.len(), 2, "37-12 is below compass");
+        console.note_off_manual(0, 37);
     }
 
     #[test]
     fn tuning_retunes_and_transposes() {
         let mut console = test_console();
         // Equal temperament, a=440: everything at unity rate.
-        let baseline = console.note_on(0, 60).0[0].spec.rate;
+        let baseline = console.note_on_manual(0, 60).0[0].spec.rate;
         assert!((baseline - 1.0).abs() < 1e-6);
-        console.note_off(0, 60);
+        console.note_off_manual(0, 60);
 
         // Meantone C sits +10.265 cents above equal (a-referenced).
         console.set_tuning(crate::tuning::Tuning {
@@ -1142,13 +1001,13 @@ mod tests {
             a4_hz: 440.0,
             transpose: 0,
         });
-        let meantone_c = console.note_on(0, 60).0[0].spec.rate;
+        let meantone_c = console.note_on_manual(0, 60).0[0].spec.rate;
         let expected = (10.265f32 / 1200.0).exp2();
         assert!(
             (meantone_c - expected).abs() < 1e-4,
             "meantone C rate {meantone_c} vs {expected}"
         );
-        console.note_off(0, 60);
+        console.note_off_manual(0, 60);
 
         // Transpose +2: key 60 routes to pipe 62 (rate reflects D's
         // offset, and the sounding pipe index shifts).
@@ -1157,13 +1016,13 @@ mod tests {
             a4_hz: 440.0,
             transpose: 2,
         });
-        let (transposed, _) = console.note_on(0, 60);
+        let (transposed, _) = console.note_on_manual(0, 60);
         assert_eq!(transposed.len(), 2, "both drawn stops sound");
         // Pipe index = key 62 − first_midi 36 = 26; sample index equals
         // rank − 1 in the fixture, so instead verify by keying at the
         // compass edge: 96 + 2 is out of range → silent.
-        console.note_off(0, 60);
-        assert!(console.note_on(0, 96).0.is_empty(), "96+2 exceeds compass");
+        console.note_off_manual(0, 60);
+        assert!(console.note_on_manual(0, 96).0.is_empty(), "96+2 exceeds compass");
     }
 
     #[test]
@@ -1176,9 +1035,9 @@ mod tests {
         let mut console = coupled_console();
         console.set_coupler(1, true); // 16' I: self-coupler at −12
 
-        let (first, _) = console.note_on(0, 72);
+        let (first, _) = console.note_on_manual(0, 72);
         assert_eq!(first.len(), 2, "72 direct + coupled 60");
-        let (second, _) = console.note_on(0, 60);
+        let (second, _) = console.note_on_manual(0, 60);
         assert_eq!(
             second.len(),
             1,
@@ -1187,15 +1046,15 @@ mod tests {
         );
 
         // Releasing 72 must NOT stop the shared pipe (60 still holds it).
-        let stopped = console.note_off(0, 72);
+        let stopped = console.note_off_manual(0, 72);
         assert_eq!(stopped.len(), 1, "only 72's unshared pipe stops");
         // Releasing 60 stops the shared pipe and 60's own coupled pipe.
-        let stopped = console.note_off(0, 60);
+        let stopped = console.note_off_manual(0, 60);
         assert_eq!(stopped.len(), 2, "shared pipe + 48-pipe stop last");
 
         // Every started voice eventually stopped exactly once.
-        assert!(console.note_off(0, 60).is_empty());
-        assert!(console.note_off(0, 72).is_empty());
+        assert!(console.note_off_manual(0, 60).is_empty());
+        assert!(console.note_off_manual(0, 72).is_empty());
     }
 
     #[test]
@@ -1208,17 +1067,17 @@ mod tests {
         let mut console = coupled_console();
         console.set_coupler(1, true); // 16' I self-coupler
 
-        let (starts, _) = console.note_on(0, 72); // pipes 36 and 24
+        let (starts, _) = console.note_on_manual(0, 72); // pipes 36 and 24
         let shared_pipe_voice = starts
             .iter()
             .map(|s| s.handle)
             .max()
             .expect("voices started");
-        let released = console.note_off(0, 72);
+        let released = console.note_off_manual(0, 72);
         assert_eq!(released.len(), 2);
 
         // Immediately press 60 → its direct pipe IS 72's coupled pipe.
-        let (_, expedited) = console.note_on(0, 60);
+        let (_, expedited) = console.note_on_manual(0, 60);
         assert!(
             expedited.contains(&shared_pipe_voice)
                 || released.contains(&shared_pipe_voice),
@@ -1236,8 +1095,8 @@ mod tests {
         console.set_coupler(0, true); // II/I
         console.set_coupler(2, true); // I/II — cycle
         // I→II and II→I at unison collapse to the same two notes.
-        assert_eq!(console.note_on(0, 60).0.len(), 2);
-        console.note_off(0, 60);
+        assert_eq!(console.note_on_manual(0, 60).0.len(), 2);
+        console.note_off_manual(0, 60);
     }
 
     #[test]
@@ -1246,21 +1105,21 @@ mod tests {
         // release the first press's voices — a pipe can't speak twice,
         // and doubling correlated audio is an instant +6 dB.
         let mut console = test_console();
-        let (first, retriggered) = console.note_on(0, 60);
+        let (first, retriggered) = console.note_on_manual(0, 60);
         assert_eq!(first.len(), 2);
         assert!(retriggered.is_empty());
         let first_handles: Vec<u64> = first.iter().map(|s| s.handle).collect();
 
-        let (second, retriggered) = console.note_on(0, 60);
+        let (second, retriggered) = console.note_on_manual(0, 60);
         assert_eq!(second.len(), 2);
         assert_eq!(retriggered, first_handles, "old voices released");
 
         // Note-off stops only the live (second) voices.
-        let stopped = console.note_off(0, 60);
+        let stopped = console.note_off_manual(0, 60);
         assert_eq!(
             stopped,
             second.iter().map(|s| s.handle).collect::<Vec<_>>()
         );
-        assert!(console.note_off(0, 60).is_empty());
+        assert!(console.note_off_manual(0, 60).is_empty());
     }
 }

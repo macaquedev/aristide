@@ -453,23 +453,21 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
 }
 .ghost:hover { border-color: var(--accent); color: var(--text); }
 
-/* one row per MIDI input: listen switch, name, where it plays */
-.midi-ports { display: flex; flex-direction: column; gap: 8px; }
+/* one block per manual: its name, and the inputs that play it */
+.midi-manuals { display: flex; flex-direction: column; gap: 8px; }
 
-.midi-port {
+.midi-manual {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   gap: 12px;
   padding: 9px 12px;
   border: 1px solid var(--border);
   border-radius: 10px;
   background: var(--surface);
 }
-.midi-port.unassigned { border-style: dashed; }
-.midi-port.unassigned .port-name { color: var(--text-dim); }
 
-.port-name {
-  flex: 1;
+.manual-name {
+  flex: 0 0 108px;
   min-width: 0;
   font-size: 12.5px;
   white-space: nowrap;
@@ -477,26 +475,49 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   text-overflow: ellipsis;
 }
 
-.port-route { flex: 0 0 auto; max-width: 210px; }
-
-/* the channel map: sixteen small assignments, two or three per row */
-.midi-channels {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
-  gap: 8px;
+.manual-inputs {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
 }
 
-.midi-channel {
+.manual-input {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 6px 10px;
+  gap: 6px;
+  width: 100%;
+}
+.manual-input .input-device { flex: 1; min-width: 0; }
+.manual-input .input-channel { flex: 0 0 auto; max-width: 130px; }
+/* Waiting for a key: the row is the only live thing in the dialog. */
+.manual-input.listening .input-device { border-color: var(--accent); }
+.manual-input.missing .input-device { border-style: dashed; color: var(--text-dim); }
+
+.listen-hint {
+  font-size: 11px;
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+.remove-input { padding: 4px 9px; font-size: 13px; letter-spacing: 0; }
+.add-input { padding: 3px 8px; font-size: 10px; }
+
+/* the inputs this machine can see — a read-only sanity check */
+.midi-ports { display: flex; flex-direction: column; gap: 4px; }
+
+.midi-port {
+  padding: 5px 10px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--surface);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-.midi-channel select { max-width: 130px; }
 
 .about-card { width: min(420px, 100%); height: auto; }
 .about-body { display: block; padding: 18px 20px 22px; font-size: 12.5px; line-height: 1.6; }

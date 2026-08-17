@@ -18,16 +18,16 @@ export class Preferences {
     this.dragging = new Set();
     this.tuning = null;
     this.midiSignature = null;
-    this.manuals = [];
+    this.learning = null;
     this.tab = "midi";
     this.el = {
       modal: root.getElementById("prefs"),
       subject: root.getElementById("prefs-subject"),
       tabs: root.getElementById("prefs-tabs"),
       panes: [...root.querySelectorAll("#prefs .pane")],
+      manuals: root.getElementById("midi-manuals"),
       ports: root.getElementById("midi-ports"),
       unassigned: root.getElementById("midi-unassigned"),
-      channels: root.getElementById("midi-channels"),
       rescan: root.getElementById("midi-rescan"),
       temperament: root.getElementById("set-temperament"),
       a4: root.getElementById("set-a4"),
@@ -57,6 +57,9 @@ export class Preferences {
   }
 
   close() {
+    // Leaving the dialog ends any wait for a key: the next thing the
+    // player touches should sound, not be swallowed as an assignment.
+    if (this.learning) this.send(commands.midiLearn(null));
     this.el.modal.classList.add("hidden");
     this.el.about.classList.add("hidden");
     this.root.body.classList.remove("modal-open");
@@ -106,122 +109,181 @@ export class Preferences {
 
   update(snapshot) {
     this.el.subject.textContent = snapshot.organ ?? "";
-    this.manuals = snapshot.manuals ?? [];
     this.refreshMidi(snapshot);
     this.refreshTuning(snapshot.tuning);
     this.refreshSound(snapshot);
   }
 
   // ---- MIDI --------------------------------------------------------------
+  //
+  // Read manual-first, the way an organist asks the question: *what
+  // plays the Récit?* A manual holds a list of inputs, so two keyboards
+  // can share a division and one console can feed several manuals by
+  // splitting itself across channels.
+  //
+  // Nothing here is edited in place: the rows are rebuilt whenever the
+  // assignments change, which is only ever just after the user acted on
+  // one (and so blurred it). Between those the pane is inert.
 
   refreshMidi(snapshot) {
-    const midi = snapshot.midi ?? { ports: [], channels: [] };
-    const signature = JSON.stringify([
-      midi.ports.map((p) => [p.id, p.name]),
-      this.manuals.map((m) => [m.idx, m.name]),
-      midi.channels.length,
-    ]);
+    const midi = snapshot.midi ?? { ports: [], manuals: [] };
+    this.learning = midi.learning ?? null;
+    const signature = JSON.stringify([midi.ports, midi.manuals, midi.learning ?? null]);
     if (signature !== this.midiSignature) {
       this.midiSignature = signature;
+      this.buildManuals(midi);
       this.buildPorts(midi.ports);
-      this.buildChannels(midi.channels.length);
-    }
-
-    for (const port of midi.ports) {
-      const row = this.el.ports.querySelector(`[data-port="${port.id}"]`);
-      if (!row) continue;
-      row.classList.toggle("unassigned", port.route === "none");
-      const route = row.querySelector(".port-route");
-      if (this.root.activeElement !== route) route.value = port.route;
     }
 
     // Silence is the honest default for an organ nobody has set up, but
     // it looks like a fault unless the dialog says so.
-    const nothingAssigned =
-      midi.ports.length > 0 && midi.ports.every((p) => p.route === "none");
-    this.el.unassigned.classList.toggle("hidden", !nothingAssigned);
+    const nothing =
+      midi.manuals.length > 0 && midi.manuals.every((m) => !m.inputs.length);
+    this.el.unassigned.classList.toggle("hidden", !nothing);
+  }
 
-    midi.channels.forEach((manual, channel) => {
-      const select = this.el.channels.querySelector(`[data-channel="${channel}"]`);
-      if (select && this.root.activeElement !== select) select.value = String(manual);
+  buildManuals(midi) {
+    this.el.manuals.replaceChildren();
+    if (!midi.manuals.length) {
+      this.el.manuals.append(this.emptyNote("No organ loaded — nothing to assign."));
+      return;
+    }
+    for (const manual of midi.manuals) {
+      const row = document.createElement("div");
+      row.className = "midi-manual";
+
+      const name = document.createElement("span");
+      name.className = "manual-name";
+      name.textContent = manual.name;
+      name.title = manual.name;
+
+      const inputs = document.createElement("div");
+      inputs.className = "manual-inputs";
+      for (const input of manual.inputs) {
+        inputs.append(this.inputRow(midi, manual.idx, input.slot, input));
+      }
+      // A manual with nothing on it still shows one row: the empty state
+      // has to be assignable, not just described.
+      const learning = midi.learning;
+      const pending =
+        learning && learning.manual === manual.idx && learning.slot >= manual.inputs.length;
+      if (!manual.inputs.length || pending) {
+        inputs.append(this.inputRow(midi, manual.idx, manual.inputs.length, null));
+      }
+      if (manual.inputs.length && !pending) {
+        const add = document.createElement("button");
+        add.className = "ghost add-input";
+        add.textContent = "+ add input";
+        add.title = "A second keyboard playing this same manual";
+        add.addEventListener("click", () =>
+          this.send(commands.midiLearn(manual.idx, manual.inputs.length))
+        );
+        inputs.append(add);
+      }
+
+      row.append(name, inputs);
+      this.el.manuals.append(row);
+    }
+  }
+
+  /// One assignment: which device, on which channel, plus the two ways
+  /// to set it — play a key, or say so.
+  inputRow(midi, manual, slot, input) {
+    const listening =
+      midi.learning && midi.learning.manual === manual && midi.learning.slot === slot;
+    const row = document.createElement("div");
+    row.className = "manual-input";
+    row.classList.toggle("listening", !!listening);
+    row.classList.toggle("missing", !!input && !input.connected);
+
+    const device = document.createElement("select");
+    device.className = "input-device";
+    if (!input) {
+      device.append(this.option("", "— no input —"));
+    }
+    for (const port of midi.ports) {
+      device.append(this.option(port.name, port.name));
+    }
+    // A binding survives its keyboard being unplugged; the row says so
+    // rather than quietly dropping the assignment.
+    if (input && !midi.ports.some((port) => port.name === input.device)) {
+      device.append(this.option(input.device, `${input.device} (not connected)`));
+    }
+    device.value = input ? input.device : "";
+    device.addEventListener("change", () => {
+      if (!device.value) return;
+      // An existing row keeps the channel it had, "any" included; a new
+      // one sends none, which lets the server apply what the set
+      // suggests for this manual.
+      const channel = input ? (input.channel ?? "any") : null;
+      this.send(commands.midiBind(manual, slot, device.value, channel));
     });
+
+    const channel = document.createElement("select");
+    channel.className = "input-channel";
+    channel.append(this.option("any", "any channel"));
+    for (let ch = 1; ch <= 16; ch++) channel.append(this.option(String(ch), `channel ${ch}`));
+    channel.value = input ? (input.channel == null ? "any" : String(input.channel)) : "any";
+    channel.disabled = !input;
+    channel.addEventListener("change", () =>
+      this.send(commands.midiBind(manual, slot, input.device, channel.value))
+    );
+
+    const listen = document.createElement("button");
+    listen.className = "ghost listen";
+    listen.textContent = listening ? "Cancel" : "Listen";
+    listen.title = "Assign by playing a key on the keyboard you mean";
+    listen.addEventListener("click", () =>
+      this.send(listening ? commands.midiLearn(null) : commands.midiLearn(manual, slot))
+    );
+
+    row.append(device, channel, listen);
+    if (input) {
+      const remove = document.createElement("button");
+      remove.className = "ghost remove-input";
+      remove.textContent = "×";
+      remove.setAttribute("aria-label", `Remove ${input.device}`);
+      remove.addEventListener("click", () => this.send(commands.midiUnbind(manual, slot)));
+      row.append(remove);
+    }
+    if (listening) {
+      const hint = document.createElement("span");
+      hint.className = "listen-hint";
+      hint.textContent = "play a key…";
+      row.append(hint);
+    }
+    return row;
   }
 
   buildPorts(ports) {
     this.el.ports.replaceChildren();
     if (!ports.length) {
-      const empty = document.createElement("p");
-      empty.className = "pane-empty";
-      empty.textContent =
-        "No MIDI inputs. Plug the console in — the list finds it by itself.";
-      this.el.ports.append(empty);
+      this.el.ports.append(
+        this.emptyNote("No MIDI inputs. Plug the console in — the list finds it by itself.")
+      );
       return;
     }
     for (const port of ports) {
       const row = document.createElement("div");
       row.className = "midi-port";
-      row.dataset.port = port.id;
-
-      const name = document.createElement("span");
-      name.className = "port-name";
-      name.textContent = port.name;
-      name.title = port.name;
-
-      // One control, three states: silent, channel-driven, or pinned.
-      // A separate mute switch would only be a second way to say "none".
-      const route = document.createElement("select");
-      route.className = "port-route";
-      for (const [value, label] of [
-        ["none", "not assigned"],
-        ["channels", "follow channel map"],
-      ]) {
-        const option = document.createElement("option");
-        option.value = value;
-        option.textContent = label;
-        route.append(option);
-      }
-      for (const manual of this.manuals) {
-        const option = document.createElement("option");
-        option.value = String(manual.idx);
-        option.textContent = manual.name;
-        route.append(option);
-      }
-      route.addEventListener("change", () => {
-        this.send(commands.midiPort(port.id, route.value));
-        route.blur();
-      });
-
-      row.append(name, route);
+      row.textContent = port.name;
+      row.title = port.name;
       this.el.ports.append(row);
     }
   }
 
-  buildChannels(count) {
-    this.el.channels.replaceChildren();
-    for (let channel = 0; channel < count; channel++) {
-      const cell = document.createElement("label");
-      cell.className = "midi-channel";
+  option(value, label) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    return option;
+  }
 
-      const label = document.createElement("span");
-      label.className = "rail-label";
-      label.textContent = `CH ${channel + 1}`;
-
-      const select = document.createElement("select");
-      select.dataset.channel = channel;
-      for (const manual of this.manuals) {
-        const option = document.createElement("option");
-        option.value = String(manual.idx);
-        option.textContent = manual.name;
-        select.append(option);
-      }
-      select.addEventListener("change", () => {
-        this.send(commands.midiChannel(channel, select.value));
-        select.blur();
-      });
-
-      cell.append(label, select);
-      this.el.channels.append(cell);
-    }
+  emptyNote(text) {
+    const empty = document.createElement("p");
+    empty.className = "pane-empty";
+    empty.textContent = text;
+    return empty;
   }
 
   // ---- tuning ------------------------------------------------------------
