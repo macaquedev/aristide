@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use aristide_model::{ManualId, Organ, RankId, StopId};
+use aristide_model::{ManualId, Organ, RankId, RankRange, StopId};
 
 use crate::bank::VoiceSpec;
 use crate::tuning::Tuning;
@@ -59,6 +59,15 @@ pub struct Console {
     /// the phase aligner makes both tails coherent too: the release
     /// comes out LOUDER than the chord (the octave-coupled F-major pop).
     speaking: HashMap<(RankId, u16), (u64, u32)>,
+    /// Engine output rate; frequency-derived voice parameters have to be
+    /// recomputed against it when a pipe is repitched.
+    device_rate: f32,
+    /// Per manual: the inclusive MIDI note range that manual answers to.
+    /// Starts as the sample set's own compass and is widened to the
+    /// player's keyboard (see `set_compass`) — a key outside it is
+    /// silent, which is the locked compass rule with the player's
+    /// hardware supplying the number.
+    compass: Vec<(i16, i16)>,
 }
 
 impl Console {
@@ -66,11 +75,22 @@ impl Console {
         organ: Organ,
         specs: HashMap<(RankId, u16), VoiceSpec>,
         drawn: Vec<StopId>,
+        device_rate: f32,
     ) -> Console {
+        let compass = organ
+            .manuals
+            .iter()
+            .map(|manual| {
+                let first = manual.first_midi_note as i16;
+                (first, first + manual.key_count as i16 - 1)
+            })
+            .collect();
         let mut console = Console {
             organ,
             specs,
             drawn,
+            device_rate,
+            compass,
             engaged_couplers: Vec::new(),
             tuning: Tuning::default(),
             noise_stops: Vec::new(),
@@ -327,6 +347,215 @@ impl Console {
         targets
     }
 
+    /// The inclusive MIDI range a manual answers to, and the widening
+    /// of it to the player's keyboard. Notes outside are silent: the
+    /// compass is the instrument, and the player's hardware now says
+    /// how wide it is.
+    pub fn compass(&self, manual_index: usize) -> Option<(i16, i16)> {
+        self.compass.get(manual_index).copied()
+    }
+
+    /// The compass the sample set itself declares — what the player's
+    /// keyboard is measured against, and what `reset_compass` restores.
+    pub fn native_compass(&self, manual_index: usize) -> Option<(i16, i16)> {
+        self.organ.manuals.get(manual_index).map(|manual| {
+            let first = manual.first_midi_note as i16;
+            (first, first + manual.key_count as i16 - 1)
+        })
+    }
+
+    pub fn set_compass(&mut self, manual_index: usize, low: i16, high: i16) {
+        let Some(manual) = self.organ.manuals.get(manual_index) else {
+            return;
+        };
+        let (low, high) = (low.min(high).max(0), high.max(low).min(127));
+        let native = (
+            manual.first_midi_note as i16,
+            manual.first_midi_note as i16 + manual.key_count as i16 - 1,
+        );
+        if (low, high) != native {
+            tracing::info!(
+                "compass: {} plays {}..{} (the set gives {}..{})",
+                manual.name,
+                low,
+                high,
+                native.0,
+                native.1
+            );
+        }
+        self.compass[manual_index] = (low, high);
+    }
+
+    /// Restore a manual to the compass its sample set declares.
+    pub fn reset_compass(&mut self, manual_index: usize) {
+        let Some(manual) = self.organ.manuals.get(manual_index) else {
+            return;
+        };
+        let first = manual.first_midi_note as i16;
+        self.compass[manual_index] = (first, first + manual.key_count as i16 - 1);
+    }
+
+    /// Which pipe of `range` speaks for a key, and the ratio its
+    /// playback rate must be scaled by.
+    ///
+    /// The pipe a rank *nominally* holds for a key may be missing: the
+    /// set's compass may be narrower than the keyboard the player has
+    /// widened this manual to, the range may stop short of it, or the
+    /// set may simply have a hole where a sample failed to load. In
+    /// every one of those cases the honest answer is not silence — it
+    /// is the nearest pipe the rank does have, played at the pitch the
+    /// missing one would have sounded. That is what a real organ
+    /// builder's borrowing does, and what makes a 56-note set playable
+    /// from a 61-note keyboard.
+    ///
+    /// The ratio is exactly 1 (before tuning) whenever the nominal pipe
+    /// exists, so nothing in the ordinary compass is touched by this.
+    fn pipe_for(&self, range: &RankRange, key_index: i16) -> Option<(u16, f32)> {
+        let first = range.first_pipe as i32;
+        let last = first + range.key_count as i32 - 1;
+        if last < first {
+            return None;
+        }
+        // Where the key would fall in the rank if the rank ran forever.
+        // Outside the range this is the pipe the organ doesn't have.
+        let wanted = first + (key_index as i32 - range.first_key as i32);
+        let mut source = wanted.clamp(first, last);
+        // A hole inside the range is a defect, not a decision: step
+        // outwards until a pipe that actually loaded turns up.
+        if !self.specs.contains_key(&(range.rank, source as u16)) {
+            let mut found = None;
+            for distance in 1..=(last - first) {
+                for candidate in [source - distance, source + distance] {
+                    if (first..=last).contains(&candidate)
+                        && self.specs.contains_key(&(range.rank, candidate as u16))
+                    {
+                        found = Some(candidate);
+                        break;
+                    }
+                }
+                if found.is_some() {
+                    break;
+                }
+            }
+            source = found?;
+        }
+        // Ranks are semitone ladders, so the pitch the missing pipe
+        // would have sounded is its distance from the one we found.
+        let semitones = (wanted - source) as f32;
+        let ratio = if semitones == 0.0 {
+            1.0
+        } else {
+            (semitones / 12.0).exp2()
+        };
+        Some((source as u16, ratio))
+    }
+
+    fn within_compass(&self, manual_index: usize, midi_key: i16) -> bool {
+        self.compass
+            .get(manual_index)
+            .is_some_and(|&(low, high)| (low..=high).contains(&midi_key))
+    }
+
+    /// Whether this rank range answers for a key.
+    ///
+    /// Inside the set's own compass the range's limits are respected to
+    /// the key: a stop that covers half the keyboard (divided registers,
+    /// treble-only mixtures) is a musical decision, and filling it in
+    /// would be inventing an instrument. Beyond the set's compass —
+    /// where the player's keyboard is wider than the organ — there is no
+    /// such decision to respect, so a range that reaches the edge
+    /// carries on past it.
+    fn range_covers(&self, range: &RankRange, key_index: i16, manual_index: usize) -> bool {
+        let first = range.first_key as i16;
+        let last = first + range.key_count as i16 - 1;
+        if (first..=last).contains(&key_index) {
+            return true;
+        }
+        let native_last = self.organ.manuals[manual_index].key_count as i16 - 1;
+        if key_index < 0 {
+            first == 0
+        } else if key_index > native_last {
+            last == native_last
+        } else {
+            false
+        }
+    }
+
+    /// The pipes one key press sounds, with each voice's parameters
+    /// settled — couplers expanded, compass enforced, missing pipes
+    /// filled by repitching. Both the key press and drawing a stop
+    /// under a held key come through here, so they cannot disagree.
+    ///
+    /// `only` restricts the walk to one stop (drawing it mid-hold).
+    fn voices_for_key(
+        &self,
+        manual_index: usize,
+        key: u8,
+        only: Option<StopId>,
+    ) -> Vec<(StopId, RankId, u16, VoiceSpec)> {
+        let Some(origin) = self.organ.manuals.get(manual_index).map(|m| m.id) else {
+            return Vec::new();
+        };
+        // The transposer shifts which pipes sound, like the console
+        // gadget; temperament + concert pitch then retune each pipe.
+        let played = key as i16 + self.tuning.transpose as i16;
+        let mut voices = Vec::new();
+        for (manual_id, midi_key) in self.couple(origin, played) {
+            let Some(target) = self
+                .organ
+                .manuals
+                .iter()
+                .position(|m| m.id == manual_id)
+                .filter(|&index| self.within_compass(index, midi_key))
+            else {
+                continue;
+            };
+            // Negative below the set's own bottom key: the rank ladder
+            // is extrapolated in both directions, so keep the sign.
+            let key_index = midi_key - self.organ.manuals[target].first_midi_note as i16;
+            for stop in &self.organ.stops {
+                if stop.manual != manual_id
+                    || !self.drawn.contains(&stop.id)
+                    || only.is_some_and(|only| only != stop.id)
+                {
+                    continue;
+                }
+                for range in &stop.ranks {
+                    if !self.range_covers(range, key_index, target) {
+                        continue;
+                    }
+                    let Some((pipe, ratio)) = self.pipe_for(range, key_index) else {
+                        continue;
+                    };
+                    let Some(spec) = self.specs.get(&(range.rank, pipe)) else {
+                        continue;
+                    };
+                    voices.push((stop.id, range.rank, pipe, self.voiced(*spec, ratio, midi_key)));
+                }
+            }
+        }
+        voices
+    }
+
+    /// A pipe's spec as it must sound for one key: the scale's own
+    /// deviation for that key, times the repitching ratio when the pipe
+    /// is standing in for one the rank hasn't got.
+    ///
+    /// Everything downstream of pitch has to move with it. Wind draw and
+    /// the pressure→brightness hinge are properties of the *sounding*
+    /// pitch, not of the recording, so a pipe pressed into service five
+    /// semitones up draws wind like the pipe it is imitating.
+    fn voiced(&self, mut spec: VoiceSpec, ratio: f32, midi_key: i16) -> VoiceSpec {
+        spec.rate *= ratio * self.tuning.rate_multiplier(midi_key.clamp(0, 127) as u8);
+        if ratio != 1.0 {
+            let sounding_hz = (spec.nominal_hz * ratio) as f64;
+            spec.wind_weight = crate::bank::wind_weight(sounding_hz, spec.percussive);
+            spec.brightness =
+                crate::bank::brightness_coefficient(sounding_hz, self.device_rate, spec.percussive);
+        }
+        spec
+    }
+
     /// Voices retired by this press: a re-press before the note-off
     /// (key bounce, fast repetition) must release the previous voices —
     /// a pipe can't speak twice, and doubling correlated audio jumps
@@ -347,65 +576,31 @@ impl Console {
                 retriggered.push(handle);
             }
         }
-        let origin = self.organ.manuals[manual_index].id;
-        // The transposer shifts which pipes sound, like the console
-        // gadget; temperament + concert pitch then retune each pipe.
-        let played = key as i16 + self.tuning.transpose as i16;
-
         let mut starts = Vec::new();
         let mut held = Vec::new();
-        for (manual_id, midi_key) in self.couple(origin, played) {
-            let Some(manual) = self.organ.manuals.iter().find(|m| m.id == manual_id) else {
-                continue;
-            };
-            let key_index = midi_key - manual.first_midi_note as i16;
-            if key_index < 0 || key_index as u16 >= manual.key_count {
+        for (stop, rank, pipe, spec) in self.voices_for_key(manual_index, key, None) {
+            if spec.percussive {
+                // One-shots (noises) aren't refcounted.
+                let handle = self.next_handle;
+                self.next_handle += 1;
+                starts.push(VoiceStart { handle, spec });
                 continue;
             }
-            let key_index = key_index as u16;
-            for stop in &self.organ.stops {
-                if stop.manual != manual_id || !self.drawn.contains(&stop.id) {
-                    continue;
-                }
-                for range in &stop.ranks {
-                    if key_index < range.first_key
-                        || key_index >= range.first_key + range.key_count
-                    {
-                        continue;
+            held.push((stop, rank, pipe));
+            match self.speaking.get_mut(&(rank, pipe)) {
+                Some((_, holders)) => *holders += 1,
+                None => {
+                    let handle = self.next_handle;
+                    self.next_handle += 1;
+                    self.speaking.insert((rank, pipe), (handle, 1));
+                    // The pipe's previous voice may still be in its
+                    // pallet-stagger window (Held at full level);
+                    // expedite its release or the pipe overlaps itself —
+                    // heard as a phantom "opening of another note".
+                    if let Some(previous) = self.last_pipe_voice.insert((rank, pipe), handle) {
+                        retriggered.push(previous);
                     }
-                    let pipe = range.first_pipe + (key_index - range.first_key);
-                    let Some(spec) = self.specs.get(&(range.rank, pipe)) else {
-                        continue;
-                    };
-                    if spec.percussive {
-                        // One-shots (noises) aren't refcounted.
-                        let handle = self.next_handle;
-                        self.next_handle += 1;
-                        starts.push(VoiceStart { handle, spec: *spec });
-                        continue;
-                    }
-                    held.push((stop.id, range.rank, pipe));
-                    match self.speaking.get_mut(&(range.rank, pipe)) {
-                        Some((_, holders)) => *holders += 1,
-                        None => {
-                            let handle = self.next_handle;
-                            self.next_handle += 1;
-                            self.speaking.insert((range.rank, pipe), (handle, 1));
-                            // The pipe's previous voice may still be in
-                            // its pallet-stagger window (Held at full
-                            // level); expedite its release or the pipe
-                            // overlaps itself — heard as a phantom
-                            // "opening of another note".
-                            if let Some(previous) =
-                                self.last_pipe_voice.insert((range.rank, pipe), handle)
-                            {
-                                retriggered.push(previous);
-                            }
-                            let mut spec = *spec;
-                            spec.rate *= self.tuning.rate_multiplier(midi_key as u8);
-                            starts.push(VoiceStart { handle, spec });
-                        }
-                    }
+                    starts.push(VoiceStart { handle, spec });
                 }
             }
         }
@@ -503,57 +698,24 @@ impl Console {
         let mut expedited = Vec::new();
         let held_keys: Vec<(usize, u8)> = self.sounding.keys().copied().collect();
         for (manual_index, key) in held_keys {
-            let origin = self.organ.manuals[manual_index].id;
-            let played = key as i16 + self.tuning.transpose as i16;
             let mut new_entries = Vec::new();
-            for (manual_id, midi_key) in self.couple(origin, played) {
-                let Some(manual) = self.organ.manuals.iter().find(|m| m.id == manual_id) else {
-                    continue;
-                };
-                let key_index = midi_key - manual.first_midi_note as i16;
-                if key_index < 0 || key_index as u16 >= manual.key_count {
+            for (stop, rank, pipe, spec) in self.voices_for_key(manual_index, key, Some(stop)) {
+                // One-shots strike on key press, not on drawing the
+                // stop mid-hold.
+                if spec.percussive {
                     continue;
                 }
-                let key_index = key_index as u16;
-                let Some(stop_def) = self
-                    .organ
-                    .stops
-                    .iter()
-                    .find(|s| s.id == stop && s.manual == manual_id)
-                else {
-                    continue;
-                };
-                for range in &stop_def.ranks {
-                    if key_index < range.first_key
-                        || key_index >= range.first_key + range.key_count
-                    {
-                        continue;
-                    }
-                    let pipe = range.first_pipe + (key_index - range.first_key);
-                    let Some(spec) = self.specs.get(&(range.rank, pipe)) else {
-                        continue;
-                    };
-                    // One-shots strike on key press, not on drawing the
-                    // stop mid-hold.
-                    if spec.percussive {
-                        continue;
-                    }
-                    new_entries.push((stop, range.rank, pipe));
-                    match self.speaking.get_mut(&(range.rank, pipe)) {
-                        Some((_, holders)) => *holders += 1,
-                        None => {
-                            let handle = self.next_handle;
-                            self.next_handle += 1;
-                            self.speaking.insert((range.rank, pipe), (handle, 1));
-                            if let Some(previous) =
-                                self.last_pipe_voice.insert((range.rank, pipe), handle)
-                            {
-                                expedited.push(previous);
-                            }
-                            let mut spec = *spec;
-                            spec.rate *= self.tuning.rate_multiplier(midi_key as u8);
-                            starts.push(VoiceStart { handle, spec });
+                new_entries.push((stop, rank, pipe));
+                match self.speaking.get_mut(&(rank, pipe)) {
+                    Some((_, holders)) => *holders += 1,
+                    None => {
+                        let handle = self.next_handle;
+                        self.next_handle += 1;
+                        self.speaking.insert((rank, pipe), (handle, 1));
+                        if let Some(previous) = self.last_pipe_voice.insert((rank, pipe), handle) {
+                            expedited.push(previous);
                         }
+                        starts.push(VoiceStart { handle, spec });
                     }
                 }
             }
@@ -665,11 +827,15 @@ impl Console {
                     .map(|&(_, key)| key)
                     .collect();
                 held.sort_unstable();
+                // The compass, not the set's own key count: a manual
+                // widened to the player's keyboard has more keys to
+                // draw, and they play.
+                let (low, high) = self.compass[index];
                 (
                     index,
                     manual.name.as_str(),
-                    manual.first_midi_note,
-                    manual.key_count,
+                    low.clamp(0, 127) as u8,
+                    (high - low + 1).max(0) as u16,
                     held,
                 )
             })
@@ -812,12 +978,110 @@ mod tests {
                         group: 0,
                         wind_weight: 1.0,
                         brightness: 0.02,
+                        nominal_hz: 440.0,
                         enclosure: aristide_engine::enclosure::ENCLOSURE_NONE,
                     },
                 );
             }
         }
-        Console::new(organ, specs, vec![StopId(1), StopId(2)])
+        Console::new(organ, specs, vec![StopId(1), StopId(2)], 48_000.0)
+    }
+
+    /// The fixture manual is MIDI 36..96. Widening it to a keyboard
+    /// that runs past both ends is the case the whole feature exists
+    /// for: a 56-note set under a 61-note keyboard.
+    #[test]
+    fn keys_past_the_set_are_repitched_from_the_pipes_that_exist() {
+        let mut console = test_console();
+        console.set_compass(0, 31, 101);
+
+        let (top, _) = console.note_on_manual(0, 101);
+        assert_eq!(top.len(), 2, "both stops speak five keys above the set");
+        for start in &top {
+            let semitones = start.spec.rate.log2() * 12.0;
+            assert!(
+                (semitones - 5.0).abs() < 1e-3,
+                "top pipe stretched a fourth up, got {semitones} semitones"
+            );
+        }
+        console.note_off_manual(0, 101);
+
+        // Downward is the same mechanism and sounds better: a longer,
+        // slower pipe is what the bottom of a keyboard wants anyway.
+        let (bottom, _) = console.note_on_manual(0, 31);
+        assert_eq!(bottom.len(), 2);
+        for start in &bottom {
+            let semitones = start.spec.rate.log2() * 12.0;
+            assert!((semitones + 5.0).abs() < 1e-3, "got {semitones} semitones");
+        }
+        console.note_off_manual(0, 31);
+
+        // Inside the set's own compass nothing is repitched at all.
+        let (native, _) = console.note_on_manual(0, 60);
+        assert!(native.iter().all(|s| (s.spec.rate - 1.0).abs() < 1e-6));
+    }
+
+    #[test]
+    fn keys_outside_the_compass_stay_silent() {
+        let mut console = test_console();
+        assert!(
+            console.note_on_manual(0, 97).0.is_empty(),
+            "the set's compass is the default, and 97 is past it"
+        );
+        console.set_compass(0, 36, 97);
+        assert_eq!(console.note_on_manual(0, 97).0.len(), 2, "now it plays");
+        console.note_off_manual(0, 97);
+        assert!(
+            console.note_on_manual(0, 98).0.is_empty(),
+            "one key past the keyboard is still nothing"
+        );
+    }
+
+    /// A missing sample mid-compass is a defect in the set, not a
+    /// musical decision, so its neighbour stands in.
+    #[test]
+    fn a_hole_in_a_rank_is_filled_by_its_neighbour() {
+        let mut console = test_console();
+        console.specs.remove(&(RankId(1), 24));
+
+        let (starts, _) = console.note_on_manual(0, 60);
+        assert_eq!(starts.len(), 2, "the hole is filled, not skipped");
+        let stretched: Vec<f32> = starts
+            .iter()
+            .map(|s| s.spec.rate.log2() * 12.0)
+            .filter(|semitones| semitones.abs() > 1e-3)
+            .collect();
+        assert_eq!(stretched.len(), 1, "only the rank with the hole moves");
+        assert!(
+            stretched[0].abs() - 1.0 < 1e-3,
+            "filled from a pipe one semitone away, got {}",
+            stretched[0]
+        );
+    }
+
+    /// Half-compass stops are real (divided registers, treble mixtures).
+    /// Widening the keyboard must not invent the other half.
+    #[test]
+    fn a_stop_that_ends_early_is_not_extended() {
+        let mut console = test_console();
+        for stop in &mut console.organ.stops {
+            if stop.id == StopId(2) {
+                stop.ranks[0].key_count = 31;
+            }
+        }
+        console.set_compass(0, 36, 101);
+
+        assert_eq!(
+            console.note_on_manual(0, 80).0.len(),
+            1,
+            "inside the set's compass the short stop simply doesn't cover it"
+        );
+        console.note_off_manual(0, 80);
+        assert_eq!(
+            console.note_on_manual(0, 101).0.len(),
+            1,
+            "and it is not carried past the set's compass either"
+        );
     }
 
     #[test]
@@ -957,12 +1221,13 @@ mod tests {
                         group: 0,
                         wind_weight: 1.0,
                         brightness: 0.0,
+                        nominal_hz: 440.0,
                         enclosure: aristide_engine::enclosure::ENCLOSURE_NONE,
                     },
                 );
             }
         }
-        Console::new(organ, specs, vec![StopId(1), StopId(2)])
+        Console::new(organ, specs, vec![StopId(1), StopId(2)], 48_000.0)
     }
 
     #[test]

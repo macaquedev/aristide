@@ -24,7 +24,7 @@ use realfft::num_complex::Complex;
 use realfft::{ComplexToReal, RealFftPlanner, RealToComplex};
 
 use crate::bank::Sample;
-use crate::resample::SincTable;
+use crate::resample::SincTables;
 
 /// Internal processing block (frames). 256 keeps latency at ~5 ms and
 /// the FFT in L1.
@@ -78,9 +78,10 @@ impl PreparedIr {
                 resampled[1].push(right);
             }
         } else {
-            let table = SincTable::new();
+            let tables = SincTables::new();
+            let kernel = tables.select(ratio);
             for frame in 0..out_frames {
-                let (left, right) = table.read(&sample, frame as f64 * ratio, None);
+                let (left, right) = tables.read(kernel, &sample, frame as f64 * ratio, None);
                 resampled[0].push(left);
                 resampled[1].push(right);
             }

@@ -34,9 +34,13 @@ export const commands = {
   // `slot` numbers a manual's inputs; one past the end adds another.
   // `channel` is 1-16 or "any"; omitting it lets the server pick the
   // channel the sample set suggests for that manual.
-  midiBind: (manual, slot, device, channel) =>
+  // `low`/`high` are MIDI notes, or "set" to go back to the sample
+  // set's own compass; omitted, the input keeps the range it has.
+  midiBind: (manual, slot, device, channel, low, high) =>
     `/api/midi/bind?manual=${manual}&slot=${slot}&device=${encodeURIComponent(device)}` +
-    (channel == null ? "" : `&ch=${channel}`),
+    (channel == null ? "" : `&ch=${channel}`) +
+    (low == null ? "" : `&low=${low}`) +
+    (high == null ? "" : `&high=${high}`),
   midiUnbind: (manual, slot) => `/api/midi/unbind?manual=${manual}&slot=${slot}`,
   // With no target, stop listening.
   midiLearn: (manual, slot) =>

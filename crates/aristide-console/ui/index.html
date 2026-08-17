@@ -46,10 +46,12 @@
             <button class="ghost" id="midi-rescan">Rescan</button>
           </div>
           <p class="pane-note">
-            Give each of this organ's manuals a keyboard to listen to. The
-            quickest way is <em>Listen</em>: press it, then play a key on the
-            keyboard you mean, and it takes the port and channel from the note
-            itself. Assignments are kept per organ.
+            Give each of this organ's manuals a keyboard to listen to. Press
+            <em>Listen</em>, then play your keyboard's lowest key and its
+            highest: that names the port and channel, and measures how wide
+            the keyboard is. Keys it reaches past the sample set's own compass
+            are filled in by repitching the nearest pipe; keys outside it stay
+            silent. Assignments are kept per organ.
           </p>
           <p class="pane-warn hidden" id="midi-unassigned">
             No manual has an input — this organ will not sound from MIDI until

@@ -9,6 +9,14 @@
 
 import { commands } from "./api.js";
 
+const NOTE_NAMES = ["C", "C♯", "D", "E♭", "E", "F", "F♯", "G", "A♭", "A", "B♭", "B"];
+
+/// MIDI note number in the naming organists read on a stoplist: middle
+/// C (60) is C4, as every sample set's documentation writes it.
+function keyName(key) {
+  return `${NOTE_NAMES[key % 12]}${Math.floor(key / 12) - 1}`;
+}
+
 const TABS = ["midi", "tuning", "sound", "appearance"];
 
 export class Preferences {
@@ -161,6 +169,7 @@ export class Preferences {
       inputs.className = "manual-inputs";
       for (const input of manual.inputs) {
         inputs.append(this.inputRow(midi, manual.idx, input.slot, input));
+        inputs.append(this.compassNote(midi, manual, input));
       }
       // A manual with nothing on it still shows one row: the empty state
       // has to be assignable, not just described.
@@ -249,10 +258,40 @@ export class Preferences {
     if (listening) {
       const hint = document.createElement("span");
       hint.className = "listen-hint";
-      hint.textContent = "play a key…";
+      hint.textContent =
+        midi.learning.step === "high" ? "now the highest key…" : "play the lowest key…";
       row.append(hint);
     }
     return row;
+  }
+
+  /// What this keyboard's compass costs the organ: the keys it reaches
+  /// past the set's own compass are the repitched ones, and that is
+  /// worth saying out loud rather than leaving to be discovered.
+  compassNote(midi, manualEntry, input) {
+    const note = document.createElement("span");
+    note.className = "input-compass";
+    const native = manualEntry.native;
+    const learned = input.low != null && input.high != null;
+    if (!learned) {
+      note.textContent = native
+        ? `${keyName(native[0])}–${keyName(native[1])} · the set's own compass`
+        : "";
+      note.classList.add("dim");
+      return note;
+    }
+    const [low, high] = [Math.min(input.low, input.high), Math.max(input.low, input.high)];
+    let text = `${keyName(low)}–${keyName(high)}`;
+    if (native) {
+      const filled = Math.max(0, native[0] - low) + Math.max(0, high - native[1]);
+      text += filled
+        ? ` · ${filled} key${filled === 1 ? "" : "s"} repitched past the set's ${keyName(
+            native[0]
+          )}–${keyName(native[1])}`
+        : " · within the set's compass";
+    }
+    note.textContent = text;
+    return note;
   }
 
   buildPorts(ports) {

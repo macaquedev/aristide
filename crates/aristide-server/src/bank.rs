@@ -18,8 +18,12 @@ use aristide_model::{Organ, Pipe, PipeRef, PipeSource, RankId};
 #[derive(Debug, Clone, Copy)]
 pub struct VoiceSpec {
     pub sample: u32,
-    /// Source frames per output frame.
+    /// Source frames per output frame, playing the pipe at its own
+    /// nominal pitch on this device.
     pub rate: f32,
+    /// The pitch that rate sounds, in Hz. Repitching a pipe onto a key
+    /// it was not recorded for is a ratio against this.
+    pub nominal_hz: f32,
     /// Linear gain.
     pub gain: f32,
     /// Loop-less percussive samples get no StopVoice on key release.
@@ -143,6 +147,7 @@ pub fn build(organ: &Organ, device_rate: f32) -> Result<LoadedBank> {
                     sample: info.index,
                     rate: (info.sample_rate / device_rate as f64
                         * (cents / 1200.0).exp2()) as f32,
+                    nominal_hz: pipe.nominal_frequency_hz as f32,
                     gain: db_to_linear(pipe.gain_db),
                     percussive: info.percussive,
                     group: (rank.windchest.saturating_sub(1))
@@ -286,7 +291,7 @@ fn db_to_linear(db: f64) -> f32 {
 /// while the fundamental stays put. Deep bass keeps a floor on the
 /// hinge (HW had to disable bass brightness modulation for distortion;
 /// a 150 Hz floor sidesteps that). Percussive noises skip the filter.
-fn brightness_coefficient(frequency_hz: f64, device_rate: f32, percussive: bool) -> f32 {
+pub(crate) fn brightness_coefficient(frequency_hz: f64, device_rate: f32, percussive: bool) -> f32 {
     if percussive || !(frequency_hz > 0.0) {
         return 0.0;
     }
@@ -298,7 +303,7 @@ fn brightness_coefficient(frequency_hz: f64, device_rate: f32, percussive: bool)
 /// halves per octave of speaking pitch (Walker US5508472 scales
 /// 8'/4'/2' as 1.0/0.5/0.25), i.e. weight ∝ 1/f, normalized to 1.0 at
 /// ~150 Hz. Percussive one-shots (action noises) draw nothing.
-fn wind_weight(frequency_hz: f64, percussive: bool) -> f32 {
+pub(crate) fn wind_weight(frequency_hz: f64, percussive: bool) -> f32 {
     if percussive || !(frequency_hz > 0.0) {
         return 0.0;
     }
@@ -376,7 +381,7 @@ mod tests {
 
         // Channel 0 → Second Manual (Récit): the pedal reaches box 0.
         let mut console =
-            crate::console::Console::new(organ.clone(), loaded.specs.clone(), Vec::new());
+            crate::console::Console::new(organ.clone(), loaded.specs.clone(), Vec::new(), 44_100.0);
         let moves = console.expression_manual(2, 64);
         assert!(
             moves.iter().any(|&(e, p)| e == 0 && (p - 64.0 / 127.0).abs() < 1e-6),
@@ -420,6 +425,7 @@ mod tests {
                 organ.clone(),
                 loaded.specs.clone(),
                 drawn.clone(),
+                device_rate,
             );
             let (mut engine, mut handle) =
                 aristide_engine::Engine::new(device_rate, std::sync::Arc::new(loaded.bank.clone()));
@@ -585,6 +591,7 @@ mod tests {
                 organ.clone(),
                 loaded.specs.clone(),
                 drawn,
+                device_rate,
             );
             // The old channel map: channel 0 → manual 2, channel 1 → manual 1.
             let manual_of = |channel: u8| -> usize { [2usize, 1][channel as usize % 2] };
@@ -850,7 +857,7 @@ mod tests {
             .collect();
         assert_eq!(drawn.len(), 4);
         let manual_index = default_manual(&organ, 0);
-        let mut console = crate::console::Console::new(organ, loaded.specs, drawn);
+        let mut console = crate::console::Console::new(organ, loaded.specs, drawn, 48000.0);
         let (mut engine, mut handle) =
             aristide_engine::Engine::new(48000.0, std::sync::Arc::new(loaded.bank));
 
@@ -958,7 +965,7 @@ mod tests {
             .collect();
         assert!(couplers.len() >= 2, "need II/I and 16' II/I couplers");
         let manual_index = default_manual(&organ, 0);
-        let mut console = crate::console::Console::new(organ, loaded.specs, drawn);
+        let mut console = crate::console::Console::new(organ, loaded.specs, drawn, 48000.0);
         for &c in &couplers {
             console.set_coupler(c, true);
         }
@@ -1063,7 +1070,7 @@ mod tests {
             .map(|(i, _)| i)
             .collect();
         let manual_index = default_manual(&organ, 0);
-        let mut console = crate::console::Console::new(organ, loaded.specs, drawn);
+        let mut console = crate::console::Console::new(organ, loaded.specs, drawn, 48000.0);
         for &c in &couplers {
             console.set_coupler(c, true);
         }
@@ -1161,7 +1168,7 @@ mod tests {
             .map(|s| s.id)
             .collect();
         let manual_index = default_manual(&organ, 0);
-        let mut console = crate::console::Console::new(organ, loaded.specs, drawn);
+        let mut console = crate::console::Console::new(organ, loaded.specs, drawn, 48000.0);
         let (mut engine, mut handle) =
             aristide_engine::Engine::new(48000.0, std::sync::Arc::new(loaded.bank));
 
@@ -1243,7 +1250,7 @@ mod tests {
                 .expect("manual has stops")
                 .id,
         ];
-        let mut console = crate::console::Console::new(organ, loaded.specs, drawn);
+        let mut console = crate::console::Console::new(organ, loaded.specs, drawn, 48000.0);
         let (starts, _) = console.note_on_manual(manual_index, 60);
         assert!(!starts.is_empty(), "middle C should sound");
 
@@ -1389,6 +1396,7 @@ mod tests {
                     organ.clone(),
                     loaded.specs.clone(),
                     vec![stop.id],
+                    48_000.0,
                 );
                 let (starts, _) = console.note_on_manual(manual_index, midi as u8);
                 assert!(!starts.is_empty(), "{} key {key_index}: silent", stop.name);
@@ -1476,7 +1484,7 @@ mod tests {
             .map(|(i, _)| i)
             .collect();
         let manual_index = default_manual(&organ, 0);
-        let mut console = crate::console::Console::new(organ, loaded.specs, drawn);
+        let mut console = crate::console::Console::new(organ, loaded.specs, drawn, device_rate);
         for &c in &couplers {
             console.set_coupler(c, true);
         }
@@ -1685,7 +1693,7 @@ mod tests {
         // itself retires the noise stops from the drawn list).
         let drawn: Vec<_> = organ.stops.iter().map(|s| s.id).collect();
         let manual_index = default_manual(&organ, 0);
-        let mut console = crate::console::Console::new(organ, loaded.specs, drawn);
+        let mut console = crate::console::Console::new(organ, loaded.specs, drawn, device_rate);
         let _ = loaded.bank.pre_fault();
         let (mut engine, mut handle) =
             aristide_engine::Engine::new(device_rate, std::sync::Arc::new(loaded.bank));
@@ -1842,6 +1850,7 @@ mod tests {
                 organ.clone(),
                 loaded.specs.clone(),
                 vec![montre.id],
+                device_rate,
             );
             let (mut engine, mut handle) =
                 aristide_engine::Engine::new(device_rate, bank.clone());
@@ -1959,6 +1968,7 @@ mod tests {
                 organ.clone(),
                 loaded.specs.clone(),
                 drawn.clone(),
+                device_rate,
             );
             for &c in &couplers {
                 console.set_coupler(c, true);
@@ -2068,6 +2078,7 @@ mod tests {
                 organ.clone(),
                 loaded.specs.clone(),
                 vec![stop.id],
+                device_rate,
             );
             let manual = organ
                 .manuals
@@ -2142,6 +2153,7 @@ mod tests {
                 organ.clone(),
                 loaded.specs.clone(),
                 vec![stop.id],
+                48000.0,
             );
             for key in [67u8, 72, 76, 79] {
                 let (starts, _) = probe_console.note_on_manual(manual, key);
@@ -2186,6 +2198,7 @@ mod tests {
                 organ.clone(),
                 loaded.specs.clone(),
                 vec![stop.id],
+                device_rate,
             );
             let (starts, _) = console.note_on_manual(manual, 67);
             for (i, st) in starts.iter().enumerate() {
@@ -2246,6 +2259,7 @@ mod tests {
                     organ.clone(),
                     loaded.specs.clone(),
                     vec![stop.id],
+                    device_rate,
                 );
                 let (mut engine, mut handle) = aristide_engine::Engine::new(
                     device_rate,
@@ -2321,7 +2335,7 @@ mod tests {
         drawn.dedup();
         let manual_index = default_manual(&organ, 0);
         let mut console =
-            crate::console::Console::new(organ.clone(), loaded.specs.clone(), drawn);
+            crate::console::Console::new(organ.clone(), loaded.specs.clone(), drawn, device_rate);
         let (mut engine, mut handle) =
             aristide_engine::Engine::new(device_rate, std::sync::Arc::new(loaded.bank.clone()));
         handle.send(aristide_engine::Command::SetMasterGain { linear: 0.4 });
@@ -2427,7 +2441,7 @@ mod tests {
         let manual_index = default_manual(&organ, 0);
         for hold_ms in [80usize, 200, 500, 2000] {
             let mut console =
-                crate::console::Console::new(organ.clone(), loaded.specs.clone(), drawn.clone());
+                crate::console::Console::new(organ.clone(), loaded.specs.clone(), drawn.clone(), device_rate);
             let (mut engine, mut handle) =
                 aristide_engine::Engine::new(device_rate, std::sync::Arc::new(loaded.bank.clone()));
             let block = 512usize;
@@ -2486,7 +2500,7 @@ mod tests {
             .map(|(_, v)| *v);
         // Find the montre middle-C spec through the console instead.
         let mut console =
-            crate::console::Console::new(organ.clone(), loaded.specs.clone(), drawn.clone());
+            crate::console::Console::new(organ.clone(), loaded.specs.clone(), drawn.clone(), device_rate);
         let (starts, _) = console.note_on_manual(manual_index, 60);
         let st = starts.first().expect("montre voice");
         let sample = loaded.bank.get(st.spec.sample).expect("sample");
@@ -2537,7 +2551,7 @@ mod tests {
         // Lite render (wind/tilt/wander off) of the 2 s hold isolates
         // whether the accelerating decay lives in the full-mode path.
         let mut console =
-            crate::console::Console::new(organ.clone(), loaded.specs.clone(), drawn.clone());
+            crate::console::Console::new(organ.clone(), loaded.specs.clone(), drawn.clone(), device_rate);
         let (mut engine, mut handle) =
             aristide_engine::Engine::new(device_rate, std::sync::Arc::new(loaded.bank.clone()));
         engine.set_lite(true);

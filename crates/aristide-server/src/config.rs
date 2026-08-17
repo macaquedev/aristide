@@ -39,6 +39,11 @@ const HEADER: &str = "\
 #                reports it
 #   channel      1-16; omit it to accept every channel (a plain USB
 #                keyboard that only ever sends one)
+#   low, high    the keyboard's own compass as MIDI note numbers,
+#                learned by playing its lowest and highest key. Notes
+#                outside it are ignored; keys past the end of the sample
+#                set's own compass are filled in by repitching the
+#                nearest pipe. Omit both for the set's compass as-is.
 #
 # A manual may list several inputs — two keyboards playing one division
 # is a valid thing to want — and one device may drive several manuals by
@@ -80,6 +85,31 @@ pub struct Input {
     /// MIDI channel 1-16, as printed on hardware. `None` = any channel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel: Option<u8>,
+    /// The keyboard's own compass as MIDI notes, learned by playing its
+    /// lowest and highest key. `None` = however wide the sample set's
+    /// manual is.
+    ///
+    /// This is a fact about the *hardware*, which is why it sits on the
+    /// input and not on the manual: two keyboards playing one division
+    /// may well be different widths. It decides two things at once —
+    /// which notes this keyboard is allowed to play (outside it,
+    /// silence) and, where it reaches past the set's own compass, which
+    /// keys get filled in by repitching a neighbouring pipe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub low: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub high: Option<u8>,
+}
+
+impl Input {
+    /// The learned compass, lowest first, when both ends are known.
+    pub fn compass(&self) -> Option<(u8, u8)> {
+        match (self.low, self.high) {
+            (Some(low), Some(high)) if low <= high => Some((low, high)),
+            (Some(low), Some(high)) => Some((high, low)),
+            _ => None,
+        }
+    }
 }
 
 impl MidiConfig {
@@ -182,6 +212,8 @@ mod tests {
         Input {
             device: device.into(),
             channel,
+            low: None,
+            high: None,
         }
     }
 

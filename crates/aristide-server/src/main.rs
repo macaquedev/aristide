@@ -363,26 +363,48 @@ pub enum Control {
     Organ(Console),
 }
 
+/// One assignment as the MIDI callback sees it: already resolved to a
+/// manual index and a key range, so no names are touched per message.
+#[derive(Clone, Copy)]
+pub struct Route {
+    /// MIDI channel 1-16; `None` accepts any.
+    pub channel: Option<u8>,
+    pub manual: usize,
+    /// The keyboard's compass — inclusive MIDI notes. Notes outside it
+    /// are not this keyboard's to send, so they are ignored.
+    pub keys: (u8, u8),
+}
+
 /// One MIDI input as the console sees it, with the assignments that
 /// name it already resolved against the loaded organ.
 pub struct MidiPort {
     pub name: String,
-    /// `(channel, manual index)` for every manual this port plays;
-    /// `None` accepts any channel. Rebuilt whenever the assignments or
-    /// the port list change, so the MIDI callback only ever scans a
-    /// handful of pairs.
-    pub routes: Vec<(Option<u8>, usize)>,
+    /// Rebuilt whenever the assignments or the port list change, so the
+    /// MIDI callback only ever scans a handful of routes.
+    pub routes: Vec<Route>,
 }
 
 impl MidiPort {
-    /// Every manual one incoming message should reach. More than one is
+    /// Every manual a message on this channel reaches. More than one is
     /// legitimate: a keyboard may be assigned to two divisions.
     fn targets(&self, channel: u8) -> Vec<usize> {
+        self.matching(channel, None)
+    }
+
+    /// The same for a note, which must also be inside the keyboard's
+    /// own compass — the width the player taught it is the only thing
+    /// that decides which notes exist.
+    fn note_targets(&self, channel: u8, key: u8) -> Vec<usize> {
+        self.matching(channel, Some(key))
+    }
+
+    fn matching(&self, channel: u8, key: Option<u8>) -> Vec<usize> {
         let mut manuals: Vec<usize> = self
             .routes
             .iter()
-            .filter(|(on, _)| on.is_none_or(|on| on == channel + 1))
-            .map(|(_, manual)| *manual)
+            .filter(|route| route.channel.is_none_or(|on| on == channel + 1))
+            .filter(|route| key.is_none_or(|key| (route.keys.0..=route.keys.1).contains(&key)))
+            .map(|route| route.manual)
             .collect();
         manuals.sort_unstable();
         manuals.dedup();
@@ -390,13 +412,20 @@ impl MidiPort {
     }
 }
 
-/// An assignment being learned: the dialog is waiting for a key press
-/// to tell it which port and channel a manual should listen to.
-#[derive(Clone, Copy)]
+/// An assignment being learned: the dialog is waiting to be played.
+///
+/// Two presses teach it everything — the first names the keyboard (its
+/// port and channel) and the bottom of its compass, the second the top.
+/// That is one gesture for what would otherwise be four fields, and it
+/// is the only way the app can know how wide the player's keyboard
+/// actually is.
+#[derive(Clone)]
 pub struct Learn {
     pub manual: usize,
     /// Which of the manual's inputs to write; past the end appends one.
     pub slot: usize,
+    /// Set by the first key: the keyboard being taught, and its bottom.
+    pub heard: Option<config::Input>,
     started: Instant,
 }
 
@@ -477,6 +506,7 @@ impl State {
     /// derived and the MIDI callback never has to look at names.
     fn resolve_routes(&mut self) {
         let assignments = self.saved_assignments();
+        let native = self.native_compass();
         for port in &mut self.midi_ports {
             port.routes = assignments
                 .iter()
@@ -484,9 +514,51 @@ impl State {
                     inputs
                         .iter()
                         .filter(|input| input.device == port.name)
-                        .map(|input| (input.channel, *manual))
+                        .map(|input| Route {
+                            channel: input.channel,
+                            manual: *manual,
+                            // A keyboard nobody has measured is assumed
+                            // to be exactly the organ's own compass.
+                            keys: input.compass().unwrap_or(native[*manual]),
+                        })
                 })
                 .collect();
+        }
+        // A manual answers to every key any of its keyboards can send:
+        // that union is the compass the console plays and the UI draws,
+        // and it is where repitching starts filling in.
+        let mut widened: Vec<Option<(u8, u8)>> = vec![None; native.len()];
+        for port in &self.midi_ports {
+            for route in &port.routes {
+                let slot = &mut widened[route.manual];
+                *slot = Some(match *slot {
+                    Some((low, high)) => (low.min(route.keys.0), high.max(route.keys.1)),
+                    None => route.keys,
+                });
+            }
+        }
+        if let Control::Organ(console) = &mut self.control {
+            for (manual, compass) in widened.into_iter().enumerate() {
+                match compass {
+                    Some((low, high)) => console.set_compass(manual, low as i16, high as i16),
+                    None => console.reset_compass(manual),
+                }
+            }
+        }
+    }
+
+    /// Each manual's compass as the sample set declares it.
+    fn native_compass(&self) -> Vec<(u8, u8)> {
+        match &self.control {
+            Control::Organ(console) => (0..console.manual_states().len())
+                .map(|manual| {
+                    console
+                        .native_compass(manual)
+                        .map(|(low, high)| (low.clamp(0, 127) as u8, high.clamp(0, 127) as u8))
+                        .unwrap_or((0, 127))
+                })
+                .collect(),
+            Control::Tone => Vec::new(),
         }
     }
 
@@ -535,19 +607,56 @@ impl State {
     /// wherever the state is observed, so a forgotten dialog doesn't
     /// keep eating notes.
     pub fn learning(&mut self) -> Option<Learn> {
-        if self.learn.is_some_and(|l| l.started.elapsed() > LEARN_TIMEOUT) {
+        if self
+            .learn
+            .as_ref()
+            .is_some_and(|l| l.started.elapsed() > LEARN_TIMEOUT)
+        {
             tracing::info!("midi: nothing played — stopped listening");
             self.learn = None;
         }
-        self.learn
+        self.learn.clone()
     }
 
     pub fn listen(&mut self, manual: usize, slot: usize) {
         self.learn = Some(Learn {
             manual,
             slot,
+            heard: None,
             started: Instant::now(),
         });
+    }
+
+    /// One key played while listening. The first names the keyboard and
+    /// the bottom of its compass; the second fixes the top and writes
+    /// the assignment. Pressing the same key twice is a slip, not a
+    /// one-key keyboard, so it keeps waiting.
+    fn learn_key(&mut self, device: &str, channel: u8, key: u8) {
+        let Some(mut learn) = self.learning() else {
+            return;
+        };
+        match learn.heard.take() {
+            None => {
+                tracing::info!("midi: heard {device} channel {} key {key}", channel + 1);
+                learn.heard = Some(config::Input {
+                    device: device.to_string(),
+                    channel: Some(channel + 1),
+                    low: Some(key),
+                    high: None,
+                });
+                learn.started = Instant::now();
+                self.learn = Some(learn);
+            }
+            Some(input) if input.low == Some(key) => {
+                learn.heard = Some(input);
+                self.learn = Some(learn);
+            }
+            Some(mut input) => {
+                input.high = Some(key);
+                self.learn = None;
+                self.set_input(learn.manual, learn.slot, input);
+            }
+        }
     }
 
     /// Write the assignments back for this organ. Called after every
@@ -740,7 +849,7 @@ fn main() -> Result<()> {
             }
             let drawn = choose_registration(&organ, &patterns);
             let suggested = suggested_channels(&organ, &sidecar.midi.channels);
-            let mut console = Console::new(organ, loaded.specs, drawn);
+            let mut console = Console::new(organ, loaded.specs, drawn, sample_rate);
             let temperament = tuning::Temperament::parse(&sidecar.tuning.temperament)
                 .unwrap_or_else(|| {
                     tracing::warn!(
@@ -1292,32 +1401,27 @@ fn handle_midi(message: &[u8], port: usize, state: &Mutex<State>) {
     // Learning swallows the key that teaches it. The player is looking
     // at Preferences, not at the music desk, and a division blurting out
     // mid-assignment reads as a fault.
-    if status & 0xF0 == 0x90
-        && data2 > 0
-        && let Some(learn) = state.learning()
-    {
+    if status & 0xF0 == 0x90 && data2 > 0 && state.learning().is_some() {
         let Some(device) = state.midi_ports.get(port).map(|p| p.name.clone()) else {
             return;
         };
-        state.learn = None;
-        state.set_input(
-            learn.manual,
-            learn.slot,
-            config::Input {
-                device,
-                channel: Some(channel + 1),
-            },
-        );
+        state.learn_key(&device, channel, data1);
         return;
     }
 
     // A manual with no input assigned is deaf to everything, including
     // note-offs: it sent no note-ons either, so nothing can hang. The M1
     // test tone has no manuals to assign to and always sounds.
-    let targets = match (&state.control, state.midi_ports.get(port)) {
+    let Some(source) = state.midi_ports.get(port) else {
+        return;
+    };
+    // Notes are filtered by the keyboard's compass as well as its
+    // channel; everything else (expression, all-notes-off) is not a key
+    // and only has to reach the right manuals.
+    let targets = match (&state.control, status & 0xF0) {
         (Control::Tone, _) => Vec::new(),
-        (_, Some(port)) => port.targets(channel),
-        (_, None) => return,
+        (_, 0x90 | 0x80) => source.note_targets(channel, data1),
+        _ => source.targets(channel),
     };
     if matches!(state.control, Control::Organ(_)) && targets.is_empty() {
         return;
@@ -1434,7 +1538,7 @@ mod tests {
             .expect("its manual exists");
         let drawn = vec![target.id];
         let loaded = bank::build(&organ, 48000.0).expect("bank builds");
-        let console = Console::new(organ, loaded.specs, drawn);
+        let console = Console::new(organ, loaded.specs, drawn, 48_000.0);
         let (_engine, engine) = Engine::new(48000.0, Arc::new(loaded.bank));
         let state = Arc::new(Mutex::new(State {
             engine,
@@ -1467,16 +1571,37 @@ mod tests {
 
     /// Assign the one test port to a manual, the way the dialog does.
     fn bind(state: &Mutex<State>, manual: usize, channel: Option<u8>) {
+        let slot = state.lock().expect("state poisoned").manual_inputs(manual).len();
+        bind_compass(state, manual, slot, channel, None, None);
+    }
+
+    fn bind_compass(
+        state: &Mutex<State>,
+        manual: usize,
+        slot: usize,
+        channel: Option<u8>,
+        low: Option<u8>,
+        high: Option<u8>,
+    ) {
         let mut state = state.lock().expect("state poisoned");
-        let slot = state.manual_inputs(manual).len();
         state.set_input(
             manual,
             slot,
             config::Input {
                 device: "Test Keyboard".into(),
                 channel,
+                low,
+                high,
             },
         );
+    }
+
+    fn compass_of(state: &Mutex<State>, manual: usize) -> Option<(i16, i16)> {
+        let state = state.lock().expect("state poisoned");
+        match &state.control {
+            Control::Organ(console) => console.compass(manual),
+            Control::Tone => None,
+        }
     }
 
     /// The point of assigning by manual: a plain keyboard that only ever
@@ -1531,41 +1656,85 @@ mod tests {
         }
     }
 
-    /// Auto-detect: the dialog waits, the player plays, and the key that
-    /// taught it stays silent — a division blurting out mid-assignment
-    /// reads as a fault.
+    /// Auto-detect: the dialog waits, the player plays its lowest and
+    /// highest key, and neither sounds — a division blurting out
+    /// mid-assignment reads as a fault.
     #[test]
-    fn listening_binds_the_key_that_is_played_and_swallows_it() {
+    fn listening_takes_the_keyboard_and_its_width_from_two_presses() {
         let Some((state, manual)) = demo_state("Gamba 8'") else {
             return;
         };
         state.lock().expect("state").listen(manual, 0);
 
-        handle_midi(&[0x92, 60, 100], 0, &state); // channel 3
+        // The first key names the keyboard and the bottom of its range.
+        handle_midi(&[0x92, 55, 100], 0, &state); // channel 3
         assert!(
             held_on(&state, manual).is_empty(),
-            "the teaching key does not sound"
+            "the teaching keys do not sound"
         );
+        assert!(
+            state.lock().expect("state").learn.is_some(),
+            "still waiting for the top"
+        );
+        // A repeat of the same key is a slip, not a one-key keyboard.
+        handle_midi(&[0x92, 55, 100], 0, &state);
+        assert!(state.lock().expect("state").learn.is_some());
 
+        handle_midi(&[0x92, 96, 100], 0, &state);
         let locked = state.lock().expect("state");
         assert_eq!(
             locked.manual_inputs(manual),
             [config::Input {
                 device: "Test Keyboard".into(),
                 channel: Some(3),
+                low: Some(55),
+                high: Some(96),
             }],
-            "bound to the port and channel the note arrived on"
+            "port, channel and compass all come from the playing"
         );
-        assert!(locked.learn.is_none(), "one key is enough");
-        assert!(
-            locked.midi_ports[0].routes.contains(&(Some(3), manual)),
-            "and the route is live immediately"
-        );
+        assert!(locked.learn.is_none(), "two keys are enough");
         drop(locked);
 
-        // The next press of the same key plays, now that it is bound.
+        // The route is live at once, and the manual now answers to the
+        // keyboard's own range rather than the set's.
+        assert_eq!(compass_of(&state, manual), Some((55, 96)));
         handle_midi(&[0x92, 60, 100], 0, &state);
         assert_eq!(held_on(&state, manual), vec![60]);
+    }
+
+    /// The player's keyboard is the compass: inside it every key plays,
+    /// outside it none does, whatever the sample set's own range.
+    #[test]
+    fn a_keyboards_compass_decides_which_notes_exist() {
+        let Some((state, manual)) = demo_state("Gamba 8'") else {
+            return;
+        };
+        let native = compass_of(&state, manual).expect("a compass");
+        let (native_low, native_high) = (native.0 as u8, native.1 as u8);
+        bind_compass(&state, manual, 0, None, Some(48), Some(60));
+        assert_eq!(compass_of(&state, manual), Some((48, 60)));
+
+        handle_midi(&[0x90, 61, 100], 0, &state);
+        assert!(held_on(&state, manual).is_empty(), "past this keyboard");
+        handle_midi(&[0x90, 60, 100], 0, &state);
+        assert_eq!(held_on(&state, manual), vec![60], "its top key plays");
+        handle_midi(&[0x80, 60, 0], 0, &state);
+
+        // Widened past the set, the extra keys speak — repitched.
+        bind_compass(&state, manual, 0, None, Some(native_low), Some(native_high + 5));
+        assert_eq!(compass_of(&state, manual), Some((native.0, native.1 + 5)));
+        handle_midi(&[0x90, native_high + 5, 100], 0, &state);
+        assert_eq!(
+            held_on(&state, manual),
+            vec![native_high + 5],
+            "five keys past the set, repitched from its top pipe"
+        );
+        handle_midi(&[0x80, native_high + 5, 0], 0, &state);
+
+        // A second keyboard on the same manual brings its own width,
+        // and the manual answers to both.
+        bind_compass(&state, manual, 1, None, Some(24), Some(48));
+        assert_eq!(compass_of(&state, manual), Some((24, native.1 + 5)));
     }
 
     /// Assignments are per organ and are stored by name, so the same
@@ -1580,12 +1749,16 @@ mod tests {
         let input = config::Input {
             device: "Test Keyboard".into(),
             channel: Some(2),
+            low: None,
+            high: None,
         };
         state
             .midi_config
             .set_input(&organ, "Second Manual", 0, input.clone());
         state.resolve_routes();
-        assert_eq!(state.midi_ports[0].routes, vec![(Some(2), manual)]);
+        assert_eq!(state.midi_ports[0].routes.len(), 1);
+        assert_eq!(state.midi_ports[0].routes[0].manual, manual);
+        assert_eq!(state.midi_ports[0].routes[0].channel, Some(2));
 
         // A manual this organ hasn't got, and an assignment saved under
         // a different organ, both leave the port silent rather than

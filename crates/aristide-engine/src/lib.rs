@@ -26,7 +26,7 @@ use std::sync::Arc;
 
 use bank::{Sample, SampleBank};
 use enclosure::{Enclosure, EnclosureParams, ENCLOSURE_NONE, MAX_ENCLOSURES};
-use resample::SincTable;
+use resample::SincTables;
 use rtrb::{Consumer, Producer, RingBuffer};
 use wind::{WindGroup, WindParams, MAX_WIND_GROUPS};
 
@@ -213,6 +213,12 @@ struct SampledVoice {
     release_position: f64,
     /// Source frames advanced per output frame (before wind modulation).
     rate: f64,
+    /// Sinc kernel bucket chosen once at [`Command::StartVoice`] from
+    /// `rate` ([`SincTables::select`]) and reused for the voice's whole
+    /// life: tremulant/release-bend wobble never swings `rate` far
+    /// enough to cross a quarter-octave bucket boundary, so re-picking
+    /// per block would only add cost, not quality.
+    kernel: usize,
     gain: f32,
     /// Crossfade progress 0→1.
     fade: f32,
@@ -351,7 +357,7 @@ impl SampledVoice {
         &mut self,
         sample: &Sample,
         external: Option<&Sample>,
-        table: &SincTable,
+        tables: &SincTables,
         ctx: &VoiceBlockContext,
         crossfade_step: f32,
         kill_step: f32,
@@ -412,7 +418,7 @@ impl SampledVoice {
         let (mut left, mut right) = if ctx.lite {
             sample.read(self.position)
         } else {
-            table.read(sample, self.position, seam)
+            tables.read(self.kernel, sample, self.position, seam)
         };
         let mut advance_position = true;
         // This frame's output gain, captured BEFORE the match arms mutate
@@ -428,7 +434,7 @@ impl SampledVoice {
                 let (tail_l, tail_r) = if ctx.lite {
                     tail_sample.read(self.release_position)
                 } else {
-                    table.read(tail_sample, self.release_position, None)
+                    tables.read(self.kernel, tail_sample, self.release_position, None)
                 };
                 // Raised-cosine-shaped blend (smoothstep ≈ it, no trig):
                 // linear fades dip audibly on the uncorrelated noise
@@ -709,7 +715,7 @@ pub struct Engine {
     sample_rate: f32,
     commands: Consumer<Command>,
     bank: Arc<SampleBank>,
-    sinc: SincTable,
+    sinc: SincTables,
     voices: Box<[Voice]>,
     wind: [WindGroup; MAX_WIND_GROUPS],
     enclosures: [Enclosure; MAX_ENCLOSURES],
@@ -754,7 +760,7 @@ impl Engine {
             sample_rate,
             commands: consumer,
             bank,
-            sinc: SincTable::new(),
+            sinc: SincTables::new(),
             voices: vec![Voice::Idle; MAX_VOICES].into_boxed_slice(),
             wind: [WindGroup::default(); MAX_WIND_GROUPS],
             enclosures: [Enclosure::default(); MAX_ENCLOSURES],
@@ -1134,6 +1140,7 @@ impl Engine {
                         position: 0.0,
                         release_position: 0.0,
                         rate: rate as f64,
+                        kernel: self.sinc.select(rate as f64),
                         gain,
                         fade: 0.0,
                         fade_step: 0.0,

@@ -43,6 +43,17 @@ drive logical keys below the accessible range and speak the extension pipes. We
 treat the keyboard's compass as the instrument's compass; borrowing is how a rank
 gets played outside it.
 
+**Whose keyboard (locked):** the compass is the *player's* keyboard, not the set's.
+Each MIDI input carries the range it was measured at — Preferences → MIDI learns it
+from two key presses — and a manual answers to the union of its inputs' ranges,
+defaulting to the set's own compass until something is measured. Notes outside are
+silent, as above; keys *inside* it that the set has no pipe for are filled by
+repitching the nearest pipe the rank does have, with no ceiling on the interval. A
+rank range that reaches the set's own edge carries on past it; one that stopped
+earlier stays stopped, because a half-compass stop is a musical decision. Holes
+inside a rank (a sample that failed to load) are filled the same way — those are
+defects, not decisions.
+
 ## Why we will sound better (engine-side quality)
 
 Fidelity comes from the renderer, not the file format. The plan, roughly in order of

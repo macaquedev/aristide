@@ -183,8 +183,28 @@ fn respond(
                         Some(value) => value.parse::<u8>().ok().filter(|c| (1..=16).contains(c)),
                         None => state.suggested_channels.get(manual).copied().flatten(),
                     };
+                    // The keyboard's own compass. "set" means the sample
+                    // set's, i.e. forget what was learned.
+                    let key = |name| match param(query, name) {
+                        Some("set") => None,
+                        Some(value) => value.parse::<u8>().ok().filter(|k| *k < 128),
+                        None => state
+                            .manual_inputs(manual)
+                            .get(slot)
+                            .and_then(|input| if name == "low" { input.low } else { input.high }),
+                    };
+                    let (low, high) = (key("low"), key("high"));
                     state.learn = None;
-                    if !state.set_input(manual, slot, crate::config::Input { device, channel }) {
+                    if !state.set_input(
+                        manual,
+                        slot,
+                        crate::config::Input {
+                            device,
+                            channel,
+                            low,
+                            high,
+                        },
+                    ) {
                         return bad_request("no such manual");
                     }
                     json(state_json_locked(&state))
@@ -481,21 +501,31 @@ fn state_json_locked(state: &State) -> String {
                     out.push(',');
                 }
                 let connected = state.midi_ports.iter().any(|p| p.name == input.device);
-                let channel = input
-                    .channel
-                    .map_or_else(|| "null".to_string(), |c| c.to_string());
+                let number = |value: Option<u8>| {
+                    value.map_or_else(|| "null".to_string(), |v| v.to_string())
+                };
                 out.push_str(&format!(
-                    "{{\"slot\":{slot},\"device\":{},\"channel\":{channel},\"connected\":{connected}}}",
-                    json_string(&input.device)
+                    "{{\"slot\":{slot},\"device\":{},\"channel\":{},\"connected\":{connected},\"low\":{},\"high\":{}}}",
+                    json_string(&input.device),
+                    number(input.channel),
+                    number(input.low),
+                    number(input.high)
                 ));
             }
-            out.push_str("]}");
+            // What the set itself declares, so the dialog can say how
+            // far a widened keyboard is reaching past it.
+            let native = console
+                .native_compass(*idx)
+                .map_or_else(|| "null".to_string(), |(low, high)| format!("[{low},{high}]"));
+            out.push_str(&format!("],\"native\":{native}}}"));
         }
     }
     out.push(']');
-    if let Some(learn) = state.learn {
+    if let Some(learn) = &state.learn {
+        // Which key the dialog is still waiting for.
+        let step = if learn.heard.is_some() { "high" } else { "low" };
         out.push_str(&format!(
-            ",\"learning\":{{\"manual\":{},\"slot\":{}}}",
+            ",\"learning\":{{\"manual\":{},\"slot\":{},\"step\":\"{step}\"}}",
             learn.manual, learn.slot
         ));
     }
@@ -605,7 +635,7 @@ mod tests {
             .expect("demo set loads")
             .organ;
         let loaded = crate::bank::build(&organ, 48000.0).expect("bank builds");
-        let console = crate::console::Console::new(organ, loaded.specs, Vec::new());
+        let console = crate::console::Console::new(organ, loaded.specs, Vec::new(), 48000.0);
         let (_engine, handle) =
             aristide_engine::Engine::new(48000.0, std::sync::Arc::new(loaded.bank));
         Some(Arc::new(Mutex::new(State {
@@ -718,7 +748,7 @@ mod tests {
         // Demo set: First Manual, Second Manual, Pedal — every one of
         // them listed, every one of them empty.
         assert!(
-            body.contains("{\"idx\":1,\"name\":\"First Manual\",\"inputs\":[]}"),
+            body.contains("{\"idx\":1,\"name\":\"First Manual\",\"inputs\":[],\"native\":[36,96]}"),
             "manuals listed with nothing assigned: {body}"
         );
         assert!(!body.contains("\"learning\""), "not listening yet");
@@ -731,9 +761,10 @@ mod tests {
         let body = state_json(&state);
         assert!(
             body.contains(
-                "{\"slot\":0,\"device\":\"Test Keyboard\",\"channel\":4,\"connected\":false}"
+                "{\"slot\":0,\"device\":\"Test Keyboard\",\"channel\":4,\"connected\":false,\"low\":null,\"high\":null}"
             ),
-            "assigned by name, and honest that it isn't plugged in: {body}"
+            "assigned by name, honest that it isn't plugged in, and no \
+             compass measured yet: {body}"
         );
 
         // No channel given falls back to what the set suggests for that
@@ -759,6 +790,23 @@ mod tests {
         );
         assert!(state_json(&state).contains("\"slot\":1,\"device\":\"Second Keyboard\""));
 
+        // A learned keyboard width rides along on the binding.
+        respond(
+            &state,
+            &Method::Post,
+            "/api/midi/bind?manual=2&slot=0&device=Test%20Keyboard&low=31&high=101",
+        );
+        assert!(state_json(&state).contains("\"low\":31,\"high\":101"));
+        respond(
+            &state,
+            &Method::Post,
+            "/api/midi/bind?manual=2&slot=0&device=Test%20Keyboard&low=set&high=set",
+        );
+        assert!(
+            state_json(&state).contains("\"low\":null,\"high\":null"),
+            "\"set\" gives the manual back the compass its set declares"
+        );
+
         respond(&state, &Method::Post, "/api/midi/unbind?manual=2&slot=0");
         let body = state_json(&state);
         assert!(
@@ -766,7 +814,7 @@ mod tests {
             "removing the first input renumbers the rest: {body}"
         );
         respond(&state, &Method::Post, "/api/midi/unbind?manual=2&slot=0");
-        assert!(state_json(&state).contains("\"name\":\"Second Manual\",\"inputs\":[]}"));
+        assert!(state_json(&state).contains("\"name\":\"Second Manual\",\"inputs\":[],\"native\":"));
 
         // A manual this organ hasn't got is refused, not clamped.
         respond(
@@ -779,7 +827,9 @@ mod tests {
         // Auto-detect is a mode the snapshot reports, so the dialog can
         // show which row is waiting.
         respond(&state, &Method::Post, "/api/midi/learn?manual=1&slot=0");
-        assert!(state_json(&state).contains("\"learning\":{\"manual\":1,\"slot\":0}"));
+        assert!(state_json(&state).contains(
+            "\"learning\":{\"manual\":1,\"slot\":0,\"step\":\"low\"}"
+        ));
         respond(&state, &Method::Post, "/api/midi/learn");
         assert!(!state_json(&state).contains("\"learning\""), "cancelled");
         respond(&state, &Method::Post, "/api/midi/learn?manual=9&slot=0");
