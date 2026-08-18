@@ -194,6 +194,12 @@ fn respond(
                             .and_then(|input| if name == "low" { input.low } else { input.high }),
                     };
                     let (low, high) = (key("low"), key("high"));
+                    // Rebinding a device keeps whatever the octave
+                    // buttons have done to it.
+                    let transpose = state
+                        .manual_inputs(manual)
+                        .get(slot)
+                        .map_or(0, |input| input.transpose);
                     state.learn = None;
                     if !state.set_input(
                         manual,
@@ -203,6 +209,7 @@ fn respond(
                             channel,
                             low,
                             high,
+                            transpose,
                         },
                     ) {
                         return bad_request("no such manual");
@@ -248,6 +255,121 @@ fn respond(
                 }
                 // No target = stop listening.
                 _ => state.learn = None,
+            }
+            json(state_json_locked(&state))
+        }
+        // A computer key, treated as any other input: a binding first,
+        // then a note on whatever manual the keyboard is assigned to.
+        (Method::Post, "/api/key") => {
+            let on = param(query, "on") == Some("1");
+            match param(query, "code").map(unescape) {
+                Some(code) if !code.is_empty() => {
+                    let mut state = state.lock().expect("state poisoned");
+                    // Teaching a binding: a key press is a control like
+                    // any piston, and must not also play.
+                    if state.control_learning().is_some() {
+                        if on {
+                            state.learn_control(
+                                crate::COMPUTER_KEYBOARD,
+                                None,
+                                crate::control::Trigger::Key(code),
+                            );
+                        }
+                        return json(state_json_locked(&state));
+                    }
+                    state.key(&code, on);
+                    json(state_json_locked(&state))
+                }
+                _ => bad_request("missing code"),
+            }
+        }
+        // Where the computer keyboard plays. The Play menu's shortcut
+        // for an assignment the MIDI tab makes the long way.
+        (Method::Post, "/api/keyboard") => {
+            match param(query, "manual").and_then(|v| v.parse::<usize>().ok()) {
+                Some(manual) => {
+                    let mut state = state.lock().expect("state poisoned");
+                    if !state.assign_keyboard(manual) {
+                        return bad_request("no such manual");
+                    }
+                    json(state_json_locked(&state))
+                }
+                None => bad_request("missing manual"),
+            }
+        }
+        // Run an action outright — the same verbs a binding uses, so a
+        // menu item and a piston cannot drift apart.
+        (Method::Post, "/api/action") => match param(query, "do").map(unescape) {
+            Some(text) => match crate::control::Action::parse(&text) {
+                Some(action) => {
+                    let device = param(query, "device").map(unescape).unwrap_or_default();
+                    let mut state = state.lock().expect("state poisoned");
+                    state.run_named(&action, &device);
+                    json(state_json_locked(&state))
+                }
+                None => bad_request("no such action"),
+            },
+            None => bad_request("missing action"),
+        },
+        // Bindings: what an input does when it isn't playing a note.
+        (Method::Post, "/api/control/bind") => {
+            let slot = param(query, "slot").and_then(|v| v.parse::<usize>().ok());
+            let action = param(query, "action").map(unescape);
+            match (slot, action) {
+                (Some(slot), Some(action)) if crate::control::Action::parse(&action).is_some() => {
+                    let mut state = state.lock().expect("state poisoned");
+                    let saved = state.controls().get(slot).cloned();
+                    // Only what the request names is changed: setting an
+                    // action leaves the trigger it was taught alone.
+                    let control = crate::config::Control {
+                        device: param(query, "device")
+                            .map(unescape)
+                            .or_else(|| saved.as_ref().map(|c| c.device.clone()))
+                            .unwrap_or_default(),
+                        channel: match param(query, "ch") {
+                            Some("any") => None,
+                            Some(value) => value.parse().ok().filter(|c| (1..=16).contains(c)),
+                            None => saved.as_ref().and_then(|c| c.channel),
+                        },
+                        trigger: param(query, "trigger")
+                            .map(unescape)
+                            .or_else(|| saved.as_ref().map(|c| c.trigger.clone()))
+                            .unwrap_or_default(),
+                        action,
+                        manual: match param(query, "manual") {
+                            Some("any") => None,
+                            Some(value) => Some(unescape(value)),
+                            None => saved.and_then(|c| c.manual),
+                        },
+                    };
+                    state.control_learn = None;
+                    state.set_control(slot, control);
+                    json(state_json_locked(&state))
+                }
+                (Some(_), Some(_)) => bad_request("no such action"),
+                _ => bad_request("missing slot/action"),
+            }
+        }
+        (Method::Post, "/api/control/unbind") => {
+            match param(query, "slot").and_then(|v| v.parse::<usize>().ok()) {
+                Some(slot) => {
+                    let mut state = state.lock().expect("state poisoned");
+                    state.control_learn = None;
+                    state.remove_control(slot);
+                    json(state_json_locked(&state))
+                }
+                None => bad_request("missing slot"),
+            }
+        }
+        // Auto-detect for controls: press the piston, pedal or key.
+        (Method::Post, "/api/control/learn") => {
+            let mut state = state.lock().expect("state poisoned");
+            match param(query, "slot").and_then(|v| v.parse::<usize>().ok()) {
+                Some(slot) => {
+                    tracing::info!("control: listening for the control of binding {slot}");
+                    state.listen_control(slot);
+                }
+                None => state.control_learn = None,
             }
             json(state_json_locked(&state))
         }
@@ -486,6 +608,16 @@ fn state_json_locked(state: &State) -> String {
             json_string(&port.name)
         ));
     }
+    // The computer keyboard is assignable like any device, though no
+    // operating system will ever list it.
+    if !state.midi_ports.is_empty() {
+        out.push(',');
+    }
+    out.push_str(&format!(
+        "{{\"id\":{},\"name\":{},\"virtual\":true}}",
+        state.midi_ports.len(),
+        json_string(crate::COMPUTER_KEYBOARD)
+    ));
     out.push_str("],\"manuals\":[");
     if let Control::Organ(console) = &state.control {
         for (position, (idx, name, _, _, _)) in console.manual_states().iter().enumerate() {
@@ -500,7 +632,8 @@ fn state_json_locked(state: &State) -> String {
                 if slot > 0 {
                     out.push(',');
                 }
-                let connected = state.midi_ports.iter().any(|p| p.name == input.device);
+                let connected = input.device == crate::COMPUTER_KEYBOARD
+                    || state.midi_ports.iter().any(|p| p.name == input.device);
                 let number = |value: Option<u8>| {
                     value.map_or_else(|| "null".to_string(), |v| v.to_string())
                 };
@@ -530,6 +663,47 @@ fn state_json_locked(state: &State) -> String {
         ));
     }
     out.push('}');
+    // Bindings, the computer keyboard, and the vocabulary a UI can
+    // offer — everything a Controls pane needs to draw itself.
+    out.push_str(",\"controls\":[");
+    for (slot, control) in state.controls().iter().enumerate() {
+        if slot > 0 {
+            out.push(',');
+        }
+        let optional = |value: &Option<String>| {
+            value
+                .as_deref()
+                .map_or_else(|| "null".to_string(), json_string)
+        };
+        out.push_str(&format!(
+            "{{\"slot\":{slot},\"device\":{},\"channel\":{},\"trigger\":{},\"action\":{},\"manual\":{}}}",
+            json_string(&control.device),
+            control
+                .channel
+                .map_or_else(|| "null".to_string(), |c| c.to_string()),
+            json_string(&control.trigger),
+            json_string(&control.action),
+            optional(&control.manual)
+        ));
+    }
+    out.push(']');
+    if let Some(learn) = state.control_learn {
+        out.push_str(&format!(",\"control_learning\":{}", learn.slot));
+    }
+    out.push_str(",\"actions\":[");
+    for (index, action) in crate::control::CATALOGUE.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        out.push_str(&json_string(action));
+    }
+    out.push(']');
+    if let Some(keyboard) = state.keyboard {
+        out.push_str(&format!(
+            ",\"keyboard\":{{\"manual\":{},\"transpose\":{},\"low\":{},\"high\":{}}}",
+            keyboard.manual, keyboard.transpose, keyboard.compass.0, keyboard.compass.1
+        ));
+    }
     if let Control::Organ(console) = &state.control {
         let (enabled, volume) = console.noises();
         out.push_str(&format!(
@@ -638,7 +812,7 @@ mod tests {
         let console = crate::console::Console::new(organ, loaded.specs, Vec::new(), 48000.0);
         let (_engine, handle) =
             aristide_engine::Engine::new(48000.0, std::sync::Arc::new(loaded.bank));
-        Some(Arc::new(Mutex::new(State {
+        let state = Arc::new(Mutex::new(State {
             engine: handle,
             control: Control::Organ(console),
             midi_ports: Vec::new(),
@@ -648,12 +822,19 @@ mod tests {
             organ_key: "test organ".into(),
             suggested_channels: vec![Some(3), Some(1), Some(2)],
             learn: None,
+            control_learn: None,
+            key_bindings: Vec::new(),
+            keyboard: None,
             trem_groups: vec![0, 1],
             trem_engaged: false,
             master_gain: 0.178,
             reverb_wet: Some(0.25),
             expression_cc: 11,
-        })))
+        }));
+        // As the server does once before it opens any device: routing,
+        // bindings and the computer keyboard all come from this.
+        state.lock().expect("state poisoned").resolve_routes();
+        Some(state)
     }
 
     #[test]
@@ -742,8 +923,11 @@ mod tests {
 
         let body = state_json(&state);
         assert!(
-            body.contains("\"midi\":{\"ports\":[]"),
-            "no inputs on a test rig: {body}"
+            body.contains(
+                "\"midi\":{\"ports\":[{\"id\":0,\"name\":\"Computer keyboard\",\"virtual\":true}]"
+            ),
+            "no MIDI on a test rig, but the computer keyboard is always \
+             assignable: {body}"
         );
         // Demo set: First Manual, Second Manual, Pedal — every one of
         // them listed, every one of them empty.
@@ -834,6 +1018,125 @@ mod tests {
         assert!(!state_json(&state).contains("\"learning\""), "cancelled");
         respond(&state, &Method::Post, "/api/midi/learn?manual=9&slot=0");
         assert!(!state_json(&state).contains("\"learning\""), "no such manual");
+    }
+
+    /// Every field a console reads sits where it says it does, and the
+    /// whole thing is valid JSON — the snapshot is hand-written, so
+    /// nothing else checks that.
+    /// Every field a console reads sits where it says it does, and the
+    /// whole thing is valid JSON — the snapshot is hand-written, so
+    /// nothing else checks that.
+    #[test]
+    #[ignore = "dumps a snapshot for the console UI harness"]
+    fn dump_snapshot() {
+        let Some(state) = demo_state() else { return };
+        respond(&state, &Method::Post, "/api/control/bind?slot=0&action=octave-up&device=Computer%20keyboard&trigger=key%3AEqual");
+        respond(&state, &Method::Post, "/api/control/bind?slot=1&action=octave-down&device=Computer%20keyboard&trigger=key%3AMinus");
+        respond(&state, &Method::Post, "/api/control/bind?slot=2&action=stop%3AMontre%208%27&device=Johannus%20DIN%20IN&ch=14&trigger=note%3A36");
+        respond(&state, &Method::Post, "/api/control/bind?slot=3&action=cancel&device=Johannus%20DIN%20IN&ch=14&trigger=note%3A39");
+        std::fs::write("/home/macaque/shots/snapshot.json", state_json(&state)).expect("written");
+    }
+
+    #[test]
+    fn the_snapshot_is_well_formed() {
+        let Some(state) = demo_state() else { return };
+        respond(&state, &Method::Post, "/api/control/bind?slot=0&action=panic");
+        let body = state_json(&state);
+        let value: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+        for field in [
+            "stops", "couplers", "manuals", "midi", "controls", "actions", "keyboard",
+            "tuning", "enclosures", "noises",
+        ] {
+            assert!(value.get(field).is_some(), "{field} missing: {body}");
+        }
+        assert!(value["midi"]["ports"].is_array());
+        assert_eq!(value["controls"][0]["action"], "panic");
+    }
+
+    #[test]
+    fn bindings_survive_the_api() {
+        let Some(state) = demo_state() else { return };
+
+        let body = state_json(&state);
+        assert!(body.contains("\"controls\":[]"), "nothing bound yet: {body}");
+        assert!(
+            body.contains("\"actions\":[\"octave-up\""),
+            "the vocabulary a UI offers is published: {body}"
+        );
+        assert!(
+            body.contains("\"keyboard\":{\"manual\":1"),
+            "the computer keyboard plays without being assigned: {body}"
+        );
+
+        // Adding a binding, then teaching it what presses it.
+        respond(
+            &state,
+            &Method::Post,
+            "/api/control/bind?slot=0&action=octave-up&device=Test%20Keyboard",
+        );
+        assert!(state_json(&state).contains("\"trigger\":\"\""), "not taught yet");
+
+        respond(&state, &Method::Post, "/api/control/learn?slot=0");
+        assert!(state_json(&state).contains("\"control_learning\":0"));
+        respond(&state, &Method::Post, "/api/key?code=Equal&on=1");
+        let body = state_json(&state);
+        assert!(
+            body.contains("\"trigger\":\"key:Equal\"")
+                && body.contains("\"device\":\"Computer keyboard\""),
+            "the key that was pressed became the trigger: {body}"
+        );
+        assert!(!body.contains("\"control_learning\""), "and the wait ended");
+
+        // Changing the action leaves the taught trigger alone.
+        respond(
+            &state,
+            &Method::Post,
+            "/api/control/bind?slot=0&action=stop%3AMontre%208%27",
+        );
+        let body = state_json(&state);
+        assert!(body.contains("\"action\":\"stop:Montre 8'\""), "{body}");
+        assert!(body.contains("\"trigger\":\"key:Equal\""), "{body}");
+
+        // And the binding does what it says, from a computer key.
+        respond(&state, &Method::Post, "/api/key?code=Equal&on=1");
+        assert!(
+            state_json(&state).contains("{\"id\":16,\"name\":\"Montre 8'\",\"manual\":\"First Manual\",\"on\":true}"),
+            "the bound key drew the stop it names"
+        );
+
+        respond(&state, &Method::Post, "/api/control/unbind?slot=0");
+        assert!(state_json(&state).contains("\"controls\":[]"));
+
+        respond(&state, &Method::Post, "/api/control/bind?slot=0&action=nonsense");
+        assert!(state_json(&state).contains("\"controls\":[]"), "refused");
+    }
+
+    /// The Play menu's shortcuts are the same verbs a binding uses.
+    #[test]
+    fn the_action_endpoint_moves_the_computer_keyboard() {
+        let Some(state) = demo_state() else { return };
+        assert!(state_json(&state).contains("\"transpose\":0"));
+
+        respond(
+            &state,
+            &Method::Post,
+            "/api/action?do=octave-up&device=Computer%20keyboard",
+        );
+        assert!(
+            state_json(&state).contains("\"keyboard\":{\"manual\":1,\"transpose\":12"),
+            "the keyboard is shifted, not the division"
+        );
+
+        respond(&state, &Method::Post, "/api/keyboard?manual=2");
+        let body = state_json(&state);
+        assert!(
+            body.contains("\"keyboard\":{\"manual\":2,\"transpose\":12"),
+            "moving it keeps the shift: {body}"
+        );
+        assert!(
+            body.matches("\"device\":\"Computer keyboard\"").count() == 1,
+            "and it plays one manual, not two: {body}"
+        );
     }
 
     #[test]

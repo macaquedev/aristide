@@ -19,3 +19,6 @@ midir = "0.10"
 tiny_http = "0.12"
 libc = "0.2"
 rtrb = "0.3"
+
+[dev-dependencies]
+serde_json.workspace = true

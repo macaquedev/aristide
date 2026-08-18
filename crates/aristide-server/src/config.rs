@@ -55,6 +55,18 @@ const HEADER: &str = "\
 # or missing manual drops its inputs rather than playing the wrong
 # division.
 #
+# A [[...controls]] entry is a binding: what a message that isn't a note
+# does. Both halves are text —
+#
+#   trigger      note:36, cc:64, program:5, or key:Equal for a computer
+#                key (named by physical position)
+#   action       octave-up, octave-down, transpose-up, transpose-down,
+#                transpose:<n>, transpose-reset, stop:<name>,
+#                coupler:<name>, tremulant, cancel, panic,
+#                enclosure:<name>
+#   manual       optional; which keyboard a pitch action shifts. Absent
+#                means every keyboard on the same device.
+#
 # Aristide rewrites this file whenever you change an assignment in
 # Preferences → MIDI. Hand edits are read back on the next start.
 
@@ -73,6 +85,30 @@ pub struct OrganConfig {
     /// added them. The order is the slot numbering the UI edits by.
     #[serde(default)]
     pub manuals: BTreeMap<String, Vec<Input>>,
+    /// Everything an input does that isn't playing a note: pistons,
+    /// the transposer, an expression shoe. Order is the slot numbering.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub controls: Vec<Control>,
+}
+
+/// One binding: this message, from this device, does this.
+///
+/// Trigger and action are stored as their text (`"note:36"`,
+/// `"stop:Montre 8'"`) rather than as parsed enums, so the file stays
+/// readable and a binding naming something this organ hasn't got is
+/// kept and reported rather than silently dropped on the next save.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Control {
+    pub device: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<u8>,
+    pub trigger: String,
+    pub action: String,
+    /// Which manual a pitch action shifts. Absent = every keyboard on
+    /// the device the trigger came from, which is what a transposer on
+    /// a console means.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manual: Option<String>,
 }
 
 /// One source of notes for one manual.
@@ -99,6 +135,16 @@ pub struct Input {
     pub low: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub high: Option<u8>,
+    /// Semitones added to every note from this keyboard. The octave
+    /// buttons move it; it belongs to the *input* because "this
+    /// controller is playing an octave down" is a fact about the
+    /// hardware in front of the player, not about the division.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub transpose: i8,
+}
+
+fn is_zero(value: &i8) -> bool {
+    *value == 0
 }
 
 impl Input {
@@ -117,6 +163,29 @@ impl MidiConfig {
         self.organs.get(organ)
     }
 
+    pub fn controls(&self, organ: &str) -> &[Control] {
+        self.organs
+            .get(organ)
+            .map_or(&[], |organ| organ.controls.as_slice())
+    }
+
+    /// Replace the binding at `slot`, or append when it is past the end.
+    pub fn set_control(&mut self, organ: &str, slot: usize, control: Control) {
+        let controls = &mut self.organs.entry(organ.to_string()).or_default().controls;
+        match controls.get_mut(slot) {
+            Some(existing) => *existing = control,
+            None => controls.push(control),
+        }
+    }
+
+    pub fn remove_control(&mut self, organ: &str, slot: usize) {
+        if let Some(organ) = self.organs.get_mut(organ)
+            && slot < organ.controls.len()
+        {
+            organ.controls.remove(slot);
+        }
+    }
+
     /// Every (manual name, inputs) pair saved for one organ.
     pub fn assignments(&self, organ: &str) -> impl Iterator<Item = (&str, &[Input])> {
         self.organs
@@ -131,6 +200,15 @@ impl MidiConfig {
             .get(organ)
             .and_then(|organ| organ.manuals.get(manual))
             .map_or(&[], Vec::as_slice)
+    }
+
+    /// The inputs of one manual, to be edited in place — what an
+    /// octave button moves.
+    pub fn inputs_mut(&mut self, organ: &str, manual: &str) -> &mut [Input] {
+        self.organs
+            .get_mut(organ)
+            .and_then(|organ| organ.manuals.get_mut(manual))
+            .map_or(&mut [], Vec::as_mut_slice)
     }
 
     /// Replace the input at `slot`, or append when `slot` is past the
@@ -214,6 +292,7 @@ mod tests {
             channel,
             low: None,
             high: None,
+            transpose: 0,
         }
     }
 

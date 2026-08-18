@@ -729,6 +729,14 @@ impl Console {
         expedited
     }
 
+    pub fn is_drawn(&self, stop: StopId) -> bool {
+        self.drawn.contains(&stop)
+    }
+
+    pub fn coupler_engaged(&self, index: usize) -> bool {
+        self.engaged_couplers.contains(&index)
+    }
+
     /// Engage or release a coupler by its index in `organ.couplers`.
     /// Sounding notes keep their current coupling; new presses use the
     /// new state. Returns (clack voice to start, noise handle to stop).

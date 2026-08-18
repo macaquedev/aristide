@@ -35,8 +35,13 @@ new MenuBar(document, document.getElementById("menus"), [
     title: "Play",
     items: () => [
       { label: "Computer keyboard map", check: keys.isOpen, run: () => keys.toggle() },
-      { label: "Octave down", accel: "−", run: () => keys.shift(-1) },
-      { label: "Octave up", accel: "=", run: () => keys.shift(+1) },
+      // Accelerators are bindings now, not built-ins: what shifts the
+      // keyboard is whatever the player has bound to octave-up and
+      // octave-down, which may equally be a piston on their console.
+      { label: "Octave down", run: () => keys.shift(-1) },
+      { label: "Octave up", run: () => keys.shift(+1) },
+      "-",
+      `SHIFTED ${keys.transpose > 0 ? "+" : ""}${keys.transpose} SEMITONES`,
       "-",
       "COMPUTER KEYBOARD PLAYS",
       ...keys.manuals.map((manual) => ({

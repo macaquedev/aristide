@@ -527,6 +527,43 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   text-overflow: ellipsis;
 }
 
+/* one row per binding: trigger, what it does, and its two housekeeping
+   buttons — action-first rather than manual-first, since a binding
+   doesn't belong to a manual */
+.controls-list { display: flex; flex-direction: column; gap: 6px; }
+
+.control-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+/* The trigger is the row's identity — "note:36 · Johannus DIN IN ch14"
+   is what the player recognises — so it keeps the width, and the two
+   selects give theirs up. */
+.control-row .control-trigger { flex: 1 1 auto; min-width: 0; }
+.control-row .control-action { flex: 0 1 132px; min-width: 0; }
+.control-row .control-target { flex: 0 1 132px; min-width: 0; }
+
+.control-trigger {
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* not yet taught: the same dashed, dimmed language as a missing MIDI input */
+.control-trigger.dim { border-style: dashed; color: var(--text-dim); }
+/* waiting for a key: the row is the only live thing in the dialog */
+.control-row.listening .control-trigger { border-color: var(--accent); color: var(--text); }
+
+.add-control { padding: 3px 8px; font-size: 10px; margin-top: 2px; }
+
 .about-card { width: min(420px, 100%); height: auto; }
 .about-body { display: block; padding: 18px 20px 22px; font-size: 12.5px; line-height: 1.6; }
 .about-body p { margin: 0 0 10px; }

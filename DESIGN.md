@@ -54,6 +54,22 @@ earlier stays stopped, because a half-compass stop is a musical decision. Holes
 inside a rank (a sample that failed to load) are filled the same way — those are
 defects, not decisions.
 
+**Bindings (locked):** any input message — a MIDI note, controller or program
+change, or a computer key — can be bound to any console action, as text
+(`note:36` -> `stop:Montre 8'`). Bindings live per organ beside the input
+assignments; a bound message does its job and does not also play. Actions
+resolve their subject by name through the same matcher manual names use, so a
+binding that names something the loaded organ hasn't got is reported and
+ignored rather than dropped from the file. `State::run` is the only place an
+action becomes an effect: a piston, a menu item and the HTTP API cannot mean
+different things by "cancel". The text vocabulary is deliberate groundwork for
+the scripting layer that will eventually write bindings (M6).
+
+The computer keyboard is an input like any other under this scheme — a device
+named `Computer keyboard`, assigned to a manual, with its own transpose and
+bindings. Octave shift belongs to the *input*, not the manual: how wide a
+keyboard is and where it currently sits are facts about the hardware.
+
 ## Why we will sound better (engine-side quality)
 
 Fidelity comes from the renderer, not the file format. The plan, roughly in order of

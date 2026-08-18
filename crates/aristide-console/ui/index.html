@@ -35,6 +35,7 @@
       <div class="modal-body">
         <nav class="tabs" id="prefs-tabs" role="tablist">
           <button role="tab" data-tab="midi">MIDI</button>
+          <button role="tab" data-tab="controls">Controls</button>
           <button role="tab" data-tab="tuning">Tuning</button>
           <button role="tab" data-tab="sound">Sound</button>
           <button role="tab" data-tab="appearance">Appearance</button>
@@ -64,6 +65,20 @@
             keyboard that isn't plugged in yet; it simply stays quiet.
           </p>
           <div id="midi-ports" class="midi-ports"></div>
+        </section>
+
+        <section class="pane hidden" data-pane="controls">
+          <h2>Bindings</h2>
+          <p class="pane-note">
+            Any MIDI message or computer key can be bound to anything the
+            console can do — draw a stop, work a coupler, nudge the pitch,
+            silence everything. A message bound this way does not also play
+            a note. Bindings are kept per organ, the same as manual
+            assignments.
+          </p>
+          <div id="controls-list" class="controls-list"></div>
+          <button class="ghost add-control" id="controls-add">+ add binding</button>
+          <p class="pane-note" id="controls-keyboard"></p>
         </section>
 
         <section class="pane hidden" data-pane="tuning">

@@ -3,9 +3,12 @@
 // an octave above, the row above each holding its sharps.
 //
 // Keys are addressed by `event.code` (physical position), so the layout is
-// the same shape on QWERTZ or AZERTY as it is on QWERTY. Notes go out
-// through the same `/api/note` command the on-screen keyboard uses, so the
-// server's `held` set lights the pressed keys with no extra plumbing.
+// the same shape on QWERTZ or AZERTY as it is on QWERTY. Every press goes
+// to the server as a *key*, not as a note: the computer keyboard is an
+// input like any other there, with a manual, a shift, and bindings, so
+// what a key does is the server's to decide. This file only draws what
+// that decision came to — the table below mirrors `control::KEYBOARD_ROWS`
+// and must stay in step with it.
 
 import { commands } from "./api.js";
 
@@ -25,10 +28,6 @@ const UPPER = [
 const LOWER_BASE = 48; // C3, with middle C = C4 = 60
 const UPPER_BASE = 60;
 
-const OCTAVE_DOWN = "Minus";
-const OCTAVE_UP = "Equal";
-const OCTAVE_LIMIT = 3;
-
 const NAMES = ["C", "C♯", "D", "D♯", "E", "F", "F♯", "G", "G♯", "A", "A♯", "B"];
 const SHARPS = new Set([1, 3, 6, 8, 10]);
 
@@ -39,6 +38,13 @@ function cap(code) {
   const punctuation = { Comma: ",", Period: ".", Semicolon: ";", Slash: "/" };
   return punctuation[code] ?? code.replace(/^(Key|Digit)/, "");
 }
+
+/// Keys worth telling the server about even when they play no note:
+/// anything the player might reasonably bind an action to.
+/// The server's name for this keyboard, wherever a device is named.
+const KEYBOARD_DEVICE = "Computer keyboard";
+
+const BINDABLE = /^(Key|Digit|F\d|Numpad|Arrow)|^(Minus|Equal|Space|Backquote|Bracket|Backslash|Quote|Tab|Enter)/;
 
 /// Semitone offsets by code, built once from the two rows.
 const OFFSETS = new Map();
@@ -58,9 +64,11 @@ export class PianoKeys {
   constructor(root, send) {
     this.root = root;
     this.send = send;
-    this.down = new Map(); // code -> {manual, midi} sounded at keydown
-    this.octave = 0;
+    this.down = new Set(); // codes currently held, so a repeat is not a second press
     this.manuals = [];
+    this.keyboard = null; // {manual, transpose, low, high} from the server
+    this.bound = new Set(); // key codes the player has bound to an action
+    this.learning = false; // Preferences is waiting to be taught a control
     this.target = null; // the manual notes go to
     this.signature = null;
     this.el = { panel: root.getElementById("keys-legend") };
@@ -74,9 +82,19 @@ export class PianoKeys {
   /// console draws, minus the pedalboard. The default target is the Great
   /// (or whatever the organ calls its principal manual), else the first.
   update(snapshot) {
-    const signature = JSON.stringify(
-      snapshot.manuals.map((m) => [m.idx, m.name, m.first_key, m.key_count])
+    // Which keys are worth sending is snapshot state too: a key nobody
+    // has bound should keep doing whatever the browser does with it.
+    this.bound = new Set(
+      (snapshot.controls ?? [])
+        .filter((c) => c.device === KEYBOARD_DEVICE && c.trigger.startsWith("key:"))
+        .map((c) => c.trigger.slice(4))
     );
+    this.learning = snapshot.control_learning != null;
+
+    const signature = JSON.stringify([
+      snapshot.manuals.map((m) => [m.idx, m.name, m.first_key, m.key_count]),
+      snapshot.keyboard ?? null,
+    ]);
     if (signature === this.signature) return;
     this.signature = signature;
 
@@ -85,18 +103,21 @@ export class PianoKeys {
     this.manuals = snapshot.manuals.filter((m) => m !== pedal);
     if (!this.manuals.length) this.manuals = snapshot.manuals;
 
-    const great = this.manuals.find((m) => /great|haupt|grand.?orgue|main/i.test(m.name));
-    this.target = great ?? this.manuals[0] ?? null;
+    // Where the keyboard plays, and how far it is shifted, are the
+    // server's: an octave button on a MIDI console moves it too.
+    this.keyboard = snapshot.keyboard ?? null;
+    this.target =
+      snapshot.manuals.find((m) => m.idx === this.keyboard?.manual) ?? null;
     this.fillManuals();
     this.paintLegend();
   }
 
-  /// The MIDI note a code plays right now, or null if it is unbound or
-  /// falls outside the target manual's compass.
+  /// The MIDI note a code plays right now, or null if it is unbound, the
+  /// keyboard is unassigned, or the note falls outside its manual.
   noteFor(code) {
     const offset = OFFSETS.get(code);
-    if (offset === undefined || !this.target) return null;
-    const midi = offset + 12 * this.octave;
+    if (offset === undefined || !this.target || !this.keyboard) return null;
+    const midi = offset + this.keyboard.transpose;
     const first = this.target.first_key;
     if (midi < first || midi >= first + this.target.key_count) return null;
     return midi;
@@ -106,33 +127,27 @@ export class PianoKeys {
 
   press(code) {
     if (this.down.has(code)) return;
-    const midi = this.noteFor(code);
-    if (midi === null) return;
-    const manual = this.target.idx;
-    this.down.set(code, { manual, midi });
-    this.send(commands.note(manual, midi, true));
+    this.down.add(code);
+    this.send(commands.key(code, true));
     this.paintCap(code, true);
   }
 
   release(code) {
-    const note = this.down.get(code);
-    if (!note) return;
-    this.down.delete(code);
-    this.send(commands.note(note.manual, note.midi, false));
+    if (!this.down.delete(code)) return;
+    this.send(commands.key(code, false));
     this.paintCap(code, false);
   }
 
   /// Losing the window mid-chord must not leave pipes speaking.
   releaseAll() {
-    for (const code of [...this.down.keys()]) this.release(code);
+    for (const code of [...this.down]) this.release(code);
   }
 
+  /// The menu's octave items: the same `octave-up` / `octave-down`
+  /// actions a piston would fire, aimed at the computer keyboard.
   shift(by) {
-    const octave = Math.min(OCTAVE_LIMIT, Math.max(-OCTAVE_LIMIT, this.octave + by));
-    if (octave === this.octave) return;
-    this.releaseAll(); // the held notes belong to the old octave
-    this.octave = octave;
-    this.paintLegend();
+    this.releaseAll(); // held notes belong to the old shift
+    this.send(commands.action(by > 0 ? "octave-up" : "octave-down", KEYBOARD_DEVICE));
   }
 
   // ---- input -----------------------------------------------------------
@@ -146,13 +161,15 @@ export class PianoKeys {
   wire() {
     window.addEventListener("keydown", (event) => {
       if (event.repeat || event.ctrlKey || event.metaKey || event.altKey) return;
-      if (typing(event.target) || this.busy) return;
-      if (event.code === OCTAVE_DOWN || event.code === OCTAVE_UP) {
-        event.preventDefault();
-        this.shift(event.code === OCTAVE_UP ? +1 : -1);
+      // Text entry always wins. A dialog otherwise silences the keys,
+      // except while it is listening for the one to bind.
+      if (typing(event.target) || (this.busy && !this.learning)) return;
+      // Every key the server has a use for goes to it: the note rows,
+      // anything bound to an action, and — while Preferences is waiting
+      // to be taught — whatever the player presses next.
+      if (!this.learning && !OFFSETS.has(event.code) && !this.bound.has(event.code)) {
         return;
       }
-      if (!OFFSETS.has(event.code)) return;
       event.preventDefault(); // "/" opens WebKit's quick find otherwise
       this.press(event.code);
     });
@@ -187,16 +204,18 @@ export class PianoKeys {
     this.el.panel.classList.add("hidden");
   }
 
-  /// Point the computer keyboard at a manual by index. Notes held on the
-  /// old manual are released first — nothing must be left speaking on a
-  /// keyboard the player has stopped addressing.
+  /// Point the computer keyboard at a manual by index — an assignment
+  /// like any other input's, so it is the server that keeps it. Notes
+  /// held on the old manual are released first: nothing must be left
+  /// speaking on a keyboard the player has stopped addressing.
   setTarget(idx) {
-    const manual = this.manuals.find((m) => m.idx === idx);
-    if (!manual || manual === this.target) return;
+    if (idx === this.target?.idx) return;
     this.releaseAll();
-    this.target = manual;
-    this.el.manual.value = String(idx);
-    this.paintLegend();
+    this.send(commands.keyboardManual(idx));
+  }
+
+  get transpose() {
+    return this.keyboard?.transpose ?? 0;
   }
 
   // ---- legend -----------------------------------------------------------
@@ -261,9 +280,11 @@ export class PianoKeys {
       key.classList.toggle("out", midi === null);
       note.textContent = midi === null ? "—" : noteName(midi);
     }
-    const shift = this.octave > 0 ? `+${this.octave}` : `${this.octave}`;
-    this.el.octave.textContent =
-      `− / =  shift octave  (${shift})`;
+    const semitones = this.keyboard?.transpose ?? 0;
+    const shift = semitones > 0 ? `+${semitones}` : `${semitones}`;
+    this.el.octave.textContent = this.keyboard
+      ? `shift ${shift} semitones · octave keys are bindings, in Preferences → Controls`
+      : "unassigned — give a manual the Computer keyboard in Preferences → MIDI";
   }
 
   paintCap(code, on) {

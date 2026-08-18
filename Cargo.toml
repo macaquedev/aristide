@@ -24,6 +24,9 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 serde = { version = "1", features = ["derive"] }
+# Test-only: the state snapshot is hand-written JSON, and nothing else
+# would catch a field landing inside the wrong object.
+serde_json = "1"
 toml = "0.9"
 
 [profile.release]

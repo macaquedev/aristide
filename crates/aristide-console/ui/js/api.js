@@ -46,6 +46,25 @@ export const commands = {
   midiLearn: (manual, slot) =>
     manual == null ? "/api/midi/learn" : `/api/midi/learn?manual=${manual}&slot=${slot}`,
   midiRescan: () => "/api/midi/rescan",
+  // Controls: a message doing an action, with no manual of its own.
+  // `fields` is the same "only what's given" partial update as tuning's —
+  // device/ch/trigger/manual, any left out keeps what the slot already had.
+  controlBind: (slot, action, fields = {}) =>
+    `/api/control/bind?slot=${slot}&action=${encodeURIComponent(action)}` +
+    (Object.keys(fields).length ? `&${new URLSearchParams(fields)}` : ""),
+  controlUnbind: (slot) => `/api/control/unbind?slot=${slot}`,
+  // With no slot, stop listening — same shape as midiLearn.
+  controlLearn: (slot) =>
+    slot == null ? "/api/control/learn" : `/api/control/learn?slot=${slot}`,
+  // Where the computer keyboard plays, and any action by name — the
+  // same verbs a binding uses, so a menu item and a piston can't drift.
+  keyboardManual: (manual) => `/api/keyboard?manual=${manual}`,
+  action: (name, device) =>
+    `/api/action?do=${encodeURIComponent(name)}` +
+    (device == null ? "" : `&device=${encodeURIComponent(device)}`),
+  // A computer key, by physical position. The server decides what it
+  // means — a note on the assigned manual, or whatever it is bound to.
+  key: (code, on) => `/api/key?code=${encodeURIComponent(code)}&on=${on ? 1 : 0}`,
   note: (manual, key, on) =>
     `/api/note?manual=${manual}&key=${key}&on=${on ? 1 : 0}`,
   panic: () => "/api/panic",

@@ -3,6 +3,7 @@
 Newest first. One entry per work session; keep entries factual and short.
 Milestones refer to DESIGN.md.
 
+- [2026-08-18 — anything can be bound to anything](progress/2026-08-18-bindings.md)
 - [2026-08-17 — repitching: playing keys the set has no pipes for](progress/2026-08-17-repitching.md)
 - [2026-08-17 — MIDI assignment, read manual-first](progress/2026-08-17-manual-first-midi-assignment.md)
 - [2026-08-16 — MIDI assignments persist, per organ](progress/2026-08-16-midi-assignments-per-organ.md)

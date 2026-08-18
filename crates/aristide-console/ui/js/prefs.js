@@ -17,7 +17,81 @@ function keyName(key) {
   return `${NOTE_NAMES[key % 12]}${Math.floor(key / 12) - 1}`;
 }
 
-const TABS = ["midi", "tuning", "sound", "appearance"];
+const TABS = ["midi", "controls", "tuning", "sound", "appearance"];
+
+// The pitch actions all take an optional target manual; everything else
+// in the catalogue is either global (panic, cancel) or names its own
+// target through a second word (stop:, coupler:, enclosure:).
+const PITCH_ACTIONS = [
+  "octave-up",
+  "octave-down",
+  "transpose-up",
+  "transpose-down",
+  "transpose-reset",
+];
+const NAMED_ACTIONS = ["stop:", "coupler:", "enclosure:"];
+
+const ACTION_LABELS = {
+  "octave-up": "Octave up",
+  "octave-down": "Octave down",
+  "transpose-up": "Transpose up",
+  "transpose-down": "Transpose down",
+  "transpose-reset": "Transpose reset",
+  tremulant: "Tremulant",
+  cancel: "General cancel",
+  panic: "Panic",
+  "stop:": "Stop…",
+  "coupler:": "Coupler…",
+  "enclosure:": "Enclosure…",
+};
+function actionLabel(action) {
+  return ACTION_LABELS[action] ?? action;
+}
+
+/// Split "stop:Montre 8'" into its verb ("stop:") and argument, the way
+/// the server itself reads an action string.
+function actionVerb(action) {
+  const at = action.indexOf(":");
+  return at === -1 ? action : action.slice(0, at + 1);
+}
+function actionArg(action) {
+  const at = action.indexOf(":");
+  return at === -1 ? "" : action.slice(at + 1);
+}
+
+function namesFor(verb, snapshot) {
+  if (verb === "stop:") return (snapshot.stops ?? []).map((s) => s.name);
+  if (verb === "coupler:") return (snapshot.couplers ?? []).map((c) => c.name);
+  if (verb === "enclosure:") return (snapshot.enclosures ?? []).map((e) => e.name);
+  return [];
+}
+
+// A handful of physical keys read better as the character they print
+// ("=") than as their event.code name ("Equal"); the rest are left as
+// the code itself, which is still legible enough for a letter or digit.
+const KEY_GLYPHS = {
+  Equal: "=", Minus: "-", Comma: ",", Period: ".", Slash: "/",
+  Semicolon: ";", Quote: "'", BracketLeft: "[", BracketRight: "]",
+  Backquote: "`", Backslash: "\\", Space: "Space",
+};
+function keyGlyph(code) {
+  if (code in KEY_GLYPHS) return KEY_GLYPHS[code];
+  if (code.startsWith("Key")) return code.slice(3);
+  if (code.startsWith("Digit")) return code.slice(5);
+  return code;
+}
+
+/// The trigger cell reads as prose, not as the wire format: a MIDI
+/// message names its device and channel; a computer key just prints the
+/// character it is, since the device is always the same one.
+function triggerText(control) {
+  if (!control || !control.trigger) return "— press Listen —";
+  if (control.trigger.startsWith("key:")) {
+    return `key:${keyGlyph(control.trigger.slice(4))}`;
+  }
+  const channel = control.channel ? ` ch${control.channel}` : "";
+  return `${control.trigger} · ${control.device}${channel}`;
+}
 
 export class Preferences {
   constructor(root, send) {
@@ -27,6 +101,9 @@ export class Preferences {
     this.tuning = null;
     this.midiSignature = null;
     this.learning = null;
+    this.controlsSignature = null;
+    this.controlLearning = null;
+    this.controlsCount = 0;
     this.tab = "midi";
     this.el = {
       modal: root.getElementById("prefs"),
@@ -37,6 +114,9 @@ export class Preferences {
       ports: root.getElementById("midi-ports"),
       unassigned: root.getElementById("midi-unassigned"),
       rescan: root.getElementById("midi-rescan"),
+      controlsList: root.getElementById("controls-list"),
+      controlsAdd: root.getElementById("controls-add"),
+      controlsKeyboard: root.getElementById("controls-keyboard"),
       temperament: root.getElementById("set-temperament"),
       a4: root.getElementById("set-a4"),
       temperamentRow: root.getElementById("temperament-row"),
@@ -68,6 +148,7 @@ export class Preferences {
     // Leaving the dialog ends any wait for a key: the next thing the
     // player touches should sound, not be swallowed as an assignment.
     if (this.learning) this.send(commands.midiLearn(null));
+    if (this.controlLearning != null) this.send(commands.controlLearn(null));
     this.el.modal.classList.add("hidden");
     this.el.about.classList.add("hidden");
     this.root.body.classList.remove("modal-open");
@@ -109,6 +190,12 @@ export class Preferences {
     });
 
     this.el.rescan.addEventListener("click", () => this.send(commands.midiRescan()));
+    // A new slot doesn't exist on the server until either a bind or a
+    // learned trigger names it; learning one past the end is enough —
+    // learn_control defaults a slot with nothing saved to "octave-up".
+    this.el.controlsAdd.addEventListener("click", () =>
+      this.send(commands.controlLearn(this.controlsCount))
+    );
     this.wireTuning();
     this.wireSound();
   }
@@ -118,6 +205,7 @@ export class Preferences {
   update(snapshot) {
     this.el.subject.textContent = snapshot.organ ?? "";
     this.refreshMidi(snapshot);
+    this.refreshControls(snapshot);
     this.refreshTuning(snapshot.tuning);
     this.refreshSound(snapshot);
   }
@@ -323,6 +411,157 @@ export class Preferences {
     empty.className = "pane-empty";
     empty.textContent = text;
     return empty;
+  }
+
+  // ---- Controls ------------------------------------------------------------
+  //
+  // Unlike MIDI's pane this one is action-first, not manual-first: a
+  // binding doesn't belong to a manual, so a flat list is the honest
+  // shape. Same discipline otherwise — rebuilt only when something the
+  // rows depend on changes, driven entirely by the snapshot.
+
+  refreshControls(snapshot) {
+    const controls = snapshot.controls ?? [];
+    const actions = snapshot.actions ?? [];
+    this.controlLearning = snapshot.control_learning ?? null;
+    this.controlsCount = controls.length;
+    const signature = JSON.stringify([
+      controls,
+      actions,
+      this.controlLearning,
+      (snapshot.stops ?? []).map((s) => s.name),
+      (snapshot.couplers ?? []).map((c) => c.name),
+      (snapshot.enclosures ?? []).map((e) => e.name),
+      (snapshot.manuals ?? []).map((m) => m.name),
+    ]);
+    if (signature !== this.controlsSignature) {
+      this.controlsSignature = signature;
+      this.buildControls(snapshot);
+    }
+    this.refreshKeyboardNote(snapshot);
+  }
+
+  buildControls(snapshot) {
+    const controls = snapshot.controls ?? [];
+    // enclosure: is real and useful but isn't in the server's catalogue
+    // (it predates this pane); offer it here regardless.
+    const catalogue = [...(snapshot.actions ?? []), "enclosure:"];
+    this.el.controlsList.replaceChildren();
+    // A binding just started from "+ add binding" has no row of its own
+    // yet — the same pending-row trick the MIDI pane uses while it
+    // waits for a first key.
+    const pending = this.controlLearning === controls.length ? controls.length : null;
+    if (!controls.length && pending == null) {
+      this.el.controlsList.append(this.emptyNote("No bindings yet — add one below."));
+      return;
+    }
+    for (const control of controls) {
+      this.el.controlsList.append(this.controlRow(control, control.slot, catalogue, snapshot));
+    }
+    if (pending != null) {
+      this.el.controlsList.append(this.controlRow(null, pending, catalogue, snapshot));
+    }
+  }
+
+  /// One binding: what arrived, what it does, and the two ways to set
+  /// each — Listen for the trigger, a pair of selects for the action.
+  controlRow(control, slot, catalogue, snapshot) {
+    const listening = this.controlLearning === slot;
+    const action = control?.action ?? "octave-up";
+    const verb = actionVerb(action);
+
+    const row = document.createElement("div");
+    row.className = "control-row";
+    row.classList.toggle("listening", listening);
+
+    const trigger = document.createElement("span");
+    trigger.className = "control-trigger";
+    trigger.classList.toggle("dim", !control?.trigger);
+    trigger.textContent = triggerText(control);
+    trigger.title = trigger.textContent;
+    row.append(trigger);
+
+    const actionSelect = document.createElement("select");
+    actionSelect.className = "control-action";
+    for (const entry of catalogue) actionSelect.append(this.option(entry, actionLabel(entry)));
+    actionSelect.value = catalogue.includes(verb) ? verb : catalogue[0];
+    actionSelect.addEventListener("change", () => {
+      const named = NAMED_ACTIONS.includes(actionSelect.value);
+      // A named action means nothing without a target; default to the
+      // first one on the list rather than sending a bare "stop:".
+      const names = named ? namesFor(actionSelect.value, snapshot) : [];
+      const next = named ? `${actionSelect.value}${names[0] ?? ""}` : actionSelect.value;
+      this.send(commands.controlBind(slot, next));
+    });
+    row.append(actionSelect);
+
+    if (NAMED_ACTIONS.includes(actionSelect.value)) {
+      const names = namesFor(actionSelect.value, snapshot);
+      const arg = actionArg(action);
+      const target = document.createElement("select");
+      target.className = "control-target";
+      for (const name of names) target.append(this.option(name, name));
+      target.value = names.includes(arg) ? arg : names[0] ?? "";
+      target.addEventListener("change", () =>
+        this.send(commands.controlBind(slot, `${actionSelect.value}${target.value}`))
+      );
+      row.append(target);
+    } else if (PITCH_ACTIONS.includes(verb)) {
+      const manuals = snapshot.manuals ?? [];
+      const target = document.createElement("select");
+      target.className = "control-target";
+      // "Same keyboard" is the default and by far the common case —
+      // the transposer on a console shifts the console it is part of.
+      target.append(this.option("any", "same keyboard"));
+      for (const manual of manuals) target.append(this.option(manual.name, manual.name));
+      target.value = manuals.some((m) => m.name === control?.manual) ? control.manual : "any";
+      target.addEventListener("change", () =>
+        this.send(commands.controlBind(slot, action, { manual: target.value }))
+      );
+      row.append(target);
+    }
+
+    const listen = document.createElement("button");
+    listen.className = "ghost listen";
+    listen.textContent = listening ? "Cancel" : "Listen";
+    listen.title = "Assign by pressing the piston, pedal or key you mean";
+    listen.addEventListener("click", () =>
+      this.send(commands.controlLearn(listening ? null : slot))
+    );
+    row.append(listen);
+
+    const remove = document.createElement("button");
+    remove.className = "ghost remove-input";
+    remove.textContent = "×";
+    remove.setAttribute("aria-label", "Remove this binding");
+    remove.addEventListener("click", () => this.send(commands.controlUnbind(slot)));
+    row.append(remove);
+
+    if (listening) {
+      const hint = document.createElement("span");
+      hint.className = "listen-hint";
+      hint.textContent = "press the piston, pedal or key…";
+      row.append(hint);
+    }
+    return row;
+  }
+
+  /// A read-only line, not a control: the computer keyboard is assigned
+  /// in the MIDI tab like any other device, this just says where it
+  /// currently lands.
+  refreshKeyboardNote(snapshot) {
+    const keyboard = snapshot.keyboard;
+    if (!keyboard) {
+      this.el.controlsKeyboard.textContent =
+        "Computer keyboard: unassigned — give it a manual in the MIDI tab, like any other device.";
+      return;
+    }
+    const manual = (snapshot.manuals ?? []).find((m) => m.idx === keyboard.manual);
+    const where = manual ? manual.name : `manual ${keyboard.manual}`;
+    const shift = keyboard.transpose;
+    this.el.controlsKeyboard.textContent = shift
+      ? `Computer keyboard plays ${where}, shifted ${shift > 0 ? "+" : ""}${shift} semitones.`
+      : `Computer keyboard plays ${where}, at pitch.`;
   }
 
   // ---- tuning ------------------------------------------------------------

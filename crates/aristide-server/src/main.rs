@@ -1,6 +1,7 @@
 mod bank;
 mod config;
 mod console;
+mod control;
 mod http;
 mod tuning;
 
@@ -363,6 +364,31 @@ pub enum Control {
     Organ(Console),
 }
 
+/// A binding resolved against the loaded organ: the message it answers
+/// to, and what it does, with every name already looked up so the MIDI
+/// callback never searches for one.
+#[derive(Clone)]
+pub struct Binding {
+    pub channel: Option<u8>,
+    pub trigger: control::Trigger,
+    pub action: control::Action,
+    /// Pre-resolved subject of the action: a stop, a coupler, an
+    /// enclosure, or the manual a pitch shift applies to.
+    pub subject: Subject,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum Subject {
+    None,
+    Stop(StopId),
+    Coupler(usize),
+    Enclosure(usize),
+    /// A pitch action's target: one manual, or every keyboard on the
+    /// device the trigger arrived on.
+    Manual(usize),
+    Device,
+}
+
 /// One assignment as the MIDI callback sees it: already resolved to a
 /// manual index and a key range, so no names are touched per message.
 #[derive(Clone, Copy)]
@@ -373,6 +399,8 @@ pub struct Route {
     /// The keyboard's compass — inclusive MIDI notes. Notes outside it
     /// are not this keyboard's to send, so they are ignored.
     pub keys: (u8, u8),
+    /// Semitones this keyboard is currently shifted by.
+    pub transpose: i8,
 }
 
 /// One MIDI input as the console sees it, with the assignments that
@@ -382,6 +410,8 @@ pub struct MidiPort {
     /// Rebuilt whenever the assignments or the port list change, so the
     /// MIDI callback only ever scans a handful of routes.
     pub routes: Vec<Route>,
+    /// The bindings that name this device (see [`Binding`]).
+    pub bindings: Vec<Binding>,
 }
 
 impl MidiPort {
@@ -396,6 +426,21 @@ impl MidiPort {
     /// that decides which notes exist.
     fn note_targets(&self, channel: u8, key: u8) -> Vec<usize> {
         self.matching(channel, Some(key))
+    }
+
+    /// Where a key from this port actually lands, after the shift the
+    /// octave buttons have applied to the keyboard that sent it. `None`
+    /// when the shift pushes it off the MIDI range entirely.
+    fn transpose(&self, channel: u8, key: u8) -> Option<u8> {
+        let shift = self
+            .routes
+            .iter()
+            .find(|route| {
+                route.channel.is_none_or(|on| on == channel + 1)
+                    && (route.keys.0..=route.keys.1).contains(&key)
+            })
+            .map_or(0, |route| route.transpose);
+        u8::try_from(key as i16 + shift as i16).ok().filter(|k| *k < 128)
     }
 
     fn matching(&self, channel: u8, key: Option<u8>) -> Vec<usize> {
@@ -433,6 +478,26 @@ pub struct Learn {
 /// notes it was meant to play, so the wait gives up on its own.
 const LEARN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
+/// The computer keyboard's device name, wherever a device is named: in
+/// the config file, in the UI's list, in a binding.
+pub const COMPUTER_KEYBOARD: &str = "Computer keyboard";
+
+/// A binding waiting to be taught what presses it.
+#[derive(Clone, Copy)]
+pub struct ControlLearn {
+    pub slot: usize,
+    started: Instant,
+}
+
+/// The computer keyboard resolved for play: which manual its rows
+/// address and by how much they are shifted.
+#[derive(Clone, Copy)]
+pub struct KeyboardInput {
+    pub manual: usize,
+    pub transpose: i8,
+    pub compass: (u8, u8),
+}
+
 pub struct State {
     pub engine: EngineHandle,
     pub control: Control,
@@ -454,6 +519,15 @@ pub struct State {
     pub suggested_channels: Vec<Option<u8>>,
     /// Set while Preferences waits for a key press to bind a manual.
     pub learn: Option<Learn>,
+    /// Set while it waits for the *control* to press: which binding row
+    /// the next message that isn't a note belongs to.
+    pub control_learn: Option<ControlLearn>,
+    /// Bindings on the computer keyboard, which no operating system
+    /// enumerates but which is otherwise an input like the rest.
+    pub key_bindings: Vec<Binding>,
+    /// Where the computer keyboard's notes go, and how far they are
+    /// shifted. Assigned like any other input, in the config.
+    pub keyboard: Option<KeyboardInput>,
     /// Wind groups the tremulant acts on (from the sidecar; empty when
     /// no set is loaded).
     pub trem_groups: Vec<u8>,
@@ -505,6 +579,7 @@ impl State {
     /// goes through the config, so this is the one place routing is
     /// derived and the MIDI callback never has to look at names.
     fn resolve_routes(&mut self) {
+        self.resolve_bindings();
         let assignments = self.saved_assignments();
         let native = self.native_compass();
         for port in &mut self.midi_ports {
@@ -520,23 +595,64 @@ impl State {
                             // A keyboard nobody has measured is assumed
                             // to be exactly the organ's own compass.
                             keys: input.compass().unwrap_or(native[*manual]),
+                            transpose: input.transpose,
                         })
                 })
                 .collect();
         }
         // A manual answers to every key any of its keyboards can send:
         // that union is the compass the console plays and the UI draws,
-        // and it is where repitching starts filling in.
+        // and it is where repitching starts filling in. A shifted
+        // keyboard reaches shifted pipes, so the shift is part of it —
+        // otherwise pressing octave-up would just make the top of the
+        // keyboard silent.
         let mut widened: Vec<Option<(u8, u8)>> = vec![None; native.len()];
         for port in &self.midi_ports {
             for route in &port.routes {
+                let shift = |key: u8| (key as i16 + route.transpose as i16).clamp(0, 127) as u8;
+                let reach = (shift(route.keys.0), shift(route.keys.1));
                 let slot = &mut widened[route.manual];
                 *slot = Some(match *slot {
-                    Some((low, high)) => (low.min(route.keys.0), high.max(route.keys.1)),
-                    None => route.keys,
+                    Some((low, high)) => (low.min(reach.0), high.max(reach.1)),
+                    None => reach,
                 });
             }
         }
+        // The computer keyboard is assigned like any other input, and
+        // its span counts towards the compass the same way. Unassigned,
+        // it falls back to the principal manual rather than going
+        // silent: it is the keyboard of last resort, on a machine that
+        // may have no MIDI at all, and it cannot surprise anyone by
+        // blasting a division nobody plugged in.
+        let default_keyboard = assignments
+            .iter()
+            .all(|(_, inputs)| !inputs.iter().any(|i| i.device == COMPUTER_KEYBOARD))
+            .then(|| self.principal_manual())
+            .flatten()
+            .map(|manual| (manual, vec![config::Input {
+                device: COMPUTER_KEYBOARD.to_string(),
+                channel: None,
+                low: None,
+                high: None,
+                transpose: 0,
+            }]));
+        self.keyboard = assignments.iter().chain(default_keyboard.iter()).find_map(|(manual, inputs)| {
+            let input = inputs.iter().find(|i| i.device == COMPUTER_KEYBOARD)?;
+            let (low, high) = control::keyboard_compass();
+            let shift = |key: u8| (key as i16 + input.transpose as i16).clamp(0, 127) as u8;
+            let slot = &mut widened[*manual];
+            *slot = Some(match *slot {
+                Some((at_low, at_high)) => {
+                    (at_low.min(shift(low)), at_high.max(shift(high)))
+                }
+                None => (shift(low), shift(high)),
+            });
+            Some(KeyboardInput {
+                manual: *manual,
+                transpose: input.transpose,
+                compass: (low, high),
+            })
+        });
         if let Control::Organ(console) = &mut self.control {
             for (manual, compass) in widened.into_iter().enumerate() {
                 match compass {
@@ -545,6 +661,224 @@ impl State {
                 }
             }
         }
+    }
+
+    /// A computer key, pressed or released, through exactly the path a
+    /// MIDI message takes: a binding first, then a note on whichever
+    /// manual the computer keyboard is assigned to.
+    ///
+    /// The mapping lives here rather than in the console UI so that one
+    /// binding table governs both, and so an octave button on a MIDI
+    /// console can shift the computer keyboard as readily as `=` can.
+    pub fn key(&mut self, code: &str, pressed: bool) {
+        let fired: Vec<Binding> = self
+            .key_bindings
+            .iter()
+            .filter(|binding| binding.trigger == control::Trigger::Key(code.to_string()))
+            .cloned()
+            .collect();
+        if !fired.is_empty() {
+            // A key that does something does not also play: releasing it
+            // must not sound the note its press didn't.
+            if pressed {
+                for binding in fired {
+                    self.run(&binding, COMPUTER_KEYBOARD, 127);
+                }
+            }
+            return;
+        }
+        let (Some(keyboard), Some(note)) = (self.keyboard, control::key_note(code)) else {
+            return;
+        };
+        let Ok(key) = u8::try_from(note as i16 + keyboard.transpose as i16) else {
+            return;
+        };
+        if key > 127 {
+            return;
+        }
+        let State {
+            engine, control, ..
+        } = &mut *self;
+        let Control::Organ(console) = control else {
+            return;
+        };
+        if pressed {
+            let (starts, retriggered) = console.note_on_manual(keyboard.manual, key);
+            for handle in retriggered {
+                engine.send(Command::StopVoice { handle });
+            }
+            for start in starts {
+                engine.send(start_command(&start));
+            }
+        } else {
+            for handle in console.note_off_manual(keyboard.manual, key) {
+                engine.send(Command::StopVoice { handle });
+            }
+        }
+    }
+
+    /// Point the computer keyboard at a manual, moving it off whatever
+    /// it was on — one keyboard, one place, however many manuals ask.
+    pub fn assign_keyboard(&mut self, manual: usize) -> bool {
+        let names = self.manual_names();
+        let Some(wanted) = names.get(manual).cloned() else {
+            return false;
+        };
+        let organ = self.organ_key.clone();
+        let mut transpose = 0;
+        for name in &names {
+            while let Some(slot) = self
+                .midi_config
+                .inputs(&organ, name)
+                .iter()
+                .position(|input| input.device == COMPUTER_KEYBOARD)
+            {
+                transpose = self.midi_config.inputs(&organ, name)[slot].transpose;
+                self.midi_config.remove_input(&organ, name, slot);
+            }
+        }
+        let slot = self.midi_config.inputs(&organ, &wanted).len();
+        self.midi_config.set_input(
+            &organ,
+            &wanted,
+            slot,
+            config::Input {
+                device: COMPUTER_KEYBOARD.to_string(),
+                channel: None,
+                low: None,
+                high: None,
+                transpose,
+            },
+        );
+        tracing::info!("control: computer keyboard plays {wanted}");
+        self.resolve_routes();
+        self.persist();
+        true
+    }
+
+    /// Run one action by name, as if a binding had fired it — the menu
+    /// and a piston must not be able to mean different things.
+    pub fn run_named(&mut self, action: &control::Action, device: &str) -> bool {
+        let Some(subject) = self.resolve_subject(action, None) else {
+            return false;
+        };
+        self.run(
+            &Binding {
+                channel: None,
+                trigger: control::Trigger::Note(0),
+                action: action.clone(),
+                subject,
+            },
+            device,
+            127,
+        );
+        true
+    }
+
+    /// Turn the saved bindings into the form the callbacks match
+    /// against, looking every name up once. A binding naming something
+    /// this organ hasn't got is reported and dropped from the live
+    /// table — but stays in the file, because it is about a different
+    /// instrument, not a mistake.
+    fn resolve_bindings(&mut self) {
+        let organ = self.organ_key.clone();
+        let mut by_device: std::collections::HashMap<String, Vec<Binding>> = Default::default();
+        for saved in self.midi_config.controls(&organ).to_vec() {
+            if saved.trigger.trim().is_empty() {
+                continue; // a row the player is still setting up
+            }
+            let (Some(trigger), Some(action)) = (
+                control::Trigger::parse(&saved.trigger),
+                control::Action::parse(&saved.action),
+            ) else {
+                tracing::warn!(
+                    "control: {:?} → {:?} is not something Aristide knows how to do",
+                    saved.trigger,
+                    saved.action
+                );
+                continue;
+            };
+            let Some(subject) = self.resolve_subject(&action, saved.manual.as_deref()) else {
+                tracing::warn!(
+                    "control: {:?} names something this organ hasn't got — ignoring it",
+                    saved.action
+                );
+                continue;
+            };
+            by_device.entry(saved.device.clone()).or_default().push(Binding {
+                channel: saved.channel,
+                trigger,
+                action,
+                subject,
+            });
+        }
+        for port in &mut self.midi_ports {
+            port.bindings = by_device.remove(&port.name).unwrap_or_default();
+        }
+        // The computer keyboard is a device like any other; it just
+        // isn't one the operating system enumerates.
+        self.key_bindings = by_device.remove(COMPUTER_KEYBOARD).unwrap_or_default();
+    }
+
+    /// The thing an action acts on, looked up in the loaded organ.
+    fn resolve_subject(&self, action: &control::Action, manual: Option<&str>) -> Option<Subject> {
+        let Control::Organ(console) = &self.control else {
+            return Some(Subject::None);
+        };
+        let one = |names: &[&str], pattern: &str| {
+            match aristide_formats::sidecar::match_names(names, pattern).as_slice() {
+                [index] => Some(*index),
+                _ => None,
+            }
+        };
+        Some(match action {
+            control::Action::Stop(name) => {
+                let stops = console.stop_states();
+                let names: Vec<&str> = stops.iter().map(|(_, name, _, _)| *name).collect();
+                Subject::Stop(stops[one(&names, name)?].0)
+            }
+            control::Action::Coupler(name) => {
+                let couplers = console.coupler_states();
+                let names: Vec<&str> = couplers.iter().map(|(_, name, _)| *name).collect();
+                Subject::Coupler(couplers[one(&names, name)?].0)
+            }
+            control::Action::Enclosure(name) => {
+                let boxes = console.enclosure_states();
+                let names: Vec<String> = boxes.iter().map(|(_, name, _, _)| name.clone()).collect();
+                let names: Vec<&str> = names.iter().map(String::as_str).collect();
+                Subject::Enclosure(boxes[one(&names, name)?].0)
+            }
+            control::Action::Transpose(_) | control::Action::TransposeReset => match manual {
+                Some(name) => {
+                    let names = self.manual_names();
+                    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+                    Subject::Manual(one(&names, name)?)
+                }
+                None => Subject::Device,
+            },
+            _ => Subject::None,
+        })
+    }
+
+    /// The manual a keyboard with nothing better to play should play:
+    /// the Great by whatever name the set gives it, else the first
+    /// manual that isn't the pedalboard.
+    fn principal_manual(&self) -> Option<usize> {
+        let names = self.manual_names();
+        let great = names.iter().position(|name| {
+            let name = name.to_lowercase();
+            ["great", "haupt", "grand orgue", "grand-orgue", "main", "first"]
+                .iter()
+                .any(|hint| name.contains(hint))
+        });
+        great.or_else(|| {
+            let Control::Organ(console) = &self.control else {
+                return None;
+            };
+            // GO's convention puts the pedalboard first, so the second
+            // manual is the lowest keyboard.
+            (console.manual_states().len() > 1).then_some(1).or(Some(0))
+        })
     }
 
     /// Each manual's compass as the sample set declares it.
@@ -603,6 +937,159 @@ impl State {
         true
     }
 
+    /// Do what a binding says. `value` is the message's own (a
+    /// controller's position, a note's velocity); only the continuous
+    /// actions read it.
+    ///
+    /// This is the only place an action becomes an effect, so a
+    /// binding, a menu item and a future script all mean exactly the
+    /// same thing by "cancel".
+    pub fn run(&mut self, binding: &Binding, device: &str, value: u8) {
+        let State {
+            engine, control, ..
+        } = &mut *self;
+        let mut send = |command: Command| {
+            if !engine.send(command) {
+                tracing::warn!("command queue full, dropped {command:?}");
+            }
+        };
+        match (&binding.action, binding.subject) {
+            (control::Action::Transpose(by), subject) => {
+                self.transpose_inputs(device, subject, |at| at.saturating_add(*by));
+            }
+            (control::Action::TransposeReset, subject) => {
+                self.transpose_inputs(device, subject, |_| 0);
+            }
+            (control::Action::Stop(_), Subject::Stop(stop)) => {
+                let Control::Organ(console) = control else {
+                    return;
+                };
+                let drawn = console.is_drawn(stop);
+                let (stopped, starts) = console.set_drawn(stop, !drawn);
+                for handle in stopped {
+                    send(Command::StopVoice { handle });
+                }
+                for start in starts {
+                    send(start_command(&start));
+                }
+            }
+            (control::Action::Coupler(_), Subject::Coupler(index)) => {
+                let Control::Organ(console) = control else {
+                    return;
+                };
+                let engaged = console.coupler_engaged(index);
+                let (start, stop) = console.set_coupler(index, !engaged);
+                if let Some(start) = start {
+                    send(start_command(&start));
+                }
+                if let Some(handle) = stop {
+                    send(Command::StopVoice { handle });
+                }
+            }
+            (control::Action::Tremulant, _) => {
+                let engaged = !self.trem_engaged;
+                self.set_tremulant(engaged);
+            }
+            (control::Action::Cancel, _) => {
+                let Control::Organ(console) = control else {
+                    return;
+                };
+                for handle in console.cancel() {
+                    send(Command::StopVoice { handle });
+                }
+            }
+            (control::Action::Panic, _) => {
+                if let Control::Organ(console) = control {
+                    console.all_off();
+                }
+                send(Command::AllNotesOff);
+            }
+            (control::Action::Enclosure(_), Subject::Enclosure(index)) => {
+                let Control::Organ(console) = control else {
+                    return;
+                };
+                let position = value.min(127) as f32 / 127.0;
+                if let Some((enclosure, position)) = console.set_enclosure(index, position) {
+                    send(Command::SetEnclosurePosition {
+                        enclosure,
+                        position,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Engage or release the tremulant, with its own switch noise.
+    pub fn set_tremulant(&mut self, on: bool) {
+        let changed = self.trem_engaged != on;
+        self.trem_engaged = on;
+        for group in self.trem_groups.clone() {
+            self.engine.send(Command::SetTremulant { group, engaged: on });
+        }
+        if !changed {
+            return;
+        }
+        let State {
+            engine, control, ..
+        } = &mut *self;
+        if let Control::Organ(console) = control {
+            let (start, stop) = console.tremulant_toggle_noise(on);
+            if let Some(start) = start {
+                engine.send(start_command(&start));
+            }
+            if let Some(handle) = stop {
+                engine.send(Command::StopVoice { handle });
+            }
+        }
+    }
+
+    /// Shift the keyboards a pitch action applies to: one manual's, or
+    /// every one on the device the trigger came from — which is what a
+    /// transposer built into a console means by "up".
+    fn transpose_inputs(&mut self, device: &str, subject: Subject, to: impl Fn(i8) -> i8) {
+        let organ = self.organ_key.clone();
+        // The computer keyboard's default assignment is implied, not
+        // written; shifting it is the moment it becomes a real choice.
+        if device == COMPUTER_KEYBOARD
+            && let Some(keyboard) = self.keyboard
+            && !self
+                .manual_names()
+                .iter()
+                .any(|name| {
+                    self.midi_config
+                        .inputs(&organ, name)
+                        .iter()
+                        .any(|input| input.device == COMPUTER_KEYBOARD)
+                })
+        {
+            self.assign_keyboard(keyboard.manual);
+        }
+        let names = self.manual_names();
+        let mut changed = false;
+        for (index, name) in names.iter().enumerate() {
+            for input in self.midi_config.inputs_mut(&organ, name) {
+                let mine = match subject {
+                    Subject::Manual(manual) => manual == index,
+                    _ => input.device == device,
+                };
+                if !mine {
+                    continue;
+                }
+                let shifted = to(input.transpose).clamp(-36, 36);
+                if shifted != input.transpose {
+                    input.transpose = shifted;
+                    changed = true;
+                    tracing::info!("control: {} on {name} now plays {shifted:+} semitones", input.device);
+                }
+            }
+        }
+        if changed {
+            self.resolve_routes();
+            self.persist();
+        }
+    }
+
     /// The learn target, or `None` once it has waited too long. Checked
     /// wherever the state is observed, so a forgotten dialog doesn't
     /// keep eating notes.
@@ -616,6 +1103,71 @@ impl State {
             self.learn = None;
         }
         self.learn.clone()
+    }
+
+    /// The binding row waiting for its control, if the wait is still on.
+    pub fn control_learning(&mut self) -> Option<ControlLearn> {
+        if self
+            .control_learn
+            .is_some_and(|l| l.started.elapsed() > LEARN_TIMEOUT)
+        {
+            tracing::info!("control: nothing pressed — stopped listening");
+            self.control_learn = None;
+        }
+        self.control_learn
+    }
+
+    pub fn listen_control(&mut self, slot: usize) {
+        self.control_learn = Some(ControlLearn {
+            slot,
+            started: Instant::now(),
+        });
+    }
+
+    /// One control pressed while listening: the row it was waiting for
+    /// takes this device, channel and trigger, and keeps its action.
+    fn learn_control(&mut self, device: &str, channel: Option<u8>, trigger: control::Trigger) {
+        let Some(learn) = self.control_learning() else {
+            return;
+        };
+        self.control_learn = None;
+        let organ = self.organ_key.clone();
+        let saved = self.midi_config.controls(&organ).get(learn.slot).cloned();
+        let control = config::Control {
+            device: device.to_string(),
+            channel,
+            trigger: trigger.to_string(),
+            action: saved
+                .as_ref()
+                .map_or_else(|| "octave-up".to_string(), |c| c.action.clone()),
+            manual: saved.and_then(|c| c.manual),
+        };
+        tracing::info!(
+            "control: {device} {} → {}",
+            control.trigger,
+            control.action
+        );
+        self.midi_config.set_control(&organ, learn.slot, control);
+        self.resolve_routes();
+        self.persist();
+    }
+
+    pub fn set_control(&mut self, slot: usize, control: config::Control) {
+        let organ = self.organ_key.clone();
+        self.midi_config.set_control(&organ, slot, control);
+        self.resolve_routes();
+        self.persist();
+    }
+
+    pub fn remove_control(&mut self, slot: usize) {
+        let organ = self.organ_key.clone();
+        self.midi_config.remove_control(&organ, slot);
+        self.resolve_routes();
+        self.persist();
+    }
+
+    pub fn controls(&self) -> Vec<config::Control> {
+        self.midi_config.controls(&self.organ_key).to_vec()
     }
 
     pub fn listen(&mut self, manual: usize, slot: usize) {
@@ -643,6 +1195,7 @@ impl State {
                     channel: Some(channel + 1),
                     low: Some(key),
                     high: None,
+                    transpose: 0,
                 });
                 learn.started = Instant::now();
                 self.learn = Some(learn);
@@ -1067,12 +1620,18 @@ fn main() -> Result<()> {
         organ_key,
         suggested_channels,
         learn: None,
+        control_learn: None,
+        key_bindings: Vec::new(),
+        keyboard: None,
         trem_groups,
         trem_engaged: false,
         master_gain: args.master_gain.unwrap_or(0.178),
         reverb_wet: reverb_ir.is_some().then_some(reverb_wet),
         expression_cc,
     }));
+    // Assignments exist before any hardware does: the computer
+    // keyboard and every binding are live from the first note.
+    state.lock().expect("state poisoned").resolve_routes();
     if let Err(err) = http::spawn(Arc::clone(&state), args.http_port) {
         tracing::warn!("console ui disabled: {err}");
     }
@@ -1347,6 +1906,7 @@ fn connect_all_midi_inputs(
                 ports.push(MidiPort {
                     name: name.clone(),
                     routes: Vec::new(),
+                    bindings: Vec::new(),
                 });
             }
             Err(err) => tracing::warn!("midi: failed to connect to {name}: {err}"),
@@ -1409,12 +1969,41 @@ fn handle_midi(message: &[u8], port: usize, state: &Mutex<State>) {
         return;
     }
 
-    // A manual with no input assigned is deaf to everything, including
-    // note-offs: it sent no note-ons either, so nothing can hang. The M1
-    // test tone has no manuals to assign to and always sounds.
+    // Teaching a binding: the first message that could be a control
+    // becomes one, and does nothing else on its way past.
+    if state.control_learning().is_some() {
+        let trigger = match (status & 0xF0, data2) {
+            (0x90, velocity) if velocity > 0 => Some(control::Trigger::Note(data1)),
+            (0xB0, value) if value >= control::SWITCH_ON => Some(control::Trigger::Control(data1)),
+            (0xC0, _) => Some(control::Trigger::Program(data1)),
+            _ => None,
+        };
+        if let Some(trigger) = trigger
+            && let Some(device) = state.midi_ports.get(port).map(|p| p.name.clone())
+        {
+            state.learn_control(&device, Some(channel + 1), trigger);
+        }
+        return;
+    }
+
+    // A bound message is a control, not a note: a piston that also
+    // sounded the key it sits under would be unusable. Note-offs of a
+    // bound note are swallowed with it.
     let Some(source) = state.midi_ports.get(port) else {
         return;
     };
+    let device = source.name.clone();
+    if let Some(fired) = matching_bindings(&source.bindings, status, channel, data1) {
+        for binding in fired {
+            state.run(&binding, &device, data2);
+        }
+        return;
+    }
+
+    // A manual with no input assigned is deaf to everything, including
+    // note-offs: it sent no note-ons either, so nothing can hang. The M1
+    // test tone has no manuals to assign to and always sounds.
+    let source = &state.midi_ports[port];
     // Notes are filtered by the keyboard's compass as well as its
     // channel; everything else (expression, all-notes-off) is not a key
     // and only has to reach the right manuals.
@@ -1422,6 +2011,13 @@ fn handle_midi(message: &[u8], port: usize, state: &Mutex<State>) {
         (Control::Tone, _) => Vec::new(),
         (_, 0x90 | 0x80) => source.note_targets(channel, data1),
         _ => source.targets(channel),
+    };
+    // The keyboard's own shift: which pipes its keys reach, exactly as
+    // a transposer on a console moves the whole keyboard.
+    let key = match (status & 0xF0, source.transpose(channel, data1)) {
+        (0x90 | 0x80, Some(shifted)) => shifted,
+        (0x90 | 0x80, None) => return,
+        _ => data1,
     };
     if matches!(state.control, Control::Organ(_)) && targets.is_empty() {
         return;
@@ -1442,7 +2038,7 @@ fn handle_midi(message: &[u8], port: usize, state: &Mutex<State>) {
     if status & 0xF0 == 0x90 && data2 > 0 {
         tracing::info!("midi: note-on ch={channel} key={data1} vel={data2}");
     }
-    match (status & 0xF0, data1, data2) {
+    match (status & 0xF0, key, data2) {
         (0x90, key, velocity) if velocity > 0 => match control {
             Control::Tone => send(Command::NoteOn {
                 key,
@@ -1503,6 +2099,55 @@ fn handle_midi(message: &[u8], port: usize, state: &Mutex<State>) {
     }
 }
 
+/// The bindings a message fires, if any. A note-off of a bound note
+/// matches too, so it can be swallowed rather than reaching a manual
+/// the note-on never did.
+fn matching_bindings(
+    bindings: &[Binding],
+    status: u8,
+    channel: u8,
+    data1: u8,
+) -> Option<Vec<Binding>> {
+    if bindings.is_empty() {
+        return None;
+    }
+    let fired: Vec<Binding> = bindings
+        .iter()
+        .filter(|binding| binding.channel.is_none_or(|on| on == channel + 1))
+        .filter(|binding| match (&binding.trigger, status & 0xF0) {
+            (control::Trigger::Note(note), 0x90 | 0x80) => *note == data1,
+            (control::Trigger::Control(cc), 0xB0) => *cc == data1,
+            (control::Trigger::Program(program), 0xC0) => *program == data1,
+            _ => false,
+        })
+        .cloned()
+        .collect();
+    if fired.is_empty() {
+        return None;
+    }
+    // Switch-like bindings act on the press only; continuous ones
+    // follow every message.
+    let acting: Vec<Binding> = fired
+        .into_iter()
+        .filter(|binding| binding.action.is_continuous() || status & 0xF0 != 0x80)
+        .collect();
+    Some(acting)
+}
+
+/// The engine command that starts one console voice.
+fn start_command(start: &console::VoiceStart) -> Command {
+    Command::StartVoice {
+        handle: start.handle,
+        sample: start.spec.sample,
+        rate: start.spec.rate,
+        gain: start.spec.gain,
+        group: start.spec.group,
+        wind_weight: start.spec.wind_weight,
+        brightness: start.spec.brightness,
+        enclosure: start.spec.enclosure,
+    }
+}
+
 /// 12-EDO A440 lives HERE, control-side, as one replaceable default —
 /// the RT engine only ever sees frequencies. (Tone mode only; sampled
 /// pipes carry their own pitch.)
@@ -1546,18 +2191,25 @@ mod tests {
             midi_ports: vec![MidiPort {
                 name: "Test Keyboard".into(),
                 routes: Vec::new(),
+                bindings: Vec::new(),
             }],
             midi_config: Default::default(),
             config_path: None,
             organ_key: "test organ".into(),
             suggested_channels: Vec::new(),
             learn: None,
+            control_learn: None,
+            key_bindings: Vec::new(),
+            keyboard: None,
             trem_groups: Vec::new(),
             trem_engaged: false,
             master_gain: 0.178,
             reverb_wet: None,
             expression_cc: 11,
         }));
+        // Everything downstream reads the resolved tables, exactly as
+        // the server does once before it opens any device.
+        state.lock().expect("state").resolve_routes();
         Some((state, manual))
     }
 
@@ -1592,6 +2244,7 @@ mod tests {
                 channel,
                 low,
                 high,
+                transpose: 0,
             },
         );
     }
@@ -1689,6 +2342,7 @@ mod tests {
                 channel: Some(3),
                 low: Some(55),
                 high: Some(96),
+                transpose: 0,
             }],
             "port, channel and compass all come from the playing"
         );
@@ -1737,6 +2391,156 @@ mod tests {
         assert_eq!(compass_of(&state, manual), Some((24, native.1 + 5)));
     }
 
+    fn bind_control(state: &Mutex<State>, trigger: &str, action: &str, device: &str) {
+        let mut state = state.lock().expect("state poisoned");
+        let slot = state.controls().len();
+        state.set_control(
+            slot,
+            config::Control {
+                device: device.into(),
+                channel: None,
+                trigger: trigger.into(),
+                action: action.into(),
+                manual: None,
+            },
+        );
+    }
+
+    /// A piston is a control, not a note: it does its job and the key it
+    /// sits on stays silent.
+    #[test]
+    fn a_bound_note_works_the_console_instead_of_playing() {
+        let Some((state, manual)) = demo_state("Gamba 8'") else {
+            return;
+        };
+        bind(&state, manual, None);
+        let stop = {
+            let state = state.lock().expect("state");
+            let Control::Organ(console) = &state.control else {
+                panic!("organ expected")
+            };
+            console
+                .stop_states()
+                .iter()
+                .find(|(_, name, _, _)| *name == "Gamba 8'")
+                .expect("the fixture's stop")
+                .0
+        };
+        bind_control(&state, "note:36", "stop:Gamba 8'", "Test Keyboard");
+
+        // The fixture draws that stop to make notes audible, so the
+        // piston's first press is a retire and its second a draw.
+        let drawn = |state: &Mutex<State>| {
+            let state = state.lock().expect("state");
+            let Control::Organ(console) = &state.control else {
+                panic!("organ expected")
+            };
+            console.is_drawn(stop)
+        };
+        assert!(drawn(&state), "the fixture starts with it drawn");
+
+        handle_midi(&[0x90, 36, 100], 0, &state);
+        assert!(held_on(&state, manual).is_empty(), "a piston is not a key");
+        assert!(!drawn(&state), "the piston worked the stop it names");
+
+        // Its note-off is swallowed with it, and pressing again toggles.
+        handle_midi(&[0x80, 36, 0], 0, &state);
+        handle_midi(&[0x90, 36, 100], 0, &state);
+        assert!(drawn(&state), "a second press draws it again");
+    }
+
+    /// Octave up moves the *keyboard*, not the division: the pipes its
+    /// keys reach change, and the manual's compass follows.
+    #[test]
+    fn octave_up_shifts_the_keyboard_that_pressed_it() {
+        let Some((state, manual)) = demo_state("Gamba 8'") else {
+            return;
+        };
+        bind_compass(&state, manual, 0, None, Some(48), Some(72));
+        bind_control(&state, "note:24", "octave-up", "Test Keyboard");
+
+        handle_midi(&[0x90, 60, 100], 0, &state);
+        assert_eq!(held_on(&state, manual), vec![60]);
+        handle_midi(&[0x80, 60, 0], 0, &state);
+
+        handle_midi(&[0x90, 24, 100], 0, &state);
+        assert_eq!(
+            state.lock().expect("state").manual_inputs(manual)[0].transpose,
+            12,
+            "the keyboard is shifted, and the shift is saved"
+        );
+        handle_midi(&[0x90, 60, 100], 0, &state);
+        assert_eq!(
+            held_on(&state, manual),
+            vec![72],
+            "the same key now reaches an octave higher"
+        );
+        handle_midi(&[0x80, 60, 0], 0, &state);
+
+        // Down twice lands an octave below where it started.
+        bind_control(&state, "note:25", "octave-down", "Test Keyboard");
+        handle_midi(&[0x90, 25, 100], 0, &state);
+        handle_midi(&[0x90, 25, 100], 0, &state);
+        assert_eq!(
+            state.lock().expect("state").manual_inputs(manual)[0].transpose,
+            -12
+        );
+        handle_midi(&[0x90, 60, 100], 0, &state);
+        assert_eq!(held_on(&state, manual), vec![48]);
+    }
+
+    /// The computer keyboard is an input like any other: the same
+    /// binding vocabulary, the same shift, and it plays without anyone
+    /// assigning it first.
+    #[test]
+    fn computer_keys_play_and_can_be_bound() {
+        let Some((state, _)) = demo_state("Montre 8'") else {
+            return;
+        };
+        let keyboard = state
+            .lock()
+            .expect("state")
+            .keyboard
+            .expect("assigned by default");
+        assert_eq!(keyboard.transpose, 0);
+
+        state.lock().expect("state").key("KeyZ", true);
+        assert_eq!(
+            held_on(&state, keyboard.manual),
+            vec![48],
+            "the bottom row starts at C3"
+        );
+        state.lock().expect("state").key("KeyZ", false);
+        assert!(held_on(&state, keyboard.manual).is_empty());
+
+        bind_control(&state, "key:Equal", "octave-up", COMPUTER_KEYBOARD);
+        state.lock().expect("state").key("Equal", true);
+        state.lock().expect("state").key("KeyZ", true);
+        assert_eq!(
+            held_on(&state, keyboard.manual),
+            vec![60],
+            "one octave up, from a computer key"
+        );
+
+        state.lock().expect("state").key("KeyZ", false);
+
+        // A key with a job does not also play a note.
+        bind_control(&state, "key:KeyX", "cancel", COMPUTER_KEYBOARD);
+        state.lock().expect("state").key("KeyX", true);
+        assert!(
+            held_on(&state, keyboard.manual).is_empty(),
+            "a bound key plays nothing"
+        );
+        let state = state.lock().expect("state");
+        let Control::Organ(console) = &state.control else {
+            panic!("organ expected")
+        };
+        assert!(
+            console.stop_states().iter().all(|(_, _, _, drawn)| !drawn),
+            "and did what it was bound to: cancel"
+        );
+    }
+
     /// Assignments are per organ and are stored by name, so the same
     /// keyboard can be the Récit here and the Great on another set.
     #[test]
@@ -1751,6 +2555,7 @@ mod tests {
             channel: Some(2),
             low: None,
             high: None,
+            transpose: 0,
         };
         state
             .midi_config
