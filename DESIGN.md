@@ -27,7 +27,8 @@ unencrypted HW v1/v2-era packages, and we say so clearly in user-facing docs.
 **Keyboard compass (locked):** a stop sounds only its own manual's accessible keys.
 A manual 8′ speaks from the keyboard's bottom key to its top and nowhere else, and
 that holds after coupling: an octave coupler that lands outside the compass sounds
-nothing rather than reaching past it.
+nothing rather than reaching past it (unless its route opts into repitching — see
+"Couplers are routes" below).
 
 Sample sets routinely define ranks longer than the keyboard — GO's demo set gives
 Montre 8′ 85 pipes starting twelve keys below middle-C-2, so its extension is there
@@ -43,6 +44,23 @@ drive logical keys below the accessible range and speak the extension pipes. We
 treat the keyboard's compass as the instrument's compass; borrowing is how a rank
 gets played outside it.
 
+**Couplers are routes (locked, 2026-08-18):** a coupler is a named, engageable
+bundle of *routes*: `from manual + source key range → to manual + key shift`,
+each route optionally `unison_off` (the source keys' own division is silenced
+in the range, so the note *moves* instead of doubling) and `repitch` (below).
+The classic couplers are single full-compass routes; GO's `UnisonOff` is a
+route with no target; a fourths coupler that only speaks from tenor C, or a
+16' that transposes the bottom octave down instead of doubling it, are the
+same vocabulary with ranges. Users deploy their own in the sidecar
+(`[[couplers.define]]` — manuals by name pattern, keys as MIDI numbers or
+note names like `"C3"`), resolved like bindings: a definition naming what the
+loaded organ hasn't got is reported and ignored, never fatal. Engaging or
+releasing a coupler lands on held notes immediately, as an electric-action
+console does (and as drawing a stop mid-hold always has): the console
+re-derives what each held key should sound and diffs. GO's Bass/Melody picks
+and cent-offset routes are deferred — the latter breaks pipe-speaks-once and
+belongs with per-pipe addressing (M6).
+
 **Couplers never repitch (locked, default):** repitching fills in what the
 *player's keyboard* can reach; a coupler is not a keyboard. A coupled note
 sounds only a pipe the division it lands on actually has — a 16' coupler
@@ -51,7 +69,11 @@ in a rank all stay silent in the coupled copy, while the played key itself is
 filled in as usual. Letting couplers invent pipes would change the instrument
 rather than reach it. Sets or pieces that want the other behaviour set
 `[couplers] repitch = true` in the sidecar (or POST `/api/couplers?repitch=1`
-live). The compass rule above bounds couplers either way.
+live), or a single route sets `repitch = true`. A repitching route is
+explicitly asked to synthesize tone the instrument hasn't got, so it also
+reaches past the destination's compass — that is the whole point of a 16'
+route over an 8' rank's bottom octave; non-repitching couplers stay bounded
+by the compass rule above.
 
 **Whose keyboard (locked):** the compass is the *player's* keyboard, not the set's.
 Each MIDI input carries the range it was measured at — Preferences → MIDI learns it

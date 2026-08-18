@@ -978,12 +978,12 @@ impl State {
                     return;
                 };
                 let engaged = console.coupler_engaged(index);
-                let (start, stop) = console.set_coupler(index, !engaged);
-                if let Some(start) = start {
-                    send(start_command(&start));
-                }
-                if let Some(handle) = stop {
+                let (stopped, starts) = console.set_coupler(index, !engaged);
+                for handle in stopped {
                     send(Command::StopVoice { handle });
+                }
+                for start in starts {
+                    send(start_command(&start));
                 }
             }
             (control::Action::Tremulant, _) => {
@@ -1280,7 +1280,7 @@ fn main() -> Result<()> {
     let mut reverb_wet = 0.0f32;
     let (sample_bank, control, suggested_channels) = match &args.set {
         Some(path) => {
-            let organ = load_organ(path)?;
+            let mut organ = load_organ(path)?;
             let sidecar = match aristide_formats::sidecar::load_for(path) {
                 Ok(Some(sidecar)) => {
                     tracing::info!(
@@ -1295,6 +1295,23 @@ fn main() -> Result<()> {
                     Default::default()
                 }
             };
+            // User-defined couplers join the set's own on the rail.
+            let (custom, warnings) =
+                aristide_formats::sidecar::resolve_couplers(&organ, &sidecar.couplers.define);
+            for warning in warnings {
+                tracing::warn!("sidecar couplers: {warning}");
+            }
+            if !custom.is_empty() {
+                tracing::info!(
+                    "sidecar couplers: {}",
+                    custom
+                        .iter()
+                        .map(|c| c.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                organ.couplers.extend(custom);
+            }
             let started = Instant::now();
             let loaded = bank::build(&organ, sample_rate)?;
             tracing::info!(

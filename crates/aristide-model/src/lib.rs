@@ -165,15 +165,90 @@ pub struct Windchest {
     pub enclosures: Vec<u32>,
 }
 
-/// A coupler: plays another manual's engaged stops from this manual,
-/// possibly shifted (sub/super octave = ±1200 cents at 12-EDO, but
-/// stored as a key delta since shift semantics are keyboard-relative).
+/// Where a coupler route sends its copies.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CouplerTarget {
+    pub manual: ManualId,
+    /// Keyboard-relative shift in keys (sub/super octave = ∓12 at
+    /// 12-EDO, but stored as a key delta since shift semantics are
+    /// keyboard-relative, never frequency math).
+    pub key_shift: i16,
+    /// Whether the copy may repitch a neighbouring pipe to sound a
+    /// pitch the destination hasn't got — which also lets it land past
+    /// the destination's compass, since the whole point of such a
+    /// route is tone the instrument can't otherwise make (a 16' from
+    /// an 8' rank's bottom octave). `None` = the console-wide default.
+    pub repitch: Option<bool>,
+}
+
+/// One rule inside a coupler: for source keys in a range, optionally
+/// silence the key's own division and/or send a shifted copy somewhere.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CouplerRoute {
+    pub from_manual: ManualId,
+    /// Inclusive MIDI-note bounds on the source keys this route acts
+    /// on; `None` = unbounded on that side. A fourths coupler "from
+    /// tenor C" is `low_key: Some(48)`.
+    pub low_key: Option<u8>,
+    pub high_key: Option<u8>,
+    /// Silence the played key's own division inside the range, so the
+    /// note *moves* instead of doubling (GO's `UnisonOff` is this over
+    /// the whole compass, with no target).
+    pub unison_off: bool,
+    /// The coupled copy; `None` for a pure unison-off route.
+    pub target: Option<CouplerTarget>,
+}
+
+impl CouplerRoute {
+    pub fn covers(&self, midi_key: i16) -> bool {
+        self.low_key.is_none_or(|low| midi_key >= low as i16)
+            && self.high_key.is_none_or(|high| midi_key <= high as i16)
+    }
+}
+
+/// A coupler: one engageable console control bundling any number of
+/// routes. The classic couplers are single full-compass routes; ranges,
+/// unison-off and per-route repitch make the flexible ones ("fourths
+/// from tenor C", "16' that transposes the bottom octave") expressible
+/// in the same vocabulary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Coupler {
     pub name: String,
-    pub from_manual: ManualId,
-    pub to_manual: ManualId,
-    pub key_shift: i16,
+    pub routes: Vec<CouplerRoute>,
+}
+
+impl Coupler {
+    /// The classic organ coupler: every key of `from`, shifted onto `to`.
+    pub fn simple(
+        name: impl Into<String>,
+        from: ManualId,
+        to: ManualId,
+        key_shift: i16,
+    ) -> Coupler {
+        Coupler {
+            name: name.into(),
+            routes: vec![CouplerRoute {
+                from_manual: from,
+                low_key: None,
+                high_key: None,
+                unison_off: false,
+                target: Some(CouplerTarget {
+                    manual: to,
+                    key_shift,
+                    repitch: None,
+                }),
+            }],
+        }
+    }
+
+    /// Whether any route carries notes from `from` onto `to` — what
+    /// "the II/I couplers" means when scanning a set's coupler list.
+    pub fn couples(&self, from: ManualId, to: ManualId) -> bool {
+        self.routes.iter().any(|route| {
+            route.from_manual == from
+                && route.target.as_ref().is_some_and(|t| t.manual == to)
+        })
+    }
 }
 
 /// A complete instrument, format-neutral.

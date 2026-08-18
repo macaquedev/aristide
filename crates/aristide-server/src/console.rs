@@ -17,6 +17,23 @@ pub struct VoiceStart {
     pub spec: VoiceSpec,
 }
 
+/// One place a played key lands after coupling: the manual and key
+/// that should sound, and the policies the route it travelled grants.
+struct Landing {
+    manual: ManualId,
+    midi_key: i16,
+    /// May pipes the division hasn't got be filled in by repitching a
+    /// neighbour? True for the played key itself (repitching serves
+    /// the player's keyboard) and for routes that opt in.
+    fill: bool,
+    /// Is the landing bounded by the destination's compass? The played
+    /// key always is — the compass *is* the instrument. A repitching
+    /// route is explicitly asked to synthesize what the instrument
+    /// hasn't got (16' tone off the bottom of an 8' rank), so it
+    /// reaches past the compass; a normal route stays inside it.
+    bounded: bool,
+}
+
 pub struct Console {
     organ: Organ,
     specs: HashMap<(RankId, u16), VoiceSpec>,
@@ -326,29 +343,71 @@ impl Console {
         self.tuning
     }
 
-    /// Expand one played key through the engaged couplers into every
-    /// (manual, MIDI key) that should sound. Couplers act on *played*
-    /// keys only — coupler-produced notes don't re-couple (matching
-    /// default organ behaviour, and making self-couplers like a 16' II
-    /// trivially finite; GO's opt-in propagation flags can come later).
-    fn couple(&self, manual: ManualId, midi_key: i16) -> Vec<(ManualId, i16)> {
-        let mut targets = vec![(manual, midi_key)];
+    /// Expand one played key through the engaged couplers' routes into
+    /// every (manual, MIDI key) that should sound, each landing tagged
+    /// with the policies the route it travelled grants it. Couplers act
+    /// on *played* keys only — coupler-produced notes don't re-couple
+    /// (matching default organ behaviour, and making self-couplers like
+    /// a 16' II trivially finite; GO's opt-in propagation flags can
+    /// come later).
+    ///
+    /// The played key itself lands first — unless an engaged route with
+    /// `unison_off` covers it, in which case its own division is silent
+    /// and only the coupled copies speak: the note moves rather than
+    /// doubles.
+    fn couple(&self, manual: ManualId, midi_key: i16) -> Vec<Landing> {
+        let mut unison_off = false;
+        let mut copies: Vec<Landing> = Vec::new();
         for &engaged in &self.engaged_couplers {
             let Some(coupler) = self.organ.couplers.get(engaged) else {
                 continue;
             };
-            if coupler.from_manual != manual {
-                continue;
-            }
-            let target = (
-                coupler.to_manual,
-                midi_key.saturating_add(coupler.key_shift),
-            );
-            if !targets.contains(&target) {
-                targets.push(target);
+            for route in &coupler.routes {
+                if route.from_manual != manual || !route.covers(midi_key) {
+                    continue;
+                }
+                unison_off |= route.unison_off;
+                let Some(target) = &route.target else {
+                    continue;
+                };
+                let repitch = target.repitch.unwrap_or(self.couplers_repitch);
+                let landing = Landing {
+                    manual: target.manual,
+                    midi_key: midi_key.saturating_add(target.key_shift),
+                    fill: repitch,
+                    bounded: !repitch,
+                };
+                match copies
+                    .iter_mut()
+                    .find(|c| (c.manual, c.midi_key) == (landing.manual, landing.midi_key))
+                {
+                    // Two routes onto the same note speak one pipe; if
+                    // either may fill or escape the compass, the
+                    // landing may.
+                    Some(existing) => {
+                        existing.fill |= landing.fill;
+                        existing.bounded &= landing.bounded;
+                    }
+                    None => copies.push(landing),
+                }
             }
         }
-        targets
+        let mut landings = Vec::with_capacity(copies.len() + 1);
+        if !unison_off {
+            landings.push(Landing {
+                manual,
+                midi_key,
+                fill: true,
+                bounded: true,
+            });
+        }
+        // A copy that lands exactly on the played key adds nothing.
+        landings.extend(
+            copies
+                .into_iter()
+                .filter(|c| unison_off || (c.manual, c.midi_key) != (manual, midi_key)),
+        );
+        landings
     }
 
     /// The inclusive MIDI range a manual answers to, and the widening
@@ -532,23 +591,25 @@ impl Console {
         // gadget; temperament + concert pitch then retune each pipe.
         let played = key as i16 + self.tuning.transpose as i16;
         let mut voices = Vec::new();
-        // `couple` puts the played key first; everything after it is a
-        // copy some coupler asked for.
-        for (position, (manual_id, midi_key)) in self.couple(origin, played).into_iter().enumerate()
-        {
-            // Repitching fills in what the *player's keyboard* can
-            // reach — it is a concession to their hardware, not a way
-            // to invent pipes. A coupler is not a keyboard: a 16'
-            // running off the bottom of a rank, or a coupler into a
-            // division with a shorter compass, sounds nothing there.
-            // Sets built for the other behaviour can ask for it.
-            let fill = position == 0 || self.couplers_repitch;
+        // Each landing carries its own policies: the played key fills
+        // (repitching serves the player's keyboard) inside the compass;
+        // a coupled copy fills, and escapes the compass, only if its
+        // route asked to. A 16' running off the bottom of a rank, or a
+        // coupler into a division with a shorter compass, sounds
+        // nothing there unless its route opts into repitching.
+        for landing in self.couple(origin, played) {
+            let Landing {
+                manual: manual_id,
+                midi_key,
+                fill,
+                bounded,
+            } = landing;
             let Some(target) = self
                 .organ
                 .manuals
                 .iter()
                 .position(|m| m.id == manual_id)
-                .filter(|&index| self.within_compass(index, midi_key))
+                .filter(|&index| !bounded || self.within_compass(index, midi_key))
             else {
                 continue;
             };
@@ -629,22 +690,7 @@ impl Console {
                 continue;
             }
             held.push((stop, rank, pipe));
-            match self.speaking.get_mut(&(rank, pipe)) {
-                Some((_, holders)) => *holders += 1,
-                None => {
-                    let handle = self.next_handle;
-                    self.next_handle += 1;
-                    self.speaking.insert((rank, pipe), (handle, 1));
-                    // The pipe's previous voice may still be in its
-                    // pallet-stagger window (Held at full level);
-                    // expedite its release or the pipe overlaps itself —
-                    // heard as a phantom "opening of another note".
-                    if let Some(previous) = self.last_pipe_voice.insert((rank, pipe), handle) {
-                        retriggered.push(previous);
-                    }
-                    starts.push(VoiceStart { handle, spec });
-                }
-            }
+            self.hold_pipe(rank, pipe, spec, &mut starts, &mut retriggered);
         }
         // Track the key even when no stops are drawn: the UI lights it,
         // note-off clears it, and drawing a stop mid-hold must find it
@@ -670,6 +716,32 @@ impl Console {
             }
         }
         released
+    }
+
+    /// One more holder demands a pipe. A pipe speaks ONCE no matter how
+    /// many routes reach it, so this either bumps the refcount or
+    /// starts a new voice — expediting the pipe's still-releasing
+    /// (pallet-staggered) predecessor so it never overlaps itself.
+    fn hold_pipe(
+        &mut self,
+        rank: RankId,
+        pipe: u16,
+        spec: VoiceSpec,
+        starts: &mut Vec<VoiceStart>,
+        expedited: &mut Vec<u64>,
+    ) {
+        match self.speaking.get_mut(&(rank, pipe)) {
+            Some((_, holders)) => *holders += 1,
+            None => {
+                let handle = self.next_handle;
+                self.next_handle += 1;
+                self.speaking.insert((rank, pipe), (handle, 1));
+                if let Some(previous) = self.last_pipe_voice.insert((rank, pipe), handle) {
+                    expedited.push(previous);
+                }
+                starts.push(VoiceStart { handle, spec });
+            }
+        }
     }
 
     /// One holder lets go of a pipe; the voice stops only when the
@@ -748,18 +820,7 @@ impl Console {
                     continue;
                 }
                 new_entries.push((stop, rank, pipe));
-                match self.speaking.get_mut(&(rank, pipe)) {
-                    Some((_, holders)) => *holders += 1,
-                    None => {
-                        let handle = self.next_handle;
-                        self.next_handle += 1;
-                        self.speaking.insert((rank, pipe), (handle, 1));
-                        if let Some(previous) = self.last_pipe_voice.insert((rank, pipe), handle) {
-                            expedited.push(previous);
-                        }
-                        starts.push(VoiceStart { handle, spec });
-                    }
-                }
+                self.hold_pipe(rank, pipe, spec, starts, &mut expedited);
             }
             if !new_entries.is_empty() {
                 self.sounding
@@ -780,24 +841,78 @@ impl Console {
     }
 
     /// Engage or release a coupler by its index in `organ.couplers`.
-    /// Sounding notes keep their current coupling; new presses use the
-    /// new state. Returns (clack voice to start, noise handle to stop).
-    pub fn set_coupler(&mut self, index: usize, engaged: bool) -> (Option<VoiceStart>, Option<u64>) {
+    /// Takes effect under held notes immediately, as an electric-action
+    /// console does (and as drawing a stop mid-hold already did):
+    /// engaging starts the coupled pipes under the held keys, releasing
+    /// lets go of them, and a unison-off coupler moves the held notes.
+    /// Returns (voice handles to stop, voices to start) like
+    /// `set_drawn` — the clack noise rides along in them.
+    pub fn set_coupler(&mut self, index: usize, engaged: bool) -> (Vec<u64>, Vec<VoiceStart>) {
         if index >= self.organ.couplers.len()
             || self.engaged_couplers.contains(&index) == engaged
         {
-            return (None, None);
+            return (Vec::new(), Vec::new());
         }
+        let mut stops = Vec::new();
+        let mut starts = Vec::new();
         if engaged {
             self.engaged_couplers.push(index);
-            let noise = self.open_noise(self.coupler_noise.get(&index).copied());
-            if let Some(start) = &noise {
-                self.coupler_noise_open.insert(index, start.handle);
+            if let Some(noise) = self.open_noise(self.coupler_noise.get(&index).copied()) {
+                self.coupler_noise_open.insert(index, noise.handle);
+                starts.push(noise);
             }
-            (noise, None)
         } else {
             self.engaged_couplers.retain(|&i| i != index);
-            (None, self.coupler_noise_open.remove(&index))
+            // Note-off on the open noise voice = the release clack.
+            stops.extend(self.coupler_noise_open.remove(&index));
+        }
+        self.recouple_held_keys(&mut stops, &mut starts);
+        stops.sort_unstable();
+        stops.dedup();
+        (stops, starts)
+    }
+
+    /// Re-derive what every held key should sound under the current
+    /// coupler state and diff it against what it does sound: pipes no
+    /// longer demanded are released, newly demanded ones started. This
+    /// is what makes a coupler change land on held notes instead of
+    /// waiting for the next press.
+    fn recouple_held_keys(&mut self, stops: &mut Vec<u64>, starts: &mut Vec<VoiceStart>) {
+        let held: Vec<(usize, u8)> = self.sounding.keys().copied().collect();
+        for (manual_index, key) in held {
+            // One-shots strike on key press, not on a coupler change —
+            // same rule as drawing a stop mid-hold.
+            let desired: Vec<(StopId, RankId, u16, VoiceSpec)> = self
+                .voices_for_key(manual_index, key, None)
+                .into_iter()
+                .filter(|(_, _, _, spec)| !spec.percussive)
+                .collect();
+            let mut remaining = self
+                .sounding
+                .remove(&(manual_index, key))
+                .unwrap_or_default();
+            let mut entries = Vec::with_capacity(desired.len());
+            let mut to_start = Vec::new();
+            for (stop, rank, pipe, spec) in desired {
+                // Each sounding entry holds one refcount, so match
+                // multiset-style: a demand already held is kept, not
+                // restarted.
+                match remaining.iter().position(|&e| e == (stop, rank, pipe)) {
+                    Some(at) => {
+                        remaining.swap_remove(at);
+                        entries.push((stop, rank, pipe));
+                    }
+                    None => to_start.push((stop, rank, pipe, spec)),
+                }
+            }
+            for &(_, rank, pipe) in &remaining {
+                stops.extend(self.release_pipe(rank, pipe));
+            }
+            for (stop, rank, pipe, spec) in to_start {
+                entries.push((stop, rank, pipe));
+                self.hold_pipe(rank, pipe, spec, starts, stops);
+            }
+            self.sounding.insert((manual_index, key), entries);
         }
     }
 
@@ -814,8 +929,11 @@ impl Console {
             stopped.extend(released);
         }
         for index in self.engaged_couplers.clone() {
-            let (_, noise) = self.set_coupler(index, false);
-            stopped.extend(noise);
+            // Stops are all retired by now, so releasing couplers can
+            // only stop voices (the clack noise), never start any —
+            // even a unison-off coupler has nothing to give back.
+            let (released, _) = self.set_coupler(index, false);
+            stopped.extend(released);
         }
         stopped
     }
@@ -1322,11 +1440,8 @@ mod tests {
                 })
                 .collect(),
         };
-        let coupler = |name: &str, from: u32, to: u32, shift: i16| aristide_model::Coupler {
-            name: name.into(),
-            from_manual: ManualId(from),
-            to_manual: ManualId(to),
-            key_shift: shift,
+        let coupler = |name: &str, from: u32, to: u32, shift: i16| {
+            aristide_model::Coupler::simple(name, ManualId(from), ManualId(to), shift)
         };
         let organ = Organ {
             name: "C".into(),
@@ -1362,6 +1477,156 @@ mod tests {
             }
         }
         Console::new(organ, specs, vec![StopId(1), StopId(2)], 48_000.0)
+    }
+
+    /// "A fourths coupler that plays a fourth down, but only from
+    /// tenor C": a route with a source-key range.
+    #[test]
+    fn a_coupler_can_act_on_a_key_range_only() {
+        let mut console = coupled_console();
+        console.organ.couplers.push(aristide_model::Coupler {
+            name: "Fourths II/I from tenor C".into(),
+            routes: vec![aristide_model::CouplerRoute {
+                from_manual: ManualId(1),
+                low_key: Some(48),
+                high_key: None,
+                unison_off: false,
+                target: Some(aristide_model::CouplerTarget {
+                    manual: ManualId(2),
+                    key_shift: -5,
+                    repitch: None,
+                }),
+            }],
+        });
+        let index = console.organ.couplers.len() - 1;
+        console.set_coupler(index, true);
+
+        // Below tenor C the coupler simply isn't there.
+        assert_eq!(console.note_on_manual(0, 47).0.len(), 1);
+        console.note_off_manual(0, 47);
+
+        // From tenor C up: the played key plus its fourth-down copy on
+        // II — a real pipe, nothing repitched.
+        let (starts, _) = console.note_on_manual(0, 48);
+        assert_eq!(starts.len(), 2);
+        let copy = starts.iter().find(|s| s.spec.sample == 1).expect("II speaks");
+        assert!((copy.spec.rate - 1.0).abs() < 1e-6);
+        console.note_off_manual(0, 48);
+    }
+
+    /// "A 16' coupler which transposes the bottom octave down instead
+    /// of leaving it on": two routes — a classic doubling above the
+    /// break, and below it a unison-off + repitch route that *moves*
+    /// the note down, inventing the pipes the rank hasn't got.
+    #[test]
+    fn a_sixteen_foot_that_transposes_the_bottom_octave() {
+        let mut console = coupled_console();
+        let split = 36 + 12; // an octave above the fixture's bottom key
+        let target = |repitch| {
+            Some(aristide_model::CouplerTarget {
+                manual: ManualId(1),
+                key_shift: -12,
+                repitch,
+            })
+        };
+        console.organ.couplers.push(aristide_model::Coupler {
+            name: "16' I".into(),
+            routes: vec![
+                aristide_model::CouplerRoute {
+                    from_manual: ManualId(1),
+                    low_key: Some(split),
+                    high_key: None,
+                    unison_off: false,
+                    target: target(None),
+                },
+                aristide_model::CouplerRoute {
+                    from_manual: ManualId(1),
+                    low_key: None,
+                    high_key: Some(split - 1),
+                    unison_off: true,
+                    target: target(Some(true)),
+                },
+            ],
+        });
+        let index = console.organ.couplers.len() - 1;
+        console.set_coupler(index, true);
+
+        // Above the break: the classic doubling, real pipes only.
+        let (starts, _) = console.note_on_manual(0, 60);
+        assert_eq!(starts.len(), 2, "the key and its 16' copy");
+        assert!(starts.iter().all(|s| (s.spec.rate - 1.0).abs() < 1e-6));
+        console.note_off_manual(0, 60);
+
+        // In the bottom octave the note moves: one voice, sounding an
+        // octave below the played key, bent down from the deepest pipe
+        // the rank has — past the compass, because this route asked to.
+        let (starts, _) = console.note_on_manual(0, 40);
+        assert_eq!(starts.len(), 1, "unison off: the played key itself is silent");
+        let semitones = starts[0].spec.rate.log2() * 12.0;
+        assert!(
+            (semitones + 8.0).abs() < 1e-3,
+            "pipe 0 bent down to sound an octave below key 40, got {semitones}"
+        );
+        console.note_off_manual(0, 40);
+    }
+
+    /// Engaging or releasing a coupler lands on held notes at once,
+    /// as an electric-action console does — the same way drawing a
+    /// stop mid-hold already behaves.
+    #[test]
+    fn coupler_changes_land_on_held_notes() {
+        let mut console = coupled_console();
+        let (starts, _) = console.note_on_manual(0, 60);
+        assert_eq!(starts.len(), 1, "only the Great before coupling");
+
+        // Engaging II/I under the held key speaks the Swell at once.
+        let (stopped, starts) = console.set_coupler(0, true);
+        assert!(stopped.is_empty());
+        assert_eq!(starts.len(), 1);
+        assert_eq!(starts[0].spec.sample, 1, "rank 2's sample");
+        let swell_voice = starts[0].handle;
+
+        // Releasing it lets go of exactly that voice.
+        let (stopped, starts) = console.set_coupler(0, false);
+        assert!(starts.is_empty());
+        assert_eq!(stopped, vec![swell_voice]);
+
+        // The key still sounds its own pipe, and note-off finds it.
+        assert_eq!(console.note_off_manual(0, 60).len(), 1);
+    }
+
+    /// A pure unison-off coupler (GO's `UnisonOff=Y`): the manual's own
+    /// sound is silenced, held notes included, and given back on
+    /// release.
+    #[test]
+    fn a_unison_off_coupler_moves_held_notes() {
+        let mut console = coupled_console();
+        console.organ.couplers.push(aristide_model::Coupler {
+            name: "Unison Off I".into(),
+            routes: vec![aristide_model::CouplerRoute {
+                from_manual: ManualId(1),
+                low_key: None,
+                high_key: None,
+                unison_off: true,
+                target: None,
+            }],
+        });
+        let index = console.organ.couplers.len() - 1;
+
+        let (starts, _) = console.note_on_manual(0, 60);
+        let direct = starts[0].handle;
+
+        // Engaging unison-off silences the held key's own division…
+        let (stopped, starts) = console.set_coupler(index, true);
+        assert_eq!(stopped, vec![direct]);
+        assert!(starts.is_empty());
+
+        // …and releasing it gives the note back. The silenced voice's
+        // release tail is expedited so the pipe can't overlap itself.
+        let (stopped, starts) = console.set_coupler(index, false);
+        assert_eq!(stopped, vec![direct]);
+        assert_eq!(starts.len(), 1);
+        assert_eq!(console.note_off_manual(0, 60).len(), 1);
     }
 
     #[test]

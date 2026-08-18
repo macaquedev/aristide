@@ -42,7 +42,8 @@ pub struct Sidecar {
     pub couplers: CouplersConfig,
 }
 
-/// How couplers behave at the edges of a division.
+/// How couplers behave at the edges of a division, and any couplers the
+/// user defines on top of the set's own.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CouplersConfig {
@@ -56,9 +57,190 @@ pub struct CouplersConfig {
     /// keyboard; a coupler is not a keyboard, and letting it invent
     /// pipes would change the instrument rather than reach it. Sets
     /// built for the other behaviour (or a piece that wants it) can
-    /// turn it on.
+    /// turn it on — or a single defined route can, below.
     #[serde(default)]
     pub repitch: bool,
+    /// Couplers of the user's own devising, appended to the set's and
+    /// engageable like any other. Each is a named bundle of routes:
+    ///
+    /// ```toml
+    /// [[couplers.define]]
+    /// name = "Fourths II/I"
+    /// [[couplers.define.route]]
+    /// from = "II"
+    /// to = "I"
+    /// shift = -5
+    /// low = "C3"          # tenor C; a MIDI number works too
+    /// ```
+    ///
+    /// A coupler may carry several routes (a 16' that transposes the
+    /// bottom octave instead of doubling it is two), and a route may
+    /// set `unison_off` and `repitch`.
+    #[serde(default, rename = "define")]
+    pub define: Vec<CouplerDef>,
+}
+
+/// One user-defined coupler: a name for the console rocker and the
+/// routes it engages.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CouplerDef {
+    pub name: String,
+    #[serde(default, rename = "route")]
+    pub routes: Vec<RouteDef>,
+}
+
+/// One route of a user-defined coupler. Manuals are named with the same
+/// pattern rules as `[midi] channels`; keys are MIDI numbers or note
+/// names ("C3", "F#2", "Bb1" — middle C is C4 = 60, so tenor C = "C3").
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RouteDef {
+    /// Manual the route listens on.
+    pub from: String,
+    /// Destination manual; omit for a pure unison-off route.
+    pub to: Option<String>,
+    /// Keys added to the source key: -12 = sub-octave, -5 = a fourth
+    /// down, 0 = unison.
+    #[serde(default)]
+    pub shift: i16,
+    /// Inclusive bounds on the source keys the route acts on; omit for
+    /// the whole compass.
+    pub low: Option<KeySpec>,
+    pub high: Option<KeySpec>,
+    /// Silence the source keys' own division in this range, so the
+    /// note moves instead of doubling.
+    #[serde(default)]
+    pub unison_off: bool,
+    /// Let this route repitch pipes the destination hasn't got (and so
+    /// reach past its compass); omit to follow `[couplers] repitch`.
+    pub repitch: Option<bool>,
+}
+
+/// A key in a route definition: a raw MIDI note number or a name.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum KeySpec {
+    Number(i64),
+    Name(String),
+}
+
+impl KeySpec {
+    pub fn midi_note(&self) -> Option<u8> {
+        match self {
+            KeySpec::Number(n) => u8::try_from(*n).ok().filter(|&n| n <= 127),
+            KeySpec::Name(name) => parse_note_name(name),
+        }
+    }
+}
+
+/// "C4" → 60 (middle C), scientific pitch notation, any number of
+/// `#`/`b` accidentals, octaves -1..9.
+pub fn parse_note_name(name: &str) -> Option<u8> {
+    let name = name.trim();
+    let mut chars = name.chars();
+    let letter = chars.next()?.to_ascii_uppercase();
+    let semitone: i32 = match letter {
+        'C' => 0,
+        'D' => 2,
+        'E' => 4,
+        'F' => 5,
+        'G' => 7,
+        'A' => 9,
+        'B' => 11,
+        _ => return None,
+    };
+    let rest = chars.as_str();
+    let octave_at = rest
+        .find(|c: char| c.is_ascii_digit() || c == '-' || c == '+')
+        .unwrap_or(rest.len());
+    let (accidentals, octave) = rest.split_at(octave_at);
+    let mut offset = 0i32;
+    for c in accidentals.chars() {
+        match c {
+            '#' | '♯' => offset += 1,
+            'b' | '♭' => offset -= 1,
+            _ => return None,
+        }
+    }
+    let octave: i32 = octave.parse().ok()?;
+    u8::try_from((octave + 1) * 12 + semitone + offset)
+        .ok()
+        .filter(|&n| n <= 127)
+}
+
+/// Resolve user-defined couplers against a loaded organ's manuals.
+/// Definitions that name what the organ hasn't got (or keys that don't
+/// parse) are reported and skipped, never fatal — the same rule
+/// bindings follow.
+pub fn resolve_couplers(
+    organ: &aristide_model::Organ,
+    defs: &[CouplerDef],
+) -> (Vec<aristide_model::Coupler>, Vec<String>) {
+    let names: Vec<&str> = organ.manuals.iter().map(|m| m.name.as_str()).collect();
+    let mut warnings = Vec::new();
+    let mut couplers = Vec::new();
+    for def in defs {
+        match resolve_coupler(organ, &names, def) {
+            Ok(coupler) => couplers.push(coupler),
+            Err(warning) => warnings.push(warning),
+        }
+    }
+    (couplers, warnings)
+}
+
+fn resolve_coupler(
+    organ: &aristide_model::Organ,
+    names: &[&str],
+    def: &CouplerDef,
+) -> Result<aristide_model::Coupler, String> {
+    use aristide_model::{Coupler, CouplerRoute, CouplerTarget};
+    let manual = |pattern: &str| -> Result<aristide_model::ManualId, String> {
+        match match_names(names, pattern).as_slice() {
+            [index] => Ok(organ.manuals[*index].id),
+            [] => Err(format!(
+                "{:?}: no manual matches {pattern:?} — coupler skipped",
+                def.name
+            )),
+            _ => Err(format!(
+                "{:?}: {pattern:?} is ambiguous — coupler skipped",
+                def.name
+            )),
+        }
+    };
+    let key = |spec: &Option<KeySpec>| -> Result<Option<u8>, String> {
+        match spec {
+            None => Ok(None),
+            Some(spec) => spec.midi_note().map(Some).ok_or_else(|| {
+                format!("{:?}: unparseable key {spec:?} — coupler skipped", def.name)
+            }),
+        }
+    };
+    let mut routes = Vec::new();
+    for route in &def.routes {
+        let target = match &route.to {
+            Some(to) => Some(CouplerTarget {
+                manual: manual(to)?,
+                key_shift: route.shift,
+                repitch: route.repitch,
+            }),
+            None => None,
+        };
+        routes.push(CouplerRoute {
+            from_manual: manual(&route.from)?,
+            low_key: key(&route.low)?,
+            high_key: key(&route.high)?,
+            unison_off: route.unison_off,
+            target,
+        });
+    }
+    if routes.is_empty() {
+        return Err(format!("{:?}: no routes — coupler skipped", def.name));
+    }
+    Ok(Coupler {
+        name: def.name.clone(),
+        routes,
+    })
 }
 
 /// Swell box behaviour (applied to every enclosure the set defines;
@@ -396,6 +578,97 @@ default = ["Bourdon 16'", "Montre 8'", "Prestant 4'", "Plein jeu III"]
             path_for(Path::new("/sets/demo.organ")),
             PathBuf::from("/sets/demo.organ.aristide.toml")
         );
+    }
+
+    #[test]
+    fn note_names_parse_scientific_pitch() {
+        assert_eq!(parse_note_name("C4"), Some(60), "middle C");
+        assert_eq!(parse_note_name("C3"), Some(48), "tenor C");
+        assert_eq!(parse_note_name("A0"), Some(21));
+        assert_eq!(parse_note_name("c#2"), Some(37));
+        assert_eq!(parse_note_name("Bb1"), Some(34));
+        assert_eq!(parse_note_name("C-1"), Some(0));
+        assert_eq!(parse_note_name("H2"), None);
+        assert_eq!(parse_note_name("C"), None, "an octave is required");
+    }
+
+    fn two_manual_organ() -> aristide_model::Organ {
+        let manual = |id: u32, name: &str| aristide_model::Manual {
+            id: aristide_model::ManualId(id),
+            name: name.into(),
+            first_midi_note: 36,
+            key_count: 61,
+        };
+        aristide_model::Organ {
+            manuals: vec![manual(1, "Grand Orgue"), manual(2, "Récit")],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn defined_couplers_resolve_by_manual_name() {
+        let text = r#"
+[[couplers.define]]
+name = "Fourths II/I"
+[[couplers.define.route]]
+from = "récit"
+to = "grand"
+shift = -5
+low = "C3"
+
+[[couplers.define]]
+name = "16' GO"
+[[couplers.define.route]]
+from = "grand"
+to = "grand"
+shift = -12
+low = 60
+[[couplers.define.route]]
+from = "grand"
+to = "grand"
+shift = -12
+high = 59
+unison_off = true
+repitch = true
+"#;
+        let sidecar: Sidecar = toml::from_str(text).expect("parses");
+        let (couplers, warnings) = resolve_couplers(&two_manual_organ(), &sidecar.couplers.define);
+        assert_eq!(warnings, Vec::<String>::new());
+        assert_eq!(couplers.len(), 2);
+
+        let fourths = &couplers[0];
+        assert_eq!(fourths.routes.len(), 1);
+        let route = &fourths.routes[0];
+        assert_eq!(route.from_manual, aristide_model::ManualId(2));
+        assert_eq!(route.low_key, Some(48));
+        assert_eq!(route.high_key, None);
+        let target = route.target.as_ref().expect("has a target");
+        assert_eq!((target.manual, target.key_shift), (aristide_model::ManualId(1), -5));
+
+        let sixteen = &couplers[1];
+        assert_eq!(sixteen.routes.len(), 2);
+        assert!(sixteen.routes[1].unison_off);
+        assert_eq!(sixteen.routes[1].target.as_ref().unwrap().repitch, Some(true));
+    }
+
+    #[test]
+    fn couplers_naming_missing_manuals_are_reported_not_fatal() {
+        let defs = vec![CouplerDef {
+            name: "Chamade on V".into(),
+            routes: vec![RouteDef {
+                from: "Bombardewerk".into(),
+                to: Some("Grand".into()),
+                shift: 0,
+                low: None,
+                high: None,
+                unison_off: false,
+                repitch: None,
+            }],
+        }];
+        let (couplers, warnings) = resolve_couplers(&two_manual_organ(), &defs);
+        assert!(couplers.is_empty());
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("Bombardewerk"), "{}", warnings[0]);
     }
 
     #[test]

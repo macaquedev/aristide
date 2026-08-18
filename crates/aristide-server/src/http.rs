@@ -91,10 +91,12 @@ fn respond(
                             engine, control, ..
                         } = &mut *state;
                         if let Control::Organ(console) = control {
-                            let (start, stop) = console.set_coupler(index, on);
-                            send_start(engine, start);
-                            if let Some(handle) = stop {
+                            let (stopped, starts) = console.set_coupler(index, on);
+                            for handle in stopped {
                                 engine.send(Command::StopVoice { handle });
+                            }
+                            for start in starts {
+                                send_start(engine, Some(start));
                             }
                         }
                     }
@@ -1207,10 +1209,10 @@ mod tests {
         );
 
         // Coupler clack (demo couplers have mapped noises).
-        let (clack, _) = console.set_coupler(0, true);
-        let clack = clack.expect("coupler noise mapped");
-        let (_, unclack) = console.set_coupler(0, false);
-        assert_eq!(unclack, Some(clack.handle));
+        let (_, clacks) = console.set_coupler(0, true);
+        assert_eq!(clacks.len(), 1, "coupler noise mapped");
+        let (unclack, _) = console.set_coupler(0, false);
+        assert_eq!(unclack, vec![clacks[0].handle]);
 
         // Disabling kills open noise voices and mutes future toggles.
         console.set_drawn(montre, true);

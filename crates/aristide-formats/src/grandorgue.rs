@@ -10,8 +10,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use aristide_model::{
-    AttackSample, Coupler, Manual, ManualId, Organ, Pipe, PipeRef, PipeSource, Rank, RankId,
-    RankRange, ReleaseSample, SampleLoop, Stop, StopId,
+    AttackSample, Coupler, CouplerRoute, CouplerTarget, Manual, ManualId, Organ, Pipe, PipeRef,
+    PipeSource, Rank, RankId, RankRange, ReleaseSample, SampleLoop, Stop, StopId,
 };
 use thiserror::Error;
 
@@ -398,11 +398,20 @@ impl Builder<'_> {
             for slot in 1..=coupler_count {
                 let target = section.int(&format!("Coupler{slot:03}"))?;
                 let coupler_section = self.ini.section(&format!("Coupler{target:03}"))?;
+                let name = coupler_section.get("Name").unwrap_or("Coupler").to_string();
                 if coupler_section.bool_or("UnisonOff", false)? {
-                    self.warn(format!(
-                        "[{}]: UnisonOff couplers not yet supported, skipped",
-                        coupler_section.name
-                    ));
+                    // The manual's own sound is silenced while it still
+                    // drives other couplers: a route with no target.
+                    organ.couplers.push(Coupler {
+                        name,
+                        routes: vec![CouplerRoute {
+                            from_manual: manual_id,
+                            low_key: None,
+                            high_key: None,
+                            unison_off: true,
+                            target: None,
+                        }],
+                    });
                     continue;
                 }
                 let kind = coupler_section.get("CouplerType").unwrap_or("Normal");
@@ -413,11 +422,26 @@ impl Builder<'_> {
                     ));
                     continue;
                 }
+                // GO restricts a coupler to source notes in
+                // [FirstMIDINoteNumber, FirstMIDINoteNumber+NumberOfKeys);
+                // the defaults (0, 127) cover any keyboard, so only a
+                // set value becomes a bound.
+                let first = coupler_section.int_or("FirstMIDINoteNumber", 0)?;
+                let count = coupler_section.int_or("NumberOfKeys", 127)?;
+                let last = first + count - 1;
                 organ.couplers.push(Coupler {
-                    name: coupler_section.get("Name").unwrap_or("Coupler").to_string(),
-                    from_manual: manual_id,
-                    to_manual: ManualId(coupler_section.int("DestinationManual")? as u32),
-                    key_shift: coupler_section.int("DestinationKeyshift")? as i16,
+                    name,
+                    routes: vec![CouplerRoute {
+                        from_manual: manual_id,
+                        low_key: (first > 0).then_some(first.clamp(0, 127) as u8),
+                        high_key: (last < 127).then_some(last.clamp(0, 127) as u8),
+                        unison_off: false,
+                        target: Some(CouplerTarget {
+                            manual: ManualId(coupler_section.int("DestinationManual")? as u32),
+                            key_shift: coupler_section.int("DestinationKeyshift")? as i16,
+                            repitch: None,
+                        }),
+                    }],
                 });
             }
         }

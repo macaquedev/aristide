@@ -960,7 +960,7 @@ mod tests {
             .couplers
             .iter()
             .enumerate()
-            .filter(|(_, c)| c.from_manual == great && c.to_manual == swell)
+            .filter(|(_, c)| c.couples(great, swell))
             .map(|(i, _)| i)
             .collect();
         assert!(couplers.len() >= 2, "need II/I and 16' II/I couplers");
@@ -1066,7 +1066,7 @@ mod tests {
             .couplers
             .iter()
             .enumerate()
-            .filter(|(_, c)| c.from_manual == great && c.to_manual == swell)
+            .filter(|(_, c)| c.couples(great, swell))
             .map(|(i, _)| i)
             .collect();
         let manual_index = default_manual(&organ, 0);
@@ -1480,7 +1480,7 @@ mod tests {
             .couplers
             .iter()
             .enumerate()
-            .filter(|(_, c)| c.from_manual == great && c.to_manual == swell)
+            .filter(|(_, c)| c.couples(great, swell))
             .map(|(i, _)| i)
             .collect();
         let manual_index = default_manual(&organ, 0);
@@ -1957,7 +1957,7 @@ mod tests {
             .couplers
             .iter()
             .enumerate()
-            .filter(|(_, c)| c.from_manual == great && c.to_manual == swell)
+            .filter(|(_, c)| c.couples(great, swell))
             .map(|(i, _)| i)
             .collect();
         let sr = device_rate as usize;
