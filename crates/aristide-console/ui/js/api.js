@@ -36,11 +36,14 @@ export const commands = {
   // channel the sample set suggests for that manual.
   // `low`/`high` are MIDI notes, or "set" to go back to the sample
   // set's own compass; omitted, the input keeps the range it has.
-  midiBind: (manual, slot, device, channel, low, high) =>
+  // `transpose` shifts every note the keyboard sends, in semitones;
+  // omitted, the input keeps the shift it has.
+  midiBind: (manual, slot, device, channel, low, high, transpose) =>
     `/api/midi/bind?manual=${manual}&slot=${slot}&device=${encodeURIComponent(device)}` +
     (channel == null ? "" : `&ch=${channel}`) +
     (low == null ? "" : `&low=${low}`) +
-    (high == null ? "" : `&high=${high}`),
+    (high == null ? "" : `&high=${high}`) +
+    (transpose == null ? "" : `&transpose=${transpose}`),
   midiUnbind: (manual, slot) => `/api/midi/unbind?manual=${manual}&slot=${slot}`,
   // With no target, stop listening.
   midiLearn: (manual, slot) =>

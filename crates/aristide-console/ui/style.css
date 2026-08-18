@@ -492,6 +492,7 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
 }
 .manual-input .input-device { flex: 1; min-width: 0; }
 .manual-input .input-channel { flex: 0 0 auto; max-width: 130px; }
+.manual-input .input-transpose { flex: 0 0 auto; width: 58px; }
 /* Waiting for a key: the row is the only live thing in the dialog. */
 .manual-input.listening .input-device { border-color: var(--accent); }
 .manual-input.missing .input-device { border-style: dashed; color: var(--text-dim); }

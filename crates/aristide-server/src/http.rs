@@ -196,12 +196,21 @@ fn respond(
                             .and_then(|input| if name == "low" { input.low } else { input.high }),
                     };
                     let (low, high) = (key("low"), key("high"));
-                    // Rebinding a device keeps whatever the octave
+                    // The keyboard's shift in semitones: a controller
+                    // whose keys should sound below (or above) what
+                    // they send. Same ±36 bound as the octave actions;
+                    // absent, rebinding keeps whatever the octave
                     // buttons have done to it.
-                    let transpose = state
-                        .manual_inputs(manual)
-                        .get(slot)
-                        .map_or(0, |input| input.transpose);
+                    let transpose = match param(query, "transpose") {
+                        Some(value) => match value.parse::<i8>() {
+                            Ok(semitones) => semitones.clamp(-36, 36),
+                            Err(_) => return bad_request("transpose must be semitones"),
+                        },
+                        None => state
+                            .manual_inputs(manual)
+                            .get(slot)
+                            .map_or(0, |input| input.transpose),
+                    };
                     state.learn = None;
                     if !state.set_input(
                         manual,
@@ -655,11 +664,12 @@ fn state_json_locked(state: &State) -> String {
                     value.map_or_else(|| "null".to_string(), |v| v.to_string())
                 };
                 out.push_str(&format!(
-                    "{{\"slot\":{slot},\"device\":{},\"channel\":{},\"connected\":{connected},\"low\":{},\"high\":{}}}",
+                    "{{\"slot\":{slot},\"device\":{},\"channel\":{},\"connected\":{connected},\"low\":{},\"high\":{},\"transpose\":{}}}",
                     json_string(&input.device),
                     number(input.channel),
                     number(input.low),
-                    number(input.high)
+                    number(input.high),
+                    input.transpose
                 ));
             }
             // What the set itself declares, so the dialog can say how
@@ -966,7 +976,7 @@ mod tests {
         let body = state_json(&state);
         assert!(
             body.contains(
-                "{\"slot\":0,\"device\":\"Test Keyboard\",\"channel\":4,\"connected\":false,\"low\":null,\"high\":null}"
+                "{\"slot\":0,\"device\":\"Test Keyboard\",\"channel\":4,\"connected\":false,\"low\":null,\"high\":null,\"transpose\":0}"
             ),
             "assigned by name, honest that it isn't plugged in, and no \
              compass measured yet: {body}"
@@ -1002,6 +1012,38 @@ mod tests {
             "/api/midi/bind?manual=2&slot=0&device=Test%20Keyboard&low=31&high=101",
         );
         assert!(state_json(&state).contains("\"low\":31,\"high\":101"));
+
+        // A keyboard that should sound below what it sends: C2–C7 keys
+        // playing G1–G6 is transpose −5, set right on the binding.
+        respond(
+            &state,
+            &Method::Post,
+            "/api/midi/bind?manual=2&slot=0&device=Test%20Keyboard&transpose=-5",
+        );
+        let body = state_json(&state);
+        assert!(
+            body.contains("\"low\":31,\"high\":101,\"transpose\":-5"),
+            "the shift is set and the learned compass survives it: {body}"
+        );
+        // Not sending it keeps it, like low/high; out-of-range clamps
+        // to the octave actions' own ±36 bound.
+        respond(
+            &state,
+            &Method::Post,
+            "/api/midi/bind?manual=2&slot=0&device=Test%20Keyboard&ch=any",
+        );
+        assert!(state_json(&state).contains("\"transpose\":-5"));
+        respond(
+            &state,
+            &Method::Post,
+            "/api/midi/bind?manual=2&slot=0&device=Test%20Keyboard&transpose=99",
+        );
+        assert!(state_json(&state).contains("\"transpose\":36"));
+        respond(
+            &state,
+            &Method::Post,
+            "/api/midi/bind?manual=2&slot=0&device=Test%20Keyboard&transpose=0",
+        );
         respond(
             &state,
             &Method::Post,

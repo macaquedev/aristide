@@ -326,6 +326,28 @@ export class Preferences {
       this.send(commands.midiBind(manual, slot, input.device, channel.value))
     );
 
+    // The keyboard's shift in semitones: a controller whose keys should
+    // sound other pipes than the notes it sends — C2–C7 hardware playing
+    // G1–G6 is a shift of −5. The same number the octave buttons move.
+    const shift = document.createElement("input");
+    shift.type = "number";
+    shift.className = "input-transpose";
+    shift.min = -36;
+    shift.max = 36;
+    shift.step = 1;
+    shift.value = input ? (input.transpose ?? 0) : 0;
+    shift.disabled = !input;
+    shift.title = "Shift this keyboard, in semitones: −5 makes its C sound the G below";
+    shift.setAttribute("aria-label", "Shift in semitones");
+    shift.addEventListener("change", () => {
+      const semitones = Math.min(36, Math.max(-36, Math.trunc(Number(shift.value) || 0)));
+      shift.value = semitones;
+      this.send(
+        commands.midiBind(manual, slot, input.device, input.channel ?? "any", null, null, semitones)
+      );
+      shift.blur(); // hand the field back to the snapshot
+    });
+
     const listen = document.createElement("button");
     listen.className = "ghost listen";
     listen.textContent = listening ? "Cancel" : "Listen";
@@ -334,7 +356,7 @@ export class Preferences {
       this.send(listening ? commands.midiLearn(null) : commands.midiLearn(manual, slot))
     );
 
-    row.append(device, channel, listen);
+    row.append(device, channel, shift, listen);
     if (input) {
       const remove = document.createElement("button");
       remove.className = "ghost remove-input";
@@ -360,18 +382,28 @@ export class Preferences {
     const note = document.createElement("span");
     note.className = "input-compass";
     const native = manualEntry.native;
+    const shift = input.transpose ?? 0;
+    const shifted = `shifted ${shift > 0 ? "+" : ""}${shift} semitones`;
     const learned = input.low != null && input.high != null;
     if (!learned) {
-      note.textContent = native
+      const compass = native
         ? `${keyName(native[0])}–${keyName(native[1])} · the set's own compass`
         : "";
+      note.textContent = shift ? [compass, shifted].filter(Boolean).join(" · ") : compass;
       note.classList.add("dim");
       return note;
     }
     const [low, high] = [Math.min(input.low, input.high), Math.max(input.low, input.high)];
-    let text = `${keyName(low)}–${keyName(high)}`;
+    // What the keyboard's keys actually sound, shift included — the
+    // range the compass rule and repitching are judged against.
+    const clamp = (key) => Math.min(127, Math.max(0, key + shift));
+    const [soundsLow, soundsHigh] = [clamp(low), clamp(high)];
+    let text = shift
+      ? `${keyName(low)}–${keyName(high)} sounds ${keyName(soundsLow)}–${keyName(soundsHigh)}`
+      : `${keyName(low)}–${keyName(high)}`;
     if (native) {
-      const filled = Math.max(0, native[0] - low) + Math.max(0, high - native[1]);
+      const filled =
+        Math.max(0, native[0] - soundsLow) + Math.max(0, soundsHigh - native[1]);
       text += filled
         ? ` · ${filled} key${filled === 1 ? "" : "s"} repitched past the set's ${keyName(
             native[0]
