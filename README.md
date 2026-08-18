@@ -16,8 +16,16 @@ directly, with Aristide-specific settings stored in sidecar files that never tou
 the original set. Encrypted Hauptwerk sample sets are not supported and never will
 be — we do not and will not circumvent their protection.
 
-## Building
+## Building and running
 
 ```sh
 cargo build --release
+./target/release/aristide-console path/to/set.organ
 ```
+
+That one command is the whole app: the console starts the audio server
+itself, hands it every argument (`--stops`, `--buffer`, …), and stops it
+when the window closes. The pieces still run separately when you want
+them to — `aristide-server` is a plain headless daemon, and
+`aristide-console http://host:9669` attaches to one already running,
+here or on another machine.
