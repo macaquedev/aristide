@@ -144,8 +144,12 @@ fn respond(
         (Method::Post, "/api/tuning") => {
             {
                 let mut state = state.lock().expect("state poisoned");
-                if let Control::Organ(console) = &mut state.control {
-                    let mut tuning = console.tuning();
+                // With `manual`, the update tunes that one division
+                // apart from the instrument (starting from what it
+                // effectively plays now); `reset=1` returns it to the
+                // shared tuning. Without, it tunes the instrument.
+                let manual = param(query, "manual").and_then(|v| v.parse::<usize>().ok());
+                let patched = |mut tuning: crate::tuning::Tuning| {
                     if let Some(t) =
                         param(query, "temperament").and_then(crate::tuning::Temperament::parse)
                     {
@@ -158,10 +162,68 @@ fn respond(
                     {
                         tuning.transpose = t.clamp(-12, 12);
                     }
-                    console.set_tuning(tuning);
+                    tuning
+                };
+                match manual {
+                    Some(manual) => {
+                        let reset = param(query, "reset") == Some("1");
+                        let current = match &state.control {
+                            Control::Organ(console) => Some(
+                                console.manual_tuning(manual).unwrap_or(console.tuning()),
+                            ),
+                            Control::Tone => None,
+                        };
+                        if let Some(current) = current {
+                            let tuning = (!reset).then(|| patched(current));
+                            state.tune_manual(manual, tuning);
+                        }
+                    }
+                    None => {
+                        if let Control::Organ(console) = &mut state.control {
+                            let tuning = patched(console.tuning());
+                            console.set_tuning(tuning);
+                        }
+                    }
                 }
             }
             json(state_json(state))
+        }
+        // Move a stop to another manual — the ranges re-anchor by
+        // pitch, and the change lands in the organ's file when it has
+        // one.
+        (Method::Post, "/api/organ/move") => {
+            let mut state = state.lock().expect("state poisoned");
+            match (
+                param(query, "stop").and_then(|v| v.parse::<u32>().ok()),
+                param(query, "manual").and_then(|v| v.parse::<usize>().ok()),
+            ) {
+                (Some(stop), Some(manual)) => {
+                    if state.move_stop(aristide_model::StopId(stop), manual) {
+                        json(state_json_locked(&state))
+                    } else {
+                        bad_request("no such stop or manual")
+                    }
+                }
+                _ => bad_request("missing stop/manual"),
+            }
+        }
+        // Keep a coupler on the console (`keep=1`) or take it off
+        // (`keep=0`). Off is hidden and disengaged, not deleted.
+        (Method::Post, "/api/organ/coupler") => {
+            let mut state = state.lock().expect("state poisoned");
+            match (
+                param(query, "idx").and_then(|v| v.parse::<usize>().ok()),
+                param(query, "keep").map(|v| v != "0"),
+            ) {
+                (Some(index), Some(keep)) => {
+                    if state.set_coupler_pick(index, keep) {
+                        json(state_json_locked(&state))
+                    } else {
+                        bad_request("no such coupler")
+                    }
+                }
+                _ => bad_request("missing idx/keep"),
+            }
         }
         // Declare a manual's compass (both low and high, MIDI notes),
         // or with neither given go back to the set's own. Live at
@@ -597,16 +659,19 @@ fn state_json_locked(state: &State) -> String {
     let mut out = String::from("{\"stops\":[");
     if let Control::Organ(console) = &state.control {
         let mut first = true;
-        for (id, name, manual, drawn) in console.stop_states() {
+        for (id, name, manual, manual_index, drawn) in console.stop_states() {
             if !first {
                 out.push(',');
             }
             first = false;
             out.push_str(&format!(
-                "{{\"id\":{},\"name\":{},\"manual\":{},\"on\":{}}}",
+                "{{\"id\":{},\"name\":{},\"manual\":{},\"midx\":{},\"on\":{}}}",
                 id.0,
                 json_string(name),
                 json_string(manual),
+                // usize::MAX marks a stop on a manual the set hasn't
+                // got — loaders prevent it, but JSON must stay finite.
+                manual_index.min(u32::MAX as usize),
                 drawn
             ));
         }
@@ -614,14 +679,17 @@ fn state_json_locked(state: &State) -> String {
     out.push_str("],\"couplers\":[");
     if let Control::Organ(console) = &state.control {
         let mut first = true;
-        for (index, name, engaged) in console.coupler_states() {
+        for (index, name, engaged, available) in console.coupler_states() {
             if !first {
                 out.push(',');
             }
             first = false;
             out.push_str(&format!(
-                "{{\"idx\":{index},\"name\":{},\"on\":{engaged}}}",
-                json_string(name)
+                "{{\"idx\":{index},\"name\":{},\"on\":{engaged}{}}}",
+                json_string(name),
+                // Present only when off the console, so the common
+                // snapshot stays small and old clients stay right.
+                if available { "" } else { ",\"hidden\":true" }
             ));
         }
     }
@@ -656,6 +724,23 @@ fn state_json_locked(state: &State) -> String {
             tuning.a4_hz,
             tuning.transpose
         ));
+        // Divisions tuned apart from the instrument, by manual index —
+        // absent manuals follow the shared tuning above.
+        let own: Vec<String> = (0..console.manual_states().len())
+            .filter_map(|manual| {
+                console.manual_tuning(manual).map(|tuning| {
+                    format!(
+                        "{{\"idx\":{manual},\"temperament\":{},\"a4\":{},\"transpose\":{}}}",
+                        json_string(tuning.temperament.name()),
+                        tuning.a4_hz,
+                        tuning.transpose
+                    )
+                })
+            })
+            .collect();
+        if !own.is_empty() {
+            out.push_str(&format!(",\"manual_tuning\":[{}]", own.join(",")));
+        }
     }
     if let Some(wet) = state.reverb_wet {
         out.push_str(&format!(",\"reverb\":{wet}"));
@@ -1022,6 +1107,52 @@ mod tests {
         assert_eq!(saved.midi.inputs.len(), 1);
         assert_eq!(saved.midi.inputs[0].device, "Test Keys");
         assert_eq!(saved.midi.inputs[0].channel, Some(4));
+
+        // A division tuned apart, a coupler taken off, and a stop
+        // moved all show live and land in the file.
+        respond(
+            &state,
+            &Method::Post,
+            "/api/tuning?manual=1&temperament=meantone&a4=415",
+        );
+        respond(&state, &Method::Post, "/api/organ/coupler?idx=0&keep=0");
+        let (stop, stop_name, target) = {
+            let state = state.lock().expect("state poisoned");
+            let Control::Organ(console) = &state.control else {
+                unreachable!()
+            };
+            let (id, name, _, from, _) = console.stop_states()[0];
+            (id.0, name.to_string(), if from == 0 { 1 } else { 0 })
+        };
+        respond(
+            &state,
+            &Method::Post,
+            &format!("/api/organ/move?stop={stop}&manual={target}"),
+        );
+        let body = state_json(&state);
+        assert!(
+            body.contains("\"manual_tuning\":[{\"idx\":1,\"temperament\":\"meantone4\",\"a4\":415"),
+            "own tuning shows: {body}"
+        );
+        assert!(body.contains("\"hidden\":true"), "picked-off coupler shows");
+        let saved = aristide_formats::instrument::load(&path).expect("reloads");
+        assert_eq!(
+            saved.manual_tuning,
+            [(1, Some("meantone4".into()), Some(415.0), Some(0))]
+        );
+        assert_eq!(saved.sidecar.couplers.drop.len(), 1);
+        // Ids renumber on reload; the stop's name is its identity here.
+        let _ = stop;
+        let moved = saved
+            .organ
+            .stops
+            .iter()
+            .find(|s| s.name == stop_name)
+            .expect("moved stop reloads");
+        assert_eq!(
+            moved.manual, saved.organ.manuals[target].id,
+            "the move replays from the file"
+        );
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1306,7 +1437,7 @@ mod tests {
         // And the binding does what it says, from a computer key.
         respond(&state, &Method::Post, "/api/key?code=Equal&on=1");
         assert!(
-            state_json(&state).contains("{\"id\":16,\"name\":\"Montre 8'\",\"manual\":\"First Manual\",\"on\":true}"),
+            state_json(&state).contains("{\"id\":16,\"name\":\"Montre 8'\",\"manual\":\"First Manual\",\"midx\":1,\"on\":true}"),
             "the bound key drew the stop it names"
         );
 
@@ -1385,8 +1516,8 @@ mod tests {
         let montre = console
             .stop_states()
             .iter()
-            .find(|(_, name, _, _)| *name == "Montre 8'")
-            .map(|(id, _, _, _)| *id)
+            .find(|(_, name, _, _, _)| *name == "Montre 8'")
+            .map(|(id, _, _, _, _)| *id)
             .expect("Montre 8' visible");
         let (stopped, mut noise) = console.set_drawn(montre, true);
         assert!(stopped.is_empty());

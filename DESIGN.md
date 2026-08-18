@@ -190,10 +190,17 @@ also owns its rig's `[midi]` wiring (locked 2026-08-18): device/control
 bindings load from it and interactively learned bindings are written back into
 it (comment-preserving), while plain sets keep wiring in the user config.
 
-Still to come: setup dialogs when several sets load (how manuals combine,
-compasses, couplers) with the choices editable in Preferences and saveable as a
-composite file; per-manual tuning so merged sources can disagree about
-temperament and pitch.
+The console edits the instrument live, and every edit lands in its file:
+declared compasses (`[[manual]] low/high`), stops moved between manuals
+(`[[move]]` — pitch-anchored, replayed after the pulls), couplers taken off the
+console (`[couplers] drop` — hidden and disengaged, never deleted, so always
+restorable), and per-manual tuning (`[[manual]] temperament/a4_hz/transpose`) —
+a 415 meantone Positif against a 440 equal Great is one instrument. Tuning is
+physical: a coupled copy sounds the destination division's pipes, so it speaks
+that division's temperament; a division's transpose moves only its own
+keyboard. When several sets load ad hoc, the console opens its Organ setup to
+ask how they go together, and saving writes the composite file that from then
+on owns the instrument.
 
 ## Milestones
 

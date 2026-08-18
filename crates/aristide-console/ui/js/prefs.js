@@ -110,7 +110,11 @@ export class Preferences {
     this.base = base;
     this.send = send;
     this.dragging = new Set();
-    this.tuning = null;
+    this.tuning = null; // the shared, instrument-wide tuning
+    this.manualTuning = new Map(); // idx -> its own tuning, for divisions tuned apart
+    this.tuningTarget = null; // null = whole instrument, else a manual idx
+    this.tuningTargetSignature = null;
+    this.displayed = null; // whichever tuning the fields currently show
     this.midiSignature = null;
     this.learning = null;
     this.controlsSignature = null;
@@ -130,6 +134,8 @@ export class Preferences {
       organSaveBtn: root.getElementById("organ-save-btn"),
       organSaveError: root.getElementById("organ-save-error"),
       organCompass: root.getElementById("organ-compass"),
+      organStops: root.getElementById("organ-stops"),
+      organCouplers: root.getElementById("organ-couplers"),
       manuals: root.getElementById("midi-manuals"),
       ports: root.getElementById("midi-ports"),
       unassigned: root.getElementById("midi-unassigned"),
@@ -137,6 +143,9 @@ export class Preferences {
       controlsList: root.getElementById("controls-list"),
       controlsAdd: root.getElementById("controls-add"),
       controlsKeyboard: root.getElementById("controls-keyboard"),
+      tuningTarget: root.getElementById("tuning-target"),
+      tuningTargetRow: root.getElementById("tuning-target-row"),
+      tuningReset: root.getElementById("tuning-reset"),
       temperament: root.getElementById("set-temperament"),
       a4: root.getElementById("set-a4"),
       temperamentRow: root.getElementById("temperament-row"),
@@ -228,7 +237,7 @@ export class Preferences {
     this.refreshOrgan(snapshot);
     this.refreshMidi(snapshot);
     this.refreshControls(snapshot);
-    this.refreshTuning(snapshot.tuning);
+    this.refreshTuning(snapshot);
     this.refreshSound(snapshot);
 
     // An organ combined ad hoc on the command line has nobody to ask "how
@@ -627,17 +636,39 @@ export class Preferences {
   }
 
   // ---- tuning ------------------------------------------------------------
+  //
+  // Most organs have one tuning for the whole instrument; a division can
+  // be pulled apart from it and tuned on its own. The DIVISION picker
+  // just decides which tuning the fields below are looking at right
+  // now — it is never itself sent anywhere. Every field send carries
+  // `manual` when a division is picked, so it lands on that division's
+  // own tuning rather than the instrument's.
 
   wireTuning() {
+    this.el.tuningTarget.addEventListener("change", () => {
+      this.tuningTarget =
+        this.el.tuningTarget.value === "" ? null : Number(this.el.tuningTarget.value);
+      this.syncTuningDisplay();
+    });
+
+    this.el.tuningReset.addEventListener("click", () => {
+      if (this.tuningTarget == null) return;
+      this.send(commands.tuning({ manual: this.tuningTarget, reset: 1 }));
+    });
+
     this.el.temperament.addEventListener("change", () => {
-      this.send(commands.tuning({ temperament: this.el.temperament.value }));
+      const fields = { temperament: this.el.temperament.value };
+      if (this.tuningTarget != null) fields.manual = this.tuningTarget;
+      this.send(commands.tuning(fields));
       this.el.temperament.blur(); // hand the field back to the snapshot
     });
 
     this.el.a4.addEventListener("change", () => {
       const a4 = Math.min(500, Math.max(300, Number(this.el.a4.value) || 440));
       this.el.a4.value = a4;
-      this.send(commands.tuning({ a4 }));
+      const fields = { a4 };
+      if (this.tuningTarget != null) fields.manual = this.tuningTarget;
+      this.send(commands.tuning(fields));
       this.el.a4.blur();
     });
 
@@ -646,34 +677,92 @@ export class Preferences {
       [this.el.transposeUp, +1],
     ]) {
       button.addEventListener("click", () => {
-        const at = this.tuning?.transpose ?? 0;
+        const at = this.displayed?.transpose ?? 0;
         const transpose = Math.min(12, Math.max(-12, at + step));
         if (transpose === at) return;
         // Optimistic, so rapid clicks step from the value just sent
         // rather than the last poll.
-        if (this.tuning) this.tuning = { ...this.tuning, transpose };
+        this.displayed = { ...this.displayed, transpose };
         this.el.transposeValue.textContent =
           transpose > 0 ? `+${transpose}` : `${transpose}`;
-        this.send(commands.tuning({ transpose }));
+        const fields = { transpose };
+        if (this.tuningTarget != null) fields.manual = this.tuningTarget;
+        this.send(commands.tuning(fields));
       });
     }
   }
 
-  /// Mirrors the snapshot except into inputs the user is touching right
-  /// now: a focused field or a mid-drag slider keeps its local value
-  /// until the pointer lets go.
-  refreshTuning(tuning) {
-    this.tuning = tuning ?? null;
-    for (const row of [this.el.temperamentRow, this.el.pitchRow, this.el.transposeRow]) {
+  /// A division with no tuning of its own simply plays the instrument's —
+  /// that's what "effective" means here, and it's what the fields show
+  /// until the player gives the division one.
+  effectiveTuning(target) {
+    if (target == null) return this.tuning;
+    return this.manualTuning.get(target) ?? this.tuning;
+  }
+
+  /// Mirrors whichever tuning the DIVISION picker currently points at,
+  /// except into inputs the user is touching right now: a focused field
+  /// keeps its local value until it's blurred.
+  syncTuningDisplay() {
+    this.displayed = this.effectiveTuning(this.tuningTarget);
+    this.el.tuningReset.classList.toggle(
+      "hidden",
+      !(this.tuningTarget != null && this.manualTuning.has(this.tuningTarget))
+    );
+    if (!this.displayed) return;
+    if (this.root.activeElement !== this.el.temperament) {
+      this.el.temperament.value = this.displayed.temperament;
+    }
+    if (this.root.activeElement !== this.el.a4) this.el.a4.value = this.displayed.a4;
+    this.el.transposeValue.textContent =
+      this.displayed.transpose > 0 ? `+${this.displayed.transpose}` : `${this.displayed.transpose}`;
+  }
+
+  /// The picker's option list: "Whole instrument" plus one entry per
+  /// manual, marked when that manual already has tuning of its own.
+  /// Rebuilt only when the roster or those marks change.
+  buildTuningTargets(manuals) {
+    const kept = this.tuningTarget;
+    this.el.tuningTarget.replaceChildren();
+    this.el.tuningTarget.append(this.option("", "Whole instrument"));
+    for (const manual of manuals) {
+      const mark = this.manualTuning.has(manual.idx) ? " •" : "";
+      this.el.tuningTarget.append(this.option(String(manual.idx), `${manual.name}${mark}`));
+    }
+    this.el.tuningTarget.value = kept == null ? "" : String(kept);
+  }
+
+  refreshTuning(snapshot) {
+    const tuning = snapshot.tuning ?? null;
+    this.tuning = tuning;
+    this.manualTuning = new Map((snapshot.manual_tuning ?? []).map((t) => [t.idx, t]));
+
+    for (const row of [
+      this.el.tuningTargetRow, this.el.temperamentRow, this.el.pitchRow, this.el.transposeRow,
+    ]) {
       row.classList.toggle("hidden", !tuning);
     }
     if (!tuning) return;
-    if (this.root.activeElement !== this.el.temperament) {
-      this.el.temperament.value = tuning.temperament;
+
+    const manuals = snapshot.manuals ?? [];
+    const signature = JSON.stringify([
+      manuals.map((m) => [m.idx, m.name]),
+      [...this.manualTuning.keys()].sort((a, b) => a - b),
+    ]);
+    if (signature !== this.tuningTargetSignature) {
+      this.tuningTargetSignature = signature;
+      this.buildTuningTargets(manuals);
     }
-    if (this.root.activeElement !== this.el.a4) this.el.a4.value = tuning.a4;
-    this.el.transposeValue.textContent =
-      tuning.transpose > 0 ? `+${tuning.transpose}` : `${tuning.transpose}`;
+
+    // The division being looked at can vanish out from under the player
+    // — a different organ loads, or that manual is gone. Whole
+    // instrument is always a safe fallback.
+    if (this.tuningTarget != null && !manuals.some((m) => m.idx === this.tuningTarget)) {
+      this.tuningTarget = null;
+      if (this.root.activeElement !== this.el.tuningTarget) this.el.tuningTarget.value = "";
+    }
+
+    this.syncTuningDisplay();
   }
 
   // ---- sound --------------------------------------------------------------
@@ -750,6 +839,8 @@ export class Preferences {
         c.idx, c.low, c.high, c.native_low, c.native_high, c.declared,
       ]),
       manuals.map((m) => [m.idx, m.name]),
+      (snapshot.stops ?? []).map((s) => [s.id, s.name, s.midx]),
+      (snapshot.couplers ?? []).map((c) => [c.idx, c.name, !!c.hidden]),
     ]);
     if (signature === this.organSignature) return;
     this.organSignature = signature;
@@ -758,6 +849,8 @@ export class Preferences {
     this.buildOrganSummary(snapshot, setup);
     this.buildOrganSave(setup);
     this.buildOrganCompass(setup, manuals);
+    this.buildOrganStops(snapshot, manuals);
+    this.buildOrganCouplers(snapshot);
   }
 
   buildOrganSummary(snapshot, setup) {
@@ -887,6 +980,120 @@ export class Preferences {
 
     wrap.append(input, note);
     return { wrap, input };
+  }
+
+  // ---- organ stops --------------------------------------------------------
+  //
+  // Grouped by the manual whose division actually plays them (`midx`),
+  // not by whichever jamb they were drawn on when their set loaded —
+  // that's the whole point of being able to move one. A stop reporting
+  // an out-of-range `midx` (a set whose manual didn't survive the
+  // combination) is treated as unassigned rather than guessed at.
+
+  buildOrganStops(snapshot, manuals) {
+    this.el.organStops.replaceChildren();
+    const stops = snapshot.stops ?? [];
+    if (!stops.length) {
+      this.el.organStops.append(this.emptyNote("No stops on this organ."));
+      return;
+    }
+    const manualByIdx = new Map(manuals.map((m) => [m.idx, m]));
+    const groups = new Map(); // manual idx (or null, unassigned) -> stops
+    for (const stop of stops) {
+      const manual = manualByIdx.get(stop.midx);
+      const key = manual ? manual.idx : null;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(stop);
+    }
+    for (const manual of manuals) {
+      const group = groups.get(manual.idx);
+      if (group) {
+        this.el.organStops.append(this.organStopGroup(manual.name, group, manual.idx, manuals));
+      }
+    }
+    const unassigned = groups.get(null);
+    if (unassigned) {
+      this.el.organStops.append(this.organStopGroup("Unassigned", unassigned, null, manuals));
+    }
+  }
+
+  organStopGroup(title, stops, currentIdx, manuals) {
+    const group = document.createElement("div");
+    group.className = "organ-stop-group";
+    const heading = document.createElement("h3");
+    heading.className = "organ-stop-group-title";
+    heading.textContent = title;
+    group.append(heading);
+    for (const stop of stops) group.append(this.organStopRow(stop, currentIdx, manuals));
+    return group;
+  }
+
+  /// A stop's name plus a select of the *other* manuals — choosing one
+  /// moves it there. Nothing to type, nothing to blur: picking an
+  /// option closes the dropdown itself, so committing on `change` alone
+  /// is enough to never fight a mid-poll rebuild.
+  organStopRow(stop, currentIdx, manuals) {
+    const row = document.createElement("div");
+    row.className = "organ-stop-row";
+
+    const name = document.createElement("span");
+    name.className = "organ-stop-name";
+    name.textContent = stop.name;
+    name.title = stop.name;
+    row.append(name);
+
+    const move = document.createElement("select");
+    move.className = "organ-stop-move";
+    move.append(this.option("", "Move to…"));
+    for (const manual of manuals) {
+      if (manual.idx === currentIdx) continue;
+      move.append(this.option(String(manual.idx), manual.name));
+    }
+    move.value = "";
+    move.addEventListener("change", () => {
+      if (move.value === "") return;
+      this.send(commands.organMove(stop.id, Number(move.value)));
+    });
+    row.append(move);
+
+    return row;
+  }
+
+  // ---- organ couplers -------------------------------------------------------
+  //
+  // The rail only ever shows the couplers currently on the console; this
+  // is the one place every coupler the organ has, hidden ones included,
+  // so one can be brought back after being taken off.
+
+  buildOrganCouplers(snapshot) {
+    this.el.organCouplers.replaceChildren();
+    const couplers = snapshot.couplers ?? [];
+    if (!couplers.length) {
+      this.el.organCouplers.append(this.emptyNote("No couplers on this organ."));
+      return;
+    }
+    for (const coupler of couplers) this.el.organCouplers.append(this.organCouplerRow(coupler));
+  }
+
+  organCouplerRow(coupler) {
+    const row = document.createElement("label");
+    row.className = "organ-coupler-row";
+
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = !coupler.hidden;
+    checkbox.setAttribute("aria-label", `${coupler.name} on the console`);
+    checkbox.addEventListener("change", () =>
+      this.send(commands.organCoupler(coupler.idx, checkbox.checked))
+    );
+    row.append(checkbox);
+
+    const name = document.createElement("span");
+    name.className = "organ-coupler-name";
+    name.textContent = coupler.name;
+    row.append(name);
+
+    return row;
   }
 
   /// Saving bypasses the usual send()/poll flow: every other command's

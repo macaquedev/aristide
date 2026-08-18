@@ -40,7 +40,15 @@ pub struct Console {
     drawn: Vec<StopId>,
     /// Engaged couplers, as indices into `organ.couplers`.
     engaged_couplers: Vec<usize>,
+    /// Per coupler: still on the console? Picked in the Organ setup —
+    /// an unavailable coupler is disengaged and hidden, never deleted,
+    /// so it can come back without reloading the set.
+    available_couplers: Vec<bool>,
     tuning: Tuning,
+    /// Per manual index: a tuning of that division's own, overriding
+    /// the console's — a 415 Hz meantone Positif against a 440 equal
+    /// Great in one instrument.
+    manual_tuning: Vec<Option<Tuning>>,
     /// Stops classified as control noises (drawstop thumps etc.) —
     /// hidden from UIs, triggered by the control they belong to.
     noise_stops: Vec<StopId>,
@@ -123,7 +131,9 @@ impl Console {
             couplers_repitch: false,
             compass,
             engaged_couplers: Vec::new(),
+            available_couplers: Vec::new(),
             tuning: Tuning::default(),
+            manual_tuning: Vec::new(),
             noise_stops: Vec::new(),
             stop_noise: HashMap::new(),
             coupler_noise: HashMap::new(),
@@ -153,7 +163,10 @@ impl Console {
     /// inside. Noise stops don't count — a drawstop thump rank on an
     /// effects chest must not capture a pedal.
     fn map_enclosures(&mut self) {
-        self.enclosure_positions = vec![1.0; self.organ.enclosures.len()];
+        // Re-mapping (a stop moved) must not slam every box open.
+        if self.enclosure_positions.len() != self.organ.enclosures.len() {
+            self.enclosure_positions = vec![1.0; self.organ.enclosures.len()];
+        }
         self.manual_enclosures = vec![Vec::new(); self.organ.manuals.len()];
         let max = aristide_engine::enclosure::MAX_ENCLOSURES as u32;
         for stop in &self.organ.stops {
@@ -351,6 +364,35 @@ impl Console {
 
     pub fn tuning(&self) -> Tuning {
         self.tuning
+    }
+
+    /// Give one division a tuning of its own, or with `None` return it
+    /// to the console's. Applies from the next note on; held voices
+    /// keep the pitch they started at, like pipes mid-speech.
+    pub fn set_manual_tuning(&mut self, manual_index: usize, tuning: Option<Tuning>) {
+        if manual_index >= self.organ.manuals.len() {
+            return;
+        }
+        if self.manual_tuning.len() < self.organ.manuals.len() {
+            self.manual_tuning.resize(self.organ.manuals.len(), None);
+        }
+        self.manual_tuning[manual_index] = tuning;
+    }
+
+    pub fn manual_tuning(&self, manual_index: usize) -> Option<Tuning> {
+        self.manual_tuning.get(manual_index).copied().flatten()
+    }
+
+    /// The tuning a division actually plays under: its own, else the
+    /// console's. Couplers make this physical — a coupled copy sounds
+    /// the destination's pipes, and pipes are tuned where they stand,
+    /// so the copy speaks in the destination's temperament.
+    fn effective_tuning(&self, manual_index: usize) -> Tuning {
+        self.manual_tuning
+            .get(manual_index)
+            .copied()
+            .flatten()
+            .unwrap_or(self.tuning)
     }
 
     /// Expand one played key through the engaged couplers' routes into
@@ -617,8 +659,10 @@ impl Console {
             return Vec::new();
         };
         // The transposer shifts which pipes sound, like the console
-        // gadget; temperament + concert pitch then retune each pipe.
-        let played = key as i16 + self.tuning.transpose as i16;
+        // gadget — the *played* division's transpose, since it is the
+        // keyboard that shifts; temperament + concert pitch retune each
+        // pipe where it lands.
+        let played = key as i16 + self.effective_tuning(manual_index).transpose as i16;
         let mut voices = Vec::new();
         // Each landing carries its own policies: the played key fills
         // (repitching serves the player's keyboard) inside the compass;
@@ -667,7 +711,7 @@ impl Console {
                         stop.id,
                         range.rank,
                         nominal,
-                        self.voiced(*spec, ratio, midi_key),
+                        self.voiced(*spec, ratio, midi_key, target),
                     ));
                 }
             }
@@ -677,14 +721,18 @@ impl Console {
 
     /// A pipe's spec as it must sound for one key: the scale's own
     /// deviation for that key, times the repitching ratio when the pipe
-    /// is standing in for one the rank hasn't got.
+    /// is standing in for one the rank hasn't got. The scale is the
+    /// *sounding* division's — its pipes, its temperament.
     ///
     /// Everything downstream of pitch has to move with it. Wind draw and
     /// the pressure→brightness hinge are properties of the *sounding*
     /// pitch, not of the recording, so a pipe pressed into service five
     /// semitones up draws wind like the pipe it is imitating.
-    fn voiced(&self, mut spec: VoiceSpec, ratio: f32, midi_key: i16) -> VoiceSpec {
-        spec.rate *= ratio * self.tuning.rate_multiplier(midi_key.clamp(0, 127) as u8);
+    fn voiced(&self, mut spec: VoiceSpec, ratio: f32, midi_key: i16, manual_index: usize) -> VoiceSpec {
+        spec.rate *= ratio
+            * self
+                .effective_tuning(manual_index)
+                .rate_multiplier(midi_key.clamp(0, 127) as u8);
         if ratio != 1.0 {
             let sounding_hz = (spec.nominal_hz * ratio) as f64;
             spec.wind_weight = crate::bank::wind_weight(sounding_hz, spec.percussive);
@@ -875,6 +923,118 @@ impl Console {
         self.engaged_couplers.contains(&index)
     }
 
+    pub fn coupler_available(&self, index: usize) -> bool {
+        self.available_couplers.get(index).copied().unwrap_or(true)
+    }
+
+    /// Keep a coupler on the console or take it off it. Taking it off
+    /// releases it first (with its clack, like any release); the routes
+    /// stay in the organ, so putting it back needs no reload.
+    pub fn set_coupler_available(
+        &mut self,
+        index: usize,
+        available: bool,
+    ) -> (Vec<u64>, Vec<VoiceStart>) {
+        if index >= self.organ.couplers.len() {
+            return (Vec::new(), Vec::new());
+        }
+        if self.available_couplers.len() < self.organ.couplers.len() {
+            self.available_couplers.resize(self.organ.couplers.len(), true);
+        }
+        let released = if !available && self.coupler_engaged(index) {
+            self.set_coupler(index, false)
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        self.available_couplers[index] = available;
+        released
+    }
+
+    /// Move a stop to another manual, re-anchoring its key windows by
+    /// pitch — the key that meant tenor C keeps meaning tenor C — and
+    /// trimming to the destination's key count. A drawn stop is
+    /// retired and redrawn across the move, so held keys release its
+    /// old pipes and (where the destination holds them too) sound its
+    /// new ones.
+    pub fn move_stop(
+        &mut self,
+        stop: StopId,
+        manual_index: usize,
+    ) -> (Vec<u64>, Vec<VoiceStart>) {
+        let Some(target) = self.organ.manuals.get(manual_index) else {
+            return (Vec::new(), Vec::new());
+        };
+        let (target_id, target_first, target_count) = (
+            target.id,
+            target.first_midi_note as i32,
+            target.key_count as i32,
+        );
+        let Some(entry) = self.organ.stops.iter().position(|s| s.id == stop) else {
+            return (Vec::new(), Vec::new());
+        };
+        if self.organ.stops[entry].manual == target_id || self.noise_stops.contains(&stop) {
+            return (Vec::new(), Vec::new());
+        }
+        let was_drawn = self.is_drawn(stop);
+        let (mut stopped, _) = if was_drawn {
+            self.set_drawn(stop, false)
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        let source_first = self
+            .organ
+            .manuals
+            .iter()
+            .find(|m| m.id == self.organ.stops[entry].manual)
+            .map(|m| m.first_midi_note as i32)
+            .unwrap_or(target_first);
+        let shift = source_first - target_first;
+        let moved = &mut self.organ.stops[entry];
+        moved.manual = target_id;
+        moved.ranks = moved
+            .ranks
+            .iter()
+            .filter_map(|range| {
+                let mut first_key = range.first_key as i32 + shift;
+                let mut key_count = range.key_count as i32;
+                let mut first_pipe = range.first_pipe as i32;
+                if first_key < 0 {
+                    first_pipe -= first_key;
+                    key_count += first_key;
+                    first_key = 0;
+                }
+                key_count = key_count.min(target_count - first_key);
+                (key_count > 0).then_some(aristide_model::RankRange {
+                    rank: range.rank,
+                    first_key: first_key as u16,
+                    key_count: key_count as u16,
+                    first_pipe: first_pipe as u16,
+                })
+            })
+            .collect();
+        if self.organ.stops[entry].ranks.is_empty() {
+            tracing::warn!(
+                "moved stop {:?} lies entirely outside its new manual's compass",
+                self.organ.stops[entry].name
+            );
+        }
+        tracing::info!(
+            "stop {:?} moved to {:?}",
+            self.organ.stops[entry].name,
+            self.organ.manuals[manual_index].name
+        );
+        // Expression routing follows the stop to its new division.
+        self.map_enclosures();
+        let starts = if was_drawn {
+            let (also_stopped, starts) = self.set_drawn(stop, true);
+            stopped.extend(also_stopped);
+            starts
+        } else {
+            Vec::new()
+        };
+        (stopped, starts)
+    }
+
     /// Engage or release a coupler by its index in `organ.couplers`.
     /// Takes effect under held notes immediately, as an electric-action
     /// console does (and as drawing a stop mid-hold already did):
@@ -885,6 +1045,7 @@ impl Console {
     pub fn set_coupler(&mut self, index: usize, engaged: bool) -> (Vec<u64>, Vec<VoiceStart>) {
         if index >= self.organ.couplers.len()
             || self.engaged_couplers.contains(&index) == engaged
+            || (engaged && !self.coupler_available(index))
         {
             return (Vec::new(), Vec::new());
         }
@@ -973,8 +1134,8 @@ impl Console {
         stopped
     }
 
-    /// Every coupler with its engaged state, for UIs.
-    pub fn coupler_states(&self) -> Vec<(usize, &str, bool)> {
+    /// Every coupler with its engaged and on-console states, for UIs.
+    pub fn coupler_states(&self) -> Vec<(usize, &str, bool, bool)> {
         self.organ
             .couplers
             .iter()
@@ -984,14 +1145,16 @@ impl Console {
                     index,
                     coupler.name.as_str(),
                     self.engaged_couplers.contains(&index),
+                    self.coupler_available(index),
                 )
             })
             .collect()
     }
 
-    /// Every *playable* stop with its manual name and drawn state, for
-    /// UIs — control noises are hidden (they belong to their controls).
-    pub fn stop_states(&self) -> Vec<(StopId, &str, &str, bool)> {
+    /// Every *playable* stop with its manual (name and index) and drawn
+    /// state, for UIs — control noises are hidden (they belong to
+    /// their controls).
+    pub fn stop_states(&self) -> Vec<(StopId, &str, &str, usize, bool)> {
         self.organ
             .stops
             .iter()
@@ -1001,13 +1164,14 @@ impl Console {
                     .organ
                     .manuals
                     .iter()
-                    .find(|m| m.id == stop.manual)
-                    .map(|m| m.name.as_str())
-                    .unwrap_or("?");
+                    .position(|m| m.id == stop.manual);
                 (
                     stop.id,
                     stop.name.as_str(),
-                    manual,
+                    manual
+                        .map(|index| self.organ.manuals[index].name.as_str())
+                        .unwrap_or("?"),
+                    manual.unwrap_or(usize::MAX),
                     self.drawn.contains(&stop.id),
                 )
             })
@@ -1876,6 +2040,87 @@ mod tests {
         // compass edge: 96 + 2 is out of range → silent.
         console.note_off_manual(0, 60);
         assert!(console.note_on_manual(0, 96).0.is_empty(), "96+2 exceeds compass");
+    }
+
+    /// One instrument, two pitches: the Swell tuned apart speaks its
+    /// own temperament even when a coupler reaches it from the Great —
+    /// pipes are tuned where they stand. And a per-division transpose
+    /// moves only its own keyboard.
+    #[test]
+    fn a_division_can_be_tuned_apart() {
+        let mut console = coupled_console();
+        console.set_manual_tuning(
+            1,
+            Some(crate::tuning::Tuning {
+                temperament: crate::tuning::Temperament::Meantone4,
+                a4_hz: 440.0,
+                transpose: 0,
+            }),
+        );
+        console.set_coupler(0, true); // II/I: playing the Great adds the Swell
+        let (starts, _) = console.note_on_manual(0, 60);
+        assert_eq!(starts.len(), 2);
+        let mut rates: Vec<f32> = starts.iter().map(|s| s.spec.rate).collect();
+        rates.sort_by(f32::total_cmp);
+        let meantone_c = (10.265f32 / 1200.0).exp2();
+        assert!((rates[0] - 1.0).abs() < 1e-6, "Great stays equal: {rates:?}");
+        assert!(
+            (rates[1] - meantone_c).abs() < 1e-4,
+            "coupled copy speaks the Swell's meantone: {rates:?}"
+        );
+        console.note_off_manual(0, 60);
+        console.set_coupler(0, false);
+
+        console.set_manual_tuning(
+            0,
+            Some(crate::tuning::Tuning {
+                temperament: crate::tuning::Temperament::Equal,
+                a4_hz: 440.0,
+                transpose: 2,
+            }),
+        );
+        assert!(console.note_on_manual(0, 96).0.is_empty(), "96+2 runs off the Great");
+        assert_eq!(console.note_on_manual(1, 96).0.len(), 1, "the Swell is unmoved");
+        // Back on the shared tuning, the Great answers again.
+        console.set_manual_tuning(0, None);
+        assert_eq!(console.note_on_manual(0, 96).0.len(), 1);
+    }
+
+    /// Moving a stop re-homes it mid-hold: the key holding its new
+    /// manual picks it up, its old manual gives it up.
+    #[test]
+    fn moving_a_stop_rehomes_it_under_held_keys() {
+        let mut console = coupled_console();
+        let (starts, _) = console.note_on_manual(0, 60);
+        assert_eq!(starts.len(), 1, "only the Great's own stop");
+        let (stopped, starts) = console.move_stop(StopId(2), 0);
+        assert!(stopped.is_empty(), "nothing sounded on the Swell");
+        assert_eq!(starts.len(), 1, "the moved stop speaks under the held key");
+        assert!(console.note_on_manual(1, 62).0.is_empty(), "the Swell gave it up");
+        assert_eq!(console.note_off_manual(0, 60).len(), 2);
+        assert_eq!(console.stop_states()[1].3, 0, "stop 2 reports the Great");
+    }
+
+    /// A coupler taken off the console releases, hides, and refuses
+    /// engagement — and comes back whole when restored.
+    #[test]
+    fn a_coupler_off_the_console_stays_restorable() {
+        let mut console = coupled_console();
+        console.set_coupler(0, true);
+        assert_eq!(console.note_on_manual(0, 60).0.len(), 2);
+        console.note_off_manual(0, 60);
+
+        console.set_coupler_available(0, false);
+        assert!(!console.coupler_engaged(0));
+        assert!(!console.coupler_states()[0].3);
+        assert_eq!(console.note_on_manual(0, 60).0.len(), 1);
+        console.note_off_manual(0, 60);
+        console.set_coupler(0, true);
+        assert!(!console.coupler_engaged(0), "off the console means unpullable");
+
+        console.set_coupler_available(0, true);
+        console.set_coupler(0, true);
+        assert_eq!(console.note_on_manual(0, 60).0.len(), 2);
     }
 
     #[test]

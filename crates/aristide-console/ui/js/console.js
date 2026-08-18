@@ -63,7 +63,7 @@ export class Console {
     const signature = JSON.stringify([
       snapshot.organ,
       snapshot.stops.map((s) => [s.id, s.name, s.manual]),
-      snapshot.couplers.map((c) => c.name),
+      snapshot.couplers.map((c) => [c.name, !!c.hidden]),
       snapshot.manuals.map((m) => [m.name, m.first_key, m.key_count]),
       snapshot.enclosures.filter((e) => e.displayed).map((e) => e.name),
       snapshot.reverb != null,
@@ -172,7 +172,9 @@ export class Console {
 
   buildCouplers(snapshot) {
     this.el.couplers.replaceChildren();
-    for (const coupler of snapshot.couplers) {
+    // A coupler taken off the console (see the Organ tab) is disengaged,
+    // not deleted — it simply doesn't get a tablet on the rail.
+    for (const coupler of snapshot.couplers.filter((c) => !c.hidden)) {
       const rocker = document.createElement("button");
       rocker.className = "rocker";
       rocker.dataset.key = `coupler-${coupler.idx}`;

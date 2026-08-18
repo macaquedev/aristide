@@ -28,6 +28,10 @@ export const commands = {
   noises: (on, vol) => `/api/noises?on=${on ? 1 : 0}&vol=${vol}`,
   // Partial updates: the server only applies the params present, so a
   // temperament change never has to re-send pitch or transposition.
+  // `fields.manual`, when given, tunes that division apart from the
+  // instrument rather than the whole organ; `fields.reset: 1` alongside
+  // a manual drops that division's own tuning and goes back to sharing
+  // the instrument's.
   tuning: (fields) => `/api/tuning?${new URLSearchParams(fields)}`,
   enclosure: (idx, value) => `/api/enclosure?idx=${idx}&v=${value}`,
   // Input routing, manual first: this manual listens to that input.
@@ -82,6 +86,12 @@ export const commands = {
   // loads the same way next time instead of being re-assembled from the
   // command line.
   organSave: (path) => `/api/organ/save?path=${encodeURIComponent(path)}`,
+  // Reassigns a stop to a different manual's division.
+  organMove: (stopId, manual) => `/api/organ/move?stop=${stopId}&manual=${manual}`,
+  // Takes a coupler off the console (keep=0) or restores it (keep=1) —
+  // distinct from the rail's own on/off, which only engages a coupler
+  // that's already on the console.
+  organCoupler: (idx, keep) => `/api/organ/coupler?idx=${idx}&keep=${keep ? 1 : 0}`,
 };
 
 /// Start the client. Calls `onState(snapshot)` for every fresh snapshot

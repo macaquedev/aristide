@@ -621,6 +621,61 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
 .compass-field input[type="number"] { width: 58px; }
 .compass-field i { font-style: normal; font-size: 10.5px; color: var(--text-dim); min-width: 26px; }
 
+/* stops grouped under the manual whose division plays them */
+.organ-stops { display: flex; flex-direction: column; gap: 14px; }
+
+.organ-stop-group { display: flex; flex-direction: column; gap: 6px; }
+
+.organ-stop-group-title {
+  margin: 0;
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.organ-stop-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.organ-stop-name {
+  min-width: 0;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.organ-stop-move { flex: 0 0 auto; max-width: 160px; }
+
+/* every coupler, hidden ones included — the console rail only ever
+   shows the checked ones */
+.organ-couplers { display: flex; flex-direction: column; gap: 6px; }
+
+.organ-coupler-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  cursor: pointer;
+}
+
+.organ-coupler-name { font-size: 12px; }
+
+/* the division picker atop the tuning pane */
+.tuning-target-field { display: flex; align-items: center; gap: 8px; }
+
 .about-card { width: min(420px, 100%); height: auto; }
 .about-body { display: block; padding: 18px 20px 22px; font-size: 12.5px; line-height: 1.6; }
 .about-body p { margin: 0 0 10px; }

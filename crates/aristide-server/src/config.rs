@@ -381,17 +381,30 @@ pub fn write_composite_midi(path: &Path, organ: Option<&OrganConfig>) -> Result<
     std::fs::rename(&temporary, path).map_err(|err| format!("{}: {err}", path.display()))
 }
 
+/// One manual as `save_composite` writes it: name, compass, and any
+/// tuning of its own as (temperament name, a4 Hz, transpose).
+pub struct SavedManual {
+    pub name: String,
+    pub low: u8,
+    pub high: u8,
+    pub tuning: Option<(String, f64, i8)>,
+}
+
 /// Write a combined instrument as a composite organ file: sources by
-/// alias, every manual declared with its compass, and the division
-/// pulls that rebuild it. `[midi]` wiring is written separately (the
-/// caller follows with `write_composite_midi`), and the sidecar-style
-/// sections are the player's to add by hand.
+/// alias, every manual declared with its compass (and its own tuning
+/// where it has one), the division pulls that rebuild it, the stop
+/// moves on top of them, and the couplers taken off the console.
+/// `[midi]` wiring is written separately (the caller follows with
+/// `write_composite_midi`), and the sidecar-style sections are the
+/// player's to add by hand.
 pub fn save_composite(
     path: &Path,
     name: &str,
     sources: &[(String, PathBuf)],
-    manuals: &[(String, u8, u8)],
+    manuals: &[SavedManual],
     pulls: &[(usize, String, usize)],
+    moves: &[(String, String, String)],
+    dropped_couplers: &[String],
 ) -> Result<(), String> {
     let mut doc = toml_edit::DocumentMut::new();
     doc["name"] = toml_edit::value(name);
@@ -406,26 +419,52 @@ pub fn save_composite(
     }
     doc["sources"] = toml_edit::Item::Table(table);
     let mut manual_tables = toml_edit::ArrayOfTables::new();
-    for (manual, low, high) in manuals {
+    for manual in manuals {
         let mut table = toml_edit::Table::new();
-        table["name"] = toml_edit::value(manual.as_str());
-        table["low"] = toml_edit::value(*low as i64);
-        table["high"] = toml_edit::value(*high as i64);
+        table["name"] = toml_edit::value(manual.name.as_str());
+        table["low"] = toml_edit::value(manual.low as i64);
+        table["high"] = toml_edit::value(manual.high as i64);
+        if let Some((temperament, a4, transpose)) = &manual.tuning {
+            table["temperament"] = toml_edit::value(temperament.as_str());
+            table["a4_hz"] = toml_edit::value(*a4);
+            table["transpose"] = toml_edit::value(*transpose as i64);
+        }
         manual_tables.push(table);
     }
     doc["manual"] = toml_edit::Item::ArrayOfTables(manual_tables);
     let mut division_tables = toml_edit::ArrayOfTables::new();
     for (source, source_manual, target) in pulls {
-        let Some((manual, _, _)) = manuals.get(*target) else {
+        let Some(manual) = manuals.get(*target) else {
             continue;
         };
         let mut table = toml_edit::Table::new();
         table["from"] = toml_edit::value(alias(*source));
         table["manual"] = toml_edit::value(source_manual.as_str());
-        table["on"] = toml_edit::value(manual.as_str());
+        table["on"] = toml_edit::value(manual.name.as_str());
         division_tables.push(table);
     }
     doc["division"] = toml_edit::Item::ArrayOfTables(division_tables);
+    if !moves.is_empty() {
+        let mut move_tables = toml_edit::ArrayOfTables::new();
+        for (stop, from, to) in moves {
+            let mut table = toml_edit::Table::new();
+            table["stop"] = toml_edit::value(stop.as_str());
+            table["from"] = toml_edit::value(from.as_str());
+            table["to"] = toml_edit::value(to.as_str());
+            move_tables.push(table);
+        }
+        doc["move"] = toml_edit::Item::ArrayOfTables(move_tables);
+    }
+    if !dropped_couplers.is_empty() {
+        let mut couplers = toml_edit::Table::new();
+        couplers["drop"] = toml_edit::value(
+            dropped_couplers
+                .iter()
+                .map(|name| name.as_str())
+                .collect::<toml_edit::Array>(),
+        );
+        doc["couplers"] = toml_edit::Item::Table(couplers);
+    }
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent).map_err(|err| format!("{}: {err}", parent.display()))?;
     }
@@ -443,6 +482,46 @@ pub fn write_composite_compass(
     manual: &str,
     compass: Option<(u8, u8)>,
 ) -> Result<bool, String> {
+    edit_composite_manual(path, manual, |table| match compass {
+        Some((low, high)) => {
+            table["low"] = toml_edit::value(low as i64);
+            table["high"] = toml_edit::value(high as i64);
+        }
+        None => {
+            table.remove("low");
+            table.remove("high");
+        }
+    })
+}
+
+/// Update (or with `None` remove) one declared manual's own tuning in
+/// a composite file. `Ok(false)` when the file declares no such manual.
+pub fn write_composite_manual_tuning(
+    path: &Path,
+    manual: &str,
+    tuning: Option<(String, f64, i8)>,
+) -> Result<bool, String> {
+    edit_composite_manual(path, manual, |table| match &tuning {
+        Some((temperament, a4, transpose)) => {
+            table["temperament"] = toml_edit::value(temperament.as_str());
+            table["a4_hz"] = toml_edit::value(*a4);
+            table["transpose"] = toml_edit::value(*transpose as i64);
+        }
+        None => {
+            table.remove("temperament");
+            table.remove("a4_hz");
+            table.remove("transpose");
+        }
+    })
+}
+
+/// Apply one edit to a named `[[manual]]` table of a composite file,
+/// comment-preservingly. `Ok(false)` when no such manual is declared.
+fn edit_composite_manual(
+    path: &Path,
+    manual: &str,
+    edit: impl FnOnce(&mut toml_edit::Table),
+) -> Result<bool, String> {
     let text =
         std::fs::read_to_string(path).map_err(|err| format!("{}: {err}", path.display()))?;
     let mut doc: toml_edit::DocumentMut =
@@ -458,21 +537,70 @@ pub fn write_composite_compass(
     }) else {
         return Ok(false);
     };
-    match compass {
-        Some((low, high)) => {
-            table["low"] = toml_edit::value(low as i64);
-            table["high"] = toml_edit::value(high as i64);
-        }
-        None => {
-            table.remove("low");
-            table.remove("high");
-        }
-    }
-    let temporary = path.with_extension("toml.tmp");
-    std::fs::write(&temporary, doc.to_string())
-        .map_err(|err| format!("{}: {err}", temporary.display()))?;
-    std::fs::rename(&temporary, path).map_err(|err| format!("{}: {err}", path.display()))?;
+    edit(table);
+    write_atomically(path, doc.to_string())?;
     Ok(true)
+}
+
+/// Append one `[[move]]` to a composite file: this stop, from this
+/// manual, to that one. Appending (rather than rewriting the list)
+/// keeps chains replayable — a stop moved twice moves twice.
+pub fn append_composite_move(
+    path: &Path,
+    stop: &str,
+    from: &str,
+    to: &str,
+) -> Result<(), String> {
+    let text =
+        std::fs::read_to_string(path).map_err(|err| format!("{}: {err}", path.display()))?;
+    let mut doc: toml_edit::DocumentMut =
+        text.parse().map_err(|err| format!("{}: {err}", path.display()))?;
+    let moves = doc
+        .entry("move")
+        .or_insert(toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new()));
+    let Some(moves) = moves.as_array_of_tables_mut() else {
+        return Err("[[move]] is not an array of tables".into());
+    };
+    let mut table = toml_edit::Table::new();
+    table["stop"] = toml_edit::value(stop);
+    table["from"] = toml_edit::value(from);
+    table["to"] = toml_edit::value(to);
+    moves.push(table);
+    write_atomically(path, doc.to_string())
+}
+
+/// Replace the `[couplers] drop` list of a composite file with the
+/// couplers currently off the console; an empty pick removes the key.
+pub fn write_composite_drops(path: &Path, dropped: &[String]) -> Result<(), String> {
+    let text =
+        std::fs::read_to_string(path).map_err(|err| format!("{}: {err}", path.display()))?;
+    let mut doc: toml_edit::DocumentMut =
+        text.parse().map_err(|err| format!("{}: {err}", path.display()))?;
+    let couplers = doc
+        .entry("couplers")
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+    let Some(couplers) = couplers.as_table_mut() else {
+        return Err("[couplers] is not a table".into());
+    };
+    couplers.set_implicit(true);
+    if dropped.is_empty() {
+        couplers.remove("drop");
+    } else {
+        couplers["drop"] = toml_edit::value(
+            dropped
+                .iter()
+                .map(|name| name.as_str())
+                .collect::<toml_edit::Array>(),
+        );
+    }
+    write_atomically(path, doc.to_string())
+}
+
+fn write_atomically(path: &Path, body: String) -> Result<(), String> {
+    let temporary = path.with_extension("toml.tmp");
+    std::fs::write(&temporary, body)
+        .map_err(|err| format!("{}: {err}", temporary.display()))?;
+    std::fs::rename(&temporary, path).map_err(|err| format!("{}: {err}", path.display()))
 }
 
 #[cfg(test)]

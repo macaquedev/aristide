@@ -96,6 +96,8 @@ pub struct Definition {
     pub divisions: Vec<DivisionPull>,
     #[serde(default, rename = "stop")]
     pub stops: Vec<StopPull>,
+    #[serde(default, rename = "move")]
+    pub moves: Vec<MoveDef>,
     #[serde(default)]
     pub midi: MidiDef,
     #[serde(default)]
@@ -117,13 +119,31 @@ pub struct Definition {
 }
 
 /// A manual declared by the composite. Compass is optional: omitted,
-/// it wraps exactly what lands on the manual.
+/// it wraps exactly what lands on the manual. A manual may also carry
+/// a tuning of its own — temperament, concert pitch, transpose — so
+/// merged sources can disagree about pitch (415 meantone against 440
+/// equal); fields left out follow the instrument-wide `[tuning]`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ManualDef {
     pub name: String,
     pub low: Option<KeySpec>,
     pub high: Option<KeySpec>,
+    pub temperament: Option<String>,
+    pub a4_hz: Option<f64>,
+    pub transpose: Option<i8>,
+}
+
+/// Move one stop between manuals, after all pulls: the stop named on
+/// `from` lands on `to`, re-anchored by pitch. This is how the console
+/// persists "move this stop" without rewriting the pulls that brought
+/// it in.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MoveDef {
+    pub stop: String,
+    pub from: String,
+    pub to: String,
 }
 
 /// Pull a whole division: every stop of one source manual.
@@ -223,6 +243,11 @@ impl Definition {
     }
 }
 
+/// One declared manual's own tuning: (manual index, temperament name,
+/// a4 Hz, transpose), each `None` meaning "follow the instrument-wide
+/// `[tuning]`".
+pub type ManualTuningDef = (usize, Option<String>, Option<f64>, Option<i8>);
+
 #[derive(Debug)]
 pub struct Assembled {
     pub organ: Organ,
@@ -238,6 +263,9 @@ pub struct Assembled {
     /// structure in saveable form — a definition file that replays
     /// these pulls rebuilds the same instrument.
     pub division_pulls: Vec<(usize, String, usize)>,
+    /// Declared manuals that carry a tuning of their own. Parsing the
+    /// temperament is the server's business — the format stays a name.
+    pub manual_tuning: Vec<ManualTuningDef>,
     pub warnings: Vec<String>,
 }
 
@@ -412,6 +440,50 @@ pub fn assemble(
             }
         }
     }
+    // Moves come last: whatever the pulls assembled, a [[move]] entry
+    // relocates by name — ranges stay pitch-anchored until `finish`,
+    // so re-anchoring onto the new manual is automatic.
+    for wanted in &def.moves {
+        let from = assembly.find_manual(&wanted.from)?;
+        let to = assembly.find_manual(&wanted.to)?;
+        let on_from: Vec<usize> = assembly
+            .placed
+            .iter()
+            .enumerate()
+            .filter(|(_, stop)| stop.manual == from)
+            .map(|(index, _)| index)
+            .collect();
+        let names: Vec<&str> = on_from
+            .iter()
+            .map(|&index| assembly.placed[index].name.as_str())
+            .collect();
+        let matches = sidecar::match_names(&names, &wanted.stop);
+        if matches.is_empty() {
+            assembly.warnings.push(format!(
+                "move: no stop {:?} on {:?} — skipped",
+                wanted.stop, wanted.from
+            ));
+        }
+        for at in matches {
+            assembly.placed[on_from[at]].manual = to;
+        }
+    }
+    let manual_tuning = def
+        .manuals
+        .iter()
+        .enumerate()
+        .filter(|(_, manual)| {
+            manual.temperament.is_some() || manual.a4_hz.is_some() || manual.transpose.is_some()
+        })
+        .map(|(index, manual)| {
+            (
+                index,
+                manual.temperament.clone(),
+                manual.a4_hz,
+                manual.transpose,
+            )
+        })
+        .collect();
     let organ = assembly.finish(def.name.clone());
     Ok(Assembled {
         organ,
@@ -419,6 +491,7 @@ pub fn assemble(
         midi: def.midi.clone(),
         stop_map: assembly.stop_map,
         division_pulls: assembly.division_pulls,
+        manual_tuning,
         warnings: assembly.warnings,
     })
 }
@@ -939,6 +1012,9 @@ mod tests {
             name: name.into(),
             low: low.map(KeySpec::Number),
             high: high.map(KeySpec::Number),
+            temperament: None,
+            a4_hz: None,
+            transpose: None,
         }
     }
 
@@ -1108,6 +1184,75 @@ mod tests {
             rename: None,
         }];
         assert!(assemble(&definition, &sources, Vec::new()).is_err());
+    }
+
+    /// A [[move]] relocates a pulled stop by name after all pulls,
+    /// with the ranges re-anchored by pitch onto the new manual.
+    #[test]
+    fn moves_relocate_stops_after_pulls() {
+        let sources = vec![("A".to_string(), source("A", "/a"))];
+        let mut definition = def("Rearranged");
+        definition.manuals = vec![
+            manual("Great", Some(36), Some(96)),
+            manual("Solo", Some(48), Some(96)),
+        ];
+        definition.divisions = vec![
+            DivisionPull {
+                from: "A".into(),
+                manual: "Great".into(),
+                on: Some("Great".into()),
+            },
+            DivisionPull {
+                from: "A".into(),
+                manual: "Swell".into(),
+                on: Some("Great".into()),
+            },
+        ];
+        definition.moves = vec![MoveDef {
+            stop: "Hautbois 8".into(),
+            from: "Great".into(),
+            to: "Solo".into(),
+        }];
+        let built = assemble(&definition, &sources, Vec::new()).expect("assembles");
+        let organ = &built.organ;
+        let hautbois = organ.stops.iter().find(|s| s.name == "Hautbois 8").unwrap();
+        assert_eq!(hautbois.manual, organ.manuals[1].id);
+        // Source keys meant MIDI 36..96; Solo starts at 48 — trimmed
+        // and re-anchored, pipes shifted with the cut.
+        assert_eq!(hautbois.ranks[0].first_key, 0);
+        assert_eq!(hautbois.ranks[0].first_pipe, 12);
+        // The Principal stayed home.
+        assert_eq!(organ.stops[0].manual, organ.manuals[0].id);
+    }
+
+    #[test]
+    fn per_manual_tuning_and_coupler_drops_parse() {
+        let text = r#"
+name = "Two pitches"
+
+[sources]
+a = "a.organ"
+
+[[manual]]
+name = "Great"
+
+[[manual]]
+name = "Positif"
+temperament = "meantone"
+a4_hz = 415.0
+
+[couplers]
+drop = ["Swell to Great"]
+"#;
+        let definition: Definition = toml::from_str(text).expect("parses");
+        assert_eq!(definition.couplers.drop, ["Swell to Great"]);
+        let sources = vec![("A".to_string(), source("A", "/a"))];
+        let built = assemble(&definition, &sources, Vec::new()).expect("assembles");
+        assert_eq!(
+            built.manual_tuning,
+            [(1, Some("meantone".to_string()), Some(415.0), None)]
+        );
+        assert_eq!(built.sidecar.couplers.drop, ["Swell to Great"]);
     }
 
     #[test]

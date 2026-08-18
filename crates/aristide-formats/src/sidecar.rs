@@ -78,6 +78,12 @@ pub struct CouplersConfig {
     /// set `unison_off` and `repitch`.
     #[serde(default, rename = "define")]
     pub define: Vec<CouplerDef>,
+    /// Couplers taken off the console, by name pattern — the set (or a
+    /// combination) provides them, this instrument doesn't show them.
+    /// They stay restorable from the console's Organ preferences; this
+    /// never edits the loaded set itself.
+    #[serde(default)]
+    pub drop: Vec<String>,
 }
 
 /// One user-defined coupler: a name for the console rocker and the

@@ -70,6 +70,22 @@
             pipe. <em>Native</em> goes back to what the set declares.
           </p>
           <div id="organ-compass" class="organ-compass"></div>
+
+          <h2>Stops</h2>
+          <p class="pane-note">
+            Stops are grouped by the manual their division plays from.
+            Move one to another manual if the combination calls for it.
+          </p>
+          <div id="organ-stops" class="organ-stops"></div>
+
+          <h2>Couplers</h2>
+          <p class="pane-note">
+            Unchecking takes a coupler off the console without deleting
+            it — the rail simply stops showing it until it's checked
+            again. That's different from the rail's own tablet, which
+            only engages a coupler that's already on the console.
+          </p>
+          <div id="organ-couplers" class="organ-couplers"></div>
         </section>
 
         <section class="pane" data-pane="midi">
@@ -114,6 +130,18 @@
 
         <section class="pane hidden" data-pane="tuning">
           <h2>Temperament &amp; pitch</h2>
+          <label class="settings-row" id="tuning-target-row">
+            <span class="rail-label">DIVISION</span>
+            <span class="tuning-target-field">
+              <select id="tuning-target"></select>
+              <button class="ghost hidden" id="tuning-reset">Same as instrument</button>
+            </span>
+          </label>
+          <p class="pane-note">
+            A division marked <em>&bull;</em> has its own temperament and
+            pitch, apart from the instrument. Everything below reads and
+            sets whichever one is picked above.
+          </p>
           <label class="settings-row" id="temperament-row">
             <span class="rail-label">TEMPERAMENT</span>
             <select id="set-temperament">

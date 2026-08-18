@@ -561,6 +561,9 @@ pub struct Setup {
     /// Every whole-division pull: (source index, source manual name,
     /// composite manual index). Replaying these rebuilds the organ.
     pub pulls: Vec<(usize, String, usize)>,
+    /// Stops moved between manuals this session, as (stop, from, to)
+    /// names in order — the form `[[move]]` takes in a saved file.
+    pub moves: Vec<(String, String, String)>,
     /// Combined ad hoc on the CLI: nothing on disk holds this
     /// instrument yet, so the console should ask how it goes together
     /// and offer to save it.
@@ -877,12 +880,12 @@ impl State {
         Some(match action {
             control::Action::Stop(name) => {
                 let stops = console.stop_states();
-                let names: Vec<&str> = stops.iter().map(|(_, name, _, _)| *name).collect();
+                let names: Vec<&str> = stops.iter().map(|(_, name, _, _, _)| *name).collect();
                 Subject::Stop(stops[one(&names, name)?].0)
             }
             control::Action::Coupler(name) => {
                 let couplers = console.coupler_states();
-                let names: Vec<&str> = couplers.iter().map(|(_, name, _)| *name).collect();
+                let names: Vec<&str> = couplers.iter().map(|(_, name, _, _)| *name).collect();
                 Subject::Coupler(couplers[one(&names, name)?].0)
             }
             control::Action::Enclosure(name) => {
@@ -1281,6 +1284,111 @@ impl State {
         true
     }
 
+    /// Move a stop to another manual — live under held keys, kept for
+    /// saving, and appended to the organ's file when it has one.
+    pub fn move_stop(&mut self, stop: StopId, manual: usize) -> bool {
+        let names = self.manual_names();
+        let Some(to_name) = names.get(manual).cloned() else {
+            return false;
+        };
+        let State {
+            engine, control, ..
+        } = &mut *self;
+        let Control::Organ(console) = control else {
+            return false;
+        };
+        let Some((stop_name, from_name)) = console
+            .stop_states()
+            .iter()
+            .find(|(id, ..)| *id == stop)
+            .map(|(_, name, from, _, _)| (name.to_string(), from.to_string()))
+        else {
+            return false;
+        };
+        if from_name == to_name {
+            return true;
+        }
+        let (stopped, starts) = console.move_stop(stop, manual);
+        for handle in stopped {
+            engine.send(Command::StopVoice { handle });
+        }
+        for start in starts {
+            engine.send(start_command(&start));
+        }
+        self.setup
+            .moves
+            .push((stop_name.clone(), from_name.clone(), to_name.clone()));
+        if let Some(path) = &self.composite_path
+            && let Err(err) = config::append_composite_move(path, &stop_name, &from_name, &to_name)
+        {
+            tracing::warn!("move not saved: {err}");
+        }
+        true
+    }
+
+    /// Keep a coupler on the console or take it off — live, and in the
+    /// organ's file when it has one. Off is not gone: the routes stay,
+    /// so the Organ preferences can put it back.
+    pub fn set_coupler_pick(&mut self, index: usize, keep: bool) -> bool {
+        let State {
+            engine, control, ..
+        } = &mut *self;
+        let Control::Organ(console) = control else {
+            return false;
+        };
+        if index >= console.coupler_states().len() {
+            return false;
+        }
+        let (stopped, starts) = console.set_coupler_available(index, keep);
+        for handle in stopped {
+            engine.send(Command::StopVoice { handle });
+        }
+        for start in starts {
+            engine.send(start_command(&start));
+        }
+        let dropped: Vec<String> = console
+            .coupler_states()
+            .iter()
+            .filter(|(_, _, _, available)| !available)
+            .map(|(_, name, _, _)| name.to_string())
+            .collect();
+        if let Some(path) = &self.composite_path
+            && let Err(err) = config::write_composite_drops(path, &dropped)
+        {
+            tracing::warn!("coupler pick not saved: {err}");
+        }
+        true
+    }
+
+    /// Tune one division apart from the instrument, or with `None`
+    /// return it to the shared tuning — live from the next note, and
+    /// in the organ's file when it declares the manual.
+    pub fn tune_manual(&mut self, manual: usize, tuning: Option<tuning::Tuning>) -> bool {
+        let names = self.manual_names();
+        if manual >= names.len() {
+            return false;
+        }
+        let Control::Organ(console) = &mut self.control else {
+            return false;
+        };
+        console.set_manual_tuning(manual, tuning);
+        if let Some(path) = self.composite_path.clone() {
+            let fields =
+                tuning.map(|t| (t.temperament.name().to_string(), t.a4_hz, t.transpose));
+            match config::write_composite_manual_tuning(&path, &names[manual], fields) {
+                Ok(true) => {}
+                Ok(false) => tracing::warn!(
+                    "manual tuning not saved: {} has no [[manual]] named {:?} — declare \
+                     it to keep this tuning",
+                    path.display(),
+                    names[manual]
+                ),
+                Err(err) => tracing::warn!("manual tuning not saved: {err}"),
+            }
+        }
+        true
+    }
+
     /// Write this instrument — sources, manuals with their effective
     /// compasses, division pulls, and the current MIDI wiring — as a
     /// composite organ file, which from now on is where it lives.
@@ -1293,20 +1401,41 @@ impl State {
         }
         let names = self.manual_names();
         let native = self.native_compass();
-        let manuals: Vec<(String, u8, u8)> = names
+        let manuals: Vec<config::SavedManual> = names
             .iter()
             .enumerate()
             .map(|(manual, name)| {
                 let (low, high) = self.compass_override(manual).unwrap_or(native[manual]);
-                (name.clone(), low, high)
+                let tuning = match &self.control {
+                    Control::Organ(console) => console.manual_tuning(manual),
+                    Control::Tone => None,
+                }
+                .map(|t| (t.temperament.name().to_string(), t.a4_hz, t.transpose));
+                config::SavedManual {
+                    name: name.clone(),
+                    low,
+                    high,
+                    tuning,
+                }
             })
             .collect();
+        let dropped: Vec<String> = match &self.control {
+            Control::Organ(console) => console
+                .coupler_states()
+                .iter()
+                .filter(|(_, _, _, available)| !available)
+                .map(|(_, name, _, _)| name.to_string())
+                .collect(),
+            Control::Tone => Vec::new(),
+        };
         config::save_composite(
             &path,
             &self.organ_key,
             &self.setup.sources,
             &manuals,
             &self.setup.pulls,
+            &self.setup.moves,
+            &dropped,
         )?;
         tracing::info!("organ saved: {}", path.display());
         self.composite_path = Some(path);
@@ -1398,6 +1527,7 @@ fn main() -> Result<()> {
     let mut reverb_ir: Option<Arc<aristide_engine::reverb::PreparedIr>> = None;
     let mut reverb_wet = 0.0f32;
     let mut composite_midi: Option<(PathBuf, instrument::MidiDef)> = None;
+    let mut manual_tuning_defs: Vec<instrument::ManualTuningDef> = Vec::new();
     let mut setup = Setup::default();
     let (sample_bank, control, suggested_channels) = match args.sets.first() {
         Some(first_path) => {
@@ -1425,12 +1555,14 @@ fn main() -> Result<()> {
                     );
                     if args.sets.len() == 1 {
                         composite_midi = Some((path.clone(), assembled.midi));
+                        manual_tuning_defs = assembled.manual_tuning;
                     } else if !assembled.midi.inputs.is_empty()
                         || !assembled.midi.controls.is_empty()
+                        || !assembled.manual_tuning.is_empty()
                     {
                         tracing::warn!(
-                            "{}: [midi] wiring applies only when the organ is loaded \
-                             alone — ignored",
+                            "{}: [midi] wiring and per-manual tuning apply only when \
+                             the organ is loaded alone — ignored",
                             path.display()
                         );
                     }
@@ -1691,7 +1823,55 @@ fn main() -> Result<()> {
                 transpose: sidecar.tuning.transpose.clamp(-12, 12),
             };
             console.set_tuning(live_tuning);
+            // Divisions the definition tunes apart from the rest:
+            // missing fields follow the instrument-wide tuning.
+            for (manual, temperament, a4, transpose) in &manual_tuning_defs {
+                let temperament = temperament
+                    .as_deref()
+                    .map(|name| {
+                        tuning::Temperament::parse(name).unwrap_or_else(|| {
+                            tracing::warn!(
+                                "manual tuning: unknown temperament {name:?}, using the \
+                                 instrument's"
+                            );
+                            live_tuning.temperament
+                        })
+                    })
+                    .unwrap_or(live_tuning.temperament);
+                let own = tuning::Tuning {
+                    temperament,
+                    a4_hz: a4.unwrap_or(live_tuning.a4_hz).clamp(300.0, 500.0),
+                    transpose: transpose.unwrap_or(live_tuning.transpose).clamp(-12, 12),
+                };
+                tracing::info!(
+                    "tuning: manual {manual} plays {} @ a'={} Hz, transpose {:+}",
+                    own.temperament.name(),
+                    own.a4_hz,
+                    own.transpose
+                );
+                console.set_manual_tuning(*manual, Some(own));
+            }
             console.set_coupler_repitch(sidecar.couplers.repitch);
+            // Couplers this instrument takes off its console — they
+            // stay restorable from the Organ preferences.
+            {
+                let names: Vec<String> = console
+                    .coupler_states()
+                    .iter()
+                    .map(|(_, name, _, _)| name.to_string())
+                    .collect();
+                let names: Vec<&str> = names.iter().map(String::as_str).collect();
+                for pattern in &sidecar.couplers.drop {
+                    let matches = aristide_formats::sidecar::match_names(&names, pattern);
+                    if matches.is_empty() {
+                        tracing::warn!("couplers.drop: {pattern:?} matches nothing");
+                    }
+                    for index in matches {
+                        tracing::info!("coupler off the console: {}", names[index]);
+                        console.set_coupler_available(index, false);
+                    }
+                }
+            }
             console.set_noises(
                 sidecar.noises.enabled,
                 sidecar.noises.volume.clamp(0.0, 2.0) as f32,
@@ -2711,7 +2891,7 @@ mod tests {
             console
                 .stop_states()
                 .iter()
-                .find(|(_, name, _, _)| *name == "Gamba 8'")
+                .find(|(_, name, _, _, _)| *name == "Gamba 8'")
                 .expect("the fixture's stop")
                 .0
         };
@@ -2825,7 +3005,7 @@ mod tests {
             panic!("organ expected")
         };
         assert!(
-            console.stop_states().iter().all(|(_, _, _, drawn)| !drawn),
+            console.stop_states().iter().all(|(_, _, _, _, drawn)| !drawn),
             "and did what it was bound to: cancel"
         );
     }
