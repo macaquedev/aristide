@@ -373,6 +373,21 @@ fn respond(
             }
             json(state_json_locked(&state))
         }
+        // Whether couplers may repitch to reach pipes a division hasn't
+        // got. Off is the default and the musically honest answer; a
+        // piece that wants the other can turn it on without editing the
+        // set's sidecar.
+        (Method::Post, "/api/couplers") => {
+            let on = param(query, "repitch") == Some("1");
+            {
+                let mut state = state.lock().expect("state poisoned");
+                if let Control::Organ(console) = &mut state.control {
+                    console.set_coupler_repitch(on);
+                    tracing::info!("couplers: repitch {}", if on { "on" } else { "off" });
+                }
+            }
+            json(state_json(state))
+        }
         (Method::Post, "/api/midi/rescan") => {
             crate::request_midi_rescan();
             json(state_json(state))
@@ -705,6 +720,10 @@ fn state_json_locked(state: &State) -> String {
         ));
     }
     if let Control::Organ(console) = &state.control {
+        out.push_str(&format!(
+            ",\"coupler_repitch\":{}",
+            console.coupler_repitch()
+        ));
         let (enabled, volume) = console.noises();
         out.push_str(&format!(
             ",\"noises\":{{\"on\":{enabled},\"vol\":{volume}}}"
@@ -1023,20 +1042,6 @@ mod tests {
     /// Every field a console reads sits where it says it does, and the
     /// whole thing is valid JSON — the snapshot is hand-written, so
     /// nothing else checks that.
-    /// Every field a console reads sits where it says it does, and the
-    /// whole thing is valid JSON — the snapshot is hand-written, so
-    /// nothing else checks that.
-    #[test]
-    #[ignore = "dumps a snapshot for the console UI harness"]
-    fn dump_snapshot() {
-        let Some(state) = demo_state() else { return };
-        respond(&state, &Method::Post, "/api/control/bind?slot=0&action=octave-up&device=Computer%20keyboard&trigger=key%3AEqual");
-        respond(&state, &Method::Post, "/api/control/bind?slot=1&action=octave-down&device=Computer%20keyboard&trigger=key%3AMinus");
-        respond(&state, &Method::Post, "/api/control/bind?slot=2&action=stop%3AMontre%208%27&device=Johannus%20DIN%20IN&ch=14&trigger=note%3A36");
-        respond(&state, &Method::Post, "/api/control/bind?slot=3&action=cancel&device=Johannus%20DIN%20IN&ch=14&trigger=note%3A39");
-        std::fs::write("/home/macaque/shots/snapshot.json", state_json(&state)).expect("written");
-    }
-
     #[test]
     fn the_snapshot_is_well_formed() {
         let Some(state) = demo_state() else { return };
@@ -1045,7 +1050,7 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
         for field in [
             "stops", "couplers", "manuals", "midi", "controls", "actions", "keyboard",
-            "tuning", "enclosures", "noises",
+            "tuning", "enclosures", "noises", "coupler_repitch",
         ] {
             assert!(value.get(field).is_some(), "{field} missing: {body}");
         }
@@ -1109,6 +1114,18 @@ mod tests {
 
         respond(&state, &Method::Post, "/api/control/bind?slot=0&action=nonsense");
         assert!(state_json(&state).contains("\"controls\":[]"), "refused");
+    }
+
+    /// Couplers reaching for pipes a division hasn't got is off, and
+    /// switchable without editing the set.
+    #[test]
+    fn coupler_repitch_is_off_and_switchable() {
+        let Some(state) = demo_state() else { return };
+        assert!(state_json(&state).contains("\"coupler_repitch\":false"));
+        respond(&state, &Method::Post, "/api/couplers?repitch=1");
+        assert!(state_json(&state).contains("\"coupler_repitch\":true"));
+        respond(&state, &Method::Post, "/api/couplers");
+        assert!(state_json(&state).contains("\"coupler_repitch\":false"));
     }
 
     /// The Play menu's shortcuts are the same verbs a binding uses.

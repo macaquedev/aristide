@@ -43,6 +43,16 @@ drive logical keys below the accessible range and speak the extension pipes. We
 treat the keyboard's compass as the instrument's compass; borrowing is how a rank
 gets played outside it.
 
+**Couplers never repitch (locked, default):** repitching fills in what the
+*player's keyboard* can reach; a coupler is not a keyboard. A coupled note
+sounds only a pipe the division it lands on actually has — a 16' coupler
+running off the bottom of a rank, a coupler into a shorter compass, or a hole
+in a rank all stay silent in the coupled copy, while the played key itself is
+filled in as usual. Letting couplers invent pipes would change the instrument
+rather than reach it. Sets or pieces that want the other behaviour set
+`[couplers] repitch = true` in the sidecar (or POST `/api/couplers?repitch=1`
+live). The compass rule above bounds couplers either way.
+
 **Whose keyboard (locked):** the compass is the *player's* keyboard, not the set's.
 Each MIDI input carries the range it was measured at — Preferences → MIDI learns it
 from two key presses — and a manual answers to the union of its inputs' ranges,

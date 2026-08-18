@@ -1417,6 +1417,7 @@ fn main() -> Result<()> {
                 transpose: sidecar.tuning.transpose.clamp(-12, 12),
             };
             console.set_tuning(live_tuning);
+            console.set_coupler_repitch(sidecar.couplers.repitch);
             console.set_noises(
                 sidecar.noises.enabled,
                 sidecar.noises.volume.clamp(0.0, 2.0) as f32,

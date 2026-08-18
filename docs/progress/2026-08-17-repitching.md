@@ -46,6 +46,16 @@ ladders, and index-nearest survives mixtures whose pitch series breaks
 backwards mid-rank. The *pitch* is then a frequency ratio against the
 pipe that was actually found.
 
+## Couplers are not keyboards
+
+Filling is for the **played** key. A coupled copy sounds only a pipe its
+division actually has: a 16' coupler running off the bottom of a rank,
+a coupler into a shorter compass, and a hole in the rank all stay silent
+in the copy, while the key the player pressed is filled in as usual.
+Repitching is a concession to the player's hardware; letting a coupler
+use it would be inventing an organ rather than reaching one. Sets that
+want otherwise set `[couplers] repitch = true`.
+
 ## Pitch as a ratio
 
 `VoiceSpec` now carries `nominal_hz`, the pitch its `rate` sounds. One

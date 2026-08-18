@@ -38,6 +38,27 @@ pub struct Sidecar {
     pub noises: NoisesConfig,
     #[serde(default)]
     pub enclosures: EnclosuresConfig,
+    #[serde(default)]
+    pub couplers: CouplersConfig,
+}
+
+/// How couplers behave at the edges of a division.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CouplersConfig {
+    /// Whether a coupled note may be repitched from a neighbouring pipe
+    /// when the division it lands on hasn't got that one — a 16'
+    /// running off the bottom of a rank, or a coupler into a shorter
+    /// compass.
+    ///
+    /// Off, and this is the important default. Repitching exists to
+    /// cover the gap between a sample set's compass and the player's
+    /// keyboard; a coupler is not a keyboard, and letting it invent
+    /// pipes would change the instrument rather than reach it. Sets
+    /// built for the other behaviour (or a piece that wants it) can
+    /// turn it on.
+    #[serde(default)]
+    pub repitch: bool,
 }
 
 /// Swell box behaviour (applied to every enclosure the set defines;

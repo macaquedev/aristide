@@ -62,6 +62,9 @@ pub struct Console {
     /// Engine output rate; frequency-derived voice parameters have to be
     /// recomputed against it when a pipe is repitched.
     device_rate: f32,
+    /// Whether a coupled voice may be repitched from a neighbouring
+    /// pipe. False, and deliberately so: see `voices_for_key`.
+    couplers_repitch: bool,
     /// Per manual: the inclusive MIDI note range that manual answers to.
     /// Starts as the sample set's own compass and is widened to the
     /// player's keyboard (see `set_compass`) — a key outside it is
@@ -90,6 +93,7 @@ impl Console {
             specs,
             drawn,
             device_rate,
+            couplers_repitch: false,
             compass,
             engaged_couplers: Vec::new(),
             tuning: Tuning::default(),
@@ -395,6 +399,17 @@ impl Console {
         self.compass[manual_index] = (first, first + manual.key_count as i16 - 1);
     }
 
+    /// Let couplers reach pipes their division hasn't got by repitching
+    /// a neighbour. Off by default (`[couplers] repitch` in the
+    /// sidecar); see `voices_for_key` for why.
+    pub fn set_coupler_repitch(&mut self, repitch: bool) {
+        self.couplers_repitch = repitch;
+    }
+
+    pub fn coupler_repitch(&self) -> bool {
+        self.couplers_repitch
+    }
+
     /// Which pipe of `range` speaks for a key, and the ratio its
     /// playback rate must be scaled by.
     ///
@@ -410,7 +425,7 @@ impl Console {
     ///
     /// The ratio is exactly 1 (before tuning) whenever the nominal pipe
     /// exists, so nothing in the ordinary compass is touched by this.
-    fn pipe_for(&self, range: &RankRange, key_index: i16) -> Option<(u16, f32)> {
+    fn pipe_for(&self, range: &RankRange, key_index: i16, fill: bool) -> Option<(u16, f32)> {
         let first = range.first_pipe as i32;
         let last = first + range.key_count as i32 - 1;
         if last < first {
@@ -419,6 +434,14 @@ impl Console {
         // Where the key would fall in the rank if the rank ran forever.
         // Outside the range this is the pipe the organ doesn't have.
         let wanted = first + (key_index as i32 - range.first_key as i32);
+        if !fill {
+            // Nothing stands in for this one: it speaks if the rank has
+            // it, and is silent if it hasn't.
+            let exact = u16::try_from(wanted).ok()?;
+            let present = (first..=last).contains(&wanted)
+                && self.specs.contains_key(&(range.rank, exact));
+            return present.then_some((exact, 1.0));
+        }
         let mut source = wanted.clamp(first, last);
         // A hole inside the range is a defect, not a decision: step
         // outwards until a pipe that actually loaded turns up.
@@ -465,11 +488,20 @@ impl Console {
     /// where the player's keyboard is wider than the organ — there is no
     /// such decision to respect, so a range that reaches the edge
     /// carries on past it.
-    fn range_covers(&self, range: &RankRange, key_index: i16, manual_index: usize) -> bool {
+    fn range_covers(
+        &self,
+        range: &RankRange,
+        key_index: i16,
+        manual_index: usize,
+        fill: bool,
+    ) -> bool {
         let first = range.first_key as i16;
         let last = first + range.key_count as i16 - 1;
         if (first..=last).contains(&key_index) {
             return true;
+        }
+        if !fill {
+            return false;
         }
         let native_last = self.organ.manuals[manual_index].key_count as i16 - 1;
         if key_index < 0 {
@@ -500,7 +532,17 @@ impl Console {
         // gadget; temperament + concert pitch then retune each pipe.
         let played = key as i16 + self.tuning.transpose as i16;
         let mut voices = Vec::new();
-        for (manual_id, midi_key) in self.couple(origin, played) {
+        // `couple` puts the played key first; everything after it is a
+        // copy some coupler asked for.
+        for (position, (manual_id, midi_key)) in self.couple(origin, played).into_iter().enumerate()
+        {
+            // Repitching fills in what the *player's keyboard* can
+            // reach — it is a concession to their hardware, not a way
+            // to invent pipes. A coupler is not a keyboard: a 16'
+            // running off the bottom of a rank, or a coupler into a
+            // division with a shorter compass, sounds nothing there.
+            // Sets built for the other behaviour can ask for it.
+            let fill = position == 0 || self.couplers_repitch;
             let Some(target) = self
                 .organ
                 .manuals
@@ -521,10 +563,10 @@ impl Console {
                     continue;
                 }
                 for range in &stop.ranks {
-                    if !self.range_covers(range, key_index, target) {
+                    if !self.range_covers(range, key_index, target, fill) {
                         continue;
                     }
-                    let Some((pipe, ratio)) = self.pipe_for(range, key_index) else {
+                    let Some((pipe, ratio)) = self.pipe_for(range, key_index, fill) else {
                         continue;
                     };
                     let Some(spec) = self.specs.get(&(range.rank, pipe)) else {
@@ -1090,6 +1132,90 @@ mod tests {
             1,
             "and it is not carried past the set's compass either"
         );
+    }
+
+    /// Repitching fills in what the *player's keyboard* can reach. A
+    /// coupler is not a keyboard: it may only sound pipes the division
+    /// it points at actually has. A 16' coupler running off the bottom
+    /// of a rank, or a coupler into a shorter division, sounds nothing
+    /// there — inventing those pipes would be inventing an organ.
+    #[test]
+    fn couplers_never_repitch_by_default() {
+        let mut console = coupled_console();
+        console.set_compass(0, 24, 96); // a keyboard wider than the set
+        console.set_coupler(1, true); // 16' I: −12 onto its own manual
+
+        // The played key speaks at pitch, and its 16' copy speaks only
+        // because that pipe exists.
+        let (starts, _) = console.note_on_manual(0, 60);
+        assert_eq!(starts.len(), 2, "the key and its 16' copy");
+        assert!(
+            starts.iter().all(|s| (s.spec.rate - 1.0).abs() < 1e-6),
+            "nothing is repitched inside the rank"
+        );
+        console.note_off_manual(0, 60);
+
+        // Twelve keys from the bottom, the 16' copy runs off the end of
+        // the rank. The key itself still speaks; the copy does not.
+        let (starts, _) = console.note_on_manual(0, 40);
+        assert_eq!(
+            starts.len(),
+            1,
+            "the 16' coupler must not repitch a pipe to reach below the rank"
+        );
+        assert!((starts[0].spec.rate - 1.0).abs() < 1e-6);
+        console.note_off_manual(0, 40);
+
+        // The same key played five below the set's own compass is
+        // repitched — that is the player's keyboard, not a coupler.
+        let (starts, _) = console.note_on_manual(0, 31);
+        assert_eq!(starts.len(), 1, "only the direct voice, repitched");
+        let semitones = starts[0].spec.rate.log2() * 12.0;
+        assert!((semitones + 5.0).abs() < 1e-3, "got {semitones}");
+    }
+
+    /// Coupling into a division whose rank stops short: the keys past
+    /// its end are silent there, however wide the keyboard is.
+    #[test]
+    fn coupling_into_a_shorter_division_stops_where_it_stops() {
+        let mut console = coupled_console();
+        for stop in &mut console.organ.stops {
+            if stop.id == StopId(2) {
+                stop.ranks[0].key_count = 49; // the Swell is a short rank
+            }
+        }
+        console.set_coupler(0, true); // II/I, unison
+
+        let (starts, _) = console.note_on_manual(0, 60);
+        assert_eq!(starts.len(), 2, "both divisions have this key");
+        console.note_off_manual(0, 60);
+
+        let (starts, _) = console.note_on_manual(0, 90);
+        assert_eq!(
+            starts.len(),
+            1,
+            "past the Swell's last pipe only the Great speaks"
+        );
+    }
+
+    /// Sets built for it can ask for the other behaviour. The compass
+    /// still bounds the coupler either way — that rule is older.
+    #[test]
+    fn a_set_can_ask_couplers_to_repitch() {
+        let mut console = coupled_console();
+        console.set_coupler_repitch(true);
+        console.set_compass(0, 24, 96);
+        console.set_coupler(1, true); // 16' I
+
+        let (starts, _) = console.note_on_manual(0, 40);
+        assert_eq!(starts.len(), 2, "now the 16' copy is filled in");
+        let stretched: Vec<f32> = starts
+            .iter()
+            .map(|s| s.spec.rate.log2() * 12.0)
+            .filter(|semitones| semitones.abs() > 1e-3)
+            .collect();
+        assert_eq!(stretched.len(), 1);
+        assert!((stretched[0] + 8.0).abs() < 1e-3, "got {}", stretched[0]);
     }
 
     #[test]
