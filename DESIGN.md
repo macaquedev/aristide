@@ -202,6 +202,14 @@ keyboard. When several sets load ad hoc, the console opens its Organ setup to
 ask how they go together, and saving writes the composite file that from then
 on owns the instrument.
 
+Organs load at runtime, never implicitly (locked 2026-08-18): the server
+starts organ-less and the console opens on a picker — the `[[library]]` in the
+user config (every organ this machine has loaded, most recent first) plus a
+file browser; CLI paths are just a pre-queued pick. The engine's bank is fixed
+at construction (the RT path never swaps pointers), so a load builds the new
+console and bank off-thread, then replaces engine and stream together on the
+main thread; a failed load reports and leaves the running organ untouched.
+
 ## Milestones
 
 - **M0** — repo, workspace, this document. ✅
