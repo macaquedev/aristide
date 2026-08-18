@@ -92,6 +92,12 @@ export const commands = {
   // distinct from the rail's own on/off, which only engages a coupler
   // that's already on the console.
   organCoupler: (idx, keep) => `/api/organ/coupler?idx=${idx}&keep=${keep ? 1 : 0}`,
+  // Queues loading a `.organ`/`.toml` file, from the library or from
+  // Browse. 400s with a plain-text reason if the path isn't a file or a
+  // load is already running.
+  organLoad: (path) => `/api/organ/load?path=${encodeURIComponent(path)}`,
+  // Drops one entry from the library without touching the file itself.
+  libraryForget: (path) => `/api/library/forget?path=${encodeURIComponent(path)}`,
 };
 
 /// Start the client. Calls `onState(snapshot)` for every fresh snapshot

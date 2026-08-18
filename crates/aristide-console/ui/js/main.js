@@ -2,6 +2,7 @@ import { resolveBase, connect } from "./api.js";
 import { Console } from "./console.js";
 import { PianoKeys } from "./keys.js";
 import { MenuBar } from "./menu.js";
+import { Picker } from "./picker.js";
 import { Preferences } from "./prefs.js";
 import { wireTheme } from "./theme.js";
 
@@ -10,6 +11,7 @@ wireTheme(document);
 const base = await resolveBase();
 let send;
 const prefs = new Preferences(document, base, (query) => send(query));
+const picker = new Picker(document, base, (query) => send(query));
 const view = new Console(document, (query) => send(query), (tab) => prefs.open(tab));
 const keys = new PianoKeys(document, (query) => send(query));
 
@@ -25,6 +27,8 @@ new MenuBar(document, document.getElementById("menus"), [
   {
     title: "Organ",
     items: () => [
+      { label: "Open organ…", run: () => picker.open() },
+      "-",
       { label: "Cancel registration", run: () => view.cancel() },
       { label: "Silence everything", accel: "Panic", run: () => view.panic() },
       "-",
@@ -82,6 +86,7 @@ send = connect(
     view.render(snapshot);
     keys.update(snapshot);
     prefs.update(snapshot);
+    picker.update(snapshot);
   },
   (message) => view.offline(message),
 );

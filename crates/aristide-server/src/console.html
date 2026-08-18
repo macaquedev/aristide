@@ -26,6 +26,11 @@
 </head>
 <body>
 <h1>Aristide — registration</h1>
+<div id="noorgan" style="display:none">
+  <p id="loadphase" style="color:#8b93a1;font-size:0.85rem"></p>
+  <p id="loaderror" style="color:#e5484d;font-size:0.85rem"></p>
+  <div id="library" class="stops"></div>
+</div>
 <div id="manuals"></div>
 <div class="row" id="tuningrow" style="display:none">
   <label style="color:#8b93a1;font-size:0.8rem">TUNING</label>
@@ -39,7 +44,7 @@
   <label for="transpose" style="color:#8b93a1;font-size:0.8rem">TRANSPOSE</label>
   <input id="transpose" type="number" min="-12" max="12" step="1" style="width:3.5rem">
 </div>
-<div class="row">
+<div class="row" id="mainrow">
   <button id="cancel" class="stop">General cancel</button>
   <button id="trem" class="stop">Tremulant</button>
   <label for="gain" style="color:#8b93a1;font-size:0.8rem">GAIN</label>
@@ -56,6 +61,39 @@
 <script>
 async function refresh(data) {
   if (!data) data = await (await fetch('/api/state')).json();
+
+  // No organ loaded yet (or still loading): the stoplist has nothing to
+  // show, so show the library instead — pick one, and the usual refresh
+  // loop takes over once it lands.
+  document.getElementById('noorgan').style.display = data.organ ? 'none' : '';
+  for (const id of ['manuals', 'mainrow']) {
+    document.getElementById(id).style.display = data.organ ? '' : 'none';
+  }
+  if (!data.organ) {
+    const phase = document.getElementById('loadphase');
+    phase.textContent = data.loading || '';
+    phase.style.display = data.loading ? '' : 'none';
+    const err = document.getElementById('loaderror');
+    err.textContent = data.load_error || '';
+    err.style.display = data.load_error ? '' : 'none';
+    const lib = document.getElementById('library');
+    lib.innerHTML = '';
+    for (const entry of data.library || []) {
+      const b = document.createElement('button');
+      b.className = 'stop';
+      b.textContent = entry.name;
+      b.title = entry.path;
+      b.onclick = async () => refresh(await (await fetch(
+        `/api/organ/load?path=${encodeURIComponent(entry.path)}`, {method: 'POST'})).json());
+      lib.appendChild(b);
+    }
+    // The page has no poll loop; while there is no organ, keep looking
+    // so a finished load replaces this list with the console.
+    clearTimeout(refresh.poll);
+    refresh.poll = setTimeout(() => refresh(), 1000);
+    return;
+  }
+
   const groups = {};
   for (const s of data.stops) (groups[s.manual] ||= []).push(s);
   const root = document.getElementById('manuals');

@@ -680,6 +680,129 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
 .about-body { display: block; padding: 18px 20px 22px; font-size: 12.5px; line-height: 1.6; }
 .about-body p { margin: 0 0 10px; }
 
+/* ---- organ picker ------------------------------------------------------ */
+
+.picker-loading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  font-size: 12px;
+  color: var(--text);
+}
+
+.spinner {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--accent);
+  animation: picker-spin 0.8s linear infinite;
+}
+
+@keyframes picker-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* mid-load, the lists below are inert, not just dim — nothing under
+   them should be clickable while a load is in flight */
+#picker-sections.dim {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+.picker-library,
+.picker-browse-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 168px;
+  overflow-y: auto;
+}
+
+.picker-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  background: var(--surface);
+  color: var(--text);
+  font-family: var(--sans);
+  text-align: left;
+}
+.picker-row:hover { border-color: var(--accent); background: var(--surface-2); }
+.picker-row:active { background: #262c36; }
+
+.picker-row-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.picker-row-name {
+  font-size: 12.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.picker-row-path {
+  font-size: 10px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.picker-forget {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  cursor: pointer;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 10px;
+  line-height: 1;
+}
+.picker-forget:hover { border-color: var(--danger); color: var(--danger); }
+
+.picker-browse-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.picker-dir {
+  min-width: 0;
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* a directory reads as one keystroke deeper, not a file to load */
+.picker-browse-dir .picker-row-name::before {
+  content: "\203a  ";
+  color: var(--text-dim);
+}
+
+.ghost:disabled { opacity: 0.4; cursor: default; }
+.ghost:disabled:hover { border-color: var(--border); color: var(--text-dim); }
+
 .settings-row {
   display: flex;
   align-items: center;

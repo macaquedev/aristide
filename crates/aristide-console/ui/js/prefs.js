@@ -209,10 +209,13 @@ export class Preferences {
     for (const closer of this.root.querySelectorAll("#prefs [data-close], #about [data-close]")) {
       closer.addEventListener("click", () => this.close());
     }
-    // Esc closes whichever dialog is up; the console keeps its keys
-    // otherwise (keys.js stays quiet while `modal-open` is set).
+    // Esc closes preferences or about when either is the one up — not
+    // just whenever *some* modal (the organ picker, say) has set
+    // `modal-open` on the body. The console keeps its keys otherwise
+    // (keys.js stays quiet while `modal-open` is set).
     window.addEventListener("keydown", (event) => {
-      if (event.key === "Escape" && this.root.body.classList.contains("modal-open")) {
+      const open = this.isOpen || !this.el.about.classList.contains("hidden");
+      if (event.key === "Escape" && open) {
         event.preventDefault();
         this.close();
       }
