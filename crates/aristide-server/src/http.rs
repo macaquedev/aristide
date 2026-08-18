@@ -163,6 +163,46 @@ fn respond(
             }
             json(state_json(state))
         }
+        // Declare a manual's compass (both low and high, MIDI notes),
+        // or with neither given go back to the set's own. Live at
+        // once, and saved into the organ's file when it has one.
+        (Method::Post, "/api/organ/compass") => {
+            let mut state = state.lock().expect("state poisoned");
+            let Some(manual) = param(query, "manual").and_then(|v| v.parse::<usize>().ok())
+            else {
+                return bad_request("missing manual");
+            };
+            let compass = match (
+                param(query, "low").map(|v| v.parse::<u8>()),
+                param(query, "high").map(|v| v.parse::<u8>()),
+            ) {
+                (Some(Ok(low)), Some(Ok(high))) if low <= high && high < 128 => {
+                    Some((low, high))
+                }
+                (None, None) => None,
+                _ => return bad_request("low and high must be MIDI notes, low first"),
+            };
+            if state.set_compass_override(manual, compass) {
+                json(state_json_locked(&state))
+            } else {
+                bad_request("no such manual")
+            }
+        }
+        // Write the loaded combination to a composite organ file —
+        // from then on that file is the organ, and it owns the wiring.
+        (Method::Post, "/api/organ/save") => {
+            let mut state = state.lock().expect("state poisoned");
+            match param(query, "path").map(unescape) {
+                Some(path) if path.ends_with(".toml") => {
+                    match state.save_composite(std::path::PathBuf::from(path)) {
+                        Ok(()) => json(state_json_locked(&state)),
+                        Err(err) => bad_request(&err),
+                    }
+                }
+                Some(_) => bad_request("path must end in .toml"),
+                None => bad_request("missing path"),
+            }
+        }
         // Input routing, addressed the way the player thinks about it:
         // *this manual* listens to *that device*. `slot` numbers a
         // manual's inputs (a manual may have several); a slot past the
@@ -754,6 +794,48 @@ fn state_json_locked(state: &State) -> String {
         }
         out.push(']');
     }
+    // How this instrument was put together: the setup dialog opens on
+    // `implicit` (combined on the CLI, nothing on disk yet), the Organ
+    // preferences edit compasses, and saving writes it all to a file.
+    if !state.setup.sources.is_empty() {
+        out.push_str(&format!(
+            ",\"setup\":{{\"implicit\":{},\"file\":{},\"sources\":[",
+            state.setup.implicit,
+            state
+                .composite_path
+                .as_ref()
+                .map_or_else(|| "null".to_string(), |p| json_string(&p.display().to_string()))
+        ));
+        for (index, (label, path)) in state.setup.sources.iter().enumerate() {
+            if index > 0 {
+                out.push(',');
+            }
+            out.push_str(&format!(
+                "{{\"name\":{},\"path\":{}}}",
+                json_string(label),
+                json_string(&path.display().to_string())
+            ));
+        }
+        out.push_str("],\"compass\":[");
+        for (manual, own) in state.native_compass().iter().enumerate() {
+            if manual > 0 {
+                out.push(',');
+            }
+            let (low, high) = state
+                .compass_overrides
+                .get(manual)
+                .copied()
+                .flatten()
+                .unwrap_or(*own);
+            out.push_str(&format!(
+                "{{\"idx\":{manual},\"low\":{low},\"high\":{high},\"native_low\":{},\"native_high\":{},\"declared\":{}}}",
+                own.0,
+                own.1,
+                state.compass_overrides.get(manual).copied().flatten().is_some()
+            ));
+        }
+        out.push_str("]}");
+    }
     out.push('}');
     out
 }
@@ -862,11 +944,85 @@ mod tests {
             reverb_wet: Some(0.25),
             expression_cc: 11,
             composite_path: None,
+            setup: Default::default(),
+            compass_overrides: Vec::new(),
         }));
         // As the server does once before it opens any device: routing,
         // bindings and the computer keyboard all come from this.
         state.lock().expect("state poisoned").resolve_routes();
         Some(state)
+    }
+
+    /// The whole setup story over the API: the snapshot describes how
+    /// the instrument was put together, a declared compass takes
+    /// effect live and survives in the snapshot, and saving writes a
+    /// composite file that loads back to the same structure — with the
+    /// MIDI wiring inside, since the file owns it from then on.
+    #[test]
+    fn organ_setup_compass_and_save_round_trip() {
+        let Some(state) = demo_state() else { return };
+        let demo = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testsets/grandorgue-demo/demo.organ");
+        {
+            let mut state = state.lock().expect("state poisoned");
+            let names: Vec<String> = state.manual_names();
+            state.setup.sources = vec![("Demo".into(), demo.clone())];
+            state.setup.pulls = names
+                .iter()
+                .enumerate()
+                .map(|(index, name)| (0, name.clone(), index))
+                .collect();
+            state.setup.implicit = true;
+        }
+        let body = state_json(&state);
+        assert!(body.contains("\"setup\":{\"implicit\":true,\"file\":null"));
+        assert!(body.contains("\"native_low\""));
+
+        // Declare a wider compass on manual 1 and see it live.
+        respond(&state, &Method::Post, "/api/organ/compass?manual=1&low=24&high=103");
+        let body = state_json(&state);
+        assert!(
+            body.contains("\"idx\":1,\"low\":24,\"high\":103") && body.contains("\"declared\":true"),
+            "declared compass shows: {body}"
+        );
+
+        // Save, then load the file back through the instrument layer.
+        let path = std::env::temp_dir().join("aristide-organ-save-test.toml");
+        let _ = std::fs::remove_file(&path);
+        respond(
+            &state,
+            &Method::Post,
+            &format!(
+                "/api/organ/save?path={}",
+                path.display().to_string().replace('/', "%2F")
+            ),
+        );
+        let body = state_json(&state);
+        assert!(body.contains("\"implicit\":false"), "saved: {body}");
+        let saved = aristide_formats::instrument::load(&path).expect("saved organ loads");
+        // The saved name is the assignments key (== the organ's name
+        // in production; the fixture keeps them apart on purpose).
+        assert_eq!(saved.organ.name, "test organ");
+        let manual = saved.organ.manuals.iter().find(|m| m.first_midi_note == 24);
+        assert!(manual.is_some_and(|m| m.key_count == 80), "declared compass survives");
+        assert_eq!(
+            saved.organ.manuals.len(),
+            state_json(&state).matches("\"native_low\"").count()
+        );
+        assert!(!saved.organ.stops.is_empty());
+
+        // The file now owns the wiring: a binding learned via the API
+        // lands in it.
+        respond(
+            &state,
+            &Method::Post,
+            "/api/midi/bind?manual=0&slot=0&device=Test%20Keys&ch=4",
+        );
+        let saved = aristide_formats::instrument::load(&path).expect("still loads");
+        assert_eq!(saved.midi.inputs.len(), 1);
+        assert_eq!(saved.midi.inputs[0].device, "Test Keys");
+        assert_eq!(saved.midi.inputs[0].channel, Some(4));
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

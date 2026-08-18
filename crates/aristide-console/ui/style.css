@@ -565,6 +565,62 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
 
 .add-control { padding: 3px 8px; font-size: 10px; margin-top: 2px; }
 
+/* ---- organ tab: source sets, save-as, per-manual compass -------------- */
+
+.organ-summary { display: flex; flex-direction: column; gap: 8px; }
+
+.organ-name-line { font-size: 13px; font-weight: 600; color: var(--text); }
+
+.organ-sources { display: flex; flex-direction: column; gap: 4px; }
+
+.organ-source { display: flex; align-items: baseline; gap: 10px; font-size: 12px; }
+.organ-source-name { color: var(--text); }
+.organ-source-path {
+  min-width: 0;
+  color: var(--text-dim);
+  font-size: 10.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.organ-file-line { font-size: 11.5px; color: var(--text-dim); }
+
+.organ-save { display: flex; flex-direction: column; gap: 6px; }
+
+.organ-save-field { display: flex; align-items: center; gap: 8px; }
+
+.organ-save-field input[type="text"] {
+  flex: 1;
+  min-width: 0;
+  font: 12px var(--sans);
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 8px;
+}
+.organ-save-field input[type="text"]:focus { outline: none; border-color: var(--accent); }
+
+.organ-save-error { margin: 0; font-size: 11px; color: var(--danger); }
+
+/* one row per manual, the same card the MIDI pane uses for its rows */
+.organ-compass { display: flex; flex-direction: column; gap: 8px; }
+
+.organ-compass-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.compass-field { display: flex; align-items: center; gap: 6px; }
+.compass-field input[type="number"] { width: 58px; }
+.compass-field i { font-style: normal; font-size: 10.5px; color: var(--text-dim); min-width: 26px; }
+
 .about-card { width: min(420px, 100%); height: auto; }
 .about-body { display: block; padding: 18px 20px 22px; font-size: 12.5px; line-height: 1.6; }
 .about-body p { margin: 0 0 10px; }

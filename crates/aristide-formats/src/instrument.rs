@@ -233,6 +233,11 @@ pub struct Assembled {
     /// decisions made against a source's own names (a sidecar's
     /// default registration) can ride across the assembly.
     pub stop_map: HashMap<(usize, StopId), StopId>,
+    /// Every whole-division pull that happened: (source index, source
+    /// manual name, assembled manual index). This is the composite's
+    /// structure in saveable form — a definition file that replays
+    /// these pulls rebuilds the same instrument.
+    pub division_pulls: Vec<(usize, String, usize)>,
     pub warnings: Vec<String>,
 }
 
@@ -295,6 +300,7 @@ struct PlacedRange {
 struct Assembly<'a> {
     sources: &'a [(String, Organ)],
     stop_map: HashMap<(usize, StopId), StopId>,
+    division_pulls: Vec<(usize, String, usize)>,
     manuals: Vec<Manual>,
     /// Per manual: the file-declared compass, if any.
     declared: Vec<Option<(u8, u8)>>,
@@ -323,6 +329,7 @@ pub fn assemble(
     let mut assembly = Assembly {
         sources,
         stop_map: HashMap::new(),
+        division_pulls: Vec::new(),
         manuals: Vec::new(),
         declared: Vec::new(),
         placed: Vec::new(),
@@ -411,6 +418,7 @@ pub fn assemble(
         sidecar: def.to_sidecar(),
         midi: def.midi.clone(),
         stop_map: assembly.stop_map,
+        division_pulls: assembly.division_pulls,
         warnings: assembly.warnings,
     })
 }
@@ -503,6 +511,8 @@ impl Assembly<'_> {
             }
         };
         self.division_map[source_idx].insert(source_manual.id, target);
+        self.division_pulls
+            .push((source_idx, source_manual.name.clone(), target));
         let stops: Vec<usize> = organ
             .stops
             .iter()

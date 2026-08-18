@@ -34,12 +34,43 @@
       </header>
       <div class="modal-body">
         <nav class="tabs" id="prefs-tabs" role="tablist">
+          <button role="tab" data-tab="organ">Organ</button>
           <button role="tab" data-tab="midi">MIDI</button>
           <button role="tab" data-tab="controls">Controls</button>
           <button role="tab" data-tab="tuning">Tuning</button>
           <button role="tab" data-tab="sound">Sound</button>
           <button role="tab" data-tab="appearance">Appearance</button>
         </nav>
+
+        <section class="pane hidden" data-pane="organ">
+          <div class="pane-head">
+            <h2>Instrument</h2>
+          </div>
+          <p class="pane-warn hidden" id="organ-implicit-note">
+            This instrument was combined ad hoc from the sets given on the
+            command line and doesn't live in a file of its own yet. Give a
+            manual a wider compass below if it needs one, then save the
+            combination so it loads the same way next time.
+          </p>
+          <div id="organ-summary" class="organ-summary"></div>
+          <div id="organ-save" class="organ-save hidden">
+            <label class="settings-row" id="organ-save-row">
+              <span class="rail-label">SAVE AS</span>
+              <span class="organ-save-field">
+                <input id="organ-save-path" type="text" placeholder="/path/to/organ.toml" />
+                <button class="ghost" id="organ-save-btn">Save</button>
+              </span>
+            </label>
+            <p class="organ-save-error hidden" id="organ-save-error"></p>
+          </div>
+          <h2>Manuals &amp; compass</h2>
+          <p class="pane-note">
+            A manual can be told to reach further than its sample set's own
+            keys; the extra notes are filled in by repitching the nearest
+            pipe. <em>Native</em> goes back to what the set declares.
+          </p>
+          <div id="organ-compass" class="organ-compass"></div>
+        </section>
 
         <section class="pane" data-pane="midi">
           <div class="pane-head">

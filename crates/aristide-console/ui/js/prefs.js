@@ -17,7 +17,18 @@ function keyName(key) {
   return `${NOTE_NAMES[key % 12]}${Math.floor(key / 12) - 1}`;
 }
 
-const TABS = ["midi", "controls", "tuning", "sound", "appearance"];
+const TABS = ["organ", "midi", "controls", "tuning", "sound", "appearance"];
+
+/// Clamp to a MIDI note, the same tolerant parse the transpose and shift
+/// fields use: whatever the box holds, not a value that can 400 the server.
+function clampNote(value) {
+  return Math.min(127, Math.max(0, Math.trunc(Number(value) || 0)));
+}
+
+// A page loads at most once; a combined-but-unsaved organ should ask
+// "how should these go together?" exactly once, not every time the poll
+// happens to notice it's still unsaved.
+let implicitPromptShown = false;
 
 // The pitch actions all take an optional target manual; everything else
 // in the catalogue is either global (panic, cancel) or names its own
@@ -94,8 +105,9 @@ function triggerText(control) {
 }
 
 export class Preferences {
-  constructor(root, send) {
+  constructor(root, base, send) {
     this.root = root;
+    this.base = base;
     this.send = send;
     this.dragging = new Set();
     this.tuning = null;
@@ -104,12 +116,20 @@ export class Preferences {
     this.controlsSignature = null;
     this.controlLearning = null;
     this.controlsCount = 0;
+    this.organSignature = null;
     this.tab = "midi";
     this.el = {
       modal: root.getElementById("prefs"),
       subject: root.getElementById("prefs-subject"),
       tabs: root.getElementById("prefs-tabs"),
       panes: [...root.querySelectorAll("#prefs .pane")],
+      organImplicitNote: root.getElementById("organ-implicit-note"),
+      organSummary: root.getElementById("organ-summary"),
+      organSave: root.getElementById("organ-save"),
+      organSavePath: root.getElementById("organ-save-path"),
+      organSaveBtn: root.getElementById("organ-save-btn"),
+      organSaveError: root.getElementById("organ-save-error"),
+      organCompass: root.getElementById("organ-compass"),
       manuals: root.getElementById("midi-manuals"),
       ports: root.getElementById("midi-ports"),
       unassigned: root.getElementById("midi-unassigned"),
@@ -198,16 +218,26 @@ export class Preferences {
     );
     this.wireTuning();
     this.wireSound();
+    this.wireOrgan();
   }
 
   // ---- snapshot ----------------------------------------------------------
 
   update(snapshot) {
     this.el.subject.textContent = snapshot.organ ?? "";
+    this.refreshOrgan(snapshot);
     this.refreshMidi(snapshot);
     this.refreshControls(snapshot);
     this.refreshTuning(snapshot.tuning);
     this.refreshSound(snapshot);
+
+    // An organ combined ad hoc on the command line has nobody to ask "how
+    // should these go together?" but the player — open straight to the
+    // tab that answers it, once, and never fight them for it again.
+    if (snapshot.setup?.implicit && !implicitPromptShown) {
+      implicitPromptShown = true;
+      this.open("organ");
+    }
   }
 
   // ---- MIDI --------------------------------------------------------------
@@ -686,5 +716,213 @@ export class Preferences {
       this.el.noisesOn.checked = snapshot.noises.on;
       if (!this.dragging.has("noises-vol")) this.el.noisesVol.value = snapshot.noises.vol;
     }
+  }
+
+  // ---- organ (composite setup) -------------------------------------------
+  //
+  // Where this instrument came from — one sample set or several combined
+  // — and, when it was assembled ad hoc rather than loaded from a
+  // composite file, the one place to widen a manual's compass and to
+  // save the combination. Nothing here commits as the user types: a
+  // compass edit waits for "Set", a save path waits for "Save", so a
+  // rebuild from the next poll never tears out a field mid-edit — it
+  // only ever needs to run when the setup itself has actually changed.
+
+  wireOrgan() {
+    this.el.organSaveBtn.addEventListener("click", () => this.saveOrgan());
+    this.el.organSavePath.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        this.saveOrgan();
+      }
+    });
+  }
+
+  refreshOrgan(snapshot) {
+    const setup = snapshot.setup ?? null;
+    const manuals = snapshot.manuals ?? [];
+    const signature = JSON.stringify([
+      snapshot.organ,
+      setup?.implicit ?? false,
+      setup?.file ?? null,
+      setup?.sources ?? [],
+      (setup?.compass ?? []).map((c) => [
+        c.idx, c.low, c.high, c.native_low, c.native_high, c.declared,
+      ]),
+      manuals.map((m) => [m.idx, m.name]),
+    ]);
+    if (signature === this.organSignature) return;
+    this.organSignature = signature;
+
+    this.el.organImplicitNote.classList.toggle("hidden", !setup?.implicit);
+    this.buildOrganSummary(snapshot, setup);
+    this.buildOrganSave(setup);
+    this.buildOrganCompass(setup, manuals);
+  }
+
+  buildOrganSummary(snapshot, setup) {
+    this.el.organSummary.replaceChildren();
+
+    const title = document.createElement("div");
+    title.className = "organ-name-line";
+    title.textContent = snapshot.organ ?? "Untitled organ";
+    this.el.organSummary.append(title);
+
+    const sources = setup?.sources ?? [];
+    if (sources.length) {
+      const list = document.createElement("div");
+      list.className = "organ-sources";
+      for (const source of sources) {
+        const row = document.createElement("div");
+        row.className = "organ-source";
+        const name = document.createElement("span");
+        name.className = "organ-source-name";
+        name.textContent = source.name;
+        const path = document.createElement("span");
+        path.className = "organ-source-path";
+        path.textContent = source.path;
+        path.title = source.path;
+        row.append(name, path);
+        list.append(row);
+      }
+      this.el.organSummary.append(list);
+    }
+
+    if (setup?.file) {
+      const file = document.createElement("div");
+      file.className = "organ-file-line";
+      file.textContent = `Lives in ${setup.file}`;
+      file.title = setup.file;
+      this.el.organSummary.append(file);
+    }
+  }
+
+  /// The save row only makes sense for an organ with a setup that isn't
+  /// already backed by a file — an ordinary single-set load has nothing
+  /// to save.
+  buildOrganSave(setup) {
+    const needsSave = !!setup && !setup.file;
+    this.el.organSave.classList.toggle("hidden", !needsSave);
+    if (!needsSave) return;
+    this.el.organSavePath.value = "";
+    this.hideSaveError();
+  }
+
+  buildOrganCompass(setup, manuals) {
+    this.el.organCompass.replaceChildren();
+    const compassByIdx = new Map((setup?.compass ?? []).map((c) => [c.idx, c]));
+    if (!compassByIdx.size) {
+      this.el.organCompass.append(this.emptyNote("No compass information for this organ."));
+      return;
+    }
+    for (const manual of manuals) {
+      const compass = compassByIdx.get(manual.idx);
+      if (compass) this.el.organCompass.append(this.organCompassRow(manual, compass));
+    }
+  }
+
+  /// One manual's compass: two editable bounds and the two ways to change
+  /// them — type new values and press Set, or fall back to whatever the
+  /// sample set itself declares.
+  organCompassRow(manual, compass) {
+    const row = document.createElement("div");
+    row.className = "organ-compass-row";
+
+    const name = document.createElement("span");
+    name.className = "manual-name";
+    name.textContent = manual.name;
+    name.title = manual.name;
+    row.append(name);
+
+    const low = this.compassField(compass.low ?? compass.native_low, compass.native_low);
+    const high = this.compassField(compass.high ?? compass.native_high, compass.native_high);
+    row.append(low.wrap, high.wrap);
+
+    const set = document.createElement("button");
+    set.className = "ghost";
+    set.textContent = "Set";
+    set.title = "Declare this manual's compass";
+    set.addEventListener("click", () => {
+      const lo = clampNote(low.input.value);
+      const hi = clampNote(high.input.value);
+      low.input.value = lo;
+      high.input.value = hi;
+      this.send(commands.organCompass(manual.idx, lo, hi));
+    });
+    row.append(set);
+
+    if (compass.declared) {
+      const native = document.createElement("button");
+      native.className = "ghost";
+      native.textContent = "Native";
+      native.title = "Go back to the sample set's own compass";
+      native.addEventListener("click", () => this.send(commands.organCompass(manual.idx)));
+      row.append(native);
+    }
+
+    return row;
+  }
+
+  /// A number field paired with the note name it currently reads as —
+  /// the same C4-is-60 naming as everywhere else in the dialog. Purely
+  /// local until Set is pressed: typing here never sends anything.
+  compassField(value, native) {
+    const wrap = document.createElement("span");
+    wrap.className = "compass-field";
+
+    const input = document.createElement("input");
+    input.type = "number";
+    input.min = 0;
+    input.max = 127;
+    input.step = 1;
+    input.value = value;
+    input.placeholder = native;
+    input.title = `Sample set's own: ${keyName(native)}`;
+
+    const note = document.createElement("i");
+    note.textContent = keyName(clampNote(value));
+    input.addEventListener("input", () => {
+      note.textContent = keyName(clampNote(input.value));
+    });
+
+    wrap.append(input, note);
+    return { wrap, input };
+  }
+
+  /// Saving bypasses the usual send()/poll flow: every other command's
+  /// error just needs to say "the organ is unreachable", but a bad path
+  /// here has a specific, useful reason the server already wrote out,
+  /// and this is the one place worth fetching directly to show it.
+  async saveOrgan() {
+    const path = this.el.organSavePath.value.trim();
+    if (!path) {
+      this.showSaveError("Give it a path first.");
+      return;
+    }
+    this.el.organSaveBtn.disabled = true;
+    try {
+      const response = await fetch(this.base + commands.organSave(path), { method: "POST" });
+      if (!response.ok) {
+        this.showSaveError((await response.text()) || `${response.status} ${response.statusText}`);
+        return;
+      }
+      // The next poll (at most POLL_INTERVAL_MS away) picks up the
+      // now-saved organ and rebuilds this pane without the save row.
+      this.hideSaveError();
+    } catch (err) {
+      this.showSaveError(String(err));
+    } finally {
+      this.el.organSaveBtn.disabled = false;
+    }
+  }
+
+  showSaveError(text) {
+    this.el.organSaveError.textContent = text;
+    this.el.organSaveError.classList.remove("hidden");
+  }
+
+  hideSaveError() {
+    this.el.organSaveError.classList.add("hidden");
+    this.el.organSaveError.textContent = "";
   }
 }

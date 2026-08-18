@@ -72,6 +72,16 @@ export const commands = {
     `/api/note?manual=${manual}&key=${key}&on=${on ? 1 : 0}`,
   panic: () => "/api/panic",
   cancel: () => "/api/cancel",
+  // A manual's compass, MIDI notes 0-127. Omitting low/high goes back to
+  // the sample set's own (native) compass rather than declaring one.
+  organCompass: (manual, low, high) =>
+    `/api/organ/compass?manual=${manual}` +
+    (low == null ? "" : `&low=${low}`) +
+    (high == null ? "" : `&high=${high}`),
+  // Writes the current combination out as a composite organ file, so it
+  // loads the same way next time instead of being re-assembled from the
+  // command line.
+  organSave: (path) => `/api/organ/save?path=${encodeURIComponent(path)}`,
 };
 
 /// Start the client. Calls `onState(snapshot)` for every fresh snapshot

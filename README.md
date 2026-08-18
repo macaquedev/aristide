@@ -16,6 +16,33 @@ directly, with Aristide-specific settings stored in sidecar files that never tou
 the original set. Encrypted Hauptwerk sample sets are not supported and never will
 be — we do not and will not circumvent their protection.
 
+## Organs are files
+
+An Aristide organ is a small TOML file pointing at sample sets elsewhere. It can
+wrap one set in three lines, or declare its own manuals and pull stops and whole
+divisions from any number of sets — cross-set couplers, renames, compasses, its
+own tuning and its own MIDI wiring included. Sources are never modified, and only
+the ranks actually used are loaded:
+
+```toml
+name = "Frankenorgan"
+
+[sources]
+anne = "../sets/st-anne/demo.organ"
+
+[[manual]]
+name = "Great"
+
+[[stop]]
+from = "anne"
+stop = "trompette"
+on = "Great"
+```
+
+Launching with several sets (`aristide-console a.organ b.organ`) combines them the
+same way — each keeping its own compass and couplers — and the console can save
+the combination as an organ file.
+
 ## Building and running
 
 ```sh

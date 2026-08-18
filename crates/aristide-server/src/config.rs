@@ -381,6 +381,100 @@ pub fn write_composite_midi(path: &Path, organ: Option<&OrganConfig>) -> Result<
     std::fs::rename(&temporary, path).map_err(|err| format!("{}: {err}", path.display()))
 }
 
+/// Write a combined instrument as a composite organ file: sources by
+/// alias, every manual declared with its compass, and the division
+/// pulls that rebuild it. `[midi]` wiring is written separately (the
+/// caller follows with `write_composite_midi`), and the sidecar-style
+/// sections are the player's to add by hand.
+pub fn save_composite(
+    path: &Path,
+    name: &str,
+    sources: &[(String, PathBuf)],
+    manuals: &[(String, u8, u8)],
+    pulls: &[(usize, String, usize)],
+) -> Result<(), String> {
+    let mut doc = toml_edit::DocumentMut::new();
+    doc["name"] = toml_edit::value(name);
+    let alias = |index: usize| format!("s{}", index + 1);
+    let mut table = toml_edit::Table::new();
+    for (index, (label, source)) in sources.iter().enumerate() {
+        let mut entry = toml_edit::value(source.to_string_lossy().as_ref());
+        if let Some(decor) = entry.as_value_mut() {
+            decor.decor_mut().set_suffix(format!(" # {label}"));
+        }
+        table.insert(&alias(index), entry);
+    }
+    doc["sources"] = toml_edit::Item::Table(table);
+    let mut manual_tables = toml_edit::ArrayOfTables::new();
+    for (manual, low, high) in manuals {
+        let mut table = toml_edit::Table::new();
+        table["name"] = toml_edit::value(manual.as_str());
+        table["low"] = toml_edit::value(*low as i64);
+        table["high"] = toml_edit::value(*high as i64);
+        manual_tables.push(table);
+    }
+    doc["manual"] = toml_edit::Item::ArrayOfTables(manual_tables);
+    let mut division_tables = toml_edit::ArrayOfTables::new();
+    for (source, source_manual, target) in pulls {
+        let Some((manual, _, _)) = manuals.get(*target) else {
+            continue;
+        };
+        let mut table = toml_edit::Table::new();
+        table["from"] = toml_edit::value(alias(*source));
+        table["manual"] = toml_edit::value(source_manual.as_str());
+        table["on"] = toml_edit::value(manual.as_str());
+        division_tables.push(table);
+    }
+    doc["division"] = toml_edit::Item::ArrayOfTables(division_tables);
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent).map_err(|err| format!("{}: {err}", parent.display()))?;
+    }
+    let temporary = path.with_extension("toml.tmp");
+    std::fs::write(&temporary, doc.to_string())
+        .map_err(|err| format!("{}: {err}", temporary.display()))?;
+    std::fs::rename(&temporary, path).map_err(|err| format!("{}: {err}", path.display()))
+}
+
+/// Update (or with `None` remove) one declared manual's compass in a
+/// composite file, leaving everything else — comments included —
+/// untouched. `Ok(false)` when the file declares no such manual.
+pub fn write_composite_compass(
+    path: &Path,
+    manual: &str,
+    compass: Option<(u8, u8)>,
+) -> Result<bool, String> {
+    let text =
+        std::fs::read_to_string(path).map_err(|err| format!("{}: {err}", path.display()))?;
+    let mut doc: toml_edit::DocumentMut =
+        text.parse().map_err(|err| format!("{}: {err}", path.display()))?;
+    let Some(tables) = doc.get_mut("manual").and_then(|m| m.as_array_of_tables_mut()) else {
+        return Ok(false);
+    };
+    let Some(table) = tables.iter_mut().find(|table| {
+        table
+            .get("name")
+            .and_then(|name| name.as_str())
+            .is_some_and(|name| name == manual)
+    }) else {
+        return Ok(false);
+    };
+    match compass {
+        Some((low, high)) => {
+            table["low"] = toml_edit::value(low as i64);
+            table["high"] = toml_edit::value(high as i64);
+        }
+        None => {
+            table.remove("low");
+            table.remove("high");
+        }
+    }
+    let temporary = path.with_extension("toml.tmp");
+    std::fs::write(&temporary, doc.to_string())
+        .map_err(|err| format!("{}: {err}", temporary.display()))?;
+    std::fs::rename(&temporary, path).map_err(|err| format!("{}: {err}", path.display()))?;
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

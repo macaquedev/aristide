@@ -544,6 +544,27 @@ pub struct State {
     /// on its own: that file owns the rig's MIDI wiring, so every
     /// assignment change is written back into its `[midi]` section.
     pub composite_path: Option<PathBuf>,
+    /// How this instrument was put together — what the setup dialog
+    /// asks about and what `/api/organ/save` writes to a file.
+    pub setup: Setup,
+    /// Per composite manual: a player-declared compass overriding the
+    /// set's own. Asked when sets are combined; editable later in
+    /// Preferences; saved into the composite file.
+    pub compass_overrides: Vec<Option<(u8, u8)>>,
+}
+
+/// The provenance of the loaded instrument.
+#[derive(Default)]
+pub struct Setup {
+    /// Label and path of each source set, in load order.
+    pub sources: Vec<(String, PathBuf)>,
+    /// Every whole-division pull: (source index, source manual name,
+    /// composite manual index). Replaying these rebuilds the organ.
+    pub pulls: Vec<(usize, String, usize)>,
+    /// Combined ad hoc on the CLI: nothing on disk holds this
+    /// instrument yet, so the console should ask how it goes together
+    /// and offer to save it.
+    pub implicit: bool,
 }
 
 impl State {
@@ -582,13 +603,24 @@ impl State {
             .collect()
     }
 
+    /// The compass a manual answers to before any keyboard widens it:
+    /// the player's declared override, else the set's own.
+    fn compass_override(&self, manual: usize) -> Option<(u8, u8)> {
+        self.compass_overrides.get(manual).copied().flatten()
+    }
+
     /// Push the saved assignments into the connected ports. Every edit
     /// goes through the config, so this is the one place routing is
     /// derived and the MIDI callback never has to look at names.
     fn resolve_routes(&mut self) {
         self.resolve_bindings();
         let assignments = self.saved_assignments();
-        let native = self.native_compass();
+        let native: Vec<(u8, u8)> = self
+            .native_compass()
+            .iter()
+            .enumerate()
+            .map(|(manual, own)| self.compass_override(manual).unwrap_or(*own))
+            .collect();
         for port in &mut self.midi_ports {
             port.routes = assignments
                 .iter()
@@ -613,7 +645,11 @@ impl State {
         // keyboard reaches shifted pipes, so the shift is part of it —
         // otherwise pressing octave-up would just make the top of the
         // keyboard silent.
-        let mut widened: Vec<Option<(u8, u8)>> = vec![None; native.len()];
+        // A declared compass is the floor of the union: a narrow
+        // learned keyboard must not shrink the manual below it.
+        let mut widened: Vec<Option<(u8, u8)>> = (0..native.len())
+            .map(|manual| self.compass_override(manual))
+            .collect();
         for port in &self.midi_ports {
             for route in &port.routes {
                 let shift = |key: u8| (key as i16 + route.transpose as i16).clamp(0, 127) as u8;
@@ -1219,6 +1255,67 @@ impl State {
         }
     }
 
+    /// Declare (or with `None` retract) a manual's compass, live and —
+    /// when the organ lives in a file that declares the manual — in
+    /// that file. Returns false for a manual the organ hasn't got.
+    pub fn set_compass_override(&mut self, manual: usize, compass: Option<(u8, u8)>) -> bool {
+        let names = self.manual_names();
+        if manual >= names.len() {
+            return false;
+        }
+        self.compass_overrides.resize(names.len().max(self.compass_overrides.len()), None);
+        self.compass_overrides[manual] = compass;
+        self.resolve_routes();
+        if let Some(path) = self.composite_path.clone() {
+            match config::write_composite_compass(&path, &names[manual], compass) {
+                Ok(true) => {}
+                Ok(false) => tracing::warn!(
+                    "compass not saved: {} has no [[manual]] named {:?} — declare it \
+                     to keep this compass",
+                    path.display(),
+                    names[manual]
+                ),
+                Err(err) => tracing::warn!("compass not saved: {err}"),
+            }
+        }
+        true
+    }
+
+    /// Write this instrument — sources, manuals with their effective
+    /// compasses, division pulls, and the current MIDI wiring — as a
+    /// composite organ file, which from now on is where it lives.
+    pub fn save_composite(&mut self, path: PathBuf) -> Result<(), String> {
+        if self.composite_path.is_some() {
+            return Err("this organ already lives in a file".into());
+        }
+        if self.setup.sources.is_empty() {
+            return Err("no sample set loaded".into());
+        }
+        let names = self.manual_names();
+        let native = self.native_compass();
+        let manuals: Vec<(String, u8, u8)> = names
+            .iter()
+            .enumerate()
+            .map(|(manual, name)| {
+                let (low, high) = self.compass_override(manual).unwrap_or(native[manual]);
+                (name.clone(), low, high)
+            })
+            .collect();
+        config::save_composite(
+            &path,
+            &self.organ_key,
+            &self.setup.sources,
+            &manuals,
+            &self.setup.pulls,
+        )?;
+        tracing::info!("organ saved: {}", path.display());
+        self.composite_path = Some(path);
+        self.setup.implicit = false;
+        // The new file owns the wiring from here on; write it in.
+        self.persist();
+        Ok(())
+    }
+
     /// Write the assignments back for this organ. Called after every
     /// change, so quitting never loses one. A composite organ's file
     /// owns its wiring, so the change lands there too.
@@ -1301,6 +1398,7 @@ fn main() -> Result<()> {
     let mut reverb_ir: Option<Arc<aristide_engine::reverb::PreparedIr>> = None;
     let mut reverb_wet = 0.0f32;
     let mut composite_midi: Option<(PathBuf, instrument::MidiDef)> = None;
+    let mut setup = Setup::default();
     let (sample_bank, control, suggested_channels) = match args.sets.first() {
         Some(first_path) => {
             // Every CLI path is a source: a sample set with its
@@ -1382,6 +1480,9 @@ fn main() -> Result<()> {
                     label = format!("{} {nth}", organ.name);
                     nth += 1;
                 }
+                setup
+                    .sources
+                    .push((label.clone(), path.canonicalize().unwrap_or_else(|_| path.clone())));
                 sources.push((label, organ));
                 sidecars.push(sidecar);
             }
@@ -1412,6 +1513,12 @@ fn main() -> Result<()> {
             let sidecar = &sidecars[0];
             let (organ, drawn) = if sources.len() == 1 {
                 let organ = sources.pop().expect("one source").1;
+                setup.pulls = organ
+                    .manuals
+                    .iter()
+                    .enumerate()
+                    .map(|(index, manual)| (0, manual.name.clone(), index))
+                    .collect();
                 let drawn = if args.stops.is_empty() {
                     per_source_drawn.into_iter().next().unwrap_or_default()
                 } else {
@@ -1452,6 +1559,8 @@ fn main() -> Result<()> {
                         aristide_engine::wind::MAX_WIND_GROUPS
                     );
                 }
+                setup.pulls = assembled.division_pulls.clone();
+                setup.implicit = true;
                 let stop_map = &assembled.stop_map;
                 let drawn = if args.stops.is_empty() {
                     per_source_drawn
@@ -1803,6 +1912,8 @@ fn main() -> Result<()> {
         reverb_wet: reverb_ir.is_some().then_some(reverb_wet),
         expression_cc,
         composite_path: composite_midi.map(|(path, _)| path),
+        setup,
+        compass_overrides: Vec::new(),
     }));
     // Assignments exist before any hardware does: the computer
     // keyboard and every binding are live from the first note.
@@ -2382,6 +2493,8 @@ mod tests {
             reverb_wet: None,
             expression_cc: 11,
             composite_path: None,
+            setup: Default::default(),
+            compass_overrides: Vec::new(),
         }));
         // Everything downstream reads the resolved tables, exactly as
         // the server does once before it opens any device.

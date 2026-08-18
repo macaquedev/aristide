@@ -9,7 +9,7 @@ wireTheme(document);
 
 const base = await resolveBase();
 let send;
-const prefs = new Preferences(document, (query) => send(query));
+const prefs = new Preferences(document, base, (query) => send(query));
 const view = new Console(document, (query) => send(query), (tab) => prefs.open(tab));
 const keys = new PianoKeys(document, (query) => send(query));
 
