@@ -250,6 +250,60 @@ fn respond(
                 bad_request("no such manual")
             }
         }
+        // Load an instrument: one or more paths to `.organ` sets or
+        // composite `.toml` files. The load itself happens on the main
+        // thread (it owns the audio stream); this only queues it, and
+        // the state snapshots narrate progress until the organ appears.
+        (Method::Post, "/api/organ/load") => {
+            let paths: Vec<std::path::PathBuf> = params(query, "path")
+                .map(|value| std::path::PathBuf::from(unescape(value)))
+                .collect();
+            if paths.is_empty() {
+                return bad_request("missing path");
+            }
+            for path in &paths {
+                if !path.is_file() {
+                    return bad_request(&format!("{}: not a file", path.display()));
+                }
+            }
+            let mut state = state.lock().expect("state poisoned");
+            if state.loading.is_some() || state.pending_load.is_some() {
+                return bad_request("an organ is already loading");
+            }
+            state.loading = Some("loading…".to_string());
+            state.load_error = None;
+            state.pending_load = Some(crate::LoadRequest {
+                paths,
+                stops: Vec::new(),
+                initial: false,
+            });
+            json(state_json_locked(&state))
+        }
+        // Take an organ off the picker. Its assignments are kept.
+        (Method::Post, "/api/library/forget") => match param(query, "path").map(unescape) {
+            Some(path) => {
+                let mut state = state.lock().expect("state poisoned");
+                state.forget_organ(std::path::Path::new(&path));
+                json(state_json_locked(&state))
+            }
+            None => bad_request("missing path"),
+        },
+        // The picker's file browser: subdirectories and loadable organ
+        // files under `dir` (the home directory when absent). The bind
+        // is localhost-only, which is the access control here as for
+        // every other endpoint.
+        (Method::Get, "/api/browse") => {
+            let dir = param(query, "dir")
+                .map(unescape)
+                .filter(|dir| !dir.is_empty())
+                .map(std::path::PathBuf::from)
+                .or_else(|| std::env::var_os("HOME").map(std::path::PathBuf::from))
+                .unwrap_or_else(|| std::path::PathBuf::from("/"));
+            match browse_json(&dir) {
+                Ok(body) => json(body),
+                Err(err) => bad_request(&err),
+            }
+        }
         // Write the loaded combination to a composite organ file —
         // from then on that file is the organ, and it owns the wiring.
         (Method::Post, "/api/organ/save") => {
@@ -716,6 +770,26 @@ fn state_json_locked(state: &State) -> String {
     if let Control::Organ(console) = &state.control {
         out.push_str(&format!(",\"organ\":{}", json_string(console.organ_name())));
     }
+    // The picker's world: what could be loaded, what is loading now,
+    // and why the last attempt failed.
+    if let Some(phase) = &state.loading {
+        out.push_str(&format!(",\"loading\":{}", json_string(phase)));
+    }
+    if let Some(error) = &state.load_error {
+        out.push_str(&format!(",\"load_error\":{}", json_string(error)));
+    }
+    out.push_str(",\"library\":[");
+    for (index, entry) in state.midi_config.library.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        out.push_str(&format!(
+            "{{\"name\":{},\"path\":{}}}",
+            json_string(&entry.name),
+            json_string(&entry.path.display().to_string())
+        ));
+    }
+    out.push(']');
     if let Control::Organ(console) = &state.control {
         let tuning = console.tuning();
         out.push_str(&format!(
@@ -975,6 +1049,71 @@ fn param<'a>(query: &'a str, key: &str) -> Option<&'a str> {
         .map(|(_, v)| v)
 }
 
+/// Every value of a repeated key, in order — `path=a&path=b` is how a
+/// multi-set load travels.
+fn params<'a>(query: &'a str, key: &'a str) -> impl Iterator<Item = &'a str> {
+    query
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .filter(move |(k, _)| *k == key)
+        .map(|(_, v)| v)
+}
+
+/// One directory as the picker's browser shows it: subdirectories and
+/// loadable organ files (`.organ` sample sets, `.toml` composites),
+/// dotfiles skipped, directories first.
+fn browse_json(dir: &std::path::Path) -> Result<String, String> {
+    let dir = dir
+        .canonicalize()
+        .map_err(|err| format!("{}: {err}", dir.display()))?;
+    let entries = std::fs::read_dir(&dir).map_err(|err| format!("{}: {err}", dir.display()))?;
+    let mut dirs: Vec<String> = Vec::new();
+    let mut files: Vec<String> = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') {
+            continue;
+        }
+        if entry.path().is_dir() {
+            dirs.push(name);
+        } else {
+            let lower = name.to_lowercase();
+            if lower.ends_with(".organ") || lower.ends_with(".toml") {
+                files.push(name);
+            }
+        }
+    }
+    let key = |name: &String| name.to_lowercase();
+    dirs.sort_by_key(key);
+    files.sort_by_key(key);
+    let mut out = format!(
+        "{{\"dir\":{},\"parent\":{},\"entries\":[",
+        json_string(&dir.display().to_string()),
+        dir.parent().map_or_else(
+            || "null".to_string(),
+            |parent| json_string(&parent.display().to_string())
+        )
+    );
+    let mut first = true;
+    for (name, is_dir) in dirs
+        .iter()
+        .map(|name| (name, true))
+        .chain(files.iter().map(|name| (name, false)))
+    {
+        if !first {
+            out.push(',');
+        }
+        first = false;
+        out.push_str(&format!(
+            "{{\"name\":{},\"path\":{},\"dir\":{is_dir}}}",
+            json_string(name),
+            json_string(&dir.join(name).display().to_string())
+        ));
+    }
+    out.push_str("]}");
+    Ok(out)
+}
+
 fn html(body: &str) -> Response<std::io::Cursor<Vec<u8>>> {
     Response::from_string(body).with_header(
         Header::from_bytes("Content-Type", "text/html; charset=utf-8").expect("valid header"),
@@ -1031,6 +1170,9 @@ mod tests {
             composite_path: None,
             setup: Default::default(),
             compass_overrides: Vec::new(),
+            pending_load: None,
+            loading: None,
+            load_error: None,
         }));
         // As the server does once before it opens any device: routing,
         // bindings and the computer keyboard all come from this.
@@ -1550,5 +1692,116 @@ mod tests {
         assert!(!kills.is_empty(), "open noise voices killed on disable");
         let (_, silent) = console.set_drawn(montre, false);
         assert!(silent.is_empty());
+    }
+
+    /// A state with no organ loaded — what the picker talks to.
+    fn tone_state() -> Arc<Mutex<State>> {
+        let (_engine, handle) =
+            aristide_engine::Engine::new(48000.0, std::sync::Arc::new(Default::default()));
+        Arc::new(Mutex::new(State {
+            engine: handle,
+            control: Control::Tone,
+            midi_ports: Vec::new(),
+            midi_config: Default::default(),
+            config_path: None,
+            organ_key: String::new(),
+            suggested_channels: Vec::new(),
+            learn: None,
+            control_learn: None,
+            key_bindings: Vec::new(),
+            keyboard: None,
+            trem_groups: Vec::new(),
+            trem_engaged: false,
+            master_gain: 0.178,
+            reverb_wet: None,
+            expression_cc: 11,
+            composite_path: None,
+            setup: Default::default(),
+            compass_overrides: Vec::new(),
+            pending_load: None,
+            loading: None,
+            load_error: None,
+        }))
+    }
+
+    /// Loading over the API only queues: the main thread owns the
+    /// stream, so the endpoint hands it the request and the snapshot
+    /// says "loading" until it lands.
+    #[test]
+    fn loading_an_organ_is_queued_for_the_main_thread() {
+        let state = tone_state();
+        let file = std::env::temp_dir().join("aristide-load-queue-test.organ");
+        std::fs::write(&file, "[Organ]").expect("fixture written");
+
+        let missing = respond(&state, &Method::Post, "/api/organ/load");
+        assert_eq!(missing.status_code().0, 400, "a path is required");
+        let absent = respond(
+            &state,
+            &Method::Post,
+            "/api/organ/load?path=/no/such/place.organ",
+        );
+        assert_eq!(absent.status_code().0, 400, "the path must exist");
+
+        let url = format!("/api/organ/load?path={}", file.display());
+        let queued = respond(&state, &Method::Post, &url);
+        assert_eq!(queued.status_code().0, 200);
+        {
+            let state = state.lock().expect("state poisoned");
+            let pending = state.pending_load.as_ref().expect("request queued");
+            assert_eq!(pending.paths, vec![file.clone()]);
+            assert!(!pending.initial, "a picker load must not exit on failure");
+            assert!(state.loading.is_some(), "snapshot narrates the load");
+        }
+        assert!(state_json(&state).contains("\"loading\":"));
+
+        // One at a time: a second request is refused, not stacked.
+        let refused = respond(&state, &Method::Post, &url);
+        assert_eq!(refused.status_code().0, 400);
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[test]
+    fn the_snapshot_offers_the_library_and_forget_removes() {
+        let state = tone_state();
+        state
+            .lock()
+            .expect("state poisoned")
+            .midi_config
+            .remember("Demo", Path::new("/sets/demo.organ"));
+        let body = state_json(&state);
+        assert!(
+            body.contains("\"library\":[{\"name\":\"Demo\",\"path\":\"/sets/demo.organ\"}]"),
+            "library present: {body}"
+        );
+        assert!(!body.contains("\"organ\":"), "no organ is loaded");
+
+        respond(
+            &state,
+            &Method::Post,
+            "/api/library/forget?path=/sets/demo.organ",
+        );
+        assert!(state_json(&state).contains("\"library\":[]"));
+    }
+
+    #[test]
+    fn browse_lists_directories_and_loadable_files_only() {
+        let dir = std::env::temp_dir().join("aristide-browse-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).expect("fixture dir");
+        for name in ["set.organ", "combo.toml", "readme.txt", ".hidden.organ"] {
+            std::fs::write(dir.join(name), "").expect("fixture file");
+        }
+        let body = browse_json(&dir).expect("browses");
+        assert!(body.contains("\"sub\""), "subdirectory listed: {body}");
+        assert!(body.contains("set.organ"), "sample set listed");
+        assert!(body.contains("combo.toml"), "composite listed");
+        assert!(!body.contains("readme.txt"), "other files are noise");
+        assert!(!body.contains(".hidden.organ"), "dotfiles skipped");
+        assert!(
+            body.find("\"sub\"").unwrap() < body.find("combo.toml").unwrap(),
+            "directories come first"
+        );
+        assert!(browse_json(&dir.join("nowhere")).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

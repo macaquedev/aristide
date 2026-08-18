@@ -3,6 +3,7 @@ mod config;
 mod console;
 mod control;
 mod http;
+mod load;
 mod tuning;
 
 use std::path::PathBuf;
@@ -12,7 +13,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use aristide_engine::{Command, Engine, EngineHandle};
 use aristide_formats::instrument;
-use aristide_model::{Organ, StopId};
+use aristide_model::StopId;
 use console::Console;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use midir::{Ignore, MidiInput, MidiInputConnection};
@@ -99,66 +100,6 @@ fn parse_args() -> Result<Args> {
         }
     }
     Ok(args)
-}
-
-fn load_organ(path: &std::path::Path) -> Result<Organ> {
-    let started = Instant::now();
-    let result = aristide_formats::grandorgue::load(path)
-        .with_context(|| format!("loading {}", path.display()))?;
-    tracing::info!(
-        "organ: {} ({} stops, {} ranks) in {:.1?}",
-        result.organ.name,
-        result.organ.stops.len(),
-        result.organ.ranks.len(),
-        started.elapsed()
-    );
-    for warning in result.warnings.iter().take(10) {
-        tracing::warn!("odf: {warning}");
-    }
-    if result.warnings.len() > 10 {
-        tracing::warn!("odf: … and {} more warnings", result.warnings.len() - 10);
-    }
-    Ok(result.organ)
-}
-
-/// Stop patterns (from `--stops` or the sidecar) resolve exact-first,
-/// then shortest-substring (see `sidecar::match_names`), so "plein jeu"
-/// draws the mixture and not its drawstop noise. With no patterns at
-/// all the organ starts cancelled — no stop drawn, as an organist finds
-/// it — and the player registers from silence.
-fn choose_registration(organ: &Organ, patterns: &[String]) -> Vec<StopId> {
-    let drawn: Vec<StopId> = if patterns.is_empty() {
-        Vec::new()
-    } else {
-        let names: Vec<&str> = organ.stops.iter().map(|s| s.name.as_str()).collect();
-        let mut drawn: Vec<StopId> = patterns
-            .iter()
-            .flat_map(|p| aristide_formats::sidecar::match_names(&names, p))
-            .map(|i| organ.stops[i].id)
-            .collect();
-        drawn.sort_by_key(|id| id.0);
-        drawn.dedup();
-        drawn
-    };
-    for stop in &organ.stops {
-        if drawn.contains(&stop.id) {
-            let manual = organ
-                .manuals
-                .iter()
-                .find(|m| m.id == stop.manual)
-                .map(|m| m.name.as_str())
-                .unwrap_or("?");
-            tracing::info!("drawn: {} ({manual})", stop.name);
-        }
-    }
-    if drawn.is_empty() {
-        if patterns.is_empty() {
-            tracing::info!("registration cancelled — draw stops in the console");
-        } else {
-            tracing::warn!("no stops matched — keys will be silent");
-        }
-    }
-    drawn
 }
 
 /// One-time setup on the audio callback's own thread (cpal creates it,
@@ -291,74 +232,6 @@ fn promote_audio_thread_via_rtkit() {
              sudo setcap cap_sys_nice+ep <path-to-aristide-server>"
         );
     }
-}
-
-/// Load a reverb impulse response: a wav next to the set, or
-/// "synthetic" — a generated 2 s exponentially decaying stereo hall
-/// (useful before any IR file exists; also the fallback demo room).
-fn load_impulse_response(
-    spec: &str,
-    set_path: &std::path::Path,
-    device_rate: f32,
-) -> Result<aristide_engine::reverb::PreparedIr> {
-    if spec.eq_ignore_ascii_case("synthetic") {
-        let frames = (2.0 * device_rate) as usize;
-        let mut rng = 0x1357_9BDFu32;
-        let mut noise = move || {
-            rng ^= rng << 13;
-            rng ^= rng >> 17;
-            rng ^= rng << 5;
-            (rng >> 8) as f32 / (1u32 << 24) as f32 - 0.5
-        };
-        let mut data = Vec::with_capacity(frames * 2);
-        for i in 0..frames {
-            let t = i as f32 / device_rate;
-            // ~1.4 s RT60; highs die faster via a crude progressive tilt.
-            let envelope = (-t * 4.9).exp() * (1.0 - (-t * 60.0).exp());
-            data.push(noise() * envelope);
-            data.push(noise() * envelope);
-        }
-        return aristide_engine::reverb::PreparedIr::prepare(&data, 2, device_rate, device_rate)
-            .map_err(|e| anyhow::anyhow!(e));
-    }
-    let ir_path = set_path
-        .parent()
-        .unwrap_or(std::path::Path::new(""))
-        .join(spec);
-    let file = aristide_formats::wav::read(&ir_path)
-        .map_err(|e| anyhow::anyhow!("{}: {e}", ir_path.display()))?;
-    aristide_engine::reverb::PreparedIr::prepare(
-        &file.samples,
-        file.info.channels,
-        file.info.sample_rate as f32,
-        device_rate,
-    )
-    .map_err(|e| anyhow::anyhow!(e))
-}
-
-/// The sidecar's `midi.channels` (manual names in channel order) read
-/// backwards: per manual index, the channel it conventionally speaks on.
-///
-/// This is a *suggestion*, never a route. A set can say "the Récit is
-/// channel 2" because that is how its console was built, and the dialog
-/// then pre-fills channel 2 when you hand-assign a device to the Récit;
-/// nothing sounds until you assign one.
-fn suggested_channels(organ: &Organ, channel_names: &[String]) -> Vec<Option<u8>> {
-    let names: Vec<&str> = organ.manuals.iter().map(|m| m.name.as_str()).collect();
-    let mut suggested = vec![None; organ.manuals.len()];
-    for (channel, pattern) in channel_names.iter().enumerate().take(16) {
-        match aristide_formats::sidecar::match_names(&names, pattern).as_slice() {
-            [manual] if suggested[*manual].is_none() => {
-                suggested[*manual] = Some(channel as u8 + 1);
-            }
-            [_] => {}
-            matched => tracing::warn!(
-                "sidecar midi.channels: {pattern:?} matched {} manuals, ignoring it",
-                matched.len()
-            ),
-        }
-    }
-    suggested
 }
 
 /// What MIDI input drives: the sampled organ console, or the M1 tone.
@@ -551,6 +424,25 @@ pub struct State {
     /// set's own. Asked when sets are combined; editable later in
     /// Preferences; saved into the composite file.
     pub compass_overrides: Vec<Option<(u8, u8)>>,
+    /// Sources waiting to be loaded, queued by the picker (or the CLI at
+    /// startup). The main thread owns the audio stream, so it is the one
+    /// that performs the load and swaps the result in.
+    pub pending_load: Option<LoadRequest>,
+    /// What the load in progress is doing right now, for a UI watching.
+    pub loading: Option<String>,
+    /// Why the last load failed, kept until the next one starts.
+    pub load_error: Option<String>,
+}
+
+/// One request to load an instrument, from the picker or the CLI.
+pub struct LoadRequest {
+    pub paths: Vec<PathBuf>,
+    /// CLI `--stops` registration patterns; empty means each source's
+    /// sidecar default. The picker never sets these.
+    pub stops: Vec<String>,
+    /// Queued by the command line: a failure should exit the process,
+    /// as a bad CLI path always has, not leave a silent server running.
+    pub initial: bool,
 }
 
 /// The provenance of the loaded instrument.
@@ -1438,11 +1330,23 @@ impl State {
             &dropped,
         )?;
         tracing::info!("organ saved: {}", path.display());
+        // The file is now the way to load this organ again.
+        let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+        self.midi_config.remember(&self.organ_key, &canonical);
         self.composite_path = Some(path);
         self.setup.implicit = false;
         // The new file owns the wiring from here on; write it in.
         self.persist();
         Ok(())
+    }
+
+    /// Drop an organ from the picker's library and save the change.
+    pub fn forget_organ(&mut self, path: &std::path::Path) -> bool {
+        let removed = self.midi_config.forget(path);
+        if removed {
+            self.persist();
+        }
+        removed
     }
 
     /// Write the assignments back for this organ. Called after every
@@ -1487,7 +1391,7 @@ fn main() -> Result<()> {
                     .with_context(|| format!("loading {}", path.display()))?
                     .organ
             } else {
-                load_organ(path)?
+                load::load_organ(path)?
             };
             for manual in &organ.manuals {
                 println!("{}:", manual.name);
@@ -1520,407 +1424,7 @@ fn main() -> Result<()> {
         args.buffer_frames as f32 * 1000.0 / sample_rate
     );
 
-    let mut wind_params = None;
-    let mut trem_setup: Option<(aristide_engine::wind::TremulantParams, Vec<u8>)> = None;
-    let mut enclosure_setup: Vec<(u8, aristide_engine::enclosure::EnclosureParams)> = Vec::new();
-    let mut expression_cc = 11u8;
-    let mut reverb_ir: Option<Arc<aristide_engine::reverb::PreparedIr>> = None;
-    let mut reverb_wet = 0.0f32;
-    let mut composite_midi: Option<(PathBuf, instrument::MidiDef)> = None;
-    let mut manual_tuning_defs: Vec<instrument::ManualTuningDef> = Vec::new();
-    let mut setup = Setup::default();
-    let (sample_bank, control, suggested_channels) = match args.sets.first() {
-        Some(first_path) => {
-            // Every CLI path is a source: a sample set with its
-            // sidecar, or a composite definition (`.toml`), which
-            // assembles first and then acts like any other source.
-            // Per-set decisions — sidecar couplers, the default
-            // registration, channel suggestions — resolve against each
-            // source's own names here, then ride the id maps across.
-            let mut sources: Vec<(String, Organ)> = Vec::new();
-            let mut sidecars = Vec::new();
-            for path in &args.sets {
-                let (mut organ, sidecar) = if instrument::is_definition(path) {
-                    let assembled = instrument::load(path)
-                        .with_context(|| format!("loading {}", path.display()))?;
-                    for warning in &assembled.warnings {
-                        tracing::warn!("instrument: {warning}");
-                    }
-                    tracing::info!(
-                        "instrument: {} ({} manuals, {} stops) from {}",
-                        assembled.organ.name,
-                        assembled.organ.manuals.len(),
-                        assembled.organ.stops.len(),
-                        path.display()
-                    );
-                    if args.sets.len() == 1 {
-                        composite_midi = Some((path.clone(), assembled.midi));
-                        manual_tuning_defs = assembled.manual_tuning;
-                    } else if !assembled.midi.inputs.is_empty()
-                        || !assembled.midi.controls.is_empty()
-                        || !assembled.manual_tuning.is_empty()
-                    {
-                        tracing::warn!(
-                            "{}: [midi] wiring and per-manual tuning apply only when \
-                             the organ is loaded alone — ignored",
-                            path.display()
-                        );
-                    }
-                    (assembled.organ, assembled.sidecar)
-                } else {
-                    let organ = load_organ(path)?;
-                    let sidecar = match aristide_formats::sidecar::load_for(path) {
-                        Ok(Some(sidecar)) => {
-                            tracing::info!(
-                                "sidecar: {}",
-                                aristide_formats::sidecar::path_for(path).display()
-                            );
-                            sidecar
-                        }
-                        Ok(None) => Default::default(),
-                        Err(err) => {
-                            tracing::warn!("sidecar unreadable, ignoring: {err}");
-                            Default::default()
-                        }
-                    };
-                    (organ, sidecar)
-                };
-                // User-defined couplers join the source's own on the
-                // rail; a composite's resolve against its assembled
-                // console the same way.
-                let (custom, warnings) =
-                    aristide_formats::sidecar::resolve_couplers(&organ, &sidecar.couplers.define);
-                for warning in warnings {
-                    tracing::warn!("sidecar couplers: {warning}");
-                }
-                if !custom.is_empty() {
-                    tracing::info!(
-                        "sidecar couplers: {}",
-                        custom
-                            .iter()
-                            .map(|c| c.name.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    );
-                    organ.couplers.extend(custom);
-                }
-                // The label suffixed onto colliding names when sources
-                // combine; the same set twice must stay tellable apart.
-                let mut label = organ.name.clone();
-                let mut nth = 2;
-                while sources.iter().any(|(l, _)| *l == label) {
-                    label = format!("{} {nth}", organ.name);
-                    nth += 1;
-                }
-                setup
-                    .sources
-                    .push((label.clone(), path.canonicalize().unwrap_or_else(|_| path.clone())));
-                sources.push((label, organ));
-                sidecars.push(sidecar);
-            }
-            // With a CLI --stops the patterns match the whole combined
-            // organ; each sidecar's default registration instead means
-            // its own set's stops and nothing else's.
-            let per_source_drawn: Vec<Vec<StopId>> = if args.stops.is_empty() {
-                sources
-                    .iter()
-                    .zip(&sidecars)
-                    .map(|((_, organ), sidecar)| {
-                        choose_registration(organ, &sidecar.registration.default)
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            let per_source_suggested: Vec<Vec<Option<u8>>> = sources
-                .iter()
-                .zip(&sidecars)
-                .map(|((_, organ), sidecar)| suggested_channels(organ, &sidecar.midi.channels))
-                .collect();
-            // One source stands as itself; several become an implicit
-            // composite — assembled exactly as a definition file with
-            // sources and no pulls would be, every manual and coupler
-            // as its own set provides. Engine-wide settings (wind,
-            // tremulant, reverb, tuning…) come from the first source.
-            let sidecar = &sidecars[0];
-            let (organ, drawn) = if sources.len() == 1 {
-                let organ = sources.pop().expect("one source").1;
-                setup.pulls = organ
-                    .manuals
-                    .iter()
-                    .enumerate()
-                    .map(|(index, manual)| (0, manual.name.clone(), index))
-                    .collect();
-                let drawn = if args.stops.is_empty() {
-                    per_source_drawn.into_iter().next().unwrap_or_default()
-                } else {
-                    choose_registration(&organ, &args.stops)
-                };
-                (organ, drawn)
-            } else {
-                let implicit = instrument::Definition {
-                    name: sources
-                        .iter()
-                        .map(|(label, _)| label.as_str())
-                        .collect::<Vec<_>>()
-                        .join(" + "),
-                    ..Default::default()
-                };
-                let assembled = instrument::assemble(&implicit, &sources, Vec::new())
-                    .map_err(|e| anyhow::anyhow!("combining sets: {e}"))?;
-                for warning in &assembled.warnings {
-                    tracing::warn!("instrument: {warning}");
-                }
-                tracing::info!(
-                    "composite: {} ({} manuals) — engine settings from the first \
-                     set's sidecar",
-                    assembled.organ.name,
-                    assembled.organ.manuals.len()
-                );
-                let groups = assembled
-                    .organ
-                    .windchests
-                    .iter()
-                    .map(|c| c.number)
-                    .max()
-                    .unwrap_or(0);
-                if groups as usize > aristide_engine::wind::MAX_WIND_GROUPS {
-                    tracing::warn!(
-                        "composite spans {groups} windchests; the engine models {} — \
-                         the rest share the last wind group",
-                        aristide_engine::wind::MAX_WIND_GROUPS
-                    );
-                }
-                setup.pulls = assembled.division_pulls.clone();
-                setup.implicit = true;
-                let stop_map = &assembled.stop_map;
-                let drawn = if args.stops.is_empty() {
-                    per_source_drawn
-                        .iter()
-                        .enumerate()
-                        .flat_map(|(source, ids)| {
-                            ids.iter().filter_map(move |id| stop_map.get(&(source, *id)))
-                        })
-                        .copied()
-                        .collect()
-                } else {
-                    choose_registration(&assembled.organ, &args.stops)
-                };
-                (assembled.organ, drawn)
-            };
-            let started = Instant::now();
-            let loaded = bank::build(&organ, sample_rate)?;
-            tracing::info!(
-                "samples: {} files, {:.1} MiB resident, {} skipped, in {:.1?}",
-                loaded.bank.len(),
-                loaded.bank.resident_bytes() as f64 / (1024.0 * 1024.0),
-                loaded.skipped.len(),
-                started.elapsed()
-            );
-            for note in loaded.skipped.iter().take(10) {
-                tracing::warn!("skipped: {note}");
-            }
-            let defaults = aristide_engine::wind::WindParams::default();
-            let kp = defaults.pitch_exponent as f64;
-            // sag_cents is what the user hears; invert P^kp to pressure.
-            let sag_cents = sidecar.wind.sag_cents.clamp(0.0, 50.0);
-            wind_params = Some(aristide_engine::wind::WindParams {
-                sag_depth: (1.0 - 2f64.powf(-sag_cents / (1200.0 * kp))) as f32,
-                natural_hz: sidecar.wind.bounce_hz.clamp(0.5, 12.0) as f32,
-                damping: sidecar.wind.damping.clamp(0.2, 1.5) as f32,
-                flow_noise: (sidecar.wind.flow_noise_percent / 100.0).clamp(0.0, 0.1) as f32,
-                ..defaults
-            });
-
-            // Tremulant: pitch cents → pressure swing through the same
-            // exponent, applied to the sidecar's chests (default: all).
-            let depth_cents = sidecar.tremulant.depth_cents.clamp(0.0, 30.0);
-            let trem_params = aristide_engine::wind::TremulantParams {
-                rate_hz: sidecar.tremulant.rate_hz.clamp(0.5, 12.0) as f32,
-                depth: (2f64.powf(depth_cents / (1200.0 * kp)) - 1.0) as f32,
-                ..Default::default()
-            };
-            let max_groups = aristide_engine::wind::MAX_WIND_GROUPS as u32;
-            let groups: Vec<u8> = if sidecar.tremulant.chests.is_empty() {
-                (0..max_groups as u8).collect()
-            } else {
-                sidecar
-                    .tremulant
-                    .chests
-                    .iter()
-                    .map(|&chest| chest.saturating_sub(1).min(max_groups - 1) as u8)
-                    .collect()
-            };
-            trem_setup = Some((trem_params, groups));
-
-            // Enclosures: one engine box per ODF enclosure, floor from
-            // the set's AmpMinimumLevel unless the sidecar overrides,
-            // filter/inertia constants from the sidecar.
-            let boxes = &sidecar.enclosures;
-            expression_cc = boxes.cc.min(119);
-            for (index, enclosure) in organ
-                .enclosures
-                .iter()
-                .enumerate()
-                .take(aristide_engine::enclosure::MAX_ENCLOSURES)
-            {
-                let floor_db = if boxes.floor_db < 0.0 {
-                    boxes.floor_db.max(-40.0)
-                } else {
-                    // GO: AmpMinimumLevel % linear amplitude closed.
-                    // Clamp at −40 dB (a 0 would be −∞; measured real
-                    // boxes span 10–20 dB broadband).
-                    20.0 * (enclosure.amp_minimum_level / 100.0).max(0.01).log10()
-                };
-                enclosure_setup.push((
-                    index as u8,
-                    aristide_engine::enclosure::EnclosureParams {
-                        floor_db: floor_db as f32,
-                        shelf_db: boxes.shelf_db.clamp(-40.0, 0.0) as f32,
-                        corner_open_hz: boxes.corner_open_hz.clamp(100.0, 20_000.0) as f32,
-                        corner_closed_hz: boxes.corner_closed_hz.clamp(100.0, 20_000.0) as f32,
-                        taper: boxes.taper.clamp(0.2, 5.0) as f32,
-                        full_sweep_s: boxes.full_sweep_s.clamp(0.0, 5.0) as f32,
-                    },
-                ));
-            }
-            if organ.enclosures.len() > aristide_engine::enclosure::MAX_ENCLOSURES {
-                tracing::warn!(
-                    "set defines {} enclosures; engine tracks the first {}",
-                    organ.enclosures.len(),
-                    aristide_engine::enclosure::MAX_ENCLOSURES
-                );
-            }
-
-            if !sidecar.reverb.ir.is_empty() {
-                reverb_wet = sidecar.reverb.wet.clamp(0.0, 2.0) as f32;
-                match load_impulse_response(&sidecar.reverb.ir, first_path, sample_rate) {
-                    Ok(ir) => {
-                        tracing::info!(
-                            "reverb: {} ({} partitions), wet {:.2}",
-                            sidecar.reverb.ir,
-                            ir.partition_count(),
-                            reverb_wet
-                        );
-                        reverb_ir = Some(Arc::new(ir));
-                    }
-                    Err(err) => tracing::warn!("reverb disabled: {err}"),
-                }
-            }
-            let suggested: Vec<Option<u8>> = per_source_suggested.concat();
-            let mut console = Console::new(organ, loaded.specs, drawn, sample_rate);
-            let temperament = tuning::Temperament::parse(&sidecar.tuning.temperament)
-                .unwrap_or_else(|| {
-                    tracing::warn!(
-                        "sidecar tuning: unknown temperament {:?}, using equal",
-                        sidecar.tuning.temperament
-                    );
-                    tuning::Temperament::Equal
-                });
-            let live_tuning = tuning::Tuning {
-                temperament,
-                a4_hz: sidecar.tuning.a4_hz.clamp(300.0, 500.0),
-                transpose: sidecar.tuning.transpose.clamp(-12, 12),
-            };
-            console.set_tuning(live_tuning);
-            // Divisions the definition tunes apart from the rest:
-            // missing fields follow the instrument-wide tuning.
-            for (manual, temperament, a4, transpose) in &manual_tuning_defs {
-                let temperament = temperament
-                    .as_deref()
-                    .map(|name| {
-                        tuning::Temperament::parse(name).unwrap_or_else(|| {
-                            tracing::warn!(
-                                "manual tuning: unknown temperament {name:?}, using the \
-                                 instrument's"
-                            );
-                            live_tuning.temperament
-                        })
-                    })
-                    .unwrap_or(live_tuning.temperament);
-                let own = tuning::Tuning {
-                    temperament,
-                    a4_hz: a4.unwrap_or(live_tuning.a4_hz).clamp(300.0, 500.0),
-                    transpose: transpose.unwrap_or(live_tuning.transpose).clamp(-12, 12),
-                };
-                tracing::info!(
-                    "tuning: manual {manual} plays {} @ a'={} Hz, transpose {:+}",
-                    own.temperament.name(),
-                    own.a4_hz,
-                    own.transpose
-                );
-                console.set_manual_tuning(*manual, Some(own));
-            }
-            console.set_coupler_repitch(sidecar.couplers.repitch);
-            // Couplers this instrument takes off its console — they
-            // stay restorable from the Organ preferences.
-            {
-                let names: Vec<String> = console
-                    .coupler_states()
-                    .iter()
-                    .map(|(_, name, _, _)| name.to_string())
-                    .collect();
-                let names: Vec<&str> = names.iter().map(String::as_str).collect();
-                for pattern in &sidecar.couplers.drop {
-                    let matches = aristide_formats::sidecar::match_names(&names, pattern);
-                    if matches.is_empty() {
-                        tracing::warn!("couplers.drop: {pattern:?} matches nothing");
-                    }
-                    for index in matches {
-                        tracing::info!("coupler off the console: {}", names[index]);
-                        console.set_coupler_available(index, false);
-                    }
-                }
-            }
-            console.set_noises(
-                sidecar.noises.enabled,
-                sidecar.noises.volume.clamp(0.0, 2.0) as f32,
-            );
-            tracing::info!(
-                "tuning: {} @ a'={} Hz, transpose {:+}",
-                live_tuning.temperament.name(),
-                live_tuning.a4_hz,
-                live_tuning.transpose
-            );
-            (loaded.bank, Control::Organ(console), suggested)
-        }
-        None => {
-            tracing::info!("no sample set given — playing the test tone");
-            (Default::default(), Control::Tone, Vec::new())
-        }
-    };
-
-    // Build the stream, falling back to the backend's default buffer if
-    // it rejects our fixed size. Each attempt needs a fresh Engine (the
-    // callback closure consumes it); the bank is shared via Arc.
-    let bank = Arc::new(sample_bank);
-    // Fault every sample page in NOW; doing it lazily means page faults
-    // inside the audio callback on each pipe's first note.
-    let prefault_started = Instant::now();
-    let checksum = bank.pre_fault();
-    tracing::info!(
-        "pre-faulted {:.0} MiB of samples in {:.1?} (checksum {checksum:.3})",
-        bank.resident_bytes() as f64 / (1024.0 * 1024.0),
-        prefault_started.elapsed()
-    );
-
-    let buffer_hint = args.buffer_frames;
-    // Overrun detector: the callback timestamps itself; late arrivals
-    // (gap > 2x the nominal block time) are counted and reported — the
-    // objective signal for delivery-layer glitches.
-    let overruns = Arc::new(std::sync::atomic::AtomicU32::new(0));
-    // DSP-load telemetry: the callback times engine.process() so the
-    // overrun report can say WHICH side missed — a too-slow engine and a
-    // preempted callback both arrive late, and only this measurement
-    // tells them apart.
-    let dsp_peak_ns = Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let dsp_over_budget = Arc::new(std::sync::atomic::AtomicU32::new(0));
-    let dsp_budget_ns = Arc::new(std::sync::atomic::AtomicU64::new(0));
-    // Recording tap: engine output -> lock-free ring -> writer thread.
-    let mut tap_consumer = None;
-    let record_requested = args.record.is_some();
-    let safe_mode = args.safe;
-    if safe_mode {
+    if args.safe {
         tracing::warn!(
             "SAFE MODE: linear interpolation, no wind/tremulant/brightness — \
              diagnostic quality floor (GO-grade). If audio still glitches \
@@ -1928,29 +1432,248 @@ fn main() -> Result<()> {
         );
     }
 
-    let build_stream = |buffer_size: cpal::BufferSize,
-                        tap_out: &mut Option<rtrb::Consumer<f32>>|
-     -> Result<(cpal::Stream, EngineHandle)> {
-        let (mut engine, handle) = Engine::new(sample_rate, Arc::clone(&bank));
-        engine.set_reverb(reverb_ir.clone(), reverb_wet);
-        if safe_mode {
+    // The audio output is up before any organ is: the server starts on
+    // an empty bank (the M1 test tone), and every organ — named on the
+    // CLI or picked in the console later — arrives through the same
+    // load path in the main loop below.
+    let (record_tx, recorder) = match args.record.clone() {
+        Some(path) => {
+            let (sender, worker) = spawn_recorder(path, config.sample_rate.0)?;
+            (Some(sender), Some(worker))
+        }
+        None => (None, None),
+    };
+    let mut audio = AudioOutput {
+        device,
+        config,
+        channels,
+        sample_rate,
+        buffer_frames: args.buffer_frames,
+        safe: args.safe,
+        overruns: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        dsp_peak_ns: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        dsp_over_budget: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        dsp_budget_ns: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        record: record_tx,
+        stream: None,
+    };
+    let mut handle = audio.start(Arc::new(aristide_engine::bank::SampleBank::default()), None)?;
+    if let Some(gain) = args.master_gain {
+        handle.send(Command::SetMasterGain { linear: gain });
+    }
+
+    let config_path = config::default_path();
+    let midi_config = match &config_path {
+        Some(path) => config::load(path).unwrap_or_else(|err| {
+            tracing::warn!("midi assignments unreadable, starting empty: {err}");
+            Default::default()
+        }),
+        None => {
+            tracing::warn!(
+                "no config directory (XDG_CONFIG_HOME/HOME unset) — MIDI \
+                 assignments will last only for this run"
+            );
+            Default::default()
+        }
+    };
+    // CLI paths are an explicit selection, queued like any picker
+    // request; without them nothing loads until the console asks.
+    let pending_load = (!args.sets.is_empty()).then(|| LoadRequest {
+        paths: args.sets.clone(),
+        stops: args.stops.clone(),
+        initial: true,
+    });
+    if pending_load.is_none() {
+        tracing::info!("no organ loaded — pick one in the console");
+    }
+    let state = Arc::new(Mutex::new(State {
+        engine: handle,
+        control: Control::Tone,
+        midi_ports: Vec::new(),
+        midi_config,
+        config_path,
+        organ_key: String::new(),
+        suggested_channels: Vec::new(),
+        learn: None,
+        control_learn: None,
+        key_bindings: Vec::new(),
+        keyboard: None,
+        trem_groups: Vec::new(),
+        trem_engaged: false,
+        master_gain: args.master_gain.unwrap_or(0.178),
+        reverb_wet: None,
+        expression_cc: 11,
+        composite_path: None,
+        setup: Setup::default(),
+        compass_overrides: Vec::new(),
+        loading: pending_load.as_ref().map(|_| "loading…".to_string()),
+        pending_load,
+        load_error: None,
+    }));
+    // Assignments exist before any hardware does: the computer
+    // keyboard and every binding are live from the first note.
+    state.lock().expect("state poisoned").resolve_routes();
+    if let Err(err) = http::spawn(Arc::clone(&state), args.http_port) {
+        tracing::warn!("console ui disabled: {err}");
+    }
+    // MIDI is optional: the console UI can play notes on its own, so a
+    // box with no sequencer access still gets a working instrument.
+    spawn_midi_supervisor(Arc::clone(&state));
+
+    // Ctrl-C: finish the WAV cleanly instead of truncating it.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(
+            libc::SIGINT,
+            handle_sigint as extern "C" fn(libc::c_int) as usize,
+        );
+    }
+
+    let mut reported_overruns = 0u32;
+    loop {
+        // Loads run here, on the thread that owns the stream. The lock
+        // is NOT held while loading: the console keeps answering, and
+        // the old organ keeps playing until the new one is ready.
+        let request = state.lock().expect("state poisoned").pending_load.take();
+        if let Some(request) = request {
+            let initial = request.initial;
+            if let Err(err) = perform_load(&state, &mut audio, request) {
+                if initial {
+                    return Err(err);
+                }
+                tracing::warn!("organ load failed: {err:#}");
+                let mut state = state.lock().expect("state poisoned");
+                state.loading = None;
+                state.load_error = Some(format!("{err:#}"));
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        use std::sync::atomic::Ordering::Relaxed;
+        let total = audio.overruns.load(Relaxed);
+        if total > reported_overruns {
+            // Name the guilty side: the peak engine.process() time since
+            // the last report either fits the block budget (the OS starved
+            // us) or doesn't (the DSP is too heavy for this machine).
+            let peak_ms = audio.dsp_peak_ns.swap(0, Relaxed) as f64 / 1e6;
+            let budget_ms = audio.dsp_budget_ns.load(Relaxed) as f64 / 1e6;
+            let engine_over = audio.dsp_over_budget.load(Relaxed);
+            let verdict = if engine_over == 0 {
+                "engine within budget — suspect OS scheduling / missing RT \
+                 priority / CPU frequency governor"
+            } else {
+                "the ENGINE is blowing its deadline — DSP overload on this \
+                 machine (try --safe or a larger --buffer)"
+            };
+            tracing::warn!(
+                "audio callback arrived late {total} time(s); engine DSP \
+                 peak {peak_ms:.2} ms of {budget_ms:.2} ms budget, \
+                 {engine_over} block(s) ever over — {verdict}"
+            );
+            reported_overruns = total;
+        }
+        if SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
+            break;
+        }
+    }
+    if let Some(worker) = recorder {
+        tracing::info!("finalizing recording…");
+        let _ = worker.join();
+    }
+    tracing::info!("bye ({} late callbacks total)", reported_overruns);
+    Ok(())
+}
+
+/// The audio device and the stream playing into it, owned by the main
+/// thread (a cpal stream is not `Send`). The engine's sample bank is
+/// fixed at its construction — the RT path never swaps pointers — so
+/// loading an organ means a new engine, and a new engine means a new
+/// stream; [`AudioOutput::start`] does both.
+struct AudioOutput {
+    device: cpal::Device,
+    config: cpal::StreamConfig,
+    channels: usize,
+    sample_rate: f32,
+    buffer_frames: u32,
+    safe: bool,
+    overruns: Arc<std::sync::atomic::AtomicU32>,
+    dsp_peak_ns: Arc<std::sync::atomic::AtomicU64>,
+    dsp_over_budget: Arc<std::sync::atomic::AtomicU32>,
+    dsp_budget_ns: Arc<std::sync::atomic::AtomicU64>,
+    /// Where each new engine's recording tap goes; the recorder thread
+    /// drains them all into one WAV.
+    record: Option<std::sync::mpsc::Sender<rtrb::Consumer<f32>>>,
+    stream: Option<cpal::Stream>,
+}
+
+impl AudioOutput {
+    /// Replace the running engine (and its stream) with a fresh one on
+    /// `bank`. Falls back to the backend's default buffer size if the
+    /// requested one is refused.
+    fn start(
+        &mut self,
+        bank: Arc<aristide_engine::bank::SampleBank>,
+        reverb: Option<(Arc<aristide_engine::reverb::PreparedIr>, f32)>,
+    ) -> Result<EngineHandle> {
+        // Drop the old stream first: exclusive backends refuse a second
+        // stream on the device, and the old engine (with its bank) dies
+        // with it here on the control side, never on the audio thread.
+        self.stream = None;
+        #[cfg(target_os = "linux")]
+        AUDIO_TID.store(0, std::sync::atomic::Ordering::Release);
+        let (stream, handle) =
+            match self.build(cpal::BufferSize::Fixed(self.buffer_frames), &bank, &reverb) {
+                Ok(pair) => pair,
+                Err(err) => {
+                    tracing::warn!(
+                        "device refused a {}-frame buffer ({err}); using its default \
+                         (expect higher latency — try another --buffer value)",
+                        self.buffer_frames
+                    );
+                    self.build(cpal::BufferSize::Default, &bank, &reverb)?
+                }
+            };
+        stream.play()?;
+        self.stream = Some(stream);
+        // Each stream gets a fresh callback thread; promote it again.
+        #[cfg(target_os = "linux")]
+        std::thread::spawn(promote_audio_thread_via_rtkit);
+        Ok(handle)
+    }
+
+    fn build(
+        &self,
+        buffer_size: cpal::BufferSize,
+        bank: &Arc<aristide_engine::bank::SampleBank>,
+        reverb: &Option<(Arc<aristide_engine::reverb::PreparedIr>, f32)>,
+    ) -> Result<(cpal::Stream, EngineHandle)> {
+        let (mut engine, handle) = Engine::new(self.sample_rate, Arc::clone(bank));
+        engine.set_reverb(
+            reverb.as_ref().map(|(ir, _)| Arc::clone(ir)),
+            reverb.as_ref().map_or(0.0, |(_, wet)| *wet),
+        );
+        if self.safe {
             engine.set_lite(true);
         }
-        if record_requested {
+        let mut tap = None;
+        if self.record.is_some() {
             // ~90 s of stereo headroom; the writer drains far faster.
             let (producer, consumer) = rtrb::RingBuffer::new(1 << 23);
             engine.set_tap(producer);
-            *tap_out = Some(consumer);
+            tap = Some(consumer);
         }
-        let mut stream_config = config.clone();
+        let mut stream_config = self.config.clone();
         stream_config.buffer_size = buffer_size;
         let mut rt_ready = false;
         let mut last_callback: Option<std::time::Instant> = None;
-        let overruns = Arc::clone(&overruns);
-        let dsp_peak_ns = Arc::clone(&dsp_peak_ns);
-        let dsp_over_budget = Arc::clone(&dsp_over_budget);
-        let dsp_budget_ns = Arc::clone(&dsp_budget_ns);
-        let stream = device.build_output_stream(
+        let overruns = Arc::clone(&self.overruns);
+        let dsp_peak_ns = Arc::clone(&self.dsp_peak_ns);
+        let dsp_over_budget = Arc::clone(&self.dsp_over_budget);
+        let dsp_budget_ns = Arc::clone(&self.dsp_budget_ns);
+        let channels = self.channels;
+        let sample_rate = self.sample_rate;
+        let buffer_hint = self.buffer_frames;
+        let mut engine = engine;
+        let stream = self.device.build_output_stream(
             &stream_config,
             move |data: &mut [f32], _| {
                 use std::sync::atomic::Ordering::Relaxed;
@@ -1978,29 +1701,74 @@ fn main() -> Result<()> {
             |err| tracing::error!("audio stream error: {err}"),
             None,
         )?;
+        // Only a real stream's tap reaches the recorder: a consumer
+        // whose build failed would drain nothing forever.
+        if let (Some(sender), Some(consumer)) = (&self.record, tap) {
+            let _ = sender.send(consumer);
+        }
         Ok((stream, handle))
-    };
-    let (stream, mut handle) =
-        match build_stream(cpal::BufferSize::Fixed(args.buffer_frames), &mut tap_consumer) {
-            Ok(pair) => pair,
-            Err(err) => {
-                tracing::warn!(
-                    "device refused a {}-frame buffer ({err}); using its default \
-                     (expect higher latency — try another --buffer value)",
-                    args.buffer_frames
-                );
-                tap_consumer = None;
-                build_stream(cpal::BufferSize::Default, &mut tap_consumer)?
-            }
-        };
-    stream.play()?;
-    #[cfg(target_os = "linux")]
-    std::thread::spawn(promote_audio_thread_via_rtkit);
-
-    if let Some(gain) = args.master_gain {
-        handle.send(Command::SetMasterGain { linear: gain });
     }
-    if let Some(params) = wind_params {
+}
+
+/// Prepare the requested instrument off the shared lock, then swap it
+/// in: new engine and stream, engine-wide settings, console, routing.
+/// On error the running organ (or the bare test tone) stays untouched.
+fn perform_load(
+    state: &Arc<Mutex<State>>,
+    audio: &mut AudioOutput,
+    request: LoadRequest,
+) -> Result<()> {
+    let progress = |phase: String| {
+        state.lock().expect("state poisoned").loading = Some(phase);
+    };
+    progress("loading…".to_string());
+    let load::PreparedInstrument {
+        console,
+        bank,
+        wind,
+        tremulant,
+        enclosures,
+        expression_cc,
+        reverb,
+        composite,
+        suggested_channels,
+        setup,
+    } = load::prepare(&request.paths, &request.stops, audio.sample_rate, &progress)?;
+
+    // Fault every sample page in NOW; doing it lazily means page faults
+    // inside the audio callback on each pipe's first note.
+    progress("waking samples…".to_string());
+    let bank = Arc::new(bank);
+    let prefault_started = Instant::now();
+    let checksum = bank.pre_fault();
+    tracing::info!(
+        "pre-faulted {:.0} MiB of samples in {:.1?} (checksum {checksum:.3})",
+        bank.resident_bytes() as f64 / (1024.0 * 1024.0),
+        prefault_started.elapsed()
+    );
+
+    // Let whatever the outgoing organ is sounding fade before its
+    // engine goes away with the stream.
+    {
+        let mut state = state.lock().expect("state poisoned");
+        let State {
+            engine, control, ..
+        } = &mut *state;
+        if let Control::Organ(old) = control {
+            old.all_off();
+        }
+        engine.send(Command::AllNotesOff);
+    }
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    progress("starting audio…".to_string());
+    let mut handle = audio.start(Arc::clone(&bank), reverb.clone())?;
+
+    let master_gain = state.lock().expect("state poisoned").master_gain;
+    handle.send(Command::SetMasterGain {
+        linear: master_gain,
+    });
+    if let Some(params) = wind {
         tracing::info!(
             "wind: {:.2}% pressure sag @ {:.1} Hz, ζ={:.2}{}",
             params.sag_depth * 100.0,
@@ -2012,8 +1780,7 @@ fn main() -> Result<()> {
             handle.send(Command::SetWind { group, params });
         }
     }
-
-    for &(enclosure, params) in &enclosure_setup {
+    for &(enclosure, params) in &enclosures {
         tracing::info!(
             "enclosure {}: floor {:.1} dB, shelf {:.1} dB @ {:.0}→{:.0} Hz, sweep {:.2} s (CC{})",
             enclosure,
@@ -2026,8 +1793,7 @@ fn main() -> Result<()> {
         );
         handle.send(Command::SetEnclosure { enclosure, params });
     }
-
-    let trem_groups = match &trem_setup {
+    let trem_groups = match &tremulant {
         Some((params, groups)) => {
             tracing::info!(
                 "tremulant: {:.1} Hz, ±{:.0}% pressure, chests {:?}",
@@ -2046,151 +1812,97 @@ fn main() -> Result<()> {
         None => Vec::new(),
     };
 
+    let mut state = state.lock().expect("state poisoned");
     // Assignments are per organ, so the loaded set's own name is the
-    // key; with no set loaded there is nothing to assign to.
-    let organ_key = match &control {
-        Control::Organ(console) => console.organ_name().to_string(),
-        Control::Tone => String::new(),
-    };
-    let config_path = config::default_path();
-    let mut midi_config = match &config_path {
-        Some(path) => config::load(path).unwrap_or_else(|err| {
-            tracing::warn!("midi assignments unreadable, starting empty: {err}");
-            Default::default()
-        }),
-        None => {
-            tracing::warn!(
-                "no config directory (XDG_CONFIG_HOME/HOME unset) — MIDI \
-                 assignments will last only for this run"
-            );
-            Default::default()
-        }
-    };
+    // key its wiring is stored under.
+    state.organ_key = console.organ_name().to_string();
     // A composite file owns its MIDI wiring: whatever it says replaces
     // anything the user config remembers under this organ's name, and
     // every later change is written back into the file.
-    if let Some((_, midi)) = &composite_midi {
-        midi_config
+    if let Some((_, midi)) = &composite {
+        let organ_key = state.organ_key.clone();
+        state
+            .midi_config
             .organs
-            .insert(organ_key.clone(), config::organ_config_from_file(midi));
+            .insert(organ_key, config::organ_config_from_file(midi));
     }
-    let state = Arc::new(Mutex::new(State {
-        engine: handle,
-        control,
-        midi_ports: Vec::new(),
-        midi_config,
-        config_path,
-        organ_key,
-        suggested_channels,
-        learn: None,
-        control_learn: None,
-        key_bindings: Vec::new(),
-        keyboard: None,
-        trem_groups,
-        trem_engaged: false,
-        master_gain: args.master_gain.unwrap_or(0.178),
-        reverb_wet: reverb_ir.is_some().then_some(reverb_wet),
-        expression_cc,
-        composite_path: composite_midi.map(|(path, _)| path),
-        setup,
-        compass_overrides: Vec::new(),
-    }));
-    // Assignments exist before any hardware does: the computer
-    // keyboard and every binding are live from the first note.
-    state.lock().expect("state poisoned").resolve_routes();
-    if let Err(err) = http::spawn(Arc::clone(&state), args.http_port) {
-        tracing::warn!("console ui disabled: {err}");
+    // Every source lands in the library, so the picker can offer it
+    // next time without the command line.
+    for (label, path) in &setup.sources {
+        state.midi_config.remember(label, path);
     }
-    // MIDI is optional: the console UI can play notes on its own, so a
-    // box with no sequencer access still gets a working instrument.
-    spawn_midi_supervisor(Arc::clone(&state));
+    state.engine = handle;
+    state.control = Control::Organ(console);
+    state.suggested_channels = suggested_channels;
+    state.trem_groups = trem_groups;
+    state.trem_engaged = false;
+    state.reverb_wet = reverb.map(|(_, wet)| wet);
+    state.expression_cc = expression_cc;
+    state.composite_path = composite.map(|(path, _)| path);
+    state.setup = setup;
+    state.compass_overrides = Vec::new();
+    state.learn = None;
+    state.control_learn = None;
+    state.loading = None;
+    state.load_error = None;
+    state.resolve_routes();
+    state.persist();
+    tracing::info!("organ ready: {}", state.organ_key);
+    Ok(())
+}
 
-    // Recorder thread: drain the tap into a WAV (16-bit PCM).
-    let recording = args.record.clone();
-    let recorder = tap_consumer.map(|mut consumer| {
-        let path = recording.clone().expect("record path");
-        tracing::info!("recording engine output to {}", path.display());
-        let rate = sample_rate as u32;
-        std::thread::Builder::new()
-            .name("aristide-record".into())
-            .spawn(move || -> std::io::Result<()> {
-                use std::io::{Seek, SeekFrom, Write};
-                let mut file = std::io::BufWriter::new(std::fs::File::create(&path)?);
-                // Placeholder RIFF/data sizes, patched at shutdown.
-                file.write_all(b"RIFF\0\0\0\0WAVEfmt ")?;
-                file.write_all(&16u32.to_le_bytes())?;
-                file.write_all(&1u16.to_le_bytes())?; // PCM
-                file.write_all(&2u16.to_le_bytes())?; // stereo
-                file.write_all(&rate.to_le_bytes())?;
-                file.write_all(&(rate * 4).to_le_bytes())?;
-                file.write_all(&4u16.to_le_bytes())?;
-                file.write_all(&16u16.to_le_bytes())?;
-                file.write_all(b"data\0\0\0\0")?;
-                let mut written: u32 = 0;
-                while !SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
-                    while let Ok(value) = consumer.pop() {
+/// The recording tap's writer: drains every engine's tap ring into one
+/// WAV (16-bit PCM). Loading an organ replaces the engine, so taps
+/// arrive over a channel and each engine's output is appended in turn.
+#[allow(clippy::type_complexity)]
+fn spawn_recorder(
+    path: PathBuf,
+    rate: u32,
+) -> Result<(
+    std::sync::mpsc::Sender<rtrb::Consumer<f32>>,
+    std::thread::JoinHandle<std::io::Result<()>>,
+)> {
+    tracing::info!("recording engine output to {}", path.display());
+    let (sender, receiver) = std::sync::mpsc::channel::<rtrb::Consumer<f32>>();
+    let worker = std::thread::Builder::new()
+        .name("aristide-record".into())
+        .spawn(move || -> std::io::Result<()> {
+            use std::io::{Seek, SeekFrom, Write};
+            let mut file = std::io::BufWriter::new(std::fs::File::create(&path)?);
+            // Placeholder RIFF/data sizes, patched at shutdown.
+            file.write_all(b"RIFF\0\0\0\0WAVEfmt ")?;
+            file.write_all(&16u32.to_le_bytes())?;
+            file.write_all(&1u16.to_le_bytes())?; // PCM
+            file.write_all(&2u16.to_le_bytes())?; // stereo
+            file.write_all(&rate.to_le_bytes())?;
+            file.write_all(&(rate * 4).to_le_bytes())?;
+            file.write_all(&4u16.to_le_bytes())?;
+            file.write_all(&16u16.to_le_bytes())?;
+            file.write_all(b"data\0\0\0\0")?;
+            let mut written: u32 = 0;
+            let mut taps: Vec<rtrb::Consumer<f32>> = Vec::new();
+            while !SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
+                while let Ok(tap) = receiver.try_recv() {
+                    taps.push(tap);
+                }
+                for tap in &mut taps {
+                    while let Ok(value) = tap.pop() {
                         let clamped = (value.clamp(-1.0, 1.0) * 32767.0) as i16;
                         file.write_all(&clamped.to_le_bytes())?;
                         written = written.saturating_add(2);
                     }
-                    std::thread::sleep(std::time::Duration::from_millis(50));
                 }
-                let inner = file.get_mut();
-                inner.seek(SeekFrom::Start(4))?;
-                inner.write_all(&(36 + written).to_le_bytes())?;
-                inner.seek(SeekFrom::Start(40))?;
-                inner.write_all(&written.to_le_bytes())?;
-                file.flush()?;
-                Ok(())
-            })
-            .expect("spawn recorder")
-    });
-
-    // Ctrl-C: finish the WAV cleanly instead of truncating it.
-    #[cfg(unix)]
-    unsafe {
-        libc::signal(
-            libc::SIGINT,
-            handle_sigint as extern "C" fn(libc::c_int) as usize,
-        );
-    }
-
-    let mut reported_overruns = 0u32;
-    loop {
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        use std::sync::atomic::Ordering::Relaxed;
-        let total = overruns.load(Relaxed);
-        if total > reported_overruns {
-            // Name the guilty side: the peak engine.process() time since
-            // the last report either fits the block budget (the OS starved
-            // us) or doesn't (the DSP is too heavy for this machine).
-            let peak_ms = dsp_peak_ns.swap(0, Relaxed) as f64 / 1e6;
-            let budget_ms = dsp_budget_ns.load(Relaxed) as f64 / 1e6;
-            let engine_over = dsp_over_budget.load(Relaxed);
-            let verdict = if engine_over == 0 {
-                "engine within budget — suspect OS scheduling / missing RT \
-                 priority / CPU frequency governor"
-            } else {
-                "the ENGINE is blowing its deadline — DSP overload on this \
-                 machine (try --safe or a larger --buffer)"
-            };
-            tracing::warn!(
-                "audio callback arrived late {total} time(s); engine DSP \
-                 peak {peak_ms:.2} ms of {budget_ms:.2} ms budget, \
-                 {engine_over} block(s) ever over — {verdict}"
-            );
-            reported_overruns = total;
-        }
-        if SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
-            break;
-        }
-    }
-    if let Some(worker) = recorder {
-        tracing::info!("finalizing recording…");
-        let _ = worker.join();
-    }
-    tracing::info!("bye ({} late callbacks total)", reported_overruns);
-    Ok(())
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            let inner = file.get_mut();
+            inner.seek(SeekFrom::Start(4))?;
+            inner.write_all(&(36 + written).to_le_bytes())?;
+            inner.seek(SeekFrom::Start(40))?;
+            inner.write_all(&written.to_le_bytes())?;
+            file.flush()?;
+            Ok(())
+        })?;
+    Ok((sender, worker))
 }
 
 static SHUTDOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -2675,6 +2387,9 @@ mod tests {
             composite_path: None,
             setup: Default::default(),
             compass_overrides: Vec::new(),
+            pending_load: None,
+            loading: None,
+            load_error: None,
         }));
         // Everything downstream reads the resolved tables, exactly as
         // the server does once before it opens any device.
@@ -3063,15 +2778,15 @@ mod tests {
             .expect("sidecar readable")
             .expect("sidecar present");
 
-        let drawn = choose_registration(&organ, &sidecar.registration.default);
+        let drawn = load::choose_registration(&organ, &sidecar.registration.default);
         // The sidecar names no stops: the organ starts cancelled.
         assert!(drawn.is_empty(), "no stop drawn at startup");
         // "*" is still available as an explicit full-organ pattern.
-        let full = choose_registration(&organ, &["*".into()]);
+        let full = load::choose_registration(&organ, &["*".into()]);
         assert_eq!(full.len(), organ.stops.len(), "\"*\" draws every stop");
 
         // A named pattern still narrows to exactly what it says.
-        let plein = choose_registration(&organ, &["plein jeu".into()]);
+        let plein = load::choose_registration(&organ, &["plein jeu".into()]);
         let names: Vec<&str> = organ
             .stops
             .iter()
@@ -3082,7 +2797,7 @@ mod tests {
 
         // First Manual, Second Manual, Pedal — read backwards, the
         // channel each manual conventionally speaks on.
-        let suggested = suggested_channels(&organ, &sidecar.midi.channels);
+        let suggested = load::suggested_channels(&organ, &sidecar.midi.channels);
         assert_eq!(suggested, vec![Some(3), Some(1), Some(2)]);
     }
 }

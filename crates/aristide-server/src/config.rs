@@ -67,16 +67,56 @@ const HEADER: &str = "\
 #   manual       optional; which keyboard a pitch action shifts. Absent
 #                means every keyboard on the same device.
 #
+# A [[library]] entry is one organ this machine has loaded — the
+# console's picker lists them, most recent first. Removing one only
+# removes it from the picker; its assignments below are kept.
+#
 # Aristide rewrites this file whenever you change an assignment in
-# Preferences → MIDI. Hand edits are read back on the next start.
+# Preferences → MIDI or load an organ. Hand edits are read back on the
+# next start.
 
 ";
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct MidiConfig {
+    /// Organs this machine has loaded, most recent first — what the
+    /// console's picker offers when the server starts with nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub library: Vec<LibraryEntry>,
     /// Organ name (as the loaded set reports it) → its assignments.
     #[serde(default)]
     pub organs: BTreeMap<String, OrganConfig>,
+}
+
+/// One organ the picker can load again: its name and the path that
+/// produced it (a `.organ` sample set or a composite `.toml`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LibraryEntry {
+    pub name: String,
+    pub path: PathBuf,
+}
+
+impl MidiConfig {
+    /// Put an organ at the top of the library, replacing any entry
+    /// that already names its path.
+    pub fn remember(&mut self, name: &str, path: &Path) {
+        self.library.retain(|entry| entry.path != path);
+        self.library.insert(
+            0,
+            LibraryEntry {
+                name: name.to_string(),
+                path: path.to_path_buf(),
+            },
+        );
+    }
+
+    /// Drop an organ from the picker. Its assignments stay: forgetting
+    /// where a set lives must not silently unwire it.
+    pub fn forget(&mut self, path: &Path) -> bool {
+        let before = self.library.len();
+        self.library.retain(|entry| entry.path != path);
+        self.library.len() != before
+    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
@@ -732,5 +772,25 @@ mod tests {
         let path = std::env::temp_dir().join("aristide-midi-absent.toml");
         std::fs::remove_file(&path).ok();
         assert!(load(&path).expect("missing is fine").organs.is_empty());
+    }
+
+    /// The picker's memory: most recent first, one entry per path, and
+    /// it survives the TOML round trip alongside the assignments.
+    #[test]
+    fn the_library_remembers_most_recent_first() {
+        let mut config = MidiConfig::default();
+        config.remember("A", Path::new("/sets/a.organ"));
+        config.remember("B", Path::new("/sets/b.toml"));
+        config.remember("A renamed", Path::new("/sets/a.organ"));
+        let names: Vec<&str> = config.library.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["A renamed", "B"], "reloading moves an organ up");
+
+        let text = toml::to_string_pretty(&config).expect("serializes");
+        let back: MidiConfig = toml::from_str(&text).expect("parses");
+        assert_eq!(back.library, config.library);
+
+        assert!(config.forget(Path::new("/sets/b.toml")));
+        assert!(!config.forget(Path::new("/sets/b.toml")), "already gone");
+        assert_eq!(config.library.len(), 1);
     }
 }

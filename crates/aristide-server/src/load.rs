@@ -1,0 +1,584 @@
+//! Loading an instrument: source paths → one `Organ` → decoded sample
+//! bank → a fully configured console, plus every engine setting the
+//! sources imply. Pure control-side work — no device, stream, or shared
+//! state is touched — so the same path serves the CLI at startup and
+//! the console's organ picker at runtime.
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Instant;
+
+use anyhow::{Context, Result};
+use aristide_engine::bank::SampleBank;
+use aristide_formats::instrument;
+use aristide_model::{Organ, StopId};
+
+use crate::console::Console;
+use crate::{bank, tuning, Setup};
+
+/// Everything a load produces: the playable console, the samples it
+/// plays, and the engine-wide settings the caller sends once the new
+/// engine exists.
+pub struct PreparedInstrument {
+    pub console: Console,
+    pub bank: SampleBank,
+    pub wind: Option<aristide_engine::wind::WindParams>,
+    pub tremulant: Option<(aristide_engine::wind::TremulantParams, Vec<u8>)>,
+    pub enclosures: Vec<(u8, aristide_engine::enclosure::EnclosureParams)>,
+    pub expression_cc: u8,
+    pub reverb: Option<(Arc<aristide_engine::reverb::PreparedIr>, f32)>,
+    /// Set when the loaded organ is a composite definition file loaded
+    /// alone: that file owns the rig's MIDI wiring.
+    pub composite: Option<(PathBuf, instrument::MidiDef)>,
+    pub suggested_channels: Vec<Option<u8>>,
+    pub setup: Setup,
+}
+
+pub fn load_organ(path: &Path) -> Result<Organ> {
+    let started = Instant::now();
+    let result = aristide_formats::grandorgue::load(path)
+        .with_context(|| format!("loading {}", path.display()))?;
+    tracing::info!(
+        "organ: {} ({} stops, {} ranks) in {:.1?}",
+        result.organ.name,
+        result.organ.stops.len(),
+        result.organ.ranks.len(),
+        started.elapsed()
+    );
+    for warning in result.warnings.iter().take(10) {
+        tracing::warn!("odf: {warning}");
+    }
+    if result.warnings.len() > 10 {
+        tracing::warn!("odf: … and {} more warnings", result.warnings.len() - 10);
+    }
+    Ok(result.organ)
+}
+
+/// Stop patterns (from `--stops` or the sidecar) resolve exact-first,
+/// then shortest-substring (see `sidecar::match_names`), so "plein jeu"
+/// draws the mixture and not its drawstop noise. With no patterns at
+/// all the organ starts cancelled — no stop drawn, as an organist finds
+/// it — and the player registers from silence.
+pub fn choose_registration(organ: &Organ, patterns: &[String]) -> Vec<StopId> {
+    let drawn: Vec<StopId> = if patterns.is_empty() {
+        Vec::new()
+    } else {
+        let names: Vec<&str> = organ.stops.iter().map(|s| s.name.as_str()).collect();
+        let mut drawn: Vec<StopId> = patterns
+            .iter()
+            .flat_map(|p| aristide_formats::sidecar::match_names(&names, p))
+            .map(|i| organ.stops[i].id)
+            .collect();
+        drawn.sort_by_key(|id| id.0);
+        drawn.dedup();
+        drawn
+    };
+    for stop in &organ.stops {
+        if drawn.contains(&stop.id) {
+            let manual = organ
+                .manuals
+                .iter()
+                .find(|m| m.id == stop.manual)
+                .map(|m| m.name.as_str())
+                .unwrap_or("?");
+            tracing::info!("drawn: {} ({manual})", stop.name);
+        }
+    }
+    if drawn.is_empty() {
+        if patterns.is_empty() {
+            tracing::info!("registration cancelled — draw stops in the console");
+        } else {
+            tracing::warn!("no stops matched — keys will be silent");
+        }
+    }
+    drawn
+}
+
+/// The sidecar's `midi.channels` (manual names in channel order) read
+/// backwards: per manual index, the channel it conventionally speaks on.
+///
+/// This is a *suggestion*, never a route. A set can say "the Récit is
+/// channel 2" because that is how its console was built, and the dialog
+/// then pre-fills channel 2 when you hand-assign a device to the Récit;
+/// nothing sounds until you assign one.
+pub fn suggested_channels(organ: &Organ, channel_names: &[String]) -> Vec<Option<u8>> {
+    let names: Vec<&str> = organ.manuals.iter().map(|m| m.name.as_str()).collect();
+    let mut suggested = vec![None; organ.manuals.len()];
+    for (channel, pattern) in channel_names.iter().enumerate().take(16) {
+        match aristide_formats::sidecar::match_names(&names, pattern).as_slice() {
+            [manual] if suggested[*manual].is_none() => {
+                suggested[*manual] = Some(channel as u8 + 1);
+            }
+            [_] => {}
+            matched => tracing::warn!(
+                "sidecar midi.channels: {pattern:?} matched {} manuals, ignoring it",
+                matched.len()
+            ),
+        }
+    }
+    suggested
+}
+
+/// Load a reverb impulse response: a wav next to the set, or
+/// "synthetic" — a generated 2 s exponentially decaying stereo hall
+/// (useful before any IR file exists; also the fallback demo room).
+fn load_impulse_response(
+    spec: &str,
+    set_path: &Path,
+    device_rate: f32,
+) -> Result<aristide_engine::reverb::PreparedIr> {
+    if spec.eq_ignore_ascii_case("synthetic") {
+        let frames = (2.0 * device_rate) as usize;
+        let mut rng = 0x1357_9BDFu32;
+        let mut noise = move || {
+            rng ^= rng << 13;
+            rng ^= rng >> 17;
+            rng ^= rng << 5;
+            (rng >> 8) as f32 / (1u32 << 24) as f32 - 0.5
+        };
+        let mut data = Vec::with_capacity(frames * 2);
+        for i in 0..frames {
+            let t = i as f32 / device_rate;
+            // ~1.4 s RT60; highs die faster via a crude progressive tilt.
+            let envelope = (-t * 4.9).exp() * (1.0 - (-t * 60.0).exp());
+            data.push(noise() * envelope);
+            data.push(noise() * envelope);
+        }
+        return aristide_engine::reverb::PreparedIr::prepare(&data, 2, device_rate, device_rate)
+            .map_err(|e| anyhow::anyhow!(e));
+    }
+    let ir_path = set_path
+        .parent()
+        .unwrap_or(Path::new(""))
+        .join(spec);
+    let file = aristide_formats::wav::read(&ir_path)
+        .map_err(|e| anyhow::anyhow!("{}: {e}", ir_path.display()))?;
+    aristide_engine::reverb::PreparedIr::prepare(
+        &file.samples,
+        file.info.channels,
+        file.info.sample_rate as f32,
+        device_rate,
+    )
+    .map_err(|e| anyhow::anyhow!(e))
+}
+
+/// Assemble `paths` (sample sets and composite definitions; several are
+/// combined into one implicit composite), decode the samples, and build
+/// the console. `stops` are CLI registration patterns; empty means each
+/// source's sidecar default. `progress` is told what is happening, for
+/// a UI that is watching the load.
+pub fn prepare(
+    paths: &[PathBuf],
+    stops: &[String],
+    sample_rate: f32,
+    progress: &dyn Fn(String),
+) -> Result<PreparedInstrument> {
+    anyhow::ensure!(!paths.is_empty(), "no sample set given");
+    let first_path = &paths[0];
+    let mut composite_midi: Option<(PathBuf, instrument::MidiDef)> = None;
+    let mut manual_tuning_defs: Vec<instrument::ManualTuningDef> = Vec::new();
+    let mut setup = Setup::default();
+
+    // Every path is a source: a sample set with its sidecar, or a
+    // composite definition (`.toml`), which assembles first and then
+    // acts like any other source. Per-set decisions — sidecar couplers,
+    // the default registration, channel suggestions — resolve against
+    // each source's own names here, then ride the id maps across.
+    let mut sources: Vec<(String, Organ)> = Vec::new();
+    let mut sidecars = Vec::new();
+    for path in paths {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+        progress(format!("reading {name}…"));
+        let (mut organ, sidecar) = if instrument::is_definition(path) {
+            let assembled = instrument::load(path)
+                .with_context(|| format!("loading {}", path.display()))?;
+            for warning in &assembled.warnings {
+                tracing::warn!("instrument: {warning}");
+            }
+            tracing::info!(
+                "instrument: {} ({} manuals, {} stops) from {}",
+                assembled.organ.name,
+                assembled.organ.manuals.len(),
+                assembled.organ.stops.len(),
+                path.display()
+            );
+            if paths.len() == 1 {
+                composite_midi = Some((path.clone(), assembled.midi));
+                manual_tuning_defs = assembled.manual_tuning;
+            } else if !assembled.midi.inputs.is_empty()
+                || !assembled.midi.controls.is_empty()
+                || !assembled.manual_tuning.is_empty()
+            {
+                tracing::warn!(
+                    "{}: [midi] wiring and per-manual tuning apply only when \
+                     the organ is loaded alone — ignored",
+                    path.display()
+                );
+            }
+            (assembled.organ, assembled.sidecar)
+        } else {
+            let organ = load_organ(path)?;
+            let sidecar = match aristide_formats::sidecar::load_for(path) {
+                Ok(Some(sidecar)) => {
+                    tracing::info!(
+                        "sidecar: {}",
+                        aristide_formats::sidecar::path_for(path).display()
+                    );
+                    sidecar
+                }
+                Ok(None) => Default::default(),
+                Err(err) => {
+                    tracing::warn!("sidecar unreadable, ignoring: {err}");
+                    Default::default()
+                }
+            };
+            (organ, sidecar)
+        };
+        // User-defined couplers join the source's own on the rail; a
+        // composite's resolve against its assembled console the same way.
+        let (custom, warnings) =
+            aristide_formats::sidecar::resolve_couplers(&organ, &sidecar.couplers.define);
+        for warning in warnings {
+            tracing::warn!("sidecar couplers: {warning}");
+        }
+        if !custom.is_empty() {
+            tracing::info!(
+                "sidecar couplers: {}",
+                custom
+                    .iter()
+                    .map(|c| c.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            organ.couplers.extend(custom);
+        }
+        // The label suffixed onto colliding names when sources combine;
+        // the same set twice must stay tellable apart.
+        let mut label = organ.name.clone();
+        let mut nth = 2;
+        while sources.iter().any(|(l, _)| *l == label) {
+            label = format!("{} {nth}", organ.name);
+            nth += 1;
+        }
+        setup
+            .sources
+            .push((label.clone(), path.canonicalize().unwrap_or_else(|_| path.clone())));
+        sources.push((label, organ));
+        sidecars.push(sidecar);
+    }
+
+    // With CLI --stops the patterns match the whole combined organ;
+    // each sidecar's default registration instead means its own set's
+    // stops and nothing else's.
+    let per_source_drawn: Vec<Vec<StopId>> = if stops.is_empty() {
+        sources
+            .iter()
+            .zip(&sidecars)
+            .map(|((_, organ), sidecar)| {
+                choose_registration(organ, &sidecar.registration.default)
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let per_source_suggested: Vec<Vec<Option<u8>>> = sources
+        .iter()
+        .zip(&sidecars)
+        .map(|((_, organ), sidecar)| suggested_channels(organ, &sidecar.midi.channels))
+        .collect();
+    // One source stands as itself; several become an implicit composite
+    // — assembled exactly as a definition file with sources and no
+    // pulls would be, every manual and coupler as its own set provides.
+    // Engine-wide settings (wind, tremulant, reverb, tuning…) come from
+    // the first source.
+    let sidecar = &sidecars[0];
+    let (organ, drawn) = if sources.len() == 1 {
+        let organ = sources.pop().expect("one source").1;
+        setup.pulls = organ
+            .manuals
+            .iter()
+            .enumerate()
+            .map(|(index, manual)| (0, manual.name.clone(), index))
+            .collect();
+        let drawn = if stops.is_empty() {
+            per_source_drawn.into_iter().next().unwrap_or_default()
+        } else {
+            choose_registration(&organ, stops)
+        };
+        (organ, drawn)
+    } else {
+        let implicit = instrument::Definition {
+            name: sources
+                .iter()
+                .map(|(label, _)| label.as_str())
+                .collect::<Vec<_>>()
+                .join(" + "),
+            ..Default::default()
+        };
+        let assembled = instrument::assemble(&implicit, &sources, Vec::new())
+            .map_err(|e| anyhow::anyhow!("combining sets: {e}"))?;
+        for warning in &assembled.warnings {
+            tracing::warn!("instrument: {warning}");
+        }
+        tracing::info!(
+            "composite: {} ({} manuals) — engine settings from the first \
+             set's sidecar",
+            assembled.organ.name,
+            assembled.organ.manuals.len()
+        );
+        let groups = assembled
+            .organ
+            .windchests
+            .iter()
+            .map(|c| c.number)
+            .max()
+            .unwrap_or(0);
+        if groups as usize > aristide_engine::wind::MAX_WIND_GROUPS {
+            tracing::warn!(
+                "composite spans {groups} windchests; the engine models {} — \
+                 the rest share the last wind group",
+                aristide_engine::wind::MAX_WIND_GROUPS
+            );
+        }
+        setup.pulls = assembled.division_pulls.clone();
+        setup.implicit = true;
+        let stop_map = &assembled.stop_map;
+        let drawn = if stops.is_empty() {
+            per_source_drawn
+                .iter()
+                .enumerate()
+                .flat_map(|(source, ids)| {
+                    ids.iter().filter_map(move |id| stop_map.get(&(source, *id)))
+                })
+                .copied()
+                .collect()
+        } else {
+            choose_registration(&assembled.organ, stops)
+        };
+        (assembled.organ, drawn)
+    };
+
+    progress(format!("decoding samples for {}…", organ.name));
+    let started = Instant::now();
+    let loaded = bank::build(&organ, sample_rate)?;
+    tracing::info!(
+        "samples: {} files, {:.1} MiB resident, {} skipped, in {:.1?}",
+        loaded.bank.len(),
+        loaded.bank.resident_bytes() as f64 / (1024.0 * 1024.0),
+        loaded.skipped.len(),
+        started.elapsed()
+    );
+    for note in loaded.skipped.iter().take(10) {
+        tracing::warn!("skipped: {note}");
+    }
+
+    let defaults = aristide_engine::wind::WindParams::default();
+    let kp = defaults.pitch_exponent as f64;
+    // sag_cents is what the user hears; invert P^kp to pressure.
+    let sag_cents = sidecar.wind.sag_cents.clamp(0.0, 50.0);
+    let wind = Some(aristide_engine::wind::WindParams {
+        sag_depth: (1.0 - 2f64.powf(-sag_cents / (1200.0 * kp))) as f32,
+        natural_hz: sidecar.wind.bounce_hz.clamp(0.5, 12.0) as f32,
+        damping: sidecar.wind.damping.clamp(0.2, 1.5) as f32,
+        flow_noise: (sidecar.wind.flow_noise_percent / 100.0).clamp(0.0, 0.1) as f32,
+        ..defaults
+    });
+
+    // Tremulant: pitch cents → pressure swing through the same
+    // exponent, applied to the sidecar's chests (default: all).
+    let depth_cents = sidecar.tremulant.depth_cents.clamp(0.0, 30.0);
+    let trem_params = aristide_engine::wind::TremulantParams {
+        rate_hz: sidecar.tremulant.rate_hz.clamp(0.5, 12.0) as f32,
+        depth: (2f64.powf(depth_cents / (1200.0 * kp)) - 1.0) as f32,
+        ..Default::default()
+    };
+    let max_groups = aristide_engine::wind::MAX_WIND_GROUPS as u32;
+    let groups: Vec<u8> = if sidecar.tremulant.chests.is_empty() {
+        (0..max_groups as u8).collect()
+    } else {
+        sidecar
+            .tremulant
+            .chests
+            .iter()
+            .map(|&chest| chest.saturating_sub(1).min(max_groups - 1) as u8)
+            .collect()
+    };
+    let tremulant = Some((trem_params, groups));
+
+    // Enclosures: one engine box per ODF enclosure, floor from the
+    // set's AmpMinimumLevel unless the sidecar overrides, filter and
+    // inertia constants from the sidecar.
+    let boxes = &sidecar.enclosures;
+    let expression_cc = boxes.cc.min(119);
+    let mut enclosures = Vec::new();
+    for (index, enclosure) in organ
+        .enclosures
+        .iter()
+        .enumerate()
+        .take(aristide_engine::enclosure::MAX_ENCLOSURES)
+    {
+        let floor_db = if boxes.floor_db < 0.0 {
+            boxes.floor_db.max(-40.0)
+        } else {
+            // GO: AmpMinimumLevel % linear amplitude closed. Clamp at
+            // −40 dB (a 0 would be −∞; measured real boxes span 10–20
+            // dB broadband).
+            20.0 * (enclosure.amp_minimum_level / 100.0).max(0.01).log10()
+        };
+        enclosures.push((
+            index as u8,
+            aristide_engine::enclosure::EnclosureParams {
+                floor_db: floor_db as f32,
+                shelf_db: boxes.shelf_db.clamp(-40.0, 0.0) as f32,
+                corner_open_hz: boxes.corner_open_hz.clamp(100.0, 20_000.0) as f32,
+                corner_closed_hz: boxes.corner_closed_hz.clamp(100.0, 20_000.0) as f32,
+                taper: boxes.taper.clamp(0.2, 5.0) as f32,
+                full_sweep_s: boxes.full_sweep_s.clamp(0.0, 5.0) as f32,
+            },
+        ));
+    }
+    if organ.enclosures.len() > aristide_engine::enclosure::MAX_ENCLOSURES {
+        tracing::warn!(
+            "set defines {} enclosures; engine tracks the first {}",
+            organ.enclosures.len(),
+            aristide_engine::enclosure::MAX_ENCLOSURES
+        );
+    }
+
+    let mut reverb = None;
+    if !sidecar.reverb.ir.is_empty() {
+        let wet = sidecar.reverb.wet.clamp(0.0, 2.0) as f32;
+        match load_impulse_response(&sidecar.reverb.ir, first_path, sample_rate) {
+            Ok(ir) => {
+                tracing::info!(
+                    "reverb: {} ({} partitions), wet {:.2}",
+                    sidecar.reverb.ir,
+                    ir.partition_count(),
+                    wet
+                );
+                reverb = Some((Arc::new(ir), wet));
+            }
+            Err(err) => tracing::warn!("reverb disabled: {err}"),
+        }
+    }
+
+    let suggested: Vec<Option<u8>> = per_source_suggested.concat();
+    let mut console = Console::new(organ, loaded.specs, drawn, sample_rate);
+    let temperament = tuning::Temperament::parse(&sidecar.tuning.temperament)
+        .unwrap_or_else(|| {
+            tracing::warn!(
+                "sidecar tuning: unknown temperament {:?}, using equal",
+                sidecar.tuning.temperament
+            );
+            tuning::Temperament::Equal
+        });
+    let live_tuning = tuning::Tuning {
+        temperament,
+        a4_hz: sidecar.tuning.a4_hz.clamp(300.0, 500.0),
+        transpose: sidecar.tuning.transpose.clamp(-12, 12),
+    };
+    console.set_tuning(live_tuning);
+    // Divisions the definition tunes apart from the rest: missing
+    // fields follow the instrument-wide tuning.
+    for (manual, temperament, a4, transpose) in &manual_tuning_defs {
+        let temperament = temperament
+            .as_deref()
+            .map(|name| {
+                tuning::Temperament::parse(name).unwrap_or_else(|| {
+                    tracing::warn!(
+                        "manual tuning: unknown temperament {name:?}, using the \
+                         instrument's"
+                    );
+                    live_tuning.temperament
+                })
+            })
+            .unwrap_or(live_tuning.temperament);
+        let own = tuning::Tuning {
+            temperament,
+            a4_hz: a4.unwrap_or(live_tuning.a4_hz).clamp(300.0, 500.0),
+            transpose: transpose.unwrap_or(live_tuning.transpose).clamp(-12, 12),
+        };
+        tracing::info!(
+            "tuning: manual {manual} plays {} @ a'={} Hz, transpose {:+}",
+            own.temperament.name(),
+            own.a4_hz,
+            own.transpose
+        );
+        console.set_manual_tuning(*manual, Some(own));
+    }
+    console.set_coupler_repitch(sidecar.couplers.repitch);
+    // Couplers this instrument takes off its console — they stay
+    // restorable from the Organ preferences.
+    {
+        let names: Vec<String> = console
+            .coupler_states()
+            .iter()
+            .map(|(_, name, _, _)| name.to_string())
+            .collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        for pattern in &sidecar.couplers.drop {
+            let matches = aristide_formats::sidecar::match_names(&names, pattern);
+            if matches.is_empty() {
+                tracing::warn!("couplers.drop: {pattern:?} matches nothing");
+            }
+            for index in matches {
+                tracing::info!("coupler off the console: {}", names[index]);
+                console.set_coupler_available(index, false);
+            }
+        }
+    }
+    console.set_noises(
+        sidecar.noises.enabled,
+        sidecar.noises.volume.clamp(0.0, 2.0) as f32,
+    );
+    tracing::info!(
+        "tuning: {} @ a'={} Hz, transpose {:+}",
+        live_tuning.temperament.name(),
+        live_tuning.a4_hz,
+        live_tuning.transpose
+    );
+
+    Ok(PreparedInstrument {
+        console,
+        bank: loaded.bank,
+        wind,
+        tremulant,
+        enclosures,
+        expression_cc,
+        reverb,
+        composite: composite_midi,
+        suggested_channels: suggested,
+        setup,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The whole pipeline against the demo set: the same function the
+    /// picker calls at runtime must produce a playable console.
+    #[test]
+    fn prepare_builds_a_playable_console_from_the_demo_set() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testsets/grandorgue-demo/demo.organ");
+        if !path.is_file() {
+            eprintln!("skipping: demo set not present");
+            return;
+        }
+        let phases = std::sync::Mutex::new(Vec::new());
+        let prepared = prepare(&[path], &[], 48_000.0, &|phase| {
+            phases.lock().expect("phases").push(phase);
+        })
+        .expect("demo set prepares");
+        assert!(!prepared.console.stop_states().is_empty(), "stops exist");
+        assert!(!prepared.bank.is_empty(), "samples decoded");
+        assert!(
+            !phases.lock().expect("phases").is_empty(),
+            "progress was reported"
+        );
+    }
+}
