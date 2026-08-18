@@ -77,19 +77,36 @@ export const commands = {
 /// through `onState`.
 export function connect(base, onState, onError) {
   let pollTimer = null;
+  let issued = 0; // requests dispatched, in order
+  let applied = 0; // the newest request whose snapshot has been applied
 
   async function request(method, query) {
+    // Responses come back out of order: a slow poll dispatched before a
+    // command can resolve after it, and repainting the UI with that
+    // older snapshot undoes what the command just showed — a flicker on
+    // every interaction. Snapshots carry no clock of their own, so the
+    // dispatch order is the one we have: a response is applied only if
+    // nothing dispatched later has been applied already.
+    const id = ++issued;
     try {
       const response = await fetch(base + query, { method });
       if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
       const snapshot = await response.json();
-      onState(snapshot);
+      if (id > applied) {
+        applied = id;
+        onState(snapshot);
+      }
     } catch (err) {
       onError(String(err));
     }
   }
 
+  // Replaces any pending poll rather than adding one: every command
+  // chain ends by calling this, and two overlapping commands must not
+  // leave two poll loops running (each leak multiplies the request
+  // rate, forever).
   function schedule() {
+    clearTimeout(pollTimer);
     pollTimer = setTimeout(async () => {
       await request("GET", "/api/state");
       schedule();
@@ -100,7 +117,6 @@ export function connect(base, onState, onError) {
 
   return function send(query) {
     // A command interrupts the cadence; its response is the poll.
-    clearTimeout(pollTimer);
     request("POST", query).then(schedule);
   };
 }
