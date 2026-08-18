@@ -515,14 +515,25 @@ impl Console {
                 && self.specs.contains_key(&(range.rank, exact));
             return present.then_some((exact, wanted, 1.0));
         }
-        let mut source = wanted.clamp(first, last);
-        // A hole inside the range is a defect, not a decision: step
-        // outwards until a pipe that actually loaded turns up.
+        // The rank may run past this stop's window into it — a unit
+        // rank drawn at 16' on the pedal and 8' on a manual overlaps
+        // both stops' windows. The stop's *coverage* is the range's
+        // business (settled in `range_covers` before we get here); the
+        // pipe that stands in is the rank's, so the search spans the
+        // whole rank. A real pipe at the wanted ladder position beats
+        // any repitched neighbour.
+        let rank_last = self
+            .organ
+            .rank(range.rank)
+            .map_or(last, |rank| rank.pipes.len() as i32 - 1);
+        let mut source = wanted.clamp(0, rank_last);
+        // A hole at the wanted position is a defect, not a decision:
+        // step outwards until a pipe that actually loaded turns up.
         if !self.specs.contains_key(&(range.rank, source as u16)) {
             let mut found = None;
-            for distance in 1..=(last - first) {
+            for distance in 1..=rank_last {
                 for candidate in [source - distance, source + distance] {
-                    if (first..=last).contains(&candidate)
+                    if (0..=rank_last).contains(&candidate)
                         && self.specs.contains_key(&(range.rank, candidate as u16))
                     {
                         found = Some(candidate);
@@ -1307,6 +1318,127 @@ mod tests {
             1,
             "and it is not carried past the set's compass either"
         );
+    }
+
+    /// A unit rank drawn at two pitches: Bourdon 16' on the Pedal, the
+    /// same pipes again as a Bourdon 8' on the Swell. Each stop sees a
+    /// window into one 73-pipe rank — the 16' the bottom 32, the 8'
+    /// pipes 12..72.
+    fn unit_rank_console() -> Console {
+        let organ = Organ {
+            name: "U".into(),
+            base_path: Default::default(),
+            manuals: vec![
+                Manual {
+                    id: ManualId(1),
+                    name: "Pedal".into(),
+                    first_midi_note: 36,
+                    key_count: 32,
+                },
+                Manual {
+                    id: ManualId(2),
+                    name: "Swell".into(),
+                    first_midi_note: 36,
+                    key_count: 61,
+                },
+            ],
+            stops: vec![
+                Stop {
+                    id: StopId(1),
+                    name: "Bourdon 16".into(),
+                    manual: ManualId(1),
+                    ranks: vec![RankRange {
+                        rank: RankId(1),
+                        first_key: 0,
+                        key_count: 32,
+                        first_pipe: 0,
+                    }],
+                },
+                Stop {
+                    id: StopId(2),
+                    name: "Bourdon 8".into(),
+                    manual: ManualId(2),
+                    ranks: vec![RankRange {
+                        rank: RankId(1),
+                        first_key: 0,
+                        key_count: 61,
+                        first_pipe: 12,
+                    }],
+                },
+            ],
+            ranks: vec![Rank {
+                id: RankId(1),
+                name: "Bourdon unit".into(),
+                windchest: 1,
+                pipes: (0..73)
+                    .map(|_| Pipe {
+                        nominal_frequency_hz: 440.0,
+                        pitch_tuning_cents: 0.0,
+                        gain_db: 0.0,
+                        midi_key_number: None,
+                        source: PipeSource::Silent,
+                    })
+                    .collect(),
+            }],
+            couplers: vec![],
+            enclosures: vec![],
+            windchests: vec![],
+        };
+        let mut specs = HashMap::new();
+        for pipe in 0..73u16 {
+            specs.insert(
+                (RankId(1), pipe),
+                VoiceSpec {
+                    sample: 0,
+                    rate: 1.0,
+                    gain: 1.0,
+                    percussive: false,
+                    group: 0,
+                    wind_weight: 1.0,
+                    brightness: 0.02,
+                    nominal_hz: 440.0,
+                    enclosure: aristide_engine::enclosure::ENCLOSURE_NONE,
+                },
+            );
+        }
+        Console::new(organ, specs, vec![StopId(1), StopId(2)], 48_000.0)
+    }
+
+    /// Widening a manual reaches keys the *stop* never had — but when
+    /// the stop's rank is a unit rank, the pipes those keys want are
+    /// often real (the other stop's window covers them). A real pipe at
+    /// true pitch always beats the window's edge pipe stretched to
+    /// imitate it.
+    #[test]
+    fn extended_keys_use_the_real_pipes_of_a_shared_rank() {
+        let mut console = unit_rank_console();
+
+        // Pedal native 36..67, widened a fourth up. Key 72 wants pipe
+        // 36 — past the 16' window, squarely inside the 8' treble.
+        console.set_compass(0, 36, 72);
+        let (starts, _) = console.note_on_manual(0, 72);
+        assert_eq!(starts.len(), 1, "the extended pedal key speaks");
+        assert!(
+            (starts[0].spec.rate - 1.0).abs() < 1e-6,
+            "pipe 36 exists in the unit rank; nothing may be repitched"
+        );
+        console.note_off_manual(0, 72);
+
+        // Downward off the Swell 8': pipes 7..11 are the 16' bottom
+        // the 8' window never reached, and they are equally real.
+        console.set_compass(1, 31, 96);
+        let (starts, _) = console.note_on_manual(1, 31);
+        assert_eq!(starts.len(), 1);
+        assert!((starts[0].spec.rate - 1.0).abs() < 1e-6);
+        console.note_off_manual(1, 31);
+
+        // Past the rank's REAL end the old rule still holds: swell key
+        // 99 wants pipe 75 of 73, so the last pipe stretches to serve.
+        console.set_compass(1, 31, 101);
+        let (starts, _) = console.note_on_manual(1, 99);
+        assert_eq!(starts.len(), 1);
+        let semitones = starts[0].spec.rate.log2() * 12.0;
+        assert!((semitones - 3.0).abs() < 1e-3, "got {semitones}");
     }
 
     /// Repitching fills in what the *player's keyboard* can reach. A

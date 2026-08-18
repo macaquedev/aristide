@@ -389,6 +389,40 @@ mod tests {
         );
     }
 
+    /// The demo set loaded twice and merged must build one bank with
+    /// disjoint voice specs for every copy — the collision this guards
+    /// against is silent (two organs' `RankId`s aliasing in `specs`) —
+    /// while identical recordings still decode once, and each copy's
+    /// pipes sit in that copy's own enclosures.
+    #[test]
+    fn merged_demo_twice_builds_disjoint_specs_sharing_samples() {
+        let Some(path) = demo_organ() else {
+            eprintln!("skipping: demo set not present");
+            return;
+        };
+        let load = || aristide_formats::grandorgue::load(&path).expect("loads").organ;
+        let single = build(&load(), 44_100.0).expect("bank builds");
+        let merged = aristide_formats::compose::merge(vec![load(), load()]);
+        let organ = merged.organ;
+        assert_eq!(organ.stops.len(), load().stops.len() * 2);
+        let loaded = build(&organ, 44_100.0).expect("merged bank builds");
+        assert_eq!(loaded.specs.len(), single.specs.len() * 2);
+        assert_eq!(loaded.bank.len(), single.bank.len());
+        // Both copies carry a Hautbois; the first sits in its own
+        // Récit box (enclosure 0), the second in ITS own (2), because
+        // the merge offset the second copy's enclosure indices.
+        let hautbois: Vec<u8> = organ
+            .stops
+            .iter()
+            .filter(|s| s.name.contains("Hautbois") && !s.name.contains("noise"))
+            .map(|stop| {
+                let range = stop.ranks.first().expect("ranks");
+                loaded.specs[&(range.rank, range.first_pipe)].enclosure
+            })
+            .collect();
+        assert_eq!(hautbois, vec![0, 2]);
+    }
+
     /// Render swell-box listening takes on the Récit reeds/strings
     /// (the registration a real swell box exists for): A/B states, a
     /// live pedal sweep through the inertia model, and a release with

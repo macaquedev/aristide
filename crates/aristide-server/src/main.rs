@@ -17,9 +17,11 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use midir::{Ignore, MidiInput, MidiInputConnection};
 
 struct Args {
-    /// Path to a GrandOrgue `.organ` file; without it the server plays
-    /// the M1 test tone.
-    set: Option<PathBuf>,
+    /// Paths to GrandOrgue `.organ` files. One is the usual case; more
+    /// are merged into a single composite instrument (all their
+    /// manuals side by side, ids renumbered into one namespace). With
+    /// none the server plays the M1 test tone.
+    sets: Vec<PathBuf>,
     /// Case-insensitive substrings choosing which stops to draw.
     stops: Vec<String>,
     list_stops: bool,
@@ -36,7 +38,7 @@ struct Args {
 
 fn parse_args() -> Result<Args> {
     let mut args = Args {
-        set: None,
+        sets: Vec::new(),
         stops: Vec::new(),
         list_stops: false,
         master_gain: None,
@@ -48,7 +50,9 @@ fn parse_args() -> Result<Args> {
     let mut iter = std::env::args().skip(1);
     while let Some(arg) = iter.next() {
         match arg.as_str() {
-            "--set" => args.set = Some(PathBuf::from(iter.next().context("--set needs a path")?)),
+            "--set" => args
+                .sets
+                .push(PathBuf::from(iter.next().context("--set needs a path")?)),
             "--stops" => args.stops.extend(
                 iter.next()
                     .context("--stops needs a comma-separated list")?
@@ -86,11 +90,9 @@ fn parse_args() -> Result<Args> {
                     .context("--buffer must be a frame count, e.g. 128/256/512")?
                     .clamp(16, 8192)
             }
-            other if args.set.is_none() && !other.starts_with('-') => {
-                args.set = Some(PathBuf::from(other))
-            }
+            other if !other.starts_with('-') => args.sets.push(PathBuf::from(other)),
             other => anyhow::bail!(
-                "unknown argument {other:?} (usage: aristide-server [set.organ] \
+                "unknown argument {other:?} (usage: aristide-server [set.organ…] \
                  [--stops name,name] [--list-stops] [--gain 0.18])"
             ),
         }
@@ -1240,12 +1242,14 @@ fn main() -> Result<()> {
     let args = parse_args()?;
 
     if args.list_stops {
-        let path = args.set.context("--list-stops needs a set path")?;
-        let organ = load_organ(&path)?;
-        for manual in &organ.manuals {
-            println!("{}:", manual.name);
-            for stop in organ.stops.iter().filter(|s| s.manual == manual.id) {
-                println!("  {}", stop.name);
+        anyhow::ensure!(!args.sets.is_empty(), "--list-stops needs a set path");
+        for path in &args.sets {
+            let organ = load_organ(path)?;
+            for manual in &organ.manuals {
+                println!("{}:", manual.name);
+                for stop in organ.stops.iter().filter(|s| s.manual == manual.id) {
+                    println!("  {}", stop.name);
+                }
             }
         }
         return Ok(());
@@ -1278,39 +1282,95 @@ fn main() -> Result<()> {
     let mut expression_cc = 11u8;
     let mut reverb_ir: Option<Arc<aristide_engine::reverb::PreparedIr>> = None;
     let mut reverb_wet = 0.0f32;
-    let (sample_bank, control, suggested_channels) = match &args.set {
-        Some(path) => {
-            let mut organ = load_organ(path)?;
-            let sidecar = match aristide_formats::sidecar::load_for(path) {
-                Ok(Some(sidecar)) => {
+    let (sample_bank, control, suggested_channels) = match args.sets.first() {
+        Some(first_path) => {
+            // Load every set with its sidecar. Per-set decisions —
+            // sidecar couplers, the default registration, channel
+            // suggestions — resolve against the set's own names here,
+            // before the merge, then ride the id maps across.
+            let mut organs = Vec::new();
+            let mut sidecars = Vec::new();
+            for path in &args.sets {
+                let mut organ = load_organ(path)?;
+                let sidecar = match aristide_formats::sidecar::load_for(path) {
+                    Ok(Some(sidecar)) => {
+                        tracing::info!(
+                            "sidecar: {}",
+                            aristide_formats::sidecar::path_for(path).display()
+                        );
+                        sidecar
+                    }
+                    Ok(None) => Default::default(),
+                    Err(err) => {
+                        tracing::warn!("sidecar unreadable, ignoring: {err}");
+                        Default::default()
+                    }
+                };
+                // User-defined couplers join the set's own on the rail.
+                let (custom, warnings) =
+                    aristide_formats::sidecar::resolve_couplers(&organ, &sidecar.couplers.define);
+                for warning in warnings {
+                    tracing::warn!("sidecar couplers: {warning}");
+                }
+                if !custom.is_empty() {
                     tracing::info!(
-                        "sidecar: {}",
-                        aristide_formats::sidecar::path_for(path).display()
+                        "sidecar couplers: {}",
+                        custom
+                            .iter()
+                            .map(|c| c.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     );
-                    sidecar
+                    organ.couplers.extend(custom);
                 }
-                Ok(None) => Default::default(),
-                Err(err) => {
-                    tracing::warn!("sidecar unreadable, ignoring: {err}");
-                    Default::default()
-                }
-            };
-            // User-defined couplers join the set's own on the rail.
-            let (custom, warnings) =
-                aristide_formats::sidecar::resolve_couplers(&organ, &sidecar.couplers.define);
-            for warning in warnings {
-                tracing::warn!("sidecar couplers: {warning}");
+                organs.push(organ);
+                sidecars.push(sidecar);
             }
-            if !custom.is_empty() {
+            // With a CLI --stops the patterns match the merged organ
+            // (all sets at once); each sidecar's default registration
+            // instead means its own set's stops and nothing else's.
+            let per_source_drawn: Vec<Vec<StopId>> = if args.stops.is_empty() {
+                organs
+                    .iter()
+                    .zip(&sidecars)
+                    .map(|(organ, sidecar)| {
+                        choose_registration(organ, &sidecar.registration.default)
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let per_source_suggested: Vec<Vec<Option<u8>>> = organs
+                .iter()
+                .zip(&sidecars)
+                .map(|(organ, sidecar)| suggested_channels(organ, &sidecar.midi.channels))
+                .collect();
+            let merged = aristide_formats::compose::merge(organs);
+            for warning in &merged.warnings {
+                tracing::warn!("compose: {warning}");
+            }
+            let organ = merged.organ;
+            // Engine-wide settings — wind, tremulant, enclosures,
+            // reverb, tuning, noises — have one value per instrument,
+            // so the first set's sidecar governs them; a composite
+            // that wants its own will get them from its own file when
+            // composite definitions land.
+            let sidecar = &sidecars[0];
+            if args.sets.len() > 1 {
                 tracing::info!(
-                    "sidecar couplers: {}",
-                    custom
-                        .iter()
-                        .map(|c| c.name.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
+                    "composite: {} ({} manuals) — engine settings from the first \
+                     set's sidecar",
+                    organ.name,
+                    organ.manuals.len()
                 );
-                organ.couplers.extend(custom);
+                let groups = organ.windchests.iter().map(|c| c.number).max().unwrap_or(0);
+                if groups as usize > aristide_engine::wind::MAX_WIND_GROUPS {
+                    tracing::warn!(
+                        "composite spans {groups} windchests; the engine models {} — \
+                         the rest share the last wind group",
+                        aristide_engine::wind::MAX_WIND_GROUPS
+                    );
+                }
             }
             let started = Instant::now();
             let loaded = bank::build(&organ, sample_rate)?;
@@ -1324,12 +1384,6 @@ fn main() -> Result<()> {
             for note in loaded.skipped.iter().take(10) {
                 tracing::warn!("skipped: {note}");
             }
-            // CLI wins over sidecar; sidecar wins over the built-in default.
-            let patterns = if args.stops.is_empty() {
-                sidecar.registration.default.clone()
-            } else {
-                args.stops.clone()
-            };
             let defaults = aristide_engine::wind::WindParams::default();
             let kp = defaults.pitch_exponent as f64;
             // sag_cents is what the user hears; invert P^kp to pressure.
@@ -1404,7 +1458,7 @@ fn main() -> Result<()> {
 
             if !sidecar.reverb.ir.is_empty() {
                 reverb_wet = sidecar.reverb.wet.clamp(0.0, 2.0) as f32;
-                match load_impulse_response(&sidecar.reverb.ir, path, sample_rate) {
+                match load_impulse_response(&sidecar.reverb.ir, first_path, sample_rate) {
                     Ok(ir) => {
                         tracing::info!(
                             "reverb: {} ({} partitions), wet {:.2}",
@@ -1417,8 +1471,19 @@ fn main() -> Result<()> {
                     Err(err) => tracing::warn!("reverb disabled: {err}"),
                 }
             }
-            let drawn = choose_registration(&organ, &patterns);
-            let suggested = suggested_channels(&organ, &sidecar.midi.channels);
+            // CLI wins over sidecar defaults (which were already
+            // matched per set above and only need their ids remapped).
+            let drawn = if args.stops.is_empty() {
+                per_source_drawn
+                    .iter()
+                    .zip(&merged.maps)
+                    .flat_map(|(ids, map)| ids.iter().filter_map(|id| map.stops.get(id)))
+                    .copied()
+                    .collect()
+            } else {
+                choose_registration(&organ, &args.stops)
+            };
+            let suggested: Vec<Option<u8>> = per_source_suggested.concat();
             let mut console = Console::new(organ, loaded.specs, drawn, sample_rate);
             let temperament = tuning::Temperament::parse(&sidecar.tuning.temperament)
                 .unwrap_or_else(|| {

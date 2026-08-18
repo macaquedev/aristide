@@ -8,6 +8,7 @@
 //! TOML sidecar files next to the loaded set; the set itself is never
 //! modified.
 
+pub mod compose;
 pub mod grandorgue;
 pub mod sidecar;
 pub mod wav;
