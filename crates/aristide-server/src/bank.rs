@@ -389,11 +389,11 @@ mod tests {
         );
     }
 
-    /// The demo set loaded twice and merged must build one bank with
-    /// disjoint voice specs for every copy — the collision this guards
-    /// against is silent (two organs' `RankId`s aliasing in `specs`) —
-    /// while identical recordings still decode once, and each copy's
-    /// pipes sit in that copy's own enclosures.
+    /// The demo set loaded twice as an implicit composite must build
+    /// one bank with disjoint voice specs for every copy — the
+    /// collision this guards against is silent (two organs' `RankId`s
+    /// aliasing in `specs`) — while identical recordings still decode
+    /// once, and each copy's pipes sit in that copy's own enclosures.
     #[test]
     fn merged_demo_twice_builds_disjoint_specs_sharing_samples() {
         let Some(path) = demo_organ() else {
@@ -402,8 +402,14 @@ mod tests {
         };
         let load = || aristide_formats::grandorgue::load(&path).expect("loads").organ;
         let single = build(&load(), 44_100.0).expect("bank builds");
-        let merged = aristide_formats::compose::merge(vec![load(), load()]);
-        let organ = merged.organ;
+        let implicit = aristide_formats::instrument::Definition {
+            name: "Twice".into(),
+            ..Default::default()
+        };
+        let sources = vec![("A".to_string(), load()), ("B".to_string(), load())];
+        let organ = aristide_formats::instrument::assemble(&implicit, &sources, Vec::new())
+            .expect("assembles")
+            .organ;
         assert_eq!(organ.stops.len(), load().stops.len() * 2);
         let loaded = build(&organ, 44_100.0).expect("merged bank builds");
         assert_eq!(loaded.specs.len(), single.specs.len() * 2);

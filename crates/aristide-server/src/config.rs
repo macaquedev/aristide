@@ -79,7 +79,7 @@ pub struct MidiConfig {
     pub organs: BTreeMap<String, OrganConfig>,
 }
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OrganConfig {
     /// Manual name → the inputs that play it, in the order the player
     /// added them. The order is the slot numbering the UI edits by.
@@ -282,6 +282,105 @@ pub fn save(path: &Path, config: &MidiConfig) -> Result<(), String> {
     std::fs::rename(&temporary, path).map_err(|err| format!("{}: {err}", path.display()))
 }
 
+/// A composite organ file's `[midi]` wiring in the shape the server
+/// keeps it. The file is that organ's authority: this replaces whatever
+/// the user config remembers under its name.
+pub fn organ_config_from_file(midi: &aristide_formats::instrument::MidiDef) -> OrganConfig {
+    let mut organ = OrganConfig::default();
+    for input in &midi.inputs {
+        organ.manuals.entry(input.manual.clone()).or_default().push(Input {
+            device: input.device.clone(),
+            channel: input.channel,
+            low: input.low,
+            high: input.high,
+            transpose: input.transpose,
+        });
+    }
+    organ.controls = midi
+        .controls
+        .iter()
+        .map(|control| Control {
+            device: control.device.clone(),
+            channel: control.channel,
+            trigger: control.trigger.clone(),
+            action: control.action.clone(),
+            manual: control.manual.clone(),
+        })
+        .collect();
+    organ
+}
+
+/// Rewrite a composite organ file's `[[midi.input]]`/`[[midi.control]]`
+/// tables to match the live assignments, touching nothing else — the
+/// file is hand-authored, so its comments and layout must survive
+/// every learned binding.
+pub fn write_composite_midi(path: &Path, organ: Option<&OrganConfig>) -> Result<(), String> {
+    let text =
+        std::fs::read_to_string(path).map_err(|err| format!("{}: {err}", path.display()))?;
+    let mut doc: toml_edit::DocumentMut =
+        text.parse().map_err(|err| format!("{}: {err}", path.display()))?;
+    let midi = doc
+        .entry("midi")
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+    let midi = midi
+        .as_table_mut()
+        .ok_or_else(|| "[midi] is not a table".to_string())?;
+    // Only the arrays are ours; a bare [midi] header with nothing else
+    // in it would be noise.
+    midi.set_implicit(true);
+    let mut inputs = toml_edit::ArrayOfTables::new();
+    let mut controls = toml_edit::ArrayOfTables::new();
+    if let Some(organ) = organ {
+        for (manual, list) in &organ.manuals {
+            for input in list {
+                let mut table = toml_edit::Table::new();
+                table["manual"] = toml_edit::value(manual.as_str());
+                table["device"] = toml_edit::value(input.device.as_str());
+                if let Some(channel) = input.channel {
+                    table["channel"] = toml_edit::value(channel as i64);
+                }
+                if let Some(low) = input.low {
+                    table["low"] = toml_edit::value(low as i64);
+                }
+                if let Some(high) = input.high {
+                    table["high"] = toml_edit::value(high as i64);
+                }
+                if input.transpose != 0 {
+                    table["transpose"] = toml_edit::value(input.transpose as i64);
+                }
+                inputs.push(table);
+            }
+        }
+        for control in &organ.controls {
+            let mut table = toml_edit::Table::new();
+            table["device"] = toml_edit::value(control.device.as_str());
+            if let Some(channel) = control.channel {
+                table["channel"] = toml_edit::value(channel as i64);
+            }
+            table["trigger"] = toml_edit::value(control.trigger.as_str());
+            table["action"] = toml_edit::value(control.action.as_str());
+            if let Some(manual) = &control.manual {
+                table["manual"] = toml_edit::value(manual.as_str());
+            }
+            controls.push(table);
+        }
+    }
+    if inputs.is_empty() {
+        midi.remove("input");
+    } else {
+        midi["input"] = toml_edit::Item::ArrayOfTables(inputs);
+    }
+    if controls.is_empty() {
+        midi.remove("control");
+    } else {
+        midi["control"] = toml_edit::Item::ArrayOfTables(controls);
+    }
+    let temporary = path.with_extension("toml.tmp");
+    std::fs::write(&temporary, doc.to_string())
+        .map_err(|err| format!("{}: {err}", temporary.display()))?;
+    std::fs::rename(&temporary, path).map_err(|err| format!("{}: {err}", path.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,6 +393,56 @@ mod tests {
             high: None,
             transpose: 0,
         }
+    }
+
+    /// Learned wiring lands in the composite's own file — new
+    /// `[[midi.input]]`/`[[midi.control]]` tables — while every
+    /// comment and unrelated section survives untouched, and the
+    /// result reads back as the same wiring.
+    #[test]
+    fn composite_midi_write_back_preserves_the_rest_of_the_file() {
+        let path = std::env::temp_dir().join("aristide-composite-test.toml");
+        std::fs::write(
+            &path,
+            "# my precious hand-written organ\nname = \"Franken\"\n\n\
+             [sources]\nanne = \"demo.organ\" # the good one\n\n\
+             [[midi.input]]\nmanual = \"Old\"\ndevice = \"Gone\"\n",
+        )
+        .expect("fixture writes");
+        let mut organ = OrganConfig::default();
+        organ.manuals.insert(
+            "Great".into(),
+            vec![Input {
+                device: "KeyLab 61".into(),
+                channel: Some(1),
+                low: Some(36),
+                high: Some(96),
+                transpose: -12,
+            }],
+        );
+        organ.controls.push(Control {
+            device: "KeyLab 61".into(),
+            channel: None,
+            trigger: "cc:64".into(),
+            action: "tremulant".into(),
+            manual: None,
+        });
+        write_composite_midi(&path, Some(&organ)).expect("writes back");
+        let text = std::fs::read_to_string(&path).expect("reads");
+        assert!(text.contains("# my precious hand-written organ"));
+        assert!(text.contains("# the good one"));
+        assert!(!text.contains("Gone"), "stale wiring replaced");
+        let definition: aristide_formats::instrument::Definition =
+            toml::from_str(&text).expect("still a valid organ file");
+        assert_eq!(definition.midi.inputs.len(), 1);
+        assert_eq!(definition.midi.inputs[0].transpose, -12);
+        assert_eq!(organ_config_from_file(&definition.midi), organ);
+        // Wiring emptied: the arrays vanish rather than lingering as [].
+        write_composite_midi(&path, None).expect("writes back empty");
+        let text = std::fs::read_to_string(&path).expect("reads");
+        assert!(!text.contains("midi"));
+        assert!(text.contains("# my precious hand-written organ"));
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

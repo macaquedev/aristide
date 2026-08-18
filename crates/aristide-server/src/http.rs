@@ -861,6 +861,7 @@ mod tests {
             master_gain: 0.178,
             reverb_wet: Some(0.25),
             expression_cc: 11,
+            composite_path: None,
         }));
         // As the server does once before it opens any device: routing,
         // bindings and the computer keyboard all come from this.

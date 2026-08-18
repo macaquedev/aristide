@@ -11,6 +11,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use aristide_engine::{Command, Engine, EngineHandle};
+use aristide_formats::instrument;
 use aristide_model::{Organ, StopId};
 use console::Console;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -539,6 +540,10 @@ pub struct State {
     pub reverb_wet: Option<f32>,
     /// MIDI controller number driving swell boxes (sidecar `[enclosures] cc`).
     pub expression_cc: u8,
+    /// Set when the loaded organ is a composite definition file loaded
+    /// on its own: that file owns the rig's MIDI wiring, so every
+    /// assignment change is written back into its `[midi]` section.
+    pub composite_path: Option<PathBuf>,
 }
 
 impl State {
@@ -1215,8 +1220,15 @@ impl State {
     }
 
     /// Write the assignments back for this organ. Called after every
-    /// change, so quitting never loses one.
+    /// change, so quitting never loses one. A composite organ's file
+    /// owns its wiring, so the change lands there too.
     fn persist(&mut self) {
+        if let Some(path) = &self.composite_path {
+            let organ = self.midi_config.organ(&self.organ_key);
+            if let Err(err) = config::write_composite_midi(path, organ) {
+                tracing::warn!("midi wiring not saved to {}: {err}", path.display());
+            }
+        }
         let Some(path) = self.config_path.clone() else {
             return;
         };
@@ -1244,7 +1256,13 @@ fn main() -> Result<()> {
     if args.list_stops {
         anyhow::ensure!(!args.sets.is_empty(), "--list-stops needs a set path");
         for path in &args.sets {
-            let organ = load_organ(path)?;
+            let organ = if instrument::is_definition(path) {
+                instrument::load(path)
+                    .with_context(|| format!("loading {}", path.display()))?
+                    .organ
+            } else {
+                load_organ(path)?
+            };
             for manual in &organ.manuals {
                 println!("{}:", manual.name);
                 for stop in organ.stops.iter().filter(|s| s.manual == manual.id) {
@@ -1282,31 +1300,64 @@ fn main() -> Result<()> {
     let mut expression_cc = 11u8;
     let mut reverb_ir: Option<Arc<aristide_engine::reverb::PreparedIr>> = None;
     let mut reverb_wet = 0.0f32;
+    let mut composite_midi: Option<(PathBuf, instrument::MidiDef)> = None;
     let (sample_bank, control, suggested_channels) = match args.sets.first() {
         Some(first_path) => {
-            // Load every set with its sidecar. Per-set decisions —
-            // sidecar couplers, the default registration, channel
-            // suggestions — resolve against the set's own names here,
-            // before the merge, then ride the id maps across.
-            let mut organs = Vec::new();
+            // Every CLI path is a source: a sample set with its
+            // sidecar, or a composite definition (`.toml`), which
+            // assembles first and then acts like any other source.
+            // Per-set decisions — sidecar couplers, the default
+            // registration, channel suggestions — resolve against each
+            // source's own names here, then ride the id maps across.
+            let mut sources: Vec<(String, Organ)> = Vec::new();
             let mut sidecars = Vec::new();
             for path in &args.sets {
-                let mut organ = load_organ(path)?;
-                let sidecar = match aristide_formats::sidecar::load_for(path) {
-                    Ok(Some(sidecar)) => {
-                        tracing::info!(
-                            "sidecar: {}",
-                            aristide_formats::sidecar::path_for(path).display()
+                let (mut organ, sidecar) = if instrument::is_definition(path) {
+                    let assembled = instrument::load(path)
+                        .with_context(|| format!("loading {}", path.display()))?;
+                    for warning in &assembled.warnings {
+                        tracing::warn!("instrument: {warning}");
+                    }
+                    tracing::info!(
+                        "instrument: {} ({} manuals, {} stops) from {}",
+                        assembled.organ.name,
+                        assembled.organ.manuals.len(),
+                        assembled.organ.stops.len(),
+                        path.display()
+                    );
+                    if args.sets.len() == 1 {
+                        composite_midi = Some((path.clone(), assembled.midi));
+                    } else if !assembled.midi.inputs.is_empty()
+                        || !assembled.midi.controls.is_empty()
+                    {
+                        tracing::warn!(
+                            "{}: [midi] wiring applies only when the organ is loaded \
+                             alone — ignored",
+                            path.display()
                         );
-                        sidecar
                     }
-                    Ok(None) => Default::default(),
-                    Err(err) => {
-                        tracing::warn!("sidecar unreadable, ignoring: {err}");
-                        Default::default()
-                    }
+                    (assembled.organ, assembled.sidecar)
+                } else {
+                    let organ = load_organ(path)?;
+                    let sidecar = match aristide_formats::sidecar::load_for(path) {
+                        Ok(Some(sidecar)) => {
+                            tracing::info!(
+                                "sidecar: {}",
+                                aristide_formats::sidecar::path_for(path).display()
+                            );
+                            sidecar
+                        }
+                        Ok(None) => Default::default(),
+                        Err(err) => {
+                            tracing::warn!("sidecar unreadable, ignoring: {err}");
+                            Default::default()
+                        }
+                    };
+                    (organ, sidecar)
                 };
-                // User-defined couplers join the set's own on the rail.
+                // User-defined couplers join the source's own on the
+                // rail; a composite's resolve against its assembled
+                // console the same way.
                 let (custom, warnings) =
                     aristide_formats::sidecar::resolve_couplers(&organ, &sidecar.couplers.define);
                 for warning in warnings {
@@ -1323,47 +1374,77 @@ fn main() -> Result<()> {
                     );
                     organ.couplers.extend(custom);
                 }
-                organs.push(organ);
+                // The label suffixed onto colliding names when sources
+                // combine; the same set twice must stay tellable apart.
+                let mut label = organ.name.clone();
+                let mut nth = 2;
+                while sources.iter().any(|(l, _)| *l == label) {
+                    label = format!("{} {nth}", organ.name);
+                    nth += 1;
+                }
+                sources.push((label, organ));
                 sidecars.push(sidecar);
             }
-            // With a CLI --stops the patterns match the merged organ
-            // (all sets at once); each sidecar's default registration
-            // instead means its own set's stops and nothing else's.
+            // With a CLI --stops the patterns match the whole combined
+            // organ; each sidecar's default registration instead means
+            // its own set's stops and nothing else's.
             let per_source_drawn: Vec<Vec<StopId>> = if args.stops.is_empty() {
-                organs
+                sources
                     .iter()
                     .zip(&sidecars)
-                    .map(|(organ, sidecar)| {
+                    .map(|((_, organ), sidecar)| {
                         choose_registration(organ, &sidecar.registration.default)
                     })
                     .collect()
             } else {
                 Vec::new()
             };
-            let per_source_suggested: Vec<Vec<Option<u8>>> = organs
+            let per_source_suggested: Vec<Vec<Option<u8>>> = sources
                 .iter()
                 .zip(&sidecars)
-                .map(|(organ, sidecar)| suggested_channels(organ, &sidecar.midi.channels))
+                .map(|((_, organ), sidecar)| suggested_channels(organ, &sidecar.midi.channels))
                 .collect();
-            let merged = aristide_formats::compose::merge(organs);
-            for warning in &merged.warnings {
-                tracing::warn!("compose: {warning}");
-            }
-            let organ = merged.organ;
-            // Engine-wide settings — wind, tremulant, enclosures,
-            // reverb, tuning, noises — have one value per instrument,
-            // so the first set's sidecar governs them; a composite
-            // that wants its own will get them from its own file when
-            // composite definitions land.
+            // One source stands as itself; several become an implicit
+            // composite — assembled exactly as a definition file with
+            // sources and no pulls would be, every manual and coupler
+            // as its own set provides. Engine-wide settings (wind,
+            // tremulant, reverb, tuning…) come from the first source.
             let sidecar = &sidecars[0];
-            if args.sets.len() > 1 {
+            let (organ, drawn) = if sources.len() == 1 {
+                let organ = sources.pop().expect("one source").1;
+                let drawn = if args.stops.is_empty() {
+                    per_source_drawn.into_iter().next().unwrap_or_default()
+                } else {
+                    choose_registration(&organ, &args.stops)
+                };
+                (organ, drawn)
+            } else {
+                let implicit = instrument::Definition {
+                    name: sources
+                        .iter()
+                        .map(|(label, _)| label.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" + "),
+                    ..Default::default()
+                };
+                let assembled = instrument::assemble(&implicit, &sources, Vec::new())
+                    .map_err(|e| anyhow::anyhow!("combining sets: {e}"))?;
+                for warning in &assembled.warnings {
+                    tracing::warn!("instrument: {warning}");
+                }
                 tracing::info!(
                     "composite: {} ({} manuals) — engine settings from the first \
                      set's sidecar",
-                    organ.name,
-                    organ.manuals.len()
+                    assembled.organ.name,
+                    assembled.organ.manuals.len()
                 );
-                let groups = organ.windchests.iter().map(|c| c.number).max().unwrap_or(0);
+                let groups = assembled
+                    .organ
+                    .windchests
+                    .iter()
+                    .map(|c| c.number)
+                    .max()
+                    .unwrap_or(0);
                 if groups as usize > aristide_engine::wind::MAX_WIND_GROUPS {
                     tracing::warn!(
                         "composite spans {groups} windchests; the engine models {} — \
@@ -1371,7 +1452,21 @@ fn main() -> Result<()> {
                         aristide_engine::wind::MAX_WIND_GROUPS
                     );
                 }
-            }
+                let stop_map = &assembled.stop_map;
+                let drawn = if args.stops.is_empty() {
+                    per_source_drawn
+                        .iter()
+                        .enumerate()
+                        .flat_map(|(source, ids)| {
+                            ids.iter().filter_map(move |id| stop_map.get(&(source, *id)))
+                        })
+                        .copied()
+                        .collect()
+                } else {
+                    choose_registration(&assembled.organ, &args.stops)
+                };
+                (assembled.organ, drawn)
+            };
             let started = Instant::now();
             let loaded = bank::build(&organ, sample_rate)?;
             tracing::info!(
@@ -1471,18 +1566,6 @@ fn main() -> Result<()> {
                     Err(err) => tracing::warn!("reverb disabled: {err}"),
                 }
             }
-            // CLI wins over sidecar defaults (which were already
-            // matched per set above and only need their ids remapped).
-            let drawn = if args.stops.is_empty() {
-                per_source_drawn
-                    .iter()
-                    .zip(&merged.maps)
-                    .flat_map(|(ids, map)| ids.iter().filter_map(|id| map.stops.get(id)))
-                    .copied()
-                    .collect()
-            } else {
-                choose_registration(&organ, &args.stops)
-            };
             let suggested: Vec<Option<u8>> = per_source_suggested.concat();
             let mut console = Console::new(organ, loaded.specs, drawn, sample_rate);
             let temperament = tuning::Temperament::parse(&sidecar.tuning.temperament)
@@ -1681,7 +1764,7 @@ fn main() -> Result<()> {
         Control::Tone => String::new(),
     };
     let config_path = config::default_path();
-    let midi_config = match &config_path {
+    let mut midi_config = match &config_path {
         Some(path) => config::load(path).unwrap_or_else(|err| {
             tracing::warn!("midi assignments unreadable, starting empty: {err}");
             Default::default()
@@ -1694,6 +1777,14 @@ fn main() -> Result<()> {
             Default::default()
         }
     };
+    // A composite file owns its MIDI wiring: whatever it says replaces
+    // anything the user config remembers under this organ's name, and
+    // every later change is written back into the file.
+    if let Some((_, midi)) = &composite_midi {
+        midi_config
+            .organs
+            .insert(organ_key.clone(), config::organ_config_from_file(midi));
+    }
     let state = Arc::new(Mutex::new(State {
         engine: handle,
         control,
@@ -1711,6 +1802,7 @@ fn main() -> Result<()> {
         master_gain: args.master_gain.unwrap_or(0.178),
         reverb_wet: reverb_ir.is_some().then_some(reverb_wet),
         expression_cc,
+        composite_path: composite_midi.map(|(path, _)| path),
     }));
     // Assignments exist before any hardware does: the computer
     // keyboard and every binding are live from the first note.
@@ -2289,6 +2381,7 @@ mod tests {
             master_gain: 0.178,
             reverb_wet: None,
             expression_cc: 11,
+            composite_path: None,
         }));
         // Everything downstream reads the resolved tables, exactly as
         // the server does once before it opens any device.

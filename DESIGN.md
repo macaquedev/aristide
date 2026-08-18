@@ -19,7 +19,7 @@ MIDI/audio routing. Free forever, GPLv3.
 | Native standalone format | Deferred | Only needed for future multi-mic/spatial recordings |
 | Effects | Internal RT-safe modular node graph | Taps at pipe/stop/division/output level; per-pipe delays |
 | UI style | Modern-first; photoreal console skins supported | 2026 UI by default, keep the charm when sets ship artwork |
-| Multi-organ | **Compose at load** (`aristide-formats::compose::merge`): N sets renumber into one `Organ`; engine/console/UI stay single-instrument | One playable instrument from any sources is the organ-native abstraction (a console with three builders' ranks is one organ); cross-set couplers become plain routes; no organ tag threads through every API forever |
+| Multi-organ | **Compose at load** (`aristide-formats::instrument`): composite TOML files and multi-set launches assemble N sources into one `Organ`; engine/console/UI stay single-instrument | One playable instrument from any sources is the organ-native abstraction (a console with three builders' ranks is one organ); cross-set couplers become plain routes; no organ tag threads through every API forever |
 
 **Legal boundary:** encrypted Hauptwerk sample sets (HW5+-era commercial sets) are
 off-limits — no decryption, ever. We read only the open GrandOrgue format and
@@ -168,18 +168,32 @@ input mappings, console-skin overrides. A set + its sidecars = a reproducible in
 ## Multi-organ composition
 
 Aristide is organ-agnostic all the way down, and "one loaded organ" is a
-composition-time fact, not an architectural one. Any number of sets merge into a
-single `Organ` at load (`compose::merge`): ids renumbered into one namespace,
-windchests/enclosures onto disjoint rails, sample paths absolutized per source,
-colliding console names suffixed with their source. Everything downstream —
-bank, engine, console, HTTP, UI — plays exactly one instrument and must never
-grow a "which organ" concept. Per-set decisions (sidecar couplers, default
-registration, channel suggestions) resolve against each set's own names before
-the merge and ride the id maps across; engine-wide settings currently come from
-the first set's sidecar. Still to come: an Aristide-native composite definition
-(TOML, sidecar philosophy — sources never modified) that picks
-divisions/stops from named sets, renames them, and declares cross-set couplers;
-per-manual tuning so merged sources can disagree about temperament and pitch.
+composition-time fact, not an architectural one. `aristide-formats::instrument`
+is the one composition engine: it assembles any number of sources into a single
+`Organ` — ids renumbered into one namespace, sample paths absolutized per
+source, windchests/enclosures carried and renumbered, colliding console names
+suffixed with their source. Everything downstream — bank, engine, console,
+HTTP, UI — plays exactly one instrument and must never grow a "which organ"
+concept.
+
+An organ *is* a small TOML file (sidecar philosophy — sources never modified,
+samples stay where they are): `[sources]` names sets by alias, `[[manual]]`
+declares any number of manuals, `[[division]]`/`[[stop]]` pull whole divisions
+or single stops onto any manual (loading only the ranks actually used, borrows
+followed), `[[couplers.define]]` couples across all of it, and the sidecar
+sections (tuning, wind, reverb…) apply instrument-wide. Stops anchor by pitch
+when they move between manuals. A file with sources and no pulls is those
+organs whole — each manual and coupler exactly as its set provides (locked
+default) — so wrapping a GO/HW set is three lines, and launching the server
+with several set paths builds the same implicit composite. The composite file
+also owns its rig's `[midi]` wiring (locked 2026-08-18): device/control
+bindings load from it and interactively learned bindings are written back into
+it (comment-preserving), while plain sets keep wiring in the user config.
+
+Still to come: setup dialogs when several sets load (how manuals combine,
+compasses, couplers) with the choices editable in Preferences and saveable as a
+composite file; per-manual tuning so merged sources can disagree about
+temperament and pitch.
 
 ## Milestones
 
