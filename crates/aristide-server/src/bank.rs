@@ -1909,7 +1909,7 @@ mod tests {
 
         let (sample, rate, low_ring) = ring(60);
         assert!(
-            (rate - 0.7071).abs() < 0.01,
+            (rate - std::f64::consts::FRAC_1_SQRT_2).abs() < 0.01,
             "middle C should take the tritone-down pipe, got rate {rate}"
         );
         let lambda = bank
@@ -1921,7 +1921,10 @@ mod tests {
         // An octave up: the same recording, now a tritone the other way.
         let (same, up_rate, high_ring) = ring(72);
         assert_eq!(same, sample, "keys 60 and 72 share one recording");
-        assert!((up_rate - 1.4142).abs() < 0.01, "got rate {up_rate}");
+        assert!(
+            (up_rate - std::f64::consts::SQRT_2).abs() < 0.01,
+            "got rate {up_rate}"
+        );
 
         assert!(
             (0.3..4.0).contains(&low_ring) && (0.3..4.0).contains(&high_ring),
