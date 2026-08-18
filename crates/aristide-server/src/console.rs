@@ -64,18 +64,28 @@ pub struct Console {
     /// (manual index, MIDI key) → pipes held by that key, tagged with
     /// the stop that engaged them (so retiring a stop can release
     /// them). `percussive` voices are excluded (they stop themselves).
-    sounding: HashMap<(usize, u8), Vec<(StopId, RankId, u16)>>,
+    ///
+    /// Pipes here (and in `last_pipe_voice` / `speaking`) are *nominal*
+    /// indices — the rank-ladder position a key demands, which is the
+    /// physical pipe whenever the rank has it and a position past its
+    /// ends (or in a hole) when a neighbour is repitched to stand in.
+    /// Identity by nominal position is what lets two keys borrow the
+    /// same physical pipe at two pitches simultaneously, while the same
+    /// pitch reached by several routes still merges into one voice.
+    sounding: HashMap<(usize, u8), Vec<(StopId, RankId, i32)>>,
     /// The most recent voice handle started per pipe — used to expedite
     /// a still-releasing (pallet-staggered) predecessor when the pipe
     /// re-speaks, so a pipe can never overlap itself at full level.
-    last_pipe_voice: HashMap<(RankId, u16), u64>,
+    /// (Repitched borrowings at other pitches don't count as "itself":
+    /// different rates aren't phase-coherent, so they may overlap.)
+    last_pipe_voice: HashMap<(RankId, i32), u64>,
     /// Each speaking pipe's voice handle and how many holders (keys,
     /// couplers) currently demand it. A pipe speaks ONCE no matter how
     /// many routes reach it — starting a second voice on the same pipe
     /// sums the identical recording coherently (+6 dB), and on release
     /// the phase aligner makes both tails coherent too: the release
     /// comes out LOUDER than the chord (the octave-coupled F-major pop).
-    speaking: HashMap<(RankId, u16), (u64, u32)>,
+    speaking: HashMap<(RankId, i32), (u64, u32)>,
     /// Engine output rate; frequency-derived voice parameters have to be
     /// recomputed against it when a pipe is repitched.
     device_rate: f32,
@@ -469,8 +479,12 @@ impl Console {
         self.couplers_repitch
     }
 
-    /// Which pipe of `range` speaks for a key, and the ratio its
-    /// playback rate must be scaled by.
+    /// Which pipe of `range` speaks for a key, the *nominal* pipe index
+    /// it stands in for (the rank-ladder position the key demands, equal
+    /// to the pipe itself when nothing is borrowed), and the ratio its
+    /// playback rate must be scaled by. The nominal index is the voice's
+    /// identity for refcounting: two keys borrowing the same physical
+    /// pipe at different pitches are two voices, not one.
     ///
     /// The pipe a rank *nominally* holds for a key may be missing: the
     /// set's compass may be narrower than the keyboard the player has
@@ -484,7 +498,7 @@ impl Console {
     ///
     /// The ratio is exactly 1 (before tuning) whenever the nominal pipe
     /// exists, so nothing in the ordinary compass is touched by this.
-    fn pipe_for(&self, range: &RankRange, key_index: i16, fill: bool) -> Option<(u16, f32)> {
+    fn pipe_for(&self, range: &RankRange, key_index: i16, fill: bool) -> Option<(u16, i32, f32)> {
         let first = range.first_pipe as i32;
         let last = first + range.key_count as i32 - 1;
         if last < first {
@@ -499,7 +513,7 @@ impl Console {
             let exact = u16::try_from(wanted).ok()?;
             let present = (first..=last).contains(&wanted)
                 && self.specs.contains_key(&(range.rank, exact));
-            return present.then_some((exact, 1.0));
+            return present.then_some((exact, wanted, 1.0));
         }
         let mut source = wanted.clamp(first, last);
         // A hole inside the range is a defect, not a decision: step
@@ -529,7 +543,7 @@ impl Console {
         } else {
             (semitones / 12.0).exp2()
         };
-        Some((source as u16, ratio))
+        Some((source as u16, wanted, ratio))
     }
 
     fn within_compass(&self, manual_index: usize, midi_key: i16) -> bool {
@@ -578,12 +592,16 @@ impl Console {
     /// under a held key come through here, so they cannot disagree.
     ///
     /// `only` restricts the walk to one stop (drawing it mid-hold).
+    ///
+    /// The `i32` in each entry is the voice's identity for refcounting:
+    /// the nominal pipe index of `pipe_for`, not the physical pipe that
+    /// happens to sound it.
     fn voices_for_key(
         &self,
         manual_index: usize,
         key: u8,
         only: Option<StopId>,
-    ) -> Vec<(StopId, RankId, u16, VoiceSpec)> {
+    ) -> Vec<(StopId, RankId, i32, VoiceSpec)> {
         let Some(origin) = self.organ.manuals.get(manual_index).map(|m| m.id) else {
             return Vec::new();
         };
@@ -627,13 +645,19 @@ impl Console {
                     if !self.range_covers(range, key_index, target, fill) {
                         continue;
                     }
-                    let Some((pipe, ratio)) = self.pipe_for(range, key_index, fill) else {
+                    let Some((pipe, nominal, ratio)) = self.pipe_for(range, key_index, fill)
+                    else {
                         continue;
                     };
                     let Some(spec) = self.specs.get(&(range.rank, pipe)) else {
                         continue;
                     };
-                    voices.push((stop.id, range.rank, pipe, self.voiced(*spec, ratio, midi_key)));
+                    voices.push((
+                        stop.id,
+                        range.rank,
+                        nominal,
+                        self.voiced(*spec, ratio, midi_key),
+                    ));
                 }
             }
         }
@@ -725,7 +749,7 @@ impl Console {
     fn hold_pipe(
         &mut self,
         rank: RankId,
-        pipe: u16,
+        pipe: i32,
         spec: VoiceSpec,
         starts: &mut Vec<VoiceStart>,
         expedited: &mut Vec<u64>,
@@ -746,7 +770,7 @@ impl Console {
 
     /// One holder lets go of a pipe; the voice stops only when the
     /// last holder does.
-    fn release_pipe(&mut self, rank: RankId, pipe: u16) -> Option<u64> {
+    fn release_pipe(&mut self, rank: RankId, pipe: i32) -> Option<u64> {
         let (handle, holders) = self.speaking.get_mut(&(rank, pipe))?;
         *holders -= 1;
         if *holders == 0 {
@@ -782,7 +806,7 @@ impl Console {
             return (expedited, starts);
         }
         self.drawn.retain(|&id| id != stop);
-        let mut to_release: Vec<(RankId, u16)> = Vec::new();
+        let mut to_release: Vec<(RankId, i32)> = Vec::new();
         for entries in self.sounding.values_mut() {
             entries.retain(|&(owner, rank, pipe)| {
                 if owner == stop {
@@ -882,7 +906,7 @@ impl Console {
         for (manual_index, key) in held {
             // One-shots strike on key press, not on a coupler change —
             // same rule as drawing a stop mid-hold.
-            let desired: Vec<(StopId, RankId, u16, VoiceSpec)> = self
+            let desired: Vec<(StopId, RankId, i32, VoiceSpec)> = self
                 .voices_for_key(manual_index, key, None)
                 .into_iter()
                 .filter(|(_, _, _, spec)| !spec.percussive)
@@ -1187,6 +1211,39 @@ mod tests {
         // Inside the set's own compass nothing is repitched at all.
         let (native, _) = console.note_on_manual(0, 60);
         assert!(native.iter().all(|s| (s.spec.rate - 1.0).abs() < 1e-6));
+    }
+
+    /// Two keys past the compass edge borrow the *same* physical pipe
+    /// at two different pitches. They are two notes, and both must
+    /// sound at once — a voice's identity is the key it stands in for,
+    /// not the sample that happens to feed it.
+    #[test]
+    fn two_repitched_keys_off_the_same_pipe_sound_together() {
+        let mut console = test_console();
+        console.set_compass(0, 31, 101);
+
+        let (first, _) = console.note_on_manual(0, 101);
+        assert_eq!(first.len(), 2);
+        let (second, _) = console.note_on_manual(0, 100);
+        assert_eq!(
+            second.len(),
+            2,
+            "the second repitched key must start its own voices"
+        );
+        for start in &second {
+            let semitones = start.spec.rate.log2() * 12.0;
+            assert!((semitones - 4.0).abs() < 1e-3, "got {semitones} semitones");
+        }
+
+        // Each key releases its own voices, not the other's.
+        let released = console.note_off_manual(0, 101);
+        assert_eq!(
+            released,
+            first.iter().map(|s| s.handle).collect::<Vec<_>>(),
+            "the first key's voices stop while the second still holds"
+        );
+        let released = console.note_off_manual(0, 100);
+        assert_eq!(released, second.iter().map(|s| s.handle).collect::<Vec<_>>());
     }
 
     #[test]
