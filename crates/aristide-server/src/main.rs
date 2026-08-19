@@ -45,7 +45,7 @@ fn parse_args() -> Result<Args> {
         list_stops: false,
         master_gain: None,
         http_port: 9669,
-        buffer_frames: 256,
+        buffer_frames: 512,
         record: None,
         safe: false,
     };
