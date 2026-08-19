@@ -84,12 +84,35 @@ html, body {
 
 .brand { display: flex; align-items: center; }
 
-.brand span {
+/* The organ's name is the first menu on the bar: heavier than the
+   other titles because it is the instrument's nameplate, but hover,
+   open state and the pull-down are the same chrome. */
+.organ-title {
   font-size: 13px;
   font-weight: 600;
   letter-spacing: 0.3px;
   color: var(--text);
   white-space: nowrap;
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The name being edited in place — same metrics as the title it
+   replaces, so nothing on the bar shifts. */
+.organ-rename input {
+  height: 24px;
+  padding: 0 9px;
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  background: #1c1e20;
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  width: 220px;
+  outline: none;
 }
 
 .menus { display: flex; align-items: stretch; gap: 2px; }

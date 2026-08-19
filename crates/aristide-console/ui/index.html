@@ -9,7 +9,15 @@
 <body>
   <div id="offline" class="offline hidden">no connection to the organ</div>
   <header id="menubar" class="menubar">
-    <div class="brand"><span id="organ-name">Aristide</span></div>
+    <div class="brand menu">
+      <button id="organ-name" class="menu-title organ-title"
+        aria-haspopup="true">Aristide</button>
+      <form id="organ-rename-form" class="organ-rename hidden">
+        <input id="organ-rename" type="text" autocomplete="off"
+          spellcheck="false" aria-label="Organ name" />
+      </form>
+      <div id="organ-menu-list" class="menu-list hidden" role="menu"></div>
+    </div>
     <nav id="menus" class="menus" aria-label="Main menu"></nav>
     <div class="rail-controls">
       <label class="slider-group" id="gain-group">

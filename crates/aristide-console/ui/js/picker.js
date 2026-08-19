@@ -3,7 +3,7 @@
 // auto-opens with nothing behind it to interact with, and stays up
 // (unclosable) until a load finishes; it also pops up over the console
 // while any load is in flight, so progress and errors have somewhere
-// to show. The Load menu's items land here too.
+// to show. The organ-name menu's load items land here too.
 //
 // Three ways in: a new blank organ (a name becomes a composite file,
 // via organNew), a sample set picked in the native file dialog (Tauri;
@@ -79,7 +79,7 @@ export class Picker {
     return !!this.lastOrgan;
   }
 
-  /// Manual open, from the Load menu: whatever is loaded right now is
+  /// Manual open, from the organ-name menu: whatever is loaded now is
   /// "home" for this session, so a pick that lands on the same organ
   /// again wouldn't be mistaken for one that didn't land at all.
   open() {
@@ -87,13 +87,13 @@ export class Picker {
     this.show();
   }
 
-  /// Load ▸ New blank organ…: the dialog with the name field ready.
+  /// Organ name ▸ New blank organ…: the dialog, name field ready.
   newBlank() {
     this.open();
     this.showNameForm();
   }
 
-  /// Load ▸ New organ from a sample set…: straight to the native file
+  /// Organ name ▸ New organ from a sample set…: the native file
   /// dialog; a plain browser gets the dialog with the server-side
   /// listing revealed instead.
   newFromSet() {
@@ -188,8 +188,8 @@ export class Picker {
     this.library = library;
 
     // Auto-open: there is nothing behind the console to use, or a load
-    // (started from the Load menu, perhaps) whose progress and errors
-    // need somewhere to show.
+    // (started from the organ-name menu, perhaps) whose progress and
+    // errors need somewhere to show.
     if (!this.isOpen && (!hasOrgan || loading)) {
       this.openedWithOrgan = hasOrgan ? this.lastOrgan : undefined;
       this.show();

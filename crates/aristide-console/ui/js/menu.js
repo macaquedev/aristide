@@ -8,7 +8,10 @@
 // separator and a plain string is a section heading.
 
 export class MenuBar {
-  /// `menus` = [{title, items: () => [...]}, ...]
+  /// `menus` = [{title, items: () => [...]}, ...]. A menu may instead
+  /// bring its own `{button, list}` elements from the page — how the
+  /// organ's name, whose text the console owns, still pulls down like
+  /// any other menu.
   constructor(root, host, menus) {
     this.root = root;
     this.menus = menus;
@@ -16,20 +19,23 @@ export class MenuBar {
     host.replaceChildren();
 
     for (const menu of menus) {
-      const holder = document.createElement("div");
-      holder.className = "menu";
+      let { button, list } = menu;
+      if (!button) {
+        const holder = document.createElement("div");
+        holder.className = "menu";
 
-      const button = document.createElement("button");
-      button.className = "menu-title";
-      button.textContent = menu.title;
-      button.setAttribute("aria-haspopup", "true");
+        button = document.createElement("button");
+        button.className = "menu-title";
+        button.textContent = menu.title;
+        button.setAttribute("aria-haspopup", "true");
 
-      const list = document.createElement("div");
-      list.className = "menu-list hidden";
-      list.setAttribute("role", "menu");
+        list = document.createElement("div");
+        list.className = "menu-list hidden";
+        list.setAttribute("role", "menu");
 
-      holder.append(button, list);
-      host.append(holder);
+        holder.append(button, list);
+        host.append(holder);
+      }
       const entry = { menu, button, list };
 
       button.addEventListener("click", (event) => {

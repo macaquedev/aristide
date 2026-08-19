@@ -98,6 +98,10 @@ export const commands = {
   // Creates a blank composite organ — nothing but a name — under the
   // server's config directory, and queues loading it.
   organNew: (name) => `/api/organ/new?name=${encodeURIComponent(name)}`,
+  // Renames the loaded organ in place: the file that owns the name is
+  // edited (never moved), and the wiring and library follow. 400s with
+  // a reason when the organ has no file to keep a name in.
+  organRename: (name) => `/api/organ/rename?name=${encodeURIComponent(name)}`,
   // Drops one entry from the library without touching the file itself.
   libraryForget: (path) => `/api/library/forget?path=${encodeURIComponent(path)}`,
 };
