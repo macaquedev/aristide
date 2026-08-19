@@ -1286,6 +1286,63 @@ impl State {
         Ok(())
     }
 
+    /// Rename the loaded organ, everywhere the name is load-bearing at
+    /// once: the file that owns it (a composite's `name`, or a sample
+    /// set's sidecar), the assignments in `midi_config` — they are
+    /// keyed by name, so they must move or the rename would silently
+    /// unwire the organ — the library's display name (its path key is
+    /// untouched), and the live console. Nothing is written under the
+    /// new name until the file write has succeeded.
+    pub fn rename_organ(&mut self, name: &str) -> Result<(), String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("the organ needs a name".into());
+        }
+        let Control::Organ(console) = &mut self.control else {
+            return Err("no organ is loaded".into());
+        };
+        if console.organ_name() == name {
+            return Ok(());
+        }
+        // Where the name lives on disk. An implicit combination has no
+        // file yet, so there is nowhere durable to put its name.
+        let file = if let Some(path) = &self.composite_path {
+            config::write_composite_name(path, name)?;
+            path.canonicalize().unwrap_or_else(|_| path.clone())
+        } else if self.setup.implicit {
+            return Err(
+                "this combination isn't saved as a file yet — save it in \
+                 Preferences → Organ first"
+                    .into(),
+            );
+        } else if let Some((_, path)) = self.setup.sources.first() {
+            config::write_sidecar_name(path, name)?;
+            path.clone()
+        } else {
+            return Err("no organ is loaded".into());
+        };
+        let old_key = std::mem::replace(&mut self.organ_key, name.to_string());
+        if let Some(wiring) = self.midi_config.organs.remove(&old_key) {
+            self.midi_config.organs.insert(name.to_string(), wiring);
+        }
+        console.set_organ_name(name.to_string());
+        for entry in &mut self.midi_config.library {
+            if entry.path == file {
+                entry.name = name.to_string();
+            }
+        }
+        // The setup pane labels the organ's own file by its name; the
+        // sets inside a saved combination keep their labels.
+        for (label, path) in &mut self.setup.sources {
+            if *path == file {
+                *label = name.to_string();
+            }
+        }
+        tracing::info!("organ renamed: {old_key:?} → {name:?}");
+        self.persist();
+        Ok(())
+    }
+
     /// Drop an organ from the picker's library and save the change.
     pub fn forget_organ(&mut self, path: &std::path::Path) -> bool {
         let removed = self.midi_config.forget(path);

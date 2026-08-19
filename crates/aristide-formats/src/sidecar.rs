@@ -22,6 +22,12 @@ pub enum SidecarError {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Sidecar {
+    /// What to call this organ instead of the name the set declares —
+    /// how a set is renamed without touching it. Applies when the set
+    /// is loaded as the instrument itself; inside a composite the
+    /// composite's own name stands. Empty means the set's own name.
+    #[serde(default)]
+    pub name: String,
     #[serde(default)]
     pub midi: Midi,
     #[serde(default)]

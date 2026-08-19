@@ -1213,6 +1213,14 @@ impl Console {
         &self.organ.name
     }
 
+    /// Rename the loaded organ. Only the name changes — every stop,
+    /// manual and coupler keeps its identity; persisting the new name
+    /// (and re-keying the assignments stored under it) is the caller's
+    /// business.
+    pub fn set_organ_name(&mut self, name: String) {
+        self.organ.name = name;
+    }
+
     /// Forget everything sounding (the engine is told separately).
     pub fn all_off(&mut self) {
         self.sounding.clear();

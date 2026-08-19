@@ -214,6 +214,9 @@ impl Definition {
     /// like a set + sidecar; this is that sidecar.
     pub fn to_sidecar(&self) -> Sidecar {
         Sidecar {
+            // A composite is named by its own `name`, not a sidecar
+            // override.
+            name: String::new(),
             midi: sidecar::Midi {
                 channels: self.midi.channels.clone(),
             },

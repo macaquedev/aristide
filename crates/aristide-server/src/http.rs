@@ -307,6 +307,20 @@ fn respond(
                 Err(err) => bad_request(&err),
             }
         }
+        // Rename the loaded organ in place: the name changes in the
+        // file that owns it, and everything keyed by it (assignments,
+        // the library's label) follows; no path changes, so nothing
+        // that refers to the organ's file breaks.
+        (Method::Post, "/api/organ/rename") => match param(query, "name").map(unescape) {
+            Some(name) => {
+                let mut state = state.lock().expect("state poisoned");
+                match state.rename_organ(&name) {
+                    Ok(()) => json(state_json_locked(&state)),
+                    Err(err) => bad_request(&err),
+                }
+            }
+            None => bad_request("missing name"),
+        },
         // Take an organ off the picker. Its assignments are kept.
         (Method::Post, "/api/library/forget") => match param(query, "path").map(unescape) {
             Some(path) => {
@@ -1850,6 +1864,206 @@ mod tests {
             "/api/library/forget?path=/sets/demo.organ",
         );
         assert!(state_json(&state).contains("\"library\":[]"));
+    }
+
+    /// Renaming a sample-set organ: the name lands in the set's
+    /// sidecar (the set itself is untouched), the assignments keyed by
+    /// the old name move to the new one, and the library entry keeps
+    /// its path while showing the new name.
+    #[test]
+    fn renaming_a_set_organ_follows_everywhere() {
+        let Some(state) = demo_state() else { return };
+        let dir = std::env::temp_dir().join("aristide-rename-set-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        let set = dir.join("village.organ");
+        std::fs::write(&set, "[Organ]").expect("fixture set");
+        {
+            let mut state = state.lock().expect("state poisoned");
+            state.setup.sources = vec![("test organ".into(), set.clone())];
+            state.midi_config.remember("test organ", &set);
+            state.midi_config.set_input(
+                "test organ",
+                "First Manual",
+                0,
+                crate::config::Input {
+                    device: "Test Keys".into(),
+                    channel: Some(1),
+                    low: None,
+                    high: None,
+                    transpose: 0,
+                },
+            );
+        }
+
+        let missing = respond(&state, &Method::Post, "/api/organ/rename");
+        assert_eq!(missing.status_code().0, 400, "a name is required");
+        let blank = respond(&state, &Method::Post, "/api/organ/rename?name=%20");
+        assert_eq!(blank.status_code().0, 400, "whitespace is not a name");
+
+        let renamed = respond(
+            &state,
+            &Method::Post,
+            "/api/organ/rename?name=Chapel%20Royal",
+        );
+        assert_eq!(renamed.status_code().0, 200);
+        let body = state_json(&state);
+        assert!(body.contains("\"organ\":\"Chapel Royal\""), "live: {body}");
+        assert!(
+            body.contains("{\"name\":\"Chapel Royal\",\"path\":"),
+            "library shows the new name: {body}"
+        );
+        {
+            let state = state.lock().expect("state poisoned");
+            assert_eq!(state.organ_key, "Chapel Royal");
+            assert!(
+                state.midi_config.organ("test organ").is_none(),
+                "nothing left under the old key"
+            );
+            assert_eq!(
+                state.midi_config.inputs("Chapel Royal", "First Manual")[0].device,
+                "Test Keys",
+                "the wiring moved with the name"
+            );
+            assert_eq!(
+                state.midi_config.library[0].path, set,
+                "the library still points at the same file"
+            );
+            assert_eq!(state.setup.sources[0].0, "Chapel Royal");
+        }
+        let sidecar = aristide_formats::sidecar::load_for(&set)
+            .expect("sidecar parses")
+            .expect("sidecar written");
+        assert_eq!(sidecar.name, "Chapel Royal", "the rename is durable");
+        assert_eq!(
+            std::fs::read_to_string(&set).expect("set readable"),
+            "[Organ]",
+            "the set itself is never touched"
+        );
+
+        // Renaming to the current name is a no-op, not an error.
+        let same = respond(
+            &state,
+            &Method::Post,
+            "/api/organ/rename?name=Chapel%20Royal",
+        );
+        assert_eq!(same.status_code().0, 200);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A combination assembled ad hoc has no file to carry a name, so
+    /// renaming it is refused with the way out; and with no organ at
+    /// all there is nothing to rename.
+    #[test]
+    fn renaming_needs_an_organ_that_lives_in_a_file() {
+        let state = tone_state();
+        let refused = respond(&state, &Method::Post, "/api/organ/rename?name=Ghost");
+        assert_eq!(refused.status_code().0, 400, "no organ, no rename");
+
+        let Some(state) = demo_state() else { return };
+        {
+            let mut state = state.lock().expect("state poisoned");
+            state.setup.sources = vec![
+                ("A".into(), "/sets/a.organ".into()),
+                ("B".into(), "/sets/b.organ".into()),
+            ];
+            state.setup.implicit = true;
+        }
+        let implicit = respond(&state, &Method::Post, "/api/organ/rename?name=Duo");
+        assert_eq!(implicit.status_code().0, 400);
+        assert_eq!(
+            state.lock().expect("state poisoned").organ_key,
+            "test organ",
+            "a refused rename changes nothing"
+        );
+    }
+
+    /// Renaming a composite organ rewrites the `name` in its own file —
+    /// which keeps its path, so the library entry and the wiring the
+    /// file owns keep working — and the file loads back under the new
+    /// name.
+    #[test]
+    fn renaming_a_composite_edits_its_file_and_keeps_references() {
+        let Some(state) = demo_state() else { return };
+        let demo = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testsets/grandorgue-demo/demo.organ");
+        let path = std::env::temp_dir().join("aristide-rename-composite-test.toml");
+        let _ = std::fs::remove_file(&path);
+        {
+            let mut state = state.lock().expect("state poisoned");
+            let names: Vec<String> = state.manual_names();
+            state.setup.sources = vec![("Demo".into(), demo.clone())];
+            state.setup.pulls = names
+                .iter()
+                .enumerate()
+                .map(|(index, name)| (0, name.clone(), index))
+                .collect();
+            state.setup.implicit = true;
+            state.midi_config.remember("Demo", &demo);
+        }
+        respond(
+            &state,
+            &Method::Post,
+            &format!(
+                "/api/organ/save?path={}",
+                path.display().to_string().replace('/', "%2F")
+            ),
+        );
+        // Wiring learned before the rename, stored under the old name.
+        respond(
+            &state,
+            &Method::Post,
+            "/api/midi/bind?manual=0&slot=0&device=Test%20Keys&ch=4",
+        );
+
+        let renamed = respond(
+            &state,
+            &Method::Post,
+            "/api/organ/rename?name=St%20Fictive",
+        );
+        assert_eq!(renamed.status_code().0, 200);
+
+        let saved = aristide_formats::instrument::load(&path).expect("still loads");
+        assert_eq!(saved.organ.name, "St Fictive", "the file carries the new name");
+        assert_eq!(
+            saved.midi.inputs[0].device, "Test Keys",
+            "the wiring the file owns survives the rename"
+        );
+        {
+            let state = state.lock().expect("state poisoned");
+            assert_eq!(state.organ_key, "St Fictive");
+            let canonical = path.canonicalize().expect("saved file exists");
+            let entry = state
+                .midi_config
+                .library
+                .iter()
+                .find(|entry| entry.path == canonical)
+                .expect("the composite is in the library");
+            assert_eq!(entry.name, "St Fictive");
+            let demo_entry = state
+                .midi_config
+                .library
+                .iter()
+                .find(|entry| entry.path != canonical)
+                .expect("the source set stays in the library");
+            assert_eq!(demo_entry.name, "Demo", "the source set keeps its name");
+            let (_, inputs) = state
+                .midi_config
+                .assignments("St Fictive")
+                .next()
+                .expect("the wiring moved with the name");
+            assert_eq!(inputs[0].device, "Test Keys");
+        }
+        // Wiring changed after the rename lands under the new key and
+        // in the file.
+        respond(
+            &state,
+            &Method::Post,
+            "/api/midi/bind?manual=0&slot=0&device=Test%20Keys&ch=7",
+        );
+        let saved = aristide_formats::instrument::load(&path).expect("reloads");
+        assert_eq!(saved.midi.inputs[0].channel, Some(7));
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

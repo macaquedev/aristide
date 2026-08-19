@@ -220,7 +220,7 @@ pub fn prepare(
             }
             (assembled.organ, assembled.sidecar)
         } else {
-            let organ = load_organ(path)?;
+            let mut organ = load_organ(path)?;
             let sidecar = match aristide_formats::sidecar::load_for(path) {
                 Ok(Some(sidecar)) => {
                     tracing::info!(
@@ -235,6 +235,14 @@ pub fn prepare(
                     Default::default()
                 }
             };
+            // A sidecar rename: the set is read as-is, the name the
+            // player gave it lives beside it. The name is also the key
+            // MIDI assignments are stored under, so it applies before
+            // anything downstream sees the organ.
+            let renamed = sidecar.name.trim();
+            if !renamed.is_empty() {
+                organ.name = renamed.to_string();
+            }
             (organ, sidecar)
         };
         // User-defined couplers join the source's own on the rail; a
@@ -575,6 +583,40 @@ mod tests {
             prepared.composite.is_some(),
             "the blank file owns its own MIDI wiring like any composite"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A sidecar `name` renames the organ on load — that name is what
+    /// the console shows and what the assignments are keyed under. The
+    /// real demo set is symlinked into a scratch directory so it gets a
+    /// sidecar of this test's own instead of the one it ships with.
+    #[test]
+    #[cfg(unix)]
+    fn a_sidecar_rename_takes_effect_on_load() {
+        let demo_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testsets/grandorgue-demo");
+        if !demo_dir.join("demo.organ").is_file() {
+            eprintln!("skipping: demo set not present");
+            return;
+        }
+        let dir = std::env::temp_dir().join("aristide-sidecar-rename-load-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        for entry in std::fs::read_dir(&demo_dir).expect("demo listable").flatten() {
+            if entry.file_name() == "demo.organ.aristide.toml" {
+                continue;
+            }
+            std::os::unix::fs::symlink(entry.path(), dir.join(entry.file_name()))
+                .expect("symlink");
+        }
+        std::fs::write(
+            dir.join("demo.organ.aristide.toml"),
+            "name = \"Église Fictive\"\n",
+        )
+        .expect("sidecar writes");
+        let prepared = prepare(&[dir.join("demo.organ")], &[], 48_000.0, &|_| {})
+            .expect("renamed set prepares");
+        assert_eq!(prepared.console.organ_name(), "Église Fictive");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

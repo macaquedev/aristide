@@ -681,6 +681,36 @@ pub fn write_composite_drops(path: &Path, dropped: &[String]) -> Result<(), Stri
     write_atomically(path, doc.to_string())
 }
 
+/// Rename a composite organ in its own file: only the `name` key
+/// changes, every other line — comments included — survives. The file
+/// itself stays where it is, so the library and anything else that
+/// refers to it by path keeps working.
+pub fn write_composite_name(path: &Path, name: &str) -> Result<(), String> {
+    let text =
+        std::fs::read_to_string(path).map_err(|err| format!("{}: {err}", path.display()))?;
+    let mut doc: toml_edit::DocumentMut =
+        text.parse().map_err(|err| format!("{}: {err}", path.display()))?;
+    doc["name"] = toml_edit::value(name);
+    write_atomically(path, doc.to_string())
+}
+
+/// Rename a sample-set organ without touching the set: the name goes
+/// into the set's Aristide sidecar (created if the set has none),
+/// where the loader reads it back as the organ's name. Any existing
+/// sidecar content is edited in place, comments kept.
+pub fn write_sidecar_name(set: &Path, name: &str) -> Result<(), String> {
+    let path = aristide_formats::sidecar::path_for(set);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(err) => return Err(format!("{}: {err}", path.display())),
+    };
+    let mut doc: toml_edit::DocumentMut =
+        text.parse().map_err(|err| format!("{}: {err}", path.display()))?;
+    doc["name"] = toml_edit::value(name);
+    write_atomically(&path, doc.to_string())
+}
+
 fn write_atomically(path: &Path, body: String) -> Result<(), String> {
     let temporary = path.with_extension("toml.tmp");
     std::fs::write(&temporary, body)
@@ -750,6 +780,49 @@ mod tests {
         assert!(!text.contains("midi"));
         assert!(text.contains("# my precious hand-written organ"));
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// Renaming a composite touches the `name` key and nothing else;
+    /// renaming a set writes its sidecar — creating one when the set
+    /// has none, editing in place (comments kept) when it has.
+    #[test]
+    fn rename_writers_change_the_name_and_keep_the_rest() {
+        let dir = std::env::temp_dir().join("aristide-rename-writers-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+
+        let composite = dir.join("organ.toml");
+        std::fs::write(
+            &composite,
+            "# hand-written\nname = \"Old Name\"\n\n[sources]\na = \"demo.organ\" # keep me\n",
+        )
+        .expect("fixture writes");
+        write_composite_name(&composite, "New Name").expect("renames");
+        let text = std::fs::read_to_string(&composite).expect("reads");
+        assert!(text.contains("name = \"New Name\""));
+        assert!(!text.contains("Old Name"));
+        assert!(text.contains("# hand-written") && text.contains("# keep me"));
+
+        let set = dir.join("village.organ");
+        write_sidecar_name(&set, "Chapel").expect("creates a sidecar");
+        let sidecar_path = aristide_formats::sidecar::path_for(&set);
+        let sidecar: aristide_formats::sidecar::Sidecar =
+            toml::from_str(&std::fs::read_to_string(&sidecar_path).expect("reads"))
+                .expect("parses as a sidecar");
+        assert_eq!(sidecar.name, "Chapel");
+
+        // A second rename edits the sidecar it made — or any the set
+        // already had — without disturbing other keys.
+        std::fs::write(
+            &sidecar_path,
+            "# per-set notes\nname = \"Chapel\"\n\n[wind]\nsag_cents = 3.0\n",
+        )
+        .expect("fixture writes");
+        write_sidecar_name(&set, "Chapel Royal").expect("edits the sidecar");
+        let text = std::fs::read_to_string(&sidecar_path).expect("reads");
+        assert!(text.contains("name = \"Chapel Royal\""));
+        assert!(text.contains("# per-set notes") && text.contains("sag_cents = 3.0"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
