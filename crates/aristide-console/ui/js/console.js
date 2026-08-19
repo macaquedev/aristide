@@ -65,7 +65,9 @@ export class Console {
       snapshot.stops.map((s) => [s.id, s.name, s.manual]),
       snapshot.couplers.map((c) => [c.name, !!c.hidden]),
       snapshot.manuals.map((m) => [m.name, m.first_key, m.key_count]),
-      snapshot.enclosures.filter((e) => e.displayed).map((e) => e.name),
+      // No organ (the picker's start-empty state) sends no enclosures
+      // at all — same as an organ without a swell box.
+      (snapshot.enclosures ?? []).filter((e) => e.displayed).map((e) => e.name),
       snapshot.reverb != null,
     ]);
     if (signature !== this.signature) {
@@ -290,7 +292,7 @@ export class Console {
   shoes(snapshot) {
     const rack = document.createElement("div");
     rack.className = "shoes";
-    for (const enclosure of snapshot.enclosures.filter((e) => e.displayed)) {
+    for (const enclosure of (snapshot.enclosures ?? []).filter((e) => e.displayed)) {
       const shoe = document.createElement("div");
       shoe.className = "shoe";
       shoe.dataset.enclosure = enclosure.idx;
@@ -368,7 +370,7 @@ export class Console {
       }
     }
 
-    for (const enclosure of snapshot.enclosures) {
+    for (const enclosure of snapshot.enclosures ?? []) {
       if (this.dragging.has(`enclosure-${enclosure.idx}`)) continue;
       const shoe = this.root.querySelector(`.shoe[data-enclosure="${enclosure.idx}"]`);
       if (shoe) this.setShoe(shoe, enclosure.value);
