@@ -211,51 +211,48 @@
   <div id="picker" class="modal hidden" role="dialog" aria-modal="true"
     aria-labelledby="picker-title">
     <div class="modal-backdrop" data-close></div>
-    <div class="modal-card">
-      <header class="modal-head">
+    <div class="modal-card picker-card">
+      <header class="picker-head">
+        <span class="picker-eyebrow">Aristide</span>
         <h1 id="picker-title">Load an organ</h1>
         <button class="modal-close" id="picker-close" data-close
           aria-label="Close organ loader">&times;</button>
       </header>
-      <div class="modal-body">
-        <div class="pane">
-          <p class="pane-warn hidden" id="picker-error"></p>
-          <div class="picker-loading hidden" id="picker-loading">
-            <span class="spinner" aria-hidden="true"></span>
-            <span id="picker-loading-text"></span>
-          </div>
-          <div id="picker-sections">
+      <div class="picker-pane">
+        <p class="picker-error hidden" id="picker-error"></p>
+        <div class="picker-loading hidden" id="picker-loading">
+          <span class="spinner" aria-hidden="true"></span>
+          <span id="picker-loading-text"></span>
+        </div>
+        <div id="picker-sections">
+          <section class="picker-section">
+            <div class="picker-rule"><h2>New</h2></div>
             <div class="picker-actions">
-              <button class="picker-action" id="picker-new-blank">
-                <span class="picker-row-name">New blank organ&hellip;</span>
-                <span class="picker-row-path">Name it, then build it up from sample sets.</span>
-              </button>
-              <button class="picker-action" id="picker-new-set">
-                <span class="picker-row-name">New organ from a sample set&hellip;</span>
-                <span class="picker-row-path">A GrandOrgue, Hauptwerk or Aristide file.</span>
-              </button>
+              <button class="picker-action" id="picker-new-blank">Blank organ&hellip;</button>
+              <button class="picker-action" id="picker-new-set">From a sample set&hellip;</button>
+              <span class="picker-formats">GrandOrgue &middot; Hauptwerk &middot; Aristide</span>
             </div>
             <form id="picker-name-form" class="picker-name hidden">
               <input id="picker-name" type="text" placeholder="Name the new organ"
-                autocomplete="off" />
-              <button class="ghost" type="submit">Create</button>
+                autocomplete="off" spellcheck="false" />
+              <button class="picker-action" type="submit">Create</button>
             </form>
+          </section>
 
-            <h2>Library</h2>
-            <p class="pane-note">Organs this machine has loaded before.</p>
+          <section class="picker-section">
+            <div class="picker-rule"><h2>Library</h2></div>
             <div id="picker-library" class="picker-library"></div>
+          </section>
 
-            <div id="picker-browse" class="hidden">
-              <h2>Browse</h2>
-              <p class="pane-note">Find an organ or sample set by its path.</p>
-              <div class="picker-browse-head">
-                <button class="ghost" id="picker-up">&uarr; Up</button>
-                <span id="picker-dir" class="picker-dir"></span>
-              </div>
-              <p class="pane-warn hidden" id="picker-browse-error"></p>
-              <div id="picker-browse-list" class="picker-browse-list"></div>
+          <section id="picker-browse" class="picker-section hidden">
+            <div class="picker-rule"><h2>Browse</h2></div>
+            <div class="picker-browse-head">
+              <button class="picker-action" id="picker-up">&uarr; Up</button>
+              <span id="picker-dir" class="picker-dir"></span>
             </div>
-          </div>
+            <p class="picker-error hidden" id="picker-browse-error"></p>
+            <div id="picker-browse-list" class="picker-browse-list"></div>
+          </section>
         </div>
       </div>
     </div>

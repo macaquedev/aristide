@@ -22,6 +22,17 @@ const ORGAN_FILTER = {
   extensions: ["organ", "toml", "Organ_Hauptwerk_xml"],
 };
 
+/// The format a path is in, as the library rows label it. "" for a
+/// path whose extension names nothing loadable (it may still load —
+/// the server decides, this is only a label).
+function formatOf(path) {
+  const lower = path.toLowerCase();
+  if (lower.endsWith(".organ")) return "GrandOrgue";
+  if (lower.endsWith(".toml")) return "Aristide";
+  if (lower.endsWith(".organ_hauptwerk_xml")) return "Hauptwerk";
+  return "";
+}
+
 export class Picker {
   constructor(root, base, send) {
     this.root = root;
@@ -215,7 +226,7 @@ export class Picker {
     this.el.library.replaceChildren();
     if (!library.length) {
       this.el.library.append(
-        this.emptyNote("No organs yet — create one above.")
+        this.emptyNote("Nothing here yet — every organ you load is remembered.")
       );
       return;
     }
@@ -251,10 +262,20 @@ export class Picker {
     text.append(name, path);
     row.append(text);
 
+    // The format, ledger-style in its own right-hand column.
+    const kind = formatOf(entry.path);
+    if (kind) {
+      const tag = document.createElement("span");
+      tag.className = "picker-row-kind";
+      tag.textContent = kind;
+      row.append(tag);
+    }
+
     const forget = document.createElement("button");
     forget.type = "button";
     forget.className = "picker-forget";
     forget.textContent = "×";
+    forget.title = "Forget";
     forget.setAttribute("aria-label", `Forget ${entry.name}`);
     forget.addEventListener("click", (event) => {
       event.stopPropagation(); // don't also trigger the row's own load
@@ -271,7 +292,7 @@ export class Picker {
 
   emptyNote(text) {
     const empty = document.createElement("p");
-    empty.className = "pane-empty";
+    empty.className = "picker-empty";
     empty.textContent = text;
     return empty;
   }

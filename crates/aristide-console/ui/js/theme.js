@@ -8,9 +8,9 @@
 // soft/glow tokens in style.css. The pickers live in Preferences →
 // Appearance.
 const ACCENTS = {
+  brass: { accent: "#c9a35b", deep: "#a3803a", ink: "#231803" },
   cyan: { accent: "#45c4ff", deep: "#2b9fd8", ink: "#08202e" },
   mint: { accent: "#3ddc97", deep: "#25b77a", ink: "#06231a" },
-  amber: { accent: "#ffb454", deep: "#df9430", ink: "#2b1c05" },
   violet: { accent: "#a08eff", deep: "#7f6ae6", ink: "#191140" },
   rose: { accent: "#ff6f9c", deep: "#e0517e", ink: "#330a1c" },
 };
@@ -35,7 +35,7 @@ const store = {
 };
 
 function applyAccent(name) {
-  const { accent, deep, ink } = ACCENTS[name] ?? ACCENTS.cyan;
+  const { accent, deep, ink } = ACCENTS[name] ?? ACCENTS.brass;
   const root = document.documentElement.style;
   root.setProperty("--accent", accent);
   root.setProperty("--accent-soft", `${accent}1f`);
@@ -54,7 +54,7 @@ export function wireTheme(root) {
   const swatches = root.getElementById("accent-swatches");
   const segment = root.getElementById("density-segment");
 
-  let accent = store.get("accent", "cyan");
+  let accent = store.get("accent", "brass");
   applyAccent(accent);
   for (const [name, { accent: colour }] of Object.entries(ACCENTS)) {
     const swatch = document.createElement("button");

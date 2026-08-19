@@ -3,25 +3,30 @@
    and each token lives in one custom property. */
 
 :root {
-  --bg: #0f1115;
-  --bg-deep: #0a0c0f;
-  --surface: #171a20;
-  --surface-2: #1e232b;
+  --bg: #131215;
+  --bg-deep: #0c0b0e;
+  --surface: #1a181c;
+  --surface-2: #221f24;
   --border: #ffffff14;
   --border-strong: #ffffff2c;
-  --text: #e6e9ee;
-  --text-dim: #8b93a1;
+  --text: #eae7e1;
+  --text-dim: #97918a;
   /* Accent tokens are overridden as a set by theme.js when the user
      picks a different colour in the drawer. */
-  --accent: #45c4ff;
-  --accent-soft: #45c4ff1f;
-  --accent-glow: #45c4ff33;
-  --accent-deep: #2b9fd8;
-  --accent-ink: #08202e;
+  --accent: #c9a35b;
+  --accent-soft: #c9a35b1f;
+  --accent-glow: #c9a35b33;
+  --accent-deep: #a3803a;
+  --accent-ink: #231803;
   --danger: #e5484d;
-  --key-white: #e9ebef;
-  --key-black: #1b1e24;
-  --sans: "Inter", system-ui, "DejaVu Sans", sans-serif;
+  --key-white: #ece7db;
+  --key-black: #1c1a1e;
+  --sans: system-ui, "Segoe UI", "DejaVu Sans", sans-serif;
+  /* The instrument's voice — organ names, titles, asides — against
+     the sans of the controls. System stacks only: the console must
+     look right offline, so no webfonts anywhere. */
+  --serif: "Iowan Old Style", "Palatino Linotype", Palatino,
+    "URW Palladio L", "Book Antiqua", Georgia, serif;
   --bar-h: 46px;
 }
 
@@ -39,7 +44,7 @@ html, body {
   color: var(--text);
   font-family: var(--sans);
   background:
-    radial-gradient(100% 70% at 50% 0%, #1a1f28 0%, transparent 60%),
+    radial-gradient(100% 70% at 50% 0%, #201d22 0%, transparent 60%),
     linear-gradient(180deg, var(--bg) 0%, var(--bg-deep) 100%);
   overflow: auto;
 }
@@ -68,25 +73,27 @@ html, body {
   gap: 18px;
   height: var(--bar-h);
   padding: 0 18px;
-  background: #14171c;
+  background: #161419;
   border-bottom: 1px solid var(--border);
 }
 
 .brand { display: flex; align-items: center; gap: 10px; }
 
-/* accent tick in place of hardware branding */
+/* three façade pipes in place of hardware branding */
 .brand::before {
   content: "";
-  width: 4px;
-  height: 18px;
-  border-radius: 2px;
-  background: var(--accent);
+  width: 12px;
+  height: 17px;
+  background: linear-gradient(90deg,
+    var(--accent) 0 2px, transparent 2px 5px,
+    var(--accent) 5px 7px, transparent 7px 10px,
+    var(--accent) 10px 12px);
 }
 
 .brand span {
-  font-size: 15px;
-  font-weight: 600;
-  letter-spacing: 0.5px;
+  font-family: var(--serif);
+  font-size: 16px;
+  letter-spacing: 0.3px;
   color: var(--text);
   white-space: nowrap;
 }
@@ -99,7 +106,7 @@ html, body {
   height: 26px;
   padding: 0 11px;
   border: 0;
-  border-radius: 6px;
+  border-radius: 3px;
   cursor: pointer;
   background: transparent;
   color: var(--text-dim);
@@ -121,8 +128,8 @@ html, body {
   min-width: 232px;
   padding: 6px;
   border: 1px solid var(--border-strong);
-  border-radius: 10px;
-  background: #191d24;
+  border-radius: 5px;
+  background: #1b191f;
   box-shadow: 0 18px 44px #000c;
 }
 
@@ -149,7 +156,7 @@ html, body {
   /* the indent is the gutter every checkmark and radio dot sits in */
   padding: 7px 10px 7px 26px;
   border: 0;
-  border-radius: 6px;
+  border-radius: 3px;
   cursor: pointer;
   background: transparent;
   color: var(--text);
@@ -215,7 +222,7 @@ html, body {
   letter-spacing: 1.5px;
   text-transform: uppercase;
   color: var(--text);
-  background: #22262ef2;
+  background: #26232af2;
   border: 1px solid var(--border-strong);
   box-shadow: 0 6px 16px #000a;
   opacity: 0;
@@ -266,29 +273,30 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   font-size: 12px;
   letter-spacing: 0.5px;
   color: var(--text);
-  padding: 6px 16px;
+  padding: 6px 14px;
   border: 1px solid var(--border);
-  border-radius: 999px;
-  background: var(--surface-2);
+  border-radius: 2px;
+  background: transparent;
   cursor: pointer;
   transition: border-color 0.1s ease;
 }
 .tuning:hover { border-color: var(--accent); }
-.tuning:active { background: #262c36; }
+.tuning:active { background: #2a262c; }
 
 .panic {
-  padding: 7px 18px;
-  border: 0;
-  border-radius: 999px;
-  background: var(--danger);
-  color: #fff;
+  padding: 7px 16px;
+  border: 1px solid #e5484d80;
+  border-radius: 2px;
+  background: transparent;
+  color: var(--danger);
   font-family: var(--sans);
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 2px;
   cursor: pointer;
+  transition: background 0.1s ease, color 0.1s ease, border-color 0.1s ease;
 }
-.panic:hover { filter: brightness(1.1); }
+.panic:hover { background: var(--danger); border-color: var(--danger); color: #fff; }
 .panic:active { filter: brightness(0.9); }
 
 /* ---- preferences dialog ------------------------------------------------ */
@@ -318,8 +326,8 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   /* Fixed, so switching tabs never resizes the dialog under the cursor. */
   height: min(500px, 100%);
   border: 1px solid var(--border-strong);
-  border-radius: 14px;
-  background: #171b21;
+  border-radius: 8px;
+  background: #191719;
   box-shadow: 0 30px 80px #000d;
   overflow: hidden;
 }
@@ -370,13 +378,13 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   flex: 0 0 148px;
   padding: 12px 10px;
   border-right: 1px solid var(--border);
-  background: #14171c;
+  background: #161419;
 }
 
 .tabs button {
   padding: 8px 12px;
   border: 0;
-  border-radius: 7px;
+  border-radius: 3px;
   cursor: pointer;
   background: transparent;
   color: var(--text-dim);
@@ -441,7 +449,7 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
 .ghost {
   padding: 5px 12px;
   border: 1px solid var(--border);
-  border-radius: 999px;
+  border-radius: 2px;
   cursor: pointer;
   background: var(--surface-2);
   color: var(--text-dim);
@@ -680,24 +688,76 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
 .about-body { display: block; padding: 18px 20px 22px; font-size: 12.5px; line-height: 1.6; }
 .about-body p { margin: 0 0 10px; }
 
-/* ---- organ picker ------------------------------------------------------ */
+/* ---- the load dialog --------------------------------------------------- */
+
+/* Not another settings pane: the front door. Typography does the work
+   here — the instrument's serif for organ names, labelled hairlines
+   for structure the way a stoplist rules off its divisions, no boxes
+   inside boxes. */
+
+.picker-card {
+  width: min(620px, 100%);
+  height: auto;
+  max-height: 100%;
+  border-radius: 6px;
+}
+
+.picker-head {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 26px 30px 8px;
+}
+
+.picker-eyebrow {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 4px;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.picker-head h1 {
+  margin: 0;
+  font-family: var(--serif);
+  font-size: 24px;
+  font-weight: 400;
+  letter-spacing: 0.2px;
+}
+
+.picker-head .modal-close { position: absolute; top: 16px; right: 16px; }
+
+.picker-pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  gap: 20px;
+  padding: 16px 30px 28px;
+  overflow-y: auto;
+}
+
+.picker-error {
+  margin: 0;
+  padding: 3px 0 3px 12px;
+  border-left: 2px solid var(--danger);
+  font-size: 12px;
+  line-height: 1.55;
+  color: #f0a3a6;
+}
 
 .picker-loading {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--surface);
   font-size: 12px;
-  color: var(--text);
+  color: var(--text-dim);
 }
 
 .spinner {
   flex: 0 0 auto;
-  width: 14px;
-  height: 14px;
+  width: 12px;
+  height: 12px;
   border-radius: 50%;
   border: 2px solid var(--border-strong);
   border-top-color: var(--accent);
@@ -710,86 +770,128 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
 
 /* mid-load, the lists below are inert, not just dim — nothing under
    them should be clickable while a load is in flight */
+#picker-sections { display: flex; flex-direction: column; gap: 20px; }
 #picker-sections.dim {
   opacity: 0.45;
   pointer-events: none;
 }
 
-/* the two ways to a new organ, side by side atop the dialog */
+.picker-section { display: flex; flex-direction: column; }
+
+/* a labelled hairline: the section name sits on the rule */
+.picker-rule {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.picker-rule h2 {
+  margin: 0;
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 3px;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.picker-rule::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
 .picker-actions {
   display: flex;
+  align-items: baseline;
   gap: 10px;
-  margin-bottom: 14px;
+  padding-top: 12px;
 }
 
 .picker-action {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 3px;
-  padding: 12px 14px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
+  padding: 7px 16px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 2px;
   cursor: pointer;
-  background: var(--surface);
+  background: transparent;
   color: var(--text);
   font-family: var(--sans);
-  text-align: left;
+  font-size: 12px;
+  letter-spacing: 0.2px;
+  transition: border-color 0.1s ease, color 0.1s ease;
 }
-.picker-action:hover { border-color: var(--accent); background: var(--surface-2); }
-.picker-action .picker-row-path { white-space: normal; }
+.picker-action:hover { border-color: var(--accent); color: var(--accent); }
+.picker-action:disabled { opacity: 0.4; cursor: default; }
+.picker-action:disabled:hover { border-color: var(--border-strong); color: var(--text); }
 
+.picker-formats {
+  margin-left: auto;
+  font-family: var(--serif);
+  font-style: italic;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+/* christening a blank organ: an underline, not another boxed field */
 .picker-name {
   display: flex;
-  gap: 8px;
-  margin: 0 0 14px;
+  align-items: center;
+  gap: 14px;
+  padding-top: 14px;
 }
 
 .picker-name input {
   flex: 1;
   min-width: 0;
-  font: 12px var(--sans);
+  padding: 3px 2px 7px;
+  border: 0;
+  border-bottom: 1px solid var(--border-strong);
+  border-radius: 0;
+  background: transparent;
   color: var(--text);
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 5px 8px;
+  font-family: var(--serif);
+  font-size: 17px;
 }
-.picker-name input:focus { outline: none; border-color: var(--accent); }
+.picker-name input::placeholder { color: var(--text-dim); font-style: italic; }
+.picker-name input:focus {
+  outline: none;
+  border-bottom-color: var(--accent);
+}
 
 .picker-library,
 .picker-browse-list {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  max-height: 168px;
+  max-height: 336px;
   overflow-y: auto;
 }
 
+/* One organ per line, ruled off by hairlines. The row is typography,
+   not a card: name in the instrument's serif, provenance underneath,
+   format tag riding the baseline. */
 .picker-row {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
+  gap: 12px;
   width: 100%;
-  padding: 9px 12px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
+  padding: 10px 8px 11px 12px;
+  border: 0;
+  border-bottom: 1px solid var(--border);
   cursor: pointer;
-  background: var(--surface);
+  background: transparent;
   color: var(--text);
   font-family: var(--sans);
   text-align: left;
 }
-.picker-row:hover { border-color: var(--accent); background: var(--surface-2); }
-.picker-row:active { background: #262c36; }
+.picker-row:hover {
+  background: #ffffff08;
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.picker-row:active { background: #ffffff0d; }
 
 .picker-row-text {
+  flex: 1;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 3px;
   min-width: 0;
 }
 
@@ -799,34 +901,63 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.picker-library .picker-row-name {
+  font-family: var(--serif);
+  font-size: 15.5px;
+}
+
+.picker-row-kind {
+  flex: 0 0 auto;
+  font-size: 8.5px;
+  font-weight: 600;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
 
 .picker-row-path {
-  font-size: 10px;
+  font-size: 10.5px;
+  letter-spacing: 0.1px;
   color: var(--text-dim);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
+/* housekeeping stays out of the way until the row is under the pointer */
 .picker-forget {
   flex: 0 0 auto;
-  width: 22px;
-  height: 22px;
+  width: 24px;
+  height: 24px;
   padding: 0;
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: 50%;
   cursor: pointer;
   background: transparent;
   color: var(--text-dim);
-  font-size: 10px;
+  font-size: 14px;
   line-height: 1;
+  opacity: 0;
+  transition: opacity 0.1s ease;
 }
-.picker-forget:hover { border-color: var(--danger); color: var(--danger); }
+.picker-row:hover .picker-forget,
+.picker-forget:focus-visible { opacity: 1; }
+.picker-forget:hover { color: var(--danger); background: #ffffff0a; }
+
+.picker-empty {
+  margin: 0;
+  padding: 13px 2px 2px;
+  font-family: var(--serif);
+  font-style: italic;
+  font-size: 13px;
+  color: var(--text-dim);
+}
 
 .picker-browse-head {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
+  padding: 12px 0 8px;
 }
 
 .picker-dir {
@@ -932,7 +1063,7 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   background: var(--surface-2);
 }
 .stepper button:hover { border-color: var(--accent); }
-.stepper button:active { background: #262c36; }
+.stepper button:active { background: #2a262c; }
 
 #transpose-value { min-width: 26px; text-align: center; }
 
@@ -979,14 +1110,23 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
 }
 
 /* dark scrollbars: the default light ones cut a hole in the skin */
-.pane::-webkit-scrollbar { width: 10px; }
-.pane::-webkit-scrollbar-thumb {
+.pane::-webkit-scrollbar,
+.picker-pane::-webkit-scrollbar,
+.picker-library::-webkit-scrollbar,
+.picker-browse-list::-webkit-scrollbar { width: 10px; }
+.pane::-webkit-scrollbar-thumb,
+.picker-pane::-webkit-scrollbar-thumb,
+.picker-library::-webkit-scrollbar-thumb,
+.picker-browse-list::-webkit-scrollbar-thumb {
   border: 3px solid transparent;
   border-radius: 999px;
   background: #ffffff26;
   background-clip: content-box;
 }
-.pane::-webkit-scrollbar-track { background: transparent; }
+.pane::-webkit-scrollbar-track,
+.picker-pane::-webkit-scrollbar-track,
+.picker-library::-webkit-scrollbar-track,
+.picker-browse-list::-webkit-scrollbar-track { background: transparent; }
 
 /* ---- computer-keyboard legend ------------------------------------------ */
 
@@ -1003,7 +1143,7 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   border: 1px solid var(--border);
   border-top: 0;
   border-radius: 0 0 12px 12px;
-  background: #191d24;
+  background: #1b191f;
   box-shadow: 0 16px 40px #000c;
 }
 
@@ -1078,7 +1218,7 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   display: flex;
   gap: 16px;
   padding: 16px 14px 18px;
-  border-radius: 14px;
+  border-radius: 6px;
   background: var(--surface);
   border: 1px solid var(--border);
 }
@@ -1121,12 +1261,12 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   min-height: 52px;
   padding: 0;
   border: 1px solid var(--border);
-  border-radius: 9px;
+  border-radius: 4px;
   cursor: pointer;
   background: var(--surface-2);
   transition: border-color 0.1s ease, background 0.1s ease, box-shadow 0.1s ease;
 }
-.knob:hover { border-color: var(--border-strong); background: #232933; }
+.knob:hover { border-color: var(--border-strong); background: #272328; }
 
 .knob .face {
   display: flex;
@@ -1165,7 +1305,7 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
 }
 .knob.on .face { color: var(--text); }
 .knob.on .stop-pitch { color: var(--accent); }
-.knob:active { background: #262c36; }
+.knob:active { background: #2a262c; }
 
 /* ---- coupler rail ---------------------------------------------------- */
 
@@ -1175,7 +1315,7 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   gap: 8px;
   padding: 8px 12px;
   margin-bottom: 16px;
-  border-radius: 999px;
+  border-radius: 6px;
   background: var(--surface);
   border: 1px solid var(--border);
 }
@@ -1186,12 +1326,12 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   height: 32px;
   padding: 0 6px;
   border: 1px solid var(--border);
-  border-radius: 999px;
+  border-radius: 3px;
   cursor: pointer;
   background: var(--surface-2);
   transition: border-color 0.1s ease, background 0.1s ease;
 }
-.rocker:hover { border-color: var(--border-strong); background: #232933; }
+.rocker:hover { border-color: var(--border-strong); background: #272328; }
 
 .rocker .tab {
   display: flex;
@@ -1219,7 +1359,7 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
 .rocker.cancel {
   margin-left: 10px;
   border-left: 1px solid var(--border-strong);
-  border-radius: 999px;
+  border-radius: 3px;
   background: transparent;
   letter-spacing: 1px;
   text-transform: uppercase;
@@ -1245,7 +1385,7 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   padding: 10px 12px;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: 6px;
 }
 .keyboard.manual { --nat-w: 23px; --kb-h: 96px; --sharp-w: 13px; }
 .keyboard.pedal { --nat-w: 27px; --kb-h: 84px; --sharp-w: 15px; }
@@ -1307,7 +1447,7 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
 .key.sharp.held { background: var(--accent-deep); }
 
 /* pedal naturals read slightly darker than the manuals */
-.keyboard.pedal .key.natural { background: #c8cdd5; }
+.keyboard.pedal .key.natural { background: #d6d0c4; }
 .keyboard.pedal .key.natural.held { background: var(--accent); }
 .keyboard.pedal .key.sharp { height: 55%; }
 
