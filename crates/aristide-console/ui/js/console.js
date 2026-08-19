@@ -60,6 +60,9 @@ export class Console {
 
   render(snapshot) {
     this.el.offline.classList.add("hidden");
+    // With no organ there is no console to show — otherwise the lone
+    // tremulant knob haunts the empty background behind the loader.
+    this.root.body.classList.toggle("no-organ", !snapshot.organ);
     const signature = JSON.stringify([
       snapshot.organ,
       snapshot.stops.map((s) => [s.id, s.name, s.manual]),

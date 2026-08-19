@@ -3,31 +3,34 @@
    and each token lives in one custom property. */
 
 :root {
-  --bg: #131215;
-  --bg-deep: #0c0b0e;
-  --surface: #1a181c;
-  --surface-2: #221f24;
-  --border: #ffffff14;
-  --border-strong: #ffffff2c;
-  --text: #eae7e1;
-  --text-dim: #97918a;
+  /* Material-style dark theme: flat neutral surfaces that step up in
+     tone (never gradients), hairline outlines used sparingly, one
+     restrained primary colour. */
+  --bg: #131314;
+  --surface: #1e1f20;
+  --surface-2: #282a2c;
+  --border: #3c4043;
+  --border-strong: #5f6368;
+  --text: #e3e3e3;
+  --text-dim: #9aa0a6;
   /* Accent tokens are overridden as a set by theme.js when the user
      picks a different colour in the drawer. */
-  --accent: #c9a35b;
-  --accent-soft: #c9a35b1f;
-  --accent-glow: #c9a35b33;
-  --accent-deep: #a3803a;
-  --accent-ink: #231803;
-  --danger: #e5484d;
-  --key-white: #ece7db;
-  --key-black: #1c1a1e;
-  --sans: system-ui, "Segoe UI", "DejaVu Sans", sans-serif;
-  /* The instrument's voice — organ names, titles, asides — against
-     the sans of the controls. System stacks only: the console must
-     look right offline, so no webfonts anywhere. */
-  --serif: "Iowan Old Style", "Palatino Linotype", Palatino,
-    "URW Palladio L", "Book Antiqua", Georgia, serif;
-  --bar-h: 46px;
+  --accent: #a8c7fa;
+  --accent-soft: #a8c7fa1f;
+  --accent-deep: #7cacf8;
+  --accent-ink: #062e6f;
+  /* the tonal pair engaged chips and drawn stops fill with */
+  --accent-container: #004a77;
+  --on-accent-container: #c2e7ff;
+  /* error text on dark vs. a filled error surface */
+  --danger: #f28b82;
+  --danger-fill: #dc362e;
+  --key-white: #e8eaed;
+  --key-black: #202124;
+  /* System stacks only — no webfonts, the console must look right
+     offline. Roboto is the first choice wherever it is installed. */
+  --sans: Roboto, system-ui, "Segoe UI", "DejaVu Sans", sans-serif;
+  --bar-h: 48px;
 }
 
 * { box-sizing: border-box; user-select: none; -webkit-user-select: none; }
@@ -43,9 +46,7 @@ html, body {
   height: 100%;
   color: var(--text);
   font-family: var(--sans);
-  background:
-    radial-gradient(100% 70% at 50% 0%, #201d22 0%, transparent 60%),
-    linear-gradient(180deg, var(--bg) 0%, var(--bg-deep) 100%);
+  background: var(--bg);
   overflow: auto;
 }
 
@@ -56,7 +57,7 @@ html, body {
   inset: 0 0 auto 0;
   z-index: 50;
   padding: 6px 16px;
-  background: var(--danger);
+  background: var(--danger-fill);
   color: #fff;
   font-size: 13px;
   text-align: center;
@@ -73,27 +74,16 @@ html, body {
   gap: 18px;
   height: var(--bar-h);
   padding: 0 18px;
-  background: #161419;
-  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+  border-bottom: 1px solid #2d2f31;
 }
 
-.brand { display: flex; align-items: center; gap: 10px; }
-
-/* three façade pipes in place of hardware branding */
-.brand::before {
-  content: "";
-  width: 12px;
-  height: 17px;
-  background: linear-gradient(90deg,
-    var(--accent) 0 2px, transparent 2px 5px,
-    var(--accent) 5px 7px, transparent 7px 10px,
-    var(--accent) 10px 12px);
-}
+.brand { display: flex; align-items: center; }
 
 .brand span {
-  font-family: var(--serif);
   font-size: 16px;
-  letter-spacing: 0.3px;
+  font-weight: 500;
+  letter-spacing: 0.1px;
   color: var(--text);
   white-space: nowrap;
 }
@@ -103,10 +93,10 @@ html, body {
 .menu { position: relative; }
 
 .menu-title {
-  height: 26px;
-  padding: 0 11px;
+  height: 30px;
+  padding: 0 12px;
   border: 0;
-  border-radius: 3px;
+  border-radius: 999px;
   cursor: pointer;
   background: transparent;
   color: var(--text-dim);
@@ -126,25 +116,24 @@ html, body {
   display: flex;
   flex-direction: column;
   min-width: 232px;
-  padding: 6px;
-  border: 1px solid var(--border-strong);
-  border-radius: 5px;
-  background: #1b191f;
-  box-shadow: 0 18px 44px #000c;
+  padding: 8px 0;
+  border: 0;
+  border-radius: 4px;
+  background: var(--surface-2);
+  box-shadow: 0 4px 8px 3px #00000026, 0 1px 3px #0000004d;
 }
 
 .menu-list hr {
   height: 1px;
-  margin: 5px 8px;
+  margin: 8px 0;
   border: 0;
-  background: var(--border-strong);
+  background: var(--border);
 }
 
 .menu-heading {
-  padding: 7px 10px 4px;
-  font-size: 9px;
-  font-weight: 600;
-  letter-spacing: 2px;
+  padding: 8px 16px 4px;
+  font-size: 11px;
+  font-weight: 500;
   color: var(--text-dim);
 }
 
@@ -154,9 +143,9 @@ html, body {
   justify-content: space-between;
   gap: 20px;
   /* the indent is the gutter every checkmark and radio dot sits in */
-  padding: 7px 10px 7px 26px;
+  padding: 9px 16px 9px 32px;
   border: 0;
-  border-radius: 3px;
+  border-radius: 0;
   cursor: pointer;
   background: transparent;
   color: var(--text);
@@ -171,7 +160,7 @@ html, body {
 .menu-item.checked::before {
   content: "";
   position: absolute;
-  left: 10px;
+  left: 14px;
   width: 6px;
   height: 10px;
   border: solid var(--accent);
@@ -201,8 +190,7 @@ html, body {
 }
 
 .rail-label {
-  font-size: 10px;
-  letter-spacing: 2px;
+  font-size: 12px;
   color: var(--text-dim);
 }
 
@@ -215,16 +203,13 @@ html, body {
   position: absolute;
   top: calc(100% + 10px);
   right: 0;
-  padding: 5px 10px;
-  border-radius: 6px;
+  padding: 6px 10px;
+  border-radius: 4px;
   white-space: nowrap;
-  font-size: 10px;
-  letter-spacing: 1.5px;
-  text-transform: uppercase;
+  font-size: 11px;
   color: var(--text);
-  background: #26232af2;
-  border: 1px solid var(--border-strong);
-  box-shadow: 0 6px 16px #000a;
+  background: #2e3134f2;
+  box-shadow: 0 1px 3px #0000004d;
   opacity: 0;
   transition: opacity 120ms ease 350ms;
   pointer-events: none;
@@ -267,36 +252,36 @@ input[type="range"]::-webkit-slider-thumb {
 }
 input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
 
-/* tuning readout: a quiet pill that doubles as the settings button */
+/* tuning readout: a quiet outlined pill that doubles as the settings
+   button */
 .tuning {
   font-family: var(--sans);
-  font-size: 12px;
-  letter-spacing: 0.5px;
+  font-size: 12.5px;
   color: var(--text);
-  padding: 6px 14px;
-  border: 1px solid var(--border);
-  border-radius: 2px;
+  padding: 6px 16px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
   background: transparent;
   cursor: pointer;
-  transition: border-color 0.1s ease;
+  transition: background 0.1s ease;
 }
-.tuning:hover { border-color: var(--accent); }
-.tuning:active { background: #2a262c; }
+.tuning:hover { background: #ffffff0f; }
+.tuning:active { background: #ffffff1a; }
 
 .panic {
-  padding: 7px 16px;
-  border: 1px solid #e5484d80;
-  border-radius: 2px;
-  background: transparent;
-  color: var(--danger);
+  padding: 8px 20px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--danger-fill);
+  color: #fff;
   font-family: var(--sans);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 2px;
+  font-size: 12.5px;
+  font-weight: 500;
+  letter-spacing: 0.2px;
   cursor: pointer;
-  transition: background 0.1s ease, color 0.1s ease, border-color 0.1s ease;
+  transition: filter 0.1s ease;
 }
-.panic:hover { background: var(--danger); border-color: var(--danger); color: #fff; }
+.panic:hover { filter: brightness(1.12); }
 .panic:active { filter: brightness(0.9); }
 
 /* ---- preferences dialog ------------------------------------------------ */
@@ -314,8 +299,7 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
 .modal-backdrop {
   position: absolute;
   inset: 0;
-  background: #05070ab8;
-  backdrop-filter: blur(2px);
+  background: #000000a8;
 }
 
 .modal-card {
@@ -325,10 +309,10 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   width: min(720px, 100%);
   /* Fixed, so switching tabs never resizes the dialog under the cursor. */
   height: min(500px, 100%);
-  border: 1px solid var(--border-strong);
-  border-radius: 8px;
-  background: #191719;
-  box-shadow: 0 30px 80px #000d;
+  border: 0;
+  border-radius: 28px;
+  background: var(--surface);
+  box-shadow: 0 8px 12px 6px #00000026, 0 4px 4px #0000004d;
   overflow: hidden;
 }
 
@@ -342,16 +326,14 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
 
 .modal-head h1 {
   margin: 0;
-  font-size: 14px;
-  font-weight: 600;
-  letter-spacing: 0.5px;
+  font-size: 16px;
+  font-weight: 500;
+  letter-spacing: 0.1px;
 }
 
 /* the organ these preferences belong to */
 .modal-subject {
-  font-size: 11px;
-  letter-spacing: 1.5px;
-  text-transform: uppercase;
+  font-size: 12px;
   color: var(--text-dim);
 }
 
@@ -374,23 +356,23 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
 .tabs {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  flex: 0 0 148px;
-  padding: 12px 10px;
-  border-right: 1px solid var(--border);
-  background: #161419;
+  gap: 4px;
+  flex: 0 0 160px;
+  padding: 14px 12px;
+  border-right: 1px solid #2d2f31;
+  background: var(--surface);
 }
 
 .tabs button {
-  padding: 8px 12px;
+  padding: 9px 16px;
   border: 0;
-  border-radius: 3px;
+  border-radius: 999px;
   cursor: pointer;
   background: transparent;
   color: var(--text-dim);
   font-family: var(--sans);
-  font-size: 12px;
-  letter-spacing: 0.5px;
+  font-size: 13px;
+  font-weight: 500;
   text-align: left;
 }
 .tabs button:hover { color: var(--text); background: #ffffff0d; }
@@ -407,10 +389,9 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
 
 .pane h2 {
   margin: 0;
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 2.5px;
-  text-transform: uppercase;
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.1px;
   color: var(--text-dim);
 }
 
@@ -427,10 +408,10 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
 /* silence-by-default needs saying out loud, or it reads as a fault */
 .pane-warn {
   margin: 0;
-  padding: 10px 12px;
-  border: 1px solid #ffb45455;
+  padding: 10px 14px;
+  border: 0;
   border-radius: 8px;
-  background: #ffb4540f;
+  background: #fdd6631a;
   font-size: 11.5px;
   line-height: 1.5;
   color: #ffc987;
@@ -440,26 +421,25 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   margin: 0;
   padding: 14px;
   border: 1px dashed var(--border-strong);
-  border-radius: 10px;
+  border-radius: 12px;
   font-size: 12px;
   color: var(--text-dim);
   text-align: center;
 }
 
 .ghost {
-  padding: 5px 12px;
-  border: 1px solid var(--border);
-  border-radius: 2px;
+  padding: 6px 16px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
   cursor: pointer;
-  background: var(--surface-2);
-  color: var(--text-dim);
+  background: transparent;
+  color: var(--accent);
   font-family: var(--sans);
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 1.5px;
-  text-transform: uppercase;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.2px;
 }
-.ghost:hover { border-color: var(--accent); color: var(--text); }
+.ghost:hover { background: var(--accent-soft); }
 
 /* one block per manual: its name, and the inputs that play it */
 .midi-manuals { display: flex; flex-direction: column; gap: 8px; }
@@ -469,9 +449,9 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   align-items: baseline;
   gap: 12px;
   padding: 9px 12px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--surface);
+  border: 0;
+  border-radius: 12px;
+  background: var(--surface-2);
 }
 
 .manual-name {
@@ -526,10 +506,10 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
 .midi-ports { display: flex; flex-direction: column; gap: 4px; }
 
 .midi-port {
-  padding: 5px 10px;
-  border: 1px solid var(--border);
+  padding: 6px 12px;
+  border: 0;
   border-radius: 8px;
-  background: var(--surface);
+  background: var(--surface-2);
   font-size: 12px;
   white-space: nowrap;
   overflow: hidden;
@@ -546,9 +526,9 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   align-items: center;
   gap: 6px;
   padding: 7px 10px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--surface);
+  border: 0;
+  border-radius: 12px;
+  background: var(--surface-2);
 }
 /* The trigger is the row's identity — "note:36 · Johannus DIN IN ch14"
    is what the player recognises — so it keeps the width, and the two
@@ -620,9 +600,9 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   align-items: center;
   gap: 10px;
   padding: 9px 12px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--surface);
+  border: 0;
+  border-radius: 12px;
+  background: var(--surface-2);
 }
 
 .compass-field { display: flex; align-items: center; gap: 6px; }
@@ -649,9 +629,9 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   justify-content: space-between;
   gap: 12px;
   padding: 7px 10px;
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: 8px;
-  background: var(--surface);
+  background: var(--surface-2);
 }
 
 .organ-stop-name {
@@ -673,9 +653,9 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   align-items: center;
   gap: 10px;
   padding: 7px 10px;
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: 8px;
-  background: var(--surface);
+  background: var(--surface-2);
   cursor: pointer;
 }
 
@@ -690,76 +670,62 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
 
 /* ---- the load dialog --------------------------------------------------- */
 
-/* Not another settings pane: the front door. Typography does the work
-   here — the instrument's serif for organ names, labelled hairlines
-   for structure the way a stoplist rules off its divisions, no boxes
-   inside boxes. */
+/* A Material-style dialog: headline, two buttons, then the library as
+   a plain two-line list — tone and spacing do the structure, nothing
+   is boxed or ruled off. */
 
 .picker-card {
-  width: min(620px, 100%);
+  width: min(600px, 100%);
   height: auto;
   max-height: 100%;
-  border-radius: 6px;
 }
 
 .picker-head {
   position: relative;
   display: flex;
   flex-direction: column;
-  gap: 3px;
-  padding: 26px 30px 8px;
-}
-
-.picker-eyebrow {
-  font-size: 9px;
-  font-weight: 600;
-  letter-spacing: 4px;
-  text-transform: uppercase;
-  color: var(--accent);
+  padding: 24px 24px 0;
 }
 
 .picker-head h1 {
   margin: 0;
-  font-family: var(--serif);
-  font-size: 24px;
+  font-size: 22px;
   font-weight: 400;
-  letter-spacing: 0.2px;
+  letter-spacing: 0;
 }
 
-.picker-head .modal-close { position: absolute; top: 16px; right: 16px; }
+.picker-head .modal-close { position: absolute; top: 18px; right: 18px; }
 
 .picker-pane {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  gap: 20px;
-  padding: 16px 30px 28px;
+  gap: 18px;
+  padding: 18px 24px 24px;
   overflow-y: auto;
 }
 
 .picker-error {
   margin: 0;
-  padding: 3px 0 3px 12px;
-  border-left: 2px solid var(--danger);
-  font-size: 12px;
+  font-size: 12.5px;
   line-height: 1.55;
-  color: #f0a3a6;
+  color: var(--danger);
 }
 
 .picker-loading {
   display: flex;
   align-items: center;
   gap: 10px;
-  font-size: 12px;
+  font-size: 12.5px;
   color: var(--text-dim);
 }
 
 .spinner {
   flex: 0 0 auto;
-  width: 12px;
-  height: 12px;
+  width: 14px;
+  height: 14px;
   border-radius: 50%;
-  border: 2px solid var(--border-strong);
+  border: 2px solid var(--surface-2);
   border-top-color: var(--accent);
   animation: picker-spin 0.8s linear infinite;
 }
@@ -770,7 +736,7 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
 
 /* mid-load, the lists below are inert, not just dim — nothing under
    them should be clickable while a load is in flight */
-#picker-sections { display: flex; flex-direction: column; gap: 20px; }
+#picker-sections { display: flex; flex-direction: column; gap: 18px; }
 #picker-sections.dim {
   opacity: 0.45;
   pointer-events: none;
@@ -778,146 +744,131 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
 
 .picker-section { display: flex; flex-direction: column; }
 
-/* a labelled hairline: the section name sits on the rule */
-.picker-rule {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
+.picker-rule { margin-bottom: 6px; }
 .picker-rule h2 {
   margin: 0;
-  font-size: 9.5px;
-  font-weight: 600;
-  letter-spacing: 3px;
-  text-transform: uppercase;
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.1px;
   color: var(--text-dim);
-}
-.picker-rule::after {
-  content: "";
-  flex: 1;
-  height: 1px;
-  background: var(--border);
 }
 
 .picker-actions {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 10px;
-  padding-top: 12px;
+  padding-top: 6px;
 }
 
+/* Material buttons: a filled primary and an outlined companion. */
 .picker-action {
-  padding: 7px 16px 8px;
+  padding: 9px 22px 10px;
   border: 1px solid var(--border-strong);
-  border-radius: 2px;
+  border-radius: 999px;
   cursor: pointer;
   background: transparent;
-  color: var(--text);
+  color: var(--accent);
   font-family: var(--sans);
-  font-size: 12px;
+  font-size: 13px;
+  font-weight: 500;
   letter-spacing: 0.2px;
-  transition: border-color 0.1s ease, color 0.1s ease;
+  transition: background 0.1s ease, filter 0.1s ease;
 }
-.picker-action:hover { border-color: var(--accent); color: var(--accent); }
+.picker-action:hover { background: var(--accent-soft); }
 .picker-action:disabled { opacity: 0.4; cursor: default; }
-.picker-action:disabled:hover { border-color: var(--border-strong); color: var(--text); }
+.picker-action:disabled:hover { background: transparent; }
+
+#picker-new-blank {
+  border-color: transparent;
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+#picker-new-blank:hover { background: var(--accent); filter: brightness(1.06); }
 
 .picker-formats {
   margin-left: auto;
-  font-family: var(--serif);
-  font-style: italic;
   font-size: 12px;
   color: var(--text-dim);
 }
 
-/* christening a blank organ: an underline, not another boxed field */
+/* naming a blank organ: a Material filled text field */
 .picker-name {
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 12px;
   padding-top: 14px;
 }
 
 .picker-name input {
   flex: 1;
   min-width: 0;
-  padding: 3px 2px 7px;
+  padding: 10px 14px;
   border: 0;
   border-bottom: 1px solid var(--border-strong);
-  border-radius: 0;
-  background: transparent;
+  border-radius: 4px 4px 0 0;
+  background: var(--surface-2);
   color: var(--text);
-  font-family: var(--serif);
-  font-size: 17px;
+  font-family: var(--sans);
+  font-size: 14px;
 }
-.picker-name input::placeholder { color: var(--text-dim); font-style: italic; }
+.picker-name input::placeholder { color: var(--text-dim); }
 .picker-name input:focus {
   outline: none;
   border-bottom-color: var(--accent);
+  box-shadow: inset 0 -1px 0 var(--accent);
 }
 
 .picker-library,
 .picker-browse-list {
   display: flex;
   flex-direction: column;
+  gap: 2px;
   max-height: 336px;
   overflow-y: auto;
 }
 
-/* One organ per line, ruled off by hairlines. The row is typography,
-   not a card: name in the instrument's serif, provenance underneath,
-   format tag riding the baseline. */
+/* a two-line list item: name over path, format as trailing meta,
+   hover as a state layer rather than borders lighting up */
 .picker-row {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 14px;
   width: 100%;
-  padding: 10px 8px 11px 12px;
+  padding: 9px 10px 10px 14px;
   border: 0;
-  border-bottom: 1px solid var(--border);
+  border-radius: 10px;
   cursor: pointer;
   background: transparent;
   color: var(--text);
   font-family: var(--sans);
   text-align: left;
 }
-.picker-row:hover {
-  background: #ffffff08;
-  box-shadow: inset 2px 0 0 var(--accent);
-}
-.picker-row:active { background: #ffffff0d; }
+.picker-row:hover { background: #ffffff0d; }
+.picker-row:active { background: #ffffff14; }
 
 .picker-row-text {
   flex: 1;
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 2px;
   min-width: 0;
 }
 
 .picker-row-name {
-  font-size: 12.5px;
+  font-size: 14px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.picker-library .picker-row-name {
-  font-family: var(--serif);
-  font-size: 15.5px;
-}
 
 .picker-row-kind {
   flex: 0 0 auto;
-  font-size: 8.5px;
-  font-weight: 600;
-  letter-spacing: 2px;
-  text-transform: uppercase;
+  font-size: 11px;
   color: var(--text-dim);
 }
 
 .picker-row-path {
-  font-size: 10.5px;
-  letter-spacing: 0.1px;
+  font-size: 12px;
   color: var(--text-dim);
   white-space: nowrap;
   overflow: hidden;
@@ -927,28 +878,26 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
 /* housekeeping stays out of the way until the row is under the pointer */
 .picker-forget {
   flex: 0 0 auto;
-  width: 24px;
-  height: 24px;
+  width: 30px;
+  height: 30px;
   padding: 0;
   border: 0;
   border-radius: 50%;
   cursor: pointer;
   background: transparent;
   color: var(--text-dim);
-  font-size: 14px;
+  font-size: 16px;
   line-height: 1;
   opacity: 0;
-  transition: opacity 0.1s ease;
+  transition: opacity 0.1s ease, background 0.1s ease;
 }
 .picker-row:hover .picker-forget,
 .picker-forget:focus-visible { opacity: 1; }
-.picker-forget:hover { color: var(--danger); background: #ffffff0a; }
+.picker-forget:hover { color: var(--text); background: #ffffff14; }
 
 .picker-empty {
   margin: 0;
-  padding: 13px 2px 2px;
-  font-family: var(--serif);
-  font-style: italic;
+  padding: 10px 2px 2px;
   font-size: 13px;
   color: var(--text-dim);
 }
@@ -957,12 +906,12 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 12px 0 8px;
+  padding: 6px 0 8px;
 }
 
 .picker-dir {
   min-width: 0;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-dim);
   white-space: nowrap;
   overflow: hidden;
@@ -976,7 +925,7 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
 }
 
 .ghost:disabled { opacity: 0.4; cursor: default; }
-.ghost:disabled:hover { border-color: var(--border); color: var(--text-dim); }
+.ghost:disabled:hover { background: transparent; }
 
 .settings-row {
   display: flex;
@@ -1041,7 +990,7 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   transition: left 0.1s ease;
 }
 .pane input[type="checkbox"]:checked { background: var(--accent); }
-.pane input[type="checkbox"]:checked::before { left: 18px; background: #fff; }
+.pane input[type="checkbox"]:checked::before { left: 18px; background: var(--accent-ink); }
 
 .stepper {
   display: flex;
@@ -1052,18 +1001,18 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
 }
 
 .stepper button {
-  width: 22px;
-  height: 22px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--border-strong);
+  border-radius: 50%;
   cursor: pointer;
   color: var(--text);
   font-size: 13px;
   line-height: 1;
-  background: var(--surface-2);
+  background: transparent;
 }
-.stepper button:hover { border-color: var(--accent); }
-.stepper button:active { background: #2a262c; }
+.stepper button:hover { background: #ffffff0d; }
+.stepper button:active { background: #ffffff1a; }
 
 #transpose-value { min-width: 26px; text-align: center; }
 
@@ -1140,11 +1089,10 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   flex-direction: column;
   gap: 10px;
   padding: 14px 18px 12px;
-  border: 1px solid var(--border);
-  border-top: 0;
-  border-radius: 0 0 12px 12px;
-  background: #1b191f;
-  box-shadow: 0 16px 40px #000c;
+  border: 0;
+  border-radius: 0 0 16px 16px;
+  background: var(--surface-2);
+  box-shadow: 0 4px 8px 3px #00000026, 0 1px 3px #0000004d;
 }
 
 .legend-head { display: flex; align-items: center; gap: 12px; }
@@ -1218,9 +1166,9 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   display: flex;
   gap: 16px;
   padding: 16px 14px 18px;
-  border-radius: 6px;
+  border-radius: 16px;
   background: var(--surface);
-  border: 1px solid var(--border);
+  border: 0;
 }
 
 .division {
@@ -1234,10 +1182,10 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   margin: 0 0 2px;
   padding-bottom: 7px;
   position: relative;
-  font-size: 10px;
-  font-weight: 600;
+  font-size: 11px;
+  font-weight: 500;
   text-transform: uppercase;
-  letter-spacing: 2.5px;
+  letter-spacing: 0.8px;
   color: var(--text-dim);
   white-space: nowrap;
 }
@@ -1260,13 +1208,13 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   width: 88px;
   min-height: 52px;
   padding: 0;
-  border: 1px solid var(--border);
-  border-radius: 4px;
+  border: 0;
+  border-radius: 12px;
   cursor: pointer;
   background: var(--surface-2);
-  transition: border-color 0.1s ease, background 0.1s ease, box-shadow 0.1s ease;
+  transition: background 0.1s ease;
 }
-.knob:hover { border-color: var(--border-strong); background: #272328; }
+.knob:hover { background: #313336; }
 
 .knob .face {
   display: flex;
@@ -1297,15 +1245,11 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
 
 .stop-pitch { font-size: 10px; font-weight: 600; letter-spacing: 0.4px; }
 
-/* drawn */
-.knob.on {
-  background: var(--accent-soft);
-  border-color: var(--accent);
-  box-shadow: 0 0 12px var(--accent-glow);
-}
-.knob.on .face { color: var(--text); }
-.knob.on .stop-pitch { color: var(--accent); }
-.knob:active { background: #2a262c; }
+/* drawn: a tonal fill, no glow */
+.knob.on { background: var(--accent-container); }
+.knob.on .face { color: var(--on-accent-container); }
+.knob.on .stop-pitch { color: var(--on-accent-container); }
+.knob:active { background: #37393c; }
 
 /* ---- coupler rail ---------------------------------------------------- */
 
@@ -1313,25 +1257,22 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   display: flex;
   justify-content: center;
   gap: 8px;
-  padding: 8px 12px;
+  padding: 0;
   margin-bottom: 16px;
-  border-radius: 6px;
-  background: var(--surface);
-  border: 1px solid var(--border);
 }
 
-/* couplers are flat chips */
+/* couplers are filter chips: outlined off, tonal when engaged */
 .rocker {
   min-width: 64px;
   height: 32px;
-  padding: 0 6px;
-  border: 1px solid var(--border);
-  border-radius: 3px;
+  padding: 0 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
   cursor: pointer;
-  background: var(--surface-2);
-  transition: border-color 0.1s ease, background 0.1s ease;
+  background: transparent;
+  transition: background 0.1s ease, border-color 0.1s ease;
 }
-.rocker:hover { border-color: var(--border-strong); background: #272328; }
+.rocker:hover { background: #ffffff0d; }
 
 .rocker .tab {
   display: flex;
@@ -1345,28 +1286,21 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
 }
 
 .rocker.on {
-  background: var(--accent);
-  border-color: var(--accent);
+  background: var(--accent-container);
+  border-color: transparent;
 }
 .rocker.on .tab {
-  color: var(--accent-ink);
-  font-weight: 600;
+  color: var(--on-accent-container);
+  font-weight: 500;
 }
 .rocker:active { filter: brightness(0.9); }
 
 /* General cancel sits at the end of the rail, set apart by a hairline:
    it is a piston, not a coupler, and never latches on. */
-.rocker.cancel {
-  margin-left: 10px;
-  border-left: 1px solid var(--border-strong);
-  border-radius: 3px;
-  background: transparent;
-  letter-spacing: 1px;
-  text-transform: uppercase;
-}
-.rocker.cancel .tab { font-size: 10px; letter-spacing: 1px; }
-.rocker.cancel:hover { background: var(--surface-2); border-color: var(--danger); }
-.rocker.cancel:hover .tab { color: var(--text); }
+.rocker.cancel { margin-left: 10px; }
+.rocker.cancel .tab { font-size: 11px; letter-spacing: 0.3px; }
+.rocker.cancel:hover { background: #ffffff0d; border-color: var(--danger); }
+.rocker.cancel:hover .tab { color: var(--danger); }
 
 /* ---- keyboards -------------------------------------------------------- */
 
@@ -1384,8 +1318,8 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   align-items: stretch;
   padding: 10px 12px;
   background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  border: 0;
+  border-radius: 16px;
 }
 .keyboard.manual { --nat-w: 23px; --kb-h: 96px; --sharp-w: 13px; }
 .keyboard.pedal { --nat-w: 27px; --kb-h: 84px; --sharp-w: 15px; }
@@ -1405,8 +1339,8 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   position: relative;
   width: calc(var(--naturals) * var(--nat-w));
   height: var(--kb-h);
-  background: var(--bg-deep);
-  border-radius: 4px;
+  background: #101011;
+  border-radius: 6px;
   overflow: hidden;
 }
 
@@ -1447,7 +1381,7 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
 .key.sharp.held { background: var(--accent-deep); }
 
 /* pedal naturals read slightly darker than the manuals */
-.keyboard.pedal .key.natural { background: #d6d0c4; }
+.keyboard.pedal .key.natural { background: #dadce0; }
 .keyboard.pedal .key.natural.held { background: var(--accent); }
 .keyboard.pedal .key.sharp { height: 55%; }
 
@@ -1473,15 +1407,15 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   position: relative;
   width: 36px;
   height: 128px;
-  border-radius: 8px;
+  border-radius: 999px;
   cursor: pointer;
   /* hairline ticks at quarter positions so the fader reads as a scale */
   background:
     linear-gradient(#ffffff14, #ffffff14) 50% 25% / 14px 1px no-repeat,
     linear-gradient(#ffffff14, #ffffff14) 50% 50% / 14px 1px no-repeat,
     linear-gradient(#ffffff14, #ffffff14) 50% 75% / 14px 1px no-repeat,
-    var(--surface);
-  border: 1px solid var(--border);
+    var(--surface-2);
+  border: 0;
   touch-action: none;
 }
 
@@ -1491,7 +1425,7 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   right: 4px;
   bottom: 4px;
   height: calc((100% - 8px) * var(--open, 0));
-  border-radius: 5px;
+  border-radius: 999px;
   background: var(--accent-soft);
 }
 
@@ -1501,7 +1435,7 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   right: 4px;
   height: 8px;
   bottom: calc(4px + (100% - 16px) * var(--open, 0));
-  border-radius: 4px;
+  border-radius: 999px;
   background: var(--accent);
   pointer-events: none;
 }
@@ -1540,3 +1474,6 @@ body[data-density="spacious"] .keyboard.manual { --nat-w: 26px; --kb-h: 108px; -
 body[data-density="spacious"] .keyboard.pedal { --nat-w: 30px; --kb-h: 94px; --sharp-w: 17px; }
 body[data-density="spacious"] .shoe-track { height: 146px; }
 body[data-density="spacious"] .pedals { margin-top: 22px; }
+
+/* organ-less: the loader is the whole interface */
+body.no-organ .console { visibility: hidden; }

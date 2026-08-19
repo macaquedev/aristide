@@ -13,12 +13,12 @@
     <nav id="menus" class="menus" aria-label="Main menu"></nav>
     <div class="rail-controls">
       <label class="slider-group" id="gain-group">
-        <span class="rail-label">VOLUME</span>
+        <span class="rail-label">Volume</span>
         <input id="gain" type="range" min="0" max="1" step="0.01" />
       </label>
       <button class="tuning" id="tuning" data-tip="Tuning &amp; temperament"
         aria-label="Tuning preferences"></button>
-      <button id="panic" class="panic" data-tip="Silence everything">PANIC</button>
+      <button id="panic" class="panic" data-tip="Silence everything">Panic</button>
     </div>
   </header>
   <aside id="keys-legend" class="keys-legend hidden" aria-label="Computer keyboard mapping"></aside>
@@ -55,7 +55,7 @@
           <div id="organ-summary" class="organ-summary"></div>
           <div id="organ-save" class="organ-save hidden">
             <label class="settings-row" id="organ-save-row">
-              <span class="rail-label">SAVE AS</span>
+              <span class="rail-label">Save as</span>
               <span class="organ-save-field">
                 <input id="organ-save-path" type="text" placeholder="/path/to/organ.toml" />
                 <button class="ghost" id="organ-save-btn">Save</button>
@@ -131,7 +131,7 @@
         <section class="pane hidden" data-pane="tuning">
           <h2>Temperament &amp; pitch</h2>
           <label class="settings-row" id="tuning-target-row">
-            <span class="rail-label">DIVISION</span>
+            <span class="rail-label">Division</span>
             <span class="tuning-target-field">
               <select id="tuning-target"></select>
               <button class="ghost hidden" id="tuning-reset">Same as instrument</button>
@@ -143,7 +143,7 @@
             sets whichever one is picked above.
           </p>
           <label class="settings-row" id="temperament-row">
-            <span class="rail-label">TEMPERAMENT</span>
+            <span class="rail-label">Temperament</span>
             <select id="set-temperament">
               <option value="equal">Equal</option>
               <option value="werckmeister3">Werckmeister III</option>
@@ -153,11 +153,11 @@
             </select>
           </label>
           <label class="settings-row" id="pitch-row">
-            <span class="rail-label">PITCH a&prime;</span>
+            <span class="rail-label">Pitch a&prime;</span>
             <span class="stepper"><input id="set-a4" type="number" min="300" max="500" step="0.5" /> Hz</span>
           </label>
           <div class="settings-row" id="transpose-row">
-            <span class="rail-label">TRANSPOSE</span>
+            <span class="rail-label">Transpose</span>
             <span class="stepper">
               <button id="transpose-down">&minus;</button>
               <span id="transpose-value">0</span>
@@ -173,11 +173,11 @@
         <section class="pane hidden" data-pane="sound">
           <h2>Room &amp; mechanism</h2>
           <label class="settings-row" id="reverb-row">
-            <span class="rail-label">REVERB</span>
+            <span class="rail-label">Reverb</span>
             <input id="reverb" type="range" min="0" max="1" step="0.01" />
           </label>
           <div class="settings-row" id="noises-row">
-            <span class="rail-label">NOISES</span>
+            <span class="rail-label">Noises</span>
             <span class="stepper">
               <input id="noises-on" type="checkbox" aria-label="Blower and action noises" />
               <input id="noises-vol" type="range" min="0" max="1" step="0.01" />
@@ -192,11 +192,11 @@
         <section class="pane hidden" data-pane="appearance">
           <h2>Console skin</h2>
           <div class="settings-row" id="accent-row">
-            <span class="rail-label">ACCENT</span>
+            <span class="rail-label">Accent</span>
             <span class="swatches" id="accent-swatches"></span>
           </div>
           <div class="settings-row" id="density-row">
-            <span class="rail-label">DENSITY</span>
+            <span class="rail-label">Density</span>
             <span class="segment" id="density-segment"></span>
           </div>
           <p class="pane-note">
@@ -213,7 +213,6 @@
     <div class="modal-backdrop" data-close></div>
     <div class="modal-card picker-card">
       <header class="picker-head">
-        <span class="picker-eyebrow">Aristide</span>
         <h1 id="picker-title">Load an organ</h1>
         <button class="modal-close" id="picker-close" data-close
           aria-label="Close organ loader">&times;</button>
