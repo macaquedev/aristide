@@ -279,6 +279,34 @@ fn respond(
             });
             json(state_json_locked(&state))
         }
+        // Create a blank composite — nothing but a name — under the
+        // config directory's organs/, and queue loading it. The player
+        // grows it from there; the file is theirs to edit or move.
+        (Method::Post, "/api/organ/new") => {
+            let Some(name) = param(query, "name").map(unescape) else {
+                return bad_request("missing name");
+            };
+            let mut state = state.lock().expect("state poisoned");
+            if state.loading.is_some() || state.pending_load.is_some() {
+                return bad_request("an organ is already loading");
+            }
+            let Some(dir) = crate::config::organs_dir() else {
+                return bad_request("no config directory to keep organs in");
+            };
+            match crate::config::create_blank_organ(&dir, &name) {
+                Ok(path) => {
+                    state.loading = Some("loading…".to_string());
+                    state.load_error = None;
+                    state.pending_load = Some(crate::LoadRequest {
+                        paths: vec![path],
+                        stops: Vec::new(),
+                        initial: false,
+                    });
+                    json(state_json_locked(&state))
+                }
+                Err(err) => bad_request(&err),
+            }
+        }
         // Take an organ off the picker. Its assignments are kept.
         (Method::Post, "/api/library/forget") => match param(query, "path").map(unescape) {
             Some(path) => {
@@ -1779,6 +1807,22 @@ mod tests {
         let refused = respond(&state, &Method::Post, &url);
         assert_eq!(refused.status_code().0, 400);
         let _ = std::fs::remove_file(&file);
+    }
+
+    /// The blank-organ endpoint enforces the same rules as loading:
+    /// a real name, one load at a time. (Creation itself is proven in
+    /// `config::tests` — here would write into the user's config.)
+    #[test]
+    fn a_blank_organ_needs_a_name_and_a_free_load_slot() {
+        let state = tone_state();
+        let missing = respond(&state, &Method::Post, "/api/organ/new");
+        assert_eq!(missing.status_code().0, 400, "a name is required");
+        let blank = respond(&state, &Method::Post, "/api/organ/new?name=%20%20");
+        assert_eq!(blank.status_code().0, 400, "whitespace is not a name");
+
+        state.lock().expect("state poisoned").loading = Some("loading…".into());
+        let busy = respond(&state, &Method::Post, "/api/organ/new?name=Chapel");
+        assert_eq!(busy.status_code().0, 400, "one load at a time");
     }
 
     #[test]

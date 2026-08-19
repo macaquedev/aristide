@@ -297,6 +297,51 @@ pub fn default_path() -> Option<PathBuf> {
     Some(base.join("aristide").join("midi.toml"))
 }
 
+/// Where organs born blank in the console are written:
+/// `organs/` next to `midi.toml`. They are ordinary composite files —
+/// the player is free to edit them or move them anywhere; the library
+/// tracks them by path like any other organ.
+pub fn organs_dir() -> Option<PathBuf> {
+    Some(default_path()?.parent()?.join("organs"))
+}
+
+/// Create a composite file holding nothing but `name` — an organ with
+/// no manuals and no stops yet, ready to load and grow. The filename
+/// is a slug of the name, uniquified so creating "Chapel" twice yields
+/// two files rather than one organ silently replacing another.
+pub fn create_blank_organ(dir: &Path, name: &str) -> Result<PathBuf, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("the organ needs a name".into());
+    }
+    std::fs::create_dir_all(dir).map_err(|err| format!("{}: {err}", dir.display()))?;
+    let mut slug = String::new();
+    for c in name.to_lowercase().chars() {
+        if c.is_alphanumeric() {
+            slug.push(c);
+        } else if !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    let slug = slug.trim_matches('-');
+    let slug = if slug.is_empty() { "organ" } else { slug };
+    let mut path = dir.join(format!("{slug}.toml"));
+    let mut nth = 2;
+    while path.exists() {
+        path = dir.join(format!("{slug}-{nth}.toml"));
+        nth += 1;
+    }
+    let mut doc = toml_edit::DocumentMut::new();
+    doc["name"] = toml_edit::value(name);
+    let body = format!(
+        "# An Aristide organ. Point [sources] at sample sets and pull stops\n\
+         # or divisions onto manuals — this file is the whole instrument.\n\
+         {doc}"
+    );
+    std::fs::write(&path, body).map_err(|err| format!("{}: {err}", path.display()))?;
+    Ok(path)
+}
+
 /// A missing file is not an error: it is the state before the player
 /// has assigned anything. A malformed one is kept, not overwritten —
 /// losing someone's hand edits to a typo would be rude.
@@ -765,6 +810,29 @@ mod tests {
             "a manual with no inputs leaves no entry behind"
         );
         config.remove_input("Organ", "Great", 0);
+    }
+
+    /// The file a blank organ is born as must itself be a loadable
+    /// composite: the exact name kept, no manuals, no stops — and a
+    /// second organ with the same name gets its own file.
+    #[test]
+    fn a_blank_organ_is_a_loadable_composite() {
+        let dir = std::env::temp_dir().join("aristide-blank-organ-test");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(create_blank_organ(&dir, "   ").is_err(), "a name is required");
+
+        let path = create_blank_organ(&dir, "Église St-Jean").expect("creates");
+        assert_eq!(path.file_name().unwrap().to_str(), Some("église-st-jean.toml"));
+        let assembled = aristide_formats::instrument::load(&path).expect("loads");
+        assert_eq!(assembled.organ.name, "Église St-Jean");
+        assert!(assembled.organ.manuals.is_empty());
+        assert!(assembled.organ.stops.is_empty());
+
+        let second = create_blank_organ(&dir, "Église St-Jean").expect("creates again");
+        assert_ne!(second, path, "same name, own file");
+        assert!(second.is_file());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

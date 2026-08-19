@@ -559,6 +559,25 @@ pub fn prepare(
 mod tests {
     use super::*;
 
+    /// A blank organ — the file `/api/organ/new` writes — must come out
+    /// of the same pipeline as a real set: an empty console, no samples,
+    /// nothing to trip over downstream.
+    #[test]
+    fn prepare_accepts_a_blank_composite() {
+        let dir = std::env::temp_dir().join("aristide-blank-prepare-test");
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        let path = crate::config::create_blank_organ(&dir, "Blank Chapel").expect("creates");
+        let prepared = prepare(&[path], &[], 48_000.0, &|_| {}).expect("blank organ prepares");
+        assert_eq!(prepared.console.organ_name(), "Blank Chapel");
+        assert!(prepared.console.stop_states().is_empty());
+        assert!(prepared.bank.is_empty());
+        assert!(
+            prepared.composite.is_some(),
+            "the blank file owns its own MIDI wiring like any composite"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The whole pipeline against the demo set: the same function the
     /// picker calls at runtime must produce a playable console.
     #[test]
