@@ -213,9 +213,9 @@
     <div class="modal-backdrop" data-close></div>
     <div class="modal-card">
       <header class="modal-head">
-        <h1 id="picker-title">Choose an organ</h1>
+        <h1 id="picker-title">Load an organ</h1>
         <button class="modal-close" id="picker-close" data-close
-          aria-label="Close organ picker">&times;</button>
+          aria-label="Close organ loader">&times;</button>
       </header>
       <div class="modal-body">
         <div class="pane">
@@ -225,18 +225,36 @@
             <span id="picker-loading-text"></span>
           </div>
           <div id="picker-sections">
+            <div class="picker-actions">
+              <button class="picker-action" id="picker-new-blank">
+                <span class="picker-row-name">New blank organ&hellip;</span>
+                <span class="picker-row-path">Name it, then build it up from sample sets.</span>
+              </button>
+              <button class="picker-action" id="picker-new-set">
+                <span class="picker-row-name">New organ from a sample set&hellip;</span>
+                <span class="picker-row-path">A GrandOrgue, Hauptwerk or Aristide file.</span>
+              </button>
+            </div>
+            <form id="picker-name-form" class="picker-name hidden">
+              <input id="picker-name" type="text" placeholder="Name the new organ"
+                autocomplete="off" />
+              <button class="ghost" type="submit">Create</button>
+            </form>
+
             <h2>Library</h2>
             <p class="pane-note">Organs this machine has loaded before.</p>
             <div id="picker-library" class="picker-library"></div>
 
-            <h2>Browse</h2>
-            <p class="pane-note">Find an organ or sample set by its path.</p>
-            <div class="picker-browse-head">
-              <button class="ghost" id="picker-up">&uarr; Up</button>
-              <span id="picker-dir" class="picker-dir"></span>
+            <div id="picker-browse" class="hidden">
+              <h2>Browse</h2>
+              <p class="pane-note">Find an organ or sample set by its path.</p>
+              <div class="picker-browse-head">
+                <button class="ghost" id="picker-up">&uarr; Up</button>
+                <span id="picker-dir" class="picker-dir"></span>
+              </div>
+              <p class="pane-warn hidden" id="picker-browse-error"></p>
+              <div id="picker-browse-list" class="picker-browse-list"></div>
             </div>
-            <p class="pane-warn hidden" id="picker-browse-error"></p>
-            <div id="picker-browse-list" class="picker-browse-list"></div>
           </div>
         </div>
       </div>

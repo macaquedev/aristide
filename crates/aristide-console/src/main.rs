@@ -93,6 +93,9 @@ fn main() {
         }
     };
     tauri::Builder::default()
+        // The native open-file dialog, for picking a sample set to
+        // load — the one thing the web console can't do by itself.
+        .plugin(tauri_plugin_dialog::init())
         .manage(backend)
         .invoke_handler(tauri::generate_handler![server_url])
         .build(tauri::generate_context!())

@@ -95,6 +95,9 @@ export const commands = {
   // Browse. 400s with a plain-text reason if the path isn't a file or a
   // load is already running.
   organLoad: (path) => `/api/organ/load?path=${encodeURIComponent(path)}`,
+  // Creates a blank composite organ — nothing but a name — under the
+  // server's config directory, and queues loading it.
+  organNew: (name) => `/api/organ/new?name=${encodeURIComponent(name)}`,
   // Drops one entry from the library without touching the file itself.
   libraryForget: (path) => `/api/library/forget?path=${encodeURIComponent(path)}`,
 };

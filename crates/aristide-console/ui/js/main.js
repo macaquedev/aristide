@@ -27,10 +27,25 @@ function fullscreen() {
 // and shifting it is a binding like any other.
 new MenuBar(document, document.getElementById("menus"), [
   {
+    title: "Load",
+    items: () => [
+      { label: "New blank organ…", run: () => picker.newBlank() },
+      { label: "New organ from a sample set…", run: () => picker.newFromSet() },
+      ...(picker.library.length
+        ? [
+            "-",
+            "Recent",
+            ...picker.library.slice(0, 8).map((entry) => ({
+              label: entry.name,
+              run: () => picker.load(entry.path),
+            })),
+          ]
+        : []),
+    ],
+  },
+  {
     title: "Organ",
     items: () => [
-      { label: "Open organ…", run: () => picker.open() },
-      "-",
       { label: "Cancel registration", run: () => view.cancel() },
       { label: "Silence everything", accel: "Panic", run: () => view.panic() },
       "-",

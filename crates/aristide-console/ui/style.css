@@ -715,6 +715,50 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   pointer-events: none;
 }
 
+/* the two ways to a new organ, side by side atop the dialog */
+.picker-actions {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.picker-action {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  background: var(--surface);
+  color: var(--text);
+  font-family: var(--sans);
+  text-align: left;
+}
+.picker-action:hover { border-color: var(--accent); background: var(--surface-2); }
+.picker-action .picker-row-path { white-space: normal; }
+
+.picker-name {
+  display: flex;
+  gap: 8px;
+  margin: 0 0 14px;
+}
+
+.picker-name input {
+  flex: 1;
+  min-width: 0;
+  font: 12px var(--sans);
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 8px;
+}
+.picker-name input:focus { outline: none; border-color: var(--accent); }
+
 .picker-library,
 .picker-browse-list {
   display: flex;

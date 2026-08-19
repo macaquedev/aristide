@@ -1,16 +1,26 @@
-// The organ picker: how the player gets from a bare console to a
+// The organ loader: how the player gets from a bare console to a
 // sounding instrument. The server starts organ-less, so this modal
 // auto-opens with nothing behind it to interact with, and stays up
-// (unclosable) until a load finishes. Once an organ is loaded it
-// becomes an ordinary dialog, reachable from Organ ▸ Open organ… to
-// switch instruments later.
+// (unclosable) until a load finishes; it also pops up over the console
+// while any load is in flight, so progress and errors have somewhere
+// to show. The Load menu's items land here too.
 //
-// Two ways to name a file: the library (organs this machine has loaded
-// before) and Browse (a live directory listing via /api/browse). Both
-// end the same way — POSTing organLoad, which the usual send()/poll
-// loop turns into a `loading` snapshot and eventually a new `organ`.
+// Three ways in: a new blank organ (a name becomes a composite file,
+// via organNew), a sample set picked in the native file dialog (Tauri;
+// a plain browser falls back to the server-side directory listing),
+// and the library — organs this machine has loaded before. All end the
+// same way — POSTing a load, which the usual send()/poll loop turns
+// into a `loading` snapshot and eventually a new `organ`.
 
 import { commands } from "./api.js";
+
+// What the native open dialog offers: everything the server can load,
+// or is meant to — GrandOrgue sets, unencrypted Hauptwerk definitions,
+// Aristide composites.
+const ORGAN_FILTER = {
+  name: "Organs (GrandOrgue, Hauptwerk, Aristide)",
+  extensions: ["organ", "toml", "Organ_Hauptwerk_xml"],
+};
 
 export class Picker {
   constructor(root, base, send) {
@@ -19,6 +29,7 @@ export class Picker {
     this.send = send;
     this.lastOrgan = undefined; // mirrors snapshot.organ, kept even while closed
     this.openedWithOrgan = undefined; // snapshot.organ at the moment this opened
+    this.library = []; // mirrors snapshot.library — the Load menu reads it too
     this.signature = null;
     // Browse state lives outside the snapshot — it's this client's own
     // directory listing, fetched directly rather than polled.
@@ -33,7 +44,12 @@ export class Picker {
       loading: root.getElementById("picker-loading"),
       loadingText: root.getElementById("picker-loading-text"),
       sections: root.getElementById("picker-sections"),
+      newBlank: root.getElementById("picker-new-blank"),
+      newSet: root.getElementById("picker-new-set"),
+      nameForm: root.getElementById("picker-name-form"),
+      name: root.getElementById("picker-name"),
       library: root.getElementById("picker-library"),
+      browsePane: root.getElementById("picker-browse"),
       up: root.getElementById("picker-up"),
       dir: root.getElementById("picker-dir"),
       browseError: root.getElementById("picker-browse-error"),
@@ -52,30 +68,78 @@ export class Picker {
     return !!this.lastOrgan;
   }
 
-  /// Manual open, from Organ ▸ Open organ…: whatever is loaded right
-  /// now is "home" for this session, so a pick that lands on the same
-  /// organ again wouldn't be mistaken for one that didn't land at all.
+  /// Manual open, from the Load menu: whatever is loaded right now is
+  /// "home" for this session, so a pick that lands on the same organ
+  /// again wouldn't be mistaken for one that didn't land at all.
   open() {
     this.openedWithOrgan = this.lastOrgan;
     this.show();
+  }
+
+  /// Load ▸ New blank organ…: the dialog with the name field ready.
+  newBlank() {
+    this.open();
+    this.showNameForm();
+  }
+
+  /// Load ▸ New organ from a sample set…: straight to the native file
+  /// dialog; a plain browser gets the dialog with the server-side
+  /// listing revealed instead.
+  newFromSet() {
+    if (window.__TAURI__) {
+      this.openedWithOrgan = this.lastOrgan;
+      this.pickSampleSet();
+    } else {
+      this.open();
+      this.showBrowse();
+    }
   }
 
   show() {
     this.el.modal.classList.remove("hidden");
     this.el.close.classList.toggle("hidden", !this.closable);
     this.root.body.classList.add("modal-open");
-    if (this.dir === null) this.browse();
   }
 
   close() {
     if (!this.closable) return;
     this.el.modal.classList.add("hidden");
     this.root.body.classList.remove("modal-open");
-    // Next open starts at home again, not wherever browsing left off.
+    // Next open starts at home again: name field blank, browser shut.
+    this.el.nameForm.classList.add("hidden");
+    this.el.name.value = "";
+    this.el.browsePane.classList.add("hidden");
     this.dir = null;
     this.browseParent = null;
     this.browseEntries = null;
     this.browseError = null;
+  }
+
+  showNameForm() {
+    this.el.nameForm.classList.remove("hidden");
+    this.el.name.focus();
+  }
+
+  showBrowse() {
+    this.el.browsePane.classList.remove("hidden");
+    if (this.dir === null) this.browse();
+  }
+
+  /// The native open dialog, filtered to loadable organ formats. A
+  /// cancelled dialog is not an error — nothing happens.
+  async pickSampleSet() {
+    const picked = await window.__TAURI__.core
+      .invoke("plugin:dialog|open", {
+        options: {
+          title: "Choose a sample set or organ",
+          filters: [ORGAN_FILTER],
+          multiple: false,
+          directory: false,
+        },
+      })
+      .catch(() => null);
+    const path = Array.isArray(picked) ? picked[0] : picked;
+    if (typeof path === "string" && path) this.load(path);
   }
 
   wire() {
@@ -87,6 +151,15 @@ export class Picker {
         event.preventDefault();
         this.close();
       }
+    });
+    this.el.newBlank.addEventListener("click", () => this.showNameForm());
+    this.el.nameForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const name = this.el.name.value.trim();
+      if (name) this.send(commands.organNew(name));
+    });
+    this.el.newSet.addEventListener("click", () => {
+      window.__TAURI__ ? this.pickSampleSet() : this.showBrowse();
     });
     this.el.up.addEventListener("click", () => {
       if (this.browseParent) this.browse(this.browseParent);
@@ -101,10 +174,13 @@ export class Picker {
     const error = snapshot.load_error ?? null;
     const library = snapshot.library ?? [];
     this.lastOrgan = snapshot.organ;
+    this.library = library;
 
-    // Auto-open: there is nothing behind the console to use.
-    if (!this.isOpen && !hasOrgan && !loading) {
-      this.openedWithOrgan = undefined;
+    // Auto-open: there is nothing behind the console to use, or a load
+    // (started from the Load menu, perhaps) whose progress and errors
+    // need somewhere to show.
+    if (!this.isOpen && (!hasOrgan || loading)) {
+      this.openedWithOrgan = hasOrgan ? this.lastOrgan : undefined;
       this.show();
     }
 
@@ -139,7 +215,7 @@ export class Picker {
     this.el.library.replaceChildren();
     if (!library.length) {
       this.el.library.append(
-        this.emptyNote("No organs yet — browse for a sample set below.")
+        this.emptyNote("No organs yet — create one above.")
       );
       return;
     }
