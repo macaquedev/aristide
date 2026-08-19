@@ -1074,8 +1074,9 @@ fn params<'a>(query: &'a str, key: &'a str) -> impl Iterator<Item = &'a str> {
 }
 
 /// One directory as the picker's browser shows it: subdirectories and
-/// loadable organ files (`.organ` sample sets, `.toml` composites),
-/// dotfiles skipped, directories first.
+/// loadable organ files (`.organ` sample sets, `.toml` composites,
+/// unencrypted Hauptwerk definitions), dotfiles skipped, directories
+/// first.
 fn browse_json(dir: &std::path::Path) -> Result<String, String> {
     let dir = dir
         .canonicalize()
@@ -1092,7 +1093,10 @@ fn browse_json(dir: &std::path::Path) -> Result<String, String> {
             dirs.push(name);
         } else {
             let lower = name.to_lowercase();
-            if lower.ends_with(".organ") || lower.ends_with(".toml") {
+            if lower.ends_with(".organ")
+                || lower.ends_with(".toml")
+                || lower.ends_with(".organ_hauptwerk_xml")
+            {
                 files.push(name);
             }
         }
@@ -1853,13 +1857,20 @@ mod tests {
         let dir = std::env::temp_dir().join("aristide-browse-test");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("sub")).expect("fixture dir");
-        for name in ["set.organ", "combo.toml", "readme.txt", ".hidden.organ"] {
+        for name in [
+            "set.organ",
+            "combo.toml",
+            "hw.Organ_Hauptwerk_xml",
+            "readme.txt",
+            ".hidden.organ",
+        ] {
             std::fs::write(dir.join(name), "").expect("fixture file");
         }
         let body = browse_json(&dir).expect("browses");
         assert!(body.contains("\"sub\""), "subdirectory listed: {body}");
         assert!(body.contains("set.organ"), "sample set listed");
         assert!(body.contains("combo.toml"), "composite listed");
+        assert!(body.contains("hw.Organ_Hauptwerk_xml"), "Hauptwerk listed");
         assert!(!body.contains("readme.txt"), "other files are noise");
         assert!(!body.contains(".hidden.organ"), "dotfiles skipped");
         assert!(
