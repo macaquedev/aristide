@@ -7,6 +7,11 @@
 
 const POLL_INTERVAL_MS = 120;
 
+/// The server's name for the computer keyboard, wherever a device is
+/// named: it is assignable like any MIDI device, just never one the
+/// operating system enumerates.
+export const COMPUTER_KEYBOARD = "Computer keyboard";
+
 /// Where the server is. Priority: CLI arg via the Tauri shell,
 /// `?server=` query param, then the page's own origin (for the day the
 /// server serves this console itself).
@@ -63,12 +68,6 @@ export const commands = {
   // With no slot, stop listening — same shape as midiLearn.
   controlLearn: (slot) =>
     slot == null ? "/api/control/learn" : `/api/control/learn?slot=${slot}`,
-  // Where the computer keyboard plays, and any action by name — the
-  // same verbs a binding uses, so a menu item and a piston can't drift.
-  keyboardManual: (manual) => `/api/keyboard?manual=${manual}`,
-  action: (name, device) =>
-    `/api/action?do=${encodeURIComponent(name)}` +
-    (device == null ? "" : `&device=${encodeURIComponent(device)}`),
   // A computer key, by physical position. The server decides what it
   // means — a note on the assigned manual, or whatever it is bound to.
   key: (code, on) => `/api/key?code=${encodeURIComponent(code)}&on=${on ? 1 : 0}`,

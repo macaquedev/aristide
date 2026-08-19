@@ -646,64 +646,6 @@ impl State {
         }
     }
 
-    /// Take the computer keyboard off every manual, keeping the shift
-    /// it had so a re-assignment doesn't lose it.
-    fn retire_keyboard(&mut self) -> i8 {
-        let names = self.manual_names();
-        let organ = self.organ_key.clone();
-        let mut transpose = 0;
-        for name in &names {
-            while let Some(slot) = self
-                .midi_config
-                .inputs(&organ, name)
-                .iter()
-                .position(|input| input.device == COMPUTER_KEYBOARD)
-            {
-                transpose = self.midi_config.inputs(&organ, name)[slot].transpose;
-                self.midi_config.remove_input(&organ, name, slot);
-            }
-        }
-        transpose
-    }
-
-    /// Detach the computer keyboard entirely: its keys play nothing
-    /// until it is assigned again. Bindings (a key working a stop) are
-    /// untouched — they never depended on the assignment.
-    pub fn unassign_keyboard(&mut self) {
-        self.retire_keyboard();
-        tracing::info!("control: computer keyboard plays nothing");
-        self.resolve_routes();
-        self.persist();
-    }
-
-    /// Point the computer keyboard at a manual, moving it off whatever
-    /// it was on — one keyboard, one place, however many manuals ask.
-    pub fn assign_keyboard(&mut self, manual: usize) -> bool {
-        let names = self.manual_names();
-        let Some(wanted) = names.get(manual).cloned() else {
-            return false;
-        };
-        let organ = self.organ_key.clone();
-        let transpose = self.retire_keyboard();
-        let slot = self.midi_config.inputs(&organ, &wanted).len();
-        self.midi_config.set_input(
-            &organ,
-            &wanted,
-            slot,
-            config::Input {
-                device: COMPUTER_KEYBOARD.to_string(),
-                channel: None,
-                low: None,
-                high: None,
-                transpose,
-            },
-        );
-        tracing::info!("control: computer keyboard plays {wanted}");
-        self.resolve_routes();
-        self.persist();
-        true
-    }
-
     /// Run one action by name, as if a binding had fired it — the menu
     /// and a piston must not be able to mean different things.
     pub fn run_named(&mut self, action: &control::Action, device: &str) -> bool {
@@ -835,10 +777,41 @@ impl State {
 
     /// Assign `input` to one manual's slot (past the end appends), then
     /// re-resolve and save. Returns false when the manual doesn't exist.
-    pub fn set_input(&mut self, manual: usize, slot: usize, input: config::Input) -> bool {
+    pub fn set_input(&mut self, manual: usize, slot: usize, mut input: config::Input) -> bool {
         let Some(name) = self.manual_names().get(manual).cloned() else {
             return false;
         };
+        // The computer keyboard is picked here like any device, but it
+        // is one keyboard in one place: choosing it takes it off
+        // whatever manual it was on, carrying its shift along. Channels
+        // and a learned compass mean nothing to it — its width is the
+        // two rows, always.
+        let mut slot = slot;
+        if input.device == COMPUTER_KEYBOARD {
+            input.channel = None;
+            input.low = None;
+            input.high = None;
+            let organ = self.organ_key.clone();
+            for other in self.manual_names() {
+                while let Some(found) = self
+                    .midi_config
+                    .inputs(&organ, &other)
+                    .iter()
+                    .position(|i| i.device == COMPUTER_KEYBOARD)
+                {
+                    if other == name && found == slot {
+                        break; // the row being rewritten overwrites itself
+                    }
+                    if input.transpose == 0 {
+                        input.transpose = self.midi_config.inputs(&organ, &other)[found].transpose;
+                    }
+                    self.midi_config.remove_input(&organ, &other, found);
+                    if other == name && found < slot {
+                        slot -= 1; // the removal shifted the target row down
+                    }
+                }
+            }
+        }
         tracing::info!(
             "midi: {name} ← {} channel {}",
             input.device,
@@ -2406,6 +2379,24 @@ mod tests {
         );
     }
 
+    /// Pick the computer keyboard for a manual, exactly as the MIDI
+    /// tab's device dropdown does — there is no other assignment path.
+    fn bind_computer(state: &Mutex<State>, manual: usize) -> bool {
+        let mut state = state.lock().expect("state poisoned");
+        let slot = state.manual_inputs(manual).len();
+        state.set_input(
+            manual,
+            slot,
+            config::Input {
+                device: COMPUTER_KEYBOARD.into(),
+                channel: None,
+                low: None,
+                high: None,
+                transpose: 0,
+            },
+        )
+    }
+
     fn compass_of(state: &Mutex<State>, manual: usize) -> Option<(i16, i16)> {
         let state = state.lock().expect("state poisoned");
         match &state.control {
@@ -2664,7 +2655,7 @@ mod tests {
         assert!(held_on(&state, manual).is_empty(), "unassigned keys are silent");
         state.lock().expect("state").key("KeyZ", false);
 
-        assert!(state.lock().expect("state").assign_keyboard(manual));
+        assert!(bind_computer(&state, manual));
         let keyboard = state
             .lock()
             .expect("state")
@@ -2720,7 +2711,7 @@ mod tests {
             return;
         };
         let native = compass_of(&state, manual).expect("a compass");
-        assert!(state.lock().expect("state").assign_keyboard(manual));
+        assert!(bind_computer(&state, manual));
         assert_eq!(
             compass_of(&state, manual),
             Some(native),
@@ -2742,8 +2733,24 @@ mod tests {
             "a key past the compass is silent, not repitched"
         );
 
-        // Detached, the letter rows go back to being letters.
-        state.lock().expect("state").unassign_keyboard();
+        // One keyboard, one place: picking it for another manual in
+        // the same dropdown moves it, shift and all.
+        let other = manual - 1;
+        assert!(bind_computer(&state, other));
+        {
+            let state = state.lock().expect("state");
+            let keyboard = state.keyboard.expect("still assigned");
+            assert_eq!(keyboard.manual, other, "moved, not duplicated");
+            assert_eq!(keyboard.transpose, 36, "the shift moved with it");
+            assert!(
+                state.manual_inputs(manual).is_empty(),
+                "the old manual lost its row"
+            );
+        }
+
+        // Detached — the row removed like any device's — the letter
+        // rows go back to being letters.
+        assert!(state.lock().expect("state").remove_input(other, 0));
         assert!(state.lock().expect("state").keyboard.is_none());
         assert_eq!(compass_of(&state, manual), Some(native));
     }

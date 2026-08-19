@@ -7,7 +7,7 @@
 // (a device appears, a different organ loads), and values are written
 // back on every poll except into a control the user is touching.
 
-import { commands } from "./api.js";
+import { commands, COMPUTER_KEYBOARD } from "./api.js";
 
 const NOTE_NAMES = ["C", "C♯", "D", "E♭", "E", "F", "F♯", "G", "A♭", "A", "B♭", "B"];
 
@@ -363,7 +363,8 @@ export class Preferences {
     channel.append(this.option("any", "any channel"));
     for (let ch = 1; ch <= 16; ch++) channel.append(this.option(String(ch), `channel ${ch}`));
     channel.value = input ? (input.channel == null ? "any" : String(input.channel)) : "any";
-    channel.disabled = !input;
+    // The computer keyboard has no channels to tell apart.
+    channel.disabled = !input || input.device === COMPUTER_KEYBOARD;
     channel.addEventListener("change", () =>
       this.send(commands.midiBind(manual, slot, input.device, channel.value))
     );

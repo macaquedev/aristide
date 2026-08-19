@@ -450,29 +450,6 @@ fn respond(
                 _ => bad_request("missing code"),
             }
         }
-        // Where the computer keyboard plays — a manual, or `none` to
-        // detach it. The Play menu's shortcut for an assignment the
-        // MIDI tab makes the long way.
-        (Method::Post, "/api/keyboard") => {
-            match param(query, "manual") {
-                Some("none") => {
-                    let mut state = state.lock().expect("state poisoned");
-                    state.unassign_keyboard();
-                    json(state_json_locked(&state))
-                }
-                Some(value) => match value.parse::<usize>() {
-                    Ok(manual) => {
-                        let mut state = state.lock().expect("state poisoned");
-                        if !state.assign_keyboard(manual) {
-                            return bad_request("no such manual");
-                        }
-                        json(state_json_locked(&state))
-                    }
-                    Err(_) => bad_request("manual must be an index or none"),
-                },
-                None => bad_request("missing manual"),
-            }
-        }
         // Run an action outright — the same verbs a binding uses, so a
         // menu item and a piston cannot drift apart.
         (Method::Post, "/api/action") => match param(query, "do").map(unescape) {
@@ -1537,12 +1514,17 @@ mod tests {
         ] {
             assert!(value.get(field).is_some(), "{field} missing: {body}");
         }
-        // The keyboard object appears only once the player assigns it.
+        // The keyboard object appears only once the player assigns it —
+        // through the same bind call as any MIDI device.
         assert!(
             value.get("keyboard").is_none(),
             "an unassigned computer keyboard is absent, not defaulted: {body}"
         );
-        respond(&state, &Method::Post, "/api/keyboard?manual=1");
+        respond(
+            &state,
+            &Method::Post,
+            "/api/midi/bind?manual=1&slot=0&device=Computer%20keyboard",
+        );
         let assigned: serde_json::Value =
             serde_json::from_str(&state_json(&state)).expect("valid JSON");
         assert_eq!(assigned["keyboard"]["manual"], 1);
@@ -1620,13 +1602,19 @@ mod tests {
         assert!(state_json(&state).contains("\"coupler_repitch\":false"));
     }
 
-    /// The Play menu's shortcuts are the same verbs a binding uses.
+    /// The computer keyboard is assigned through the same bind and
+    /// unbind calls as any MIDI device — there is no separate path.
     #[test]
-    fn the_action_endpoint_moves_the_computer_keyboard() {
+    fn the_computer_keyboard_binds_like_any_device() {
         let Some(state) = demo_state() else { return };
-        respond(&state, &Method::Post, "/api/keyboard?manual=1");
+        respond(
+            &state,
+            &Method::Post,
+            "/api/midi/bind?manual=1&slot=0&device=Computer%20keyboard",
+        );
         assert!(state_json(&state).contains("\"keyboard\":{\"manual\":1,\"transpose\":0"));
 
+        // The action endpoint shifts it the way a binding would.
         respond(
             &state,
             &Method::Post,
@@ -1637,7 +1625,13 @@ mod tests {
             "the keyboard is shifted, not the division"
         );
 
-        respond(&state, &Method::Post, "/api/keyboard?manual=2");
+        // Picking it in another manual's dropdown moves it: one
+        // keyboard, one place, the shift carried along.
+        respond(
+            &state,
+            &Method::Post,
+            "/api/midi/bind?manual=2&slot=0&device=Computer%20keyboard",
+        );
         let body = state_json(&state);
         assert!(
             body.contains("\"keyboard\":{\"manual\":2,\"transpose\":12"),
@@ -1648,8 +1642,8 @@ mod tests {
             "and it plays one manual, not two: {body}"
         );
 
-        // Detaching is a first-class state, not a fault.
-        respond(&state, &Method::Post, "/api/keyboard?manual=none");
+        // Removing the row detaches it, like unplugging any device.
+        respond(&state, &Method::Post, "/api/midi/unbind?manual=2&slot=0");
         let body = state_json(&state);
         assert!(
             !body.contains("\"keyboard\":{"),

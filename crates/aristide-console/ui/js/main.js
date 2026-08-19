@@ -21,8 +21,10 @@ function fullscreen() {
 }
 
 // Menus are rebuilt each time one is pulled down, so every item states
-// what is true at that moment — which manual the computer keyboard
-// plays, whether the legend is up, whether the window is full screen.
+// what is true at that moment — whether the legend is up, whether the
+// window is full screen. Playing itself needs no menu: the computer
+// keyboard is assigned in Preferences → MIDI like any other device,
+// and shifting it is a binding like any other.
 new MenuBar(document, document.getElementById("menus"), [
   {
     title: "Organ",
@@ -36,28 +38,9 @@ new MenuBar(document, document.getElementById("menus"), [
     ],
   },
   {
-    title: "Play",
-    items: () => [
-      { label: "Computer keyboard map", check: keys.isOpen, run: () => keys.toggle() },
-      // Accelerators are bindings now, not built-ins: what shifts the
-      // keyboard is whatever the player has bound to octave-up and
-      // octave-down, which may equally be a piston on their console.
-      { label: "Octave down", run: () => keys.shift(-1) },
-      { label: "Octave up", run: () => keys.shift(+1) },
-      "-",
-      `SHIFTED ${keys.transpose > 0 ? "+" : ""}${keys.transpose} SEMITONES`,
-      "-",
-      "COMPUTER KEYBOARD PLAYS",
-      ...keys.manuals.map((manual) => ({
-        label: manual.name,
-        radio: keys.target?.idx === manual.idx,
-        run: () => keys.setTarget(manual.idx),
-      })),
-    ],
-  },
-  {
     title: "View",
     items: () => [
+      { label: "Computer keyboard map", check: keys.isOpen, run: () => keys.toggle() },
       {
         label: "Full screen",
         check: Boolean(document.fullscreenElement),
