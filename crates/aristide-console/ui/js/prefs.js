@@ -8,6 +8,7 @@
 // back on every poll except into a control the user is touching.
 
 import { commands, COMPUTER_KEYBOARD } from "./api.js";
+import { shiftWords } from "./pitch.js";
 
 const NOTE_NAMES = ["C", "C♯", "D", "E♭", "E", "F", "F♯", "G", "A♭", "A", "B♭", "B"];
 
@@ -266,6 +267,11 @@ export class Preferences {
   refreshMidi(snapshot) {
     const midi = snapshot.midi ?? { ports: [], manuals: [] };
     this.learning = midi.learning ?? null;
+    // The computer keyboard's own span (the two letter rows), from the
+    // server — present exactly while an input row names it.
+    this.keyboardSpan = snapshot.keyboard
+      ? [snapshot.keyboard.low, snapshot.keyboard.high]
+      : null;
     const signature = JSON.stringify([midi.ports, midi.manuals, midi.learning ?? null]);
     if (signature !== this.midiSignature) {
       this.midiSignature = signature;
@@ -418,42 +424,53 @@ export class Preferences {
     return row;
   }
 
-  /// What this keyboard's compass costs the organ: the keys it reaches
-  /// past the set's own compass are the repitched ones, and that is
-  /// worth saying out loud rather than leaving to be discovered.
+  /// What this input's keys will actually sound, shift included. The
+  /// line leads with the resulting pitches and speaks the shift in
+  /// words ("an octave lower"): the reader is an organist, not a MIDI
+  /// programmer. Keys reaching past the set's own compass are worth
+  /// saying out loud rather than leaving to be discovered — repitched
+  /// pipes for a real keyboard, silence for the computer keyboard.
   compassNote(midi, manualEntry, input) {
     const note = document.createElement("span");
     note.className = "input-compass";
     const native = manualEntry.native;
     const shift = input.transpose ?? 0;
-    const shifted = `shifted ${shift > 0 ? "+" : ""}${shift} semitones`;
+    const computer = input.device === COMPUTER_KEYBOARD;
     const learned = input.low != null && input.high != null;
-    if (!learned) {
-      const compass = native
-        ? `${keyName(native[0])}–${keyName(native[1])} · the set's own compass`
-        : "";
-      note.textContent = shift ? [compass, shifted].filter(Boolean).join(" · ") : compass;
-      note.classList.add("dim");
-      return note;
-    }
-    const [low, high] = [Math.min(input.low, input.high), Math.max(input.low, input.high)];
-    // What the keyboard's keys actually sound, shift included — the
-    // range the compass rule and repitching are judged against.
+    // The keys this input can send: measured by Listen, the two letter
+    // rows for the computer keyboard, else assumed to be the set's own.
+    const span = learned
+      ? [Math.min(input.low, input.high), Math.max(input.low, input.high)]
+      : computer
+        ? this.keyboardSpan
+        : native;
+    if (!span) return note;
     const clamp = (key) => Math.min(127, Math.max(0, key + shift));
-    const [soundsLow, soundsHigh] = [clamp(low), clamp(high)];
-    let text = shift
-      ? `${keyName(low)}–${keyName(high)} sounds ${keyName(soundsLow)}–${keyName(soundsHigh)}`
-      : `${keyName(low)}–${keyName(high)}`;
+    const sounds = [clamp(span[0]), clamp(span[1])];
+    const range = `${keyName(sounds[0])}–${keyName(sounds[1])}`;
+    const parts = [
+      learned
+        ? `keys ${keyName(span[0])}–${keyName(span[1])} sound ${range}`
+        : `sounds ${range}`,
+    ];
+    if (shift) parts.push(shiftWords(shift));
+    if (!learned && !computer && !shift) parts.push("the set's own compass");
     if (native) {
-      const filled =
-        Math.max(0, native[0] - soundsLow) + Math.max(0, soundsHigh - native[1]);
-      text += filled
-        ? ` · ${filled} key${filled === 1 ? "" : "s"} repitched past the set's ${keyName(
-            native[0]
-          )}–${keyName(native[1])}`
-        : " · within the set's compass";
+      const outside =
+        Math.max(0, native[0] - sounds[0]) + Math.max(0, sounds[1] - native[1]);
+      if (outside) {
+        const past = `past the set's ${keyName(native[0])}–${keyName(native[1])}`;
+        parts.push(
+          computer
+            ? `${outside} key${outside === 1 ? "" : "s"} ${past} stay silent`
+            : `${outside} key${outside === 1 ? "" : "s"} repitched ${past}`
+        );
+      } else if (learned) {
+        parts.push("within the set's compass");
+      }
     }
-    note.textContent = text;
+    note.classList.toggle("dim", !learned);
+    note.textContent = parts.join(" · ");
     return note;
   }
 
@@ -635,7 +652,7 @@ export class Preferences {
     const where = manual ? manual.name : `manual ${keyboard.manual}`;
     const shift = keyboard.transpose;
     this.el.controlsKeyboard.textContent = shift
-      ? `Computer keyboard plays ${where}, shifted ${shift > 0 ? "+" : ""}${shift} semitones.`
+      ? `Computer keyboard plays ${where}, ${shiftWords(shift)}.`
       : `Computer keyboard plays ${where}, at pitch.`;
   }
 

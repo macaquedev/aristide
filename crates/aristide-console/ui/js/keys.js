@@ -11,6 +11,7 @@
 // and must stay in step with it.
 
 import { commands, COMPUTER_KEYBOARD } from "./api.js";
+import { shiftWords } from "./pitch.js";
 
 /// Physical key codes in semitone order, low to high. Index = semitones
 /// above the row's base C; both rows are one unbroken run, so the mapping
@@ -229,10 +230,11 @@ export class PianoKeys {
     this.el.plays.textContent = this.target
       ? `plays ${this.target.name}`
       : "plays nothing";
-    const semitones = this.keyboard?.transpose ?? 0;
-    const shift = semitones > 0 ? `+${semitones}` : `${semitones}`;
+    const spoken = shiftWords(this.keyboard?.transpose ?? 0);
     this.el.octave.textContent = this.keyboard
-      ? `shift ${shift} semitones · octave keys are bindings, in Preferences → Controls`
+      ? [spoken && `sounding ${spoken}`, "octave keys are bindings, in Preferences → Controls"]
+          .filter(Boolean)
+          .join(" · ")
       : "assign it a manual in Preferences → MIDI, like any device";
   }
 
