@@ -450,17 +450,26 @@ fn respond(
                 _ => bad_request("missing code"),
             }
         }
-        // Where the computer keyboard plays. The Play menu's shortcut
-        // for an assignment the MIDI tab makes the long way.
+        // Where the computer keyboard plays — a manual, or `none` to
+        // detach it. The Play menu's shortcut for an assignment the
+        // MIDI tab makes the long way.
         (Method::Post, "/api/keyboard") => {
-            match param(query, "manual").and_then(|v| v.parse::<usize>().ok()) {
-                Some(manual) => {
+            match param(query, "manual") {
+                Some("none") => {
                     let mut state = state.lock().expect("state poisoned");
-                    if !state.assign_keyboard(manual) {
-                        return bad_request("no such manual");
-                    }
+                    state.unassign_keyboard();
                     json(state_json_locked(&state))
                 }
+                Some(value) => match value.parse::<usize>() {
+                    Ok(manual) => {
+                        let mut state = state.lock().expect("state poisoned");
+                        if !state.assign_keyboard(manual) {
+                            return bad_request("no such manual");
+                        }
+                        json(state_json_locked(&state))
+                    }
+                    Err(_) => bad_request("manual must be an index or none"),
+                },
                 None => bad_request("missing manual"),
             }
         }
@@ -1523,11 +1532,20 @@ mod tests {
         let body = state_json(&state);
         let value: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
         for field in [
-            "stops", "couplers", "manuals", "midi", "controls", "actions", "keyboard",
+            "stops", "couplers", "manuals", "midi", "controls", "actions",
             "tuning", "enclosures", "noises", "coupler_repitch",
         ] {
             assert!(value.get(field).is_some(), "{field} missing: {body}");
         }
+        // The keyboard object appears only once the player assigns it.
+        assert!(
+            value.get("keyboard").is_none(),
+            "an unassigned computer keyboard is absent, not defaulted: {body}"
+        );
+        respond(&state, &Method::Post, "/api/keyboard?manual=1");
+        let assigned: serde_json::Value =
+            serde_json::from_str(&state_json(&state)).expect("valid JSON");
+        assert_eq!(assigned["keyboard"]["manual"], 1);
         assert!(value["midi"]["ports"].is_array());
         assert_eq!(value["controls"][0]["action"], "panic");
     }
@@ -1543,8 +1561,8 @@ mod tests {
             "the vocabulary a UI offers is published: {body}"
         );
         assert!(
-            body.contains("\"keyboard\":{\"manual\":1"),
-            "the computer keyboard plays without being assigned: {body}"
+            !body.contains("\"keyboard\":{"),
+            "the computer keyboard plays nothing until assigned: {body}"
         );
 
         // Adding a binding, then teaching it what presses it.
@@ -1606,7 +1624,8 @@ mod tests {
     #[test]
     fn the_action_endpoint_moves_the_computer_keyboard() {
         let Some(state) = demo_state() else { return };
-        assert!(state_json(&state).contains("\"transpose\":0"));
+        respond(&state, &Method::Post, "/api/keyboard?manual=1");
+        assert!(state_json(&state).contains("\"keyboard\":{\"manual\":1,\"transpose\":0"));
 
         respond(
             &state,
@@ -1627,6 +1646,14 @@ mod tests {
         assert!(
             body.matches("\"device\":\"Computer keyboard\"").count() == 1,
             "and it plays one manual, not two: {body}"
+        );
+
+        // Detaching is a first-class state, not a fault.
+        respond(&state, &Method::Post, "/api/keyboard?manual=none");
+        let body = state_json(&state);
+        assert!(
+            !body.contains("\"keyboard\":{"),
+            "detached, the keyboard plays nothing: {body}"
         );
     }
 

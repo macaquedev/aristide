@@ -187,7 +187,8 @@ export class PianoKeys {
     });
 
     this.el.manual.addEventListener("change", () => {
-      this.setTarget(Number(this.el.manual.value));
+      const value = this.el.manual.value;
+      this.setTarget(value === "" ? null : Number(value));
       this.el.manual.blur(); // give the keys back to the organ
     });
   }
@@ -204,14 +205,15 @@ export class PianoKeys {
     this.el.panel.classList.add("hidden");
   }
 
-  /// Point the computer keyboard at a manual by index — an assignment
-  /// like any other input's, so it is the server that keeps it. Notes
-  /// held on the old manual are released first: nothing must be left
-  /// speaking on a keyboard the player has stopped addressing.
+  /// Point the computer keyboard at a manual by index, or at nothing —
+  /// an assignment like any other input's, so it is the server that
+  /// keeps it. Notes held on the old manual are released first: nothing
+  /// must be left speaking on a keyboard the player has stopped
+  /// addressing.
   setTarget(idx) {
-    if (idx === this.target?.idx) return;
+    if (idx === (this.target?.idx ?? null)) return;
     this.releaseAll();
-    this.send(commands.keyboardManual(idx));
+    this.send(commands.keyboardManual(idx ?? "none"));
   }
 
   get transpose() {
@@ -262,13 +264,19 @@ export class PianoKeys {
 
   fillManuals() {
     this.el.manual.replaceChildren();
+    // Playing nothing is a real choice, not a fault: the computer
+    // keyboard is mappable, never mandatory.
+    const nothing = document.createElement("option");
+    nothing.value = "";
+    nothing.textContent = "— nothing —";
+    this.el.manual.append(nothing);
     for (const manual of this.manuals) {
       const option = document.createElement("option");
       option.value = manual.idx;
       option.textContent = manual.name;
       this.el.manual.append(option);
     }
-    if (this.target) this.el.manual.value = this.target.idx;
+    this.el.manual.value = this.target ? this.target.idx : "";
   }
 
   /// Caps show what they play under the current octave shift; keys off the
@@ -284,7 +292,7 @@ export class PianoKeys {
     const shift = semitones > 0 ? `+${semitones}` : `${semitones}`;
     this.el.octave.textContent = this.keyboard
       ? `shift ${shift} semitones · octave keys are bindings, in Preferences → Controls`
-      : "unassigned — give a manual the Computer keyboard in Preferences → MIDI";
+      : "playing nothing — pick a manual above to play it from these keys";
   }
 
   paintCap(code, on) {

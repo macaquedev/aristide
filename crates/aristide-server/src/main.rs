@@ -556,39 +556,20 @@ impl State {
                 });
             }
         }
-        // The computer keyboard is assigned like any other input, and
-        // its span counts towards the compass the same way. Unassigned,
-        // it falls back to the principal manual rather than going
-        // silent: it is the keyboard of last resort, on a machine that
-        // may have no MIDI at all, and it cannot surprise anyone by
-        // blasting a division nobody plugged in.
-        let default_keyboard = assignments
-            .iter()
-            .all(|(_, inputs)| !inputs.iter().any(|i| i.device == COMPUTER_KEYBOARD))
-            .then(|| self.principal_manual())
-            .flatten()
-            .map(|manual| (manual, vec![config::Input {
-                device: COMPUTER_KEYBOARD.to_string(),
-                channel: None,
-                low: None,
-                high: None,
-                transpose: 0,
-            }]));
-        self.keyboard = assignments.iter().chain(default_keyboard.iter()).find_map(|(manual, inputs)| {
+        // The computer keyboard is assigned like any other input — or
+        // not at all: unassigned, its keys play nothing. Unlike a MIDI
+        // keyboard it never counts towards a manual's compass. Widening
+        // serves real hardware (a 61-note keyboard on a 56-note set);
+        // two QWERTY rows are not a console, and letting them reshape
+        // the instrument would rescale a manual nobody asked to change.
+        // Keys past the manual's end simply stay silent, and the legend
+        // already draws them as unavailable.
+        self.keyboard = assignments.iter().find_map(|(manual, inputs)| {
             let input = inputs.iter().find(|i| i.device == COMPUTER_KEYBOARD)?;
-            let (low, high) = control::keyboard_compass();
-            let shift = |key: u8| (key as i16 + input.transpose as i16).clamp(0, 127) as u8;
-            let slot = &mut widened[*manual];
-            *slot = Some(match *slot {
-                Some((at_low, at_high)) => {
-                    (at_low.min(shift(low)), at_high.max(shift(high)))
-                }
-                None => (shift(low), shift(high)),
-            });
             Some(KeyboardInput {
                 manual: *manual,
                 transpose: input.transpose,
-                compass: (low, high),
+                compass: control::keyboard_compass(),
             })
         });
         if let Control::Organ(console) = &mut self.control {
@@ -641,6 +622,16 @@ impl State {
             return;
         };
         if pressed {
+            // The compass rule, exactly as MIDI routing applies it: a
+            // key landing outside the manual says nothing, and is not
+            // tracked as held either. The keyboard never widens the
+            // manual to reach it — the legend draws it as unavailable.
+            let within = console
+                .compass(keyboard.manual)
+                .is_some_and(|(low, high)| (low..=high).contains(&(key as i16)));
+            if !within {
+                return;
+            }
             let (starts, retriggered) = console.note_on_manual(keyboard.manual, key);
             for handle in retriggered {
                 engine.send(Command::StopVoice { handle });
@@ -655,13 +646,10 @@ impl State {
         }
     }
 
-    /// Point the computer keyboard at a manual, moving it off whatever
-    /// it was on — one keyboard, one place, however many manuals ask.
-    pub fn assign_keyboard(&mut self, manual: usize) -> bool {
+    /// Take the computer keyboard off every manual, keeping the shift
+    /// it had so a re-assignment doesn't lose it.
+    fn retire_keyboard(&mut self) -> i8 {
         let names = self.manual_names();
-        let Some(wanted) = names.get(manual).cloned() else {
-            return false;
-        };
         let organ = self.organ_key.clone();
         let mut transpose = 0;
         for name in &names {
@@ -675,6 +663,28 @@ impl State {
                 self.midi_config.remove_input(&organ, name, slot);
             }
         }
+        transpose
+    }
+
+    /// Detach the computer keyboard entirely: its keys play nothing
+    /// until it is assigned again. Bindings (a key working a stop) are
+    /// untouched — they never depended on the assignment.
+    pub fn unassign_keyboard(&mut self) {
+        self.retire_keyboard();
+        tracing::info!("control: computer keyboard plays nothing");
+        self.resolve_routes();
+        self.persist();
+    }
+
+    /// Point the computer keyboard at a manual, moving it off whatever
+    /// it was on — one keyboard, one place, however many manuals ask.
+    pub fn assign_keyboard(&mut self, manual: usize) -> bool {
+        let names = self.manual_names();
+        let Some(wanted) = names.get(manual).cloned() else {
+            return false;
+        };
+        let organ = self.organ_key.clone();
+        let transpose = self.retire_keyboard();
         let slot = self.midi_config.inputs(&organ, &wanted).len();
         self.midi_config.set_input(
             &organ,
@@ -795,27 +805,6 @@ impl State {
                 None => Subject::Device,
             },
             _ => Subject::None,
-        })
-    }
-
-    /// The manual a keyboard with nothing better to play should play:
-    /// the Great by whatever name the set gives it, else the first
-    /// manual that isn't the pedalboard.
-    fn principal_manual(&self) -> Option<usize> {
-        let names = self.manual_names();
-        let great = names.iter().position(|name| {
-            let name = name.to_lowercase();
-            ["great", "haupt", "grand orgue", "grand-orgue", "main", "first"]
-                .iter()
-                .any(|hint| name.contains(hint))
-        });
-        great.or_else(|| {
-            let Control::Organ(console) = &self.control else {
-                return None;
-            };
-            // GO's convention puts the pedalboard first, so the second
-            // manual is the lowest keyboard.
-            (console.manual_states().len() > 1).then_some(1).or(Some(0))
         })
     }
 
@@ -987,22 +976,6 @@ impl State {
     /// transposer built into a console means by "up".
     fn transpose_inputs(&mut self, device: &str, subject: Subject, to: impl Fn(i8) -> i8) {
         let organ = self.organ_key.clone();
-        // The computer keyboard's default assignment is implied, not
-        // written; shifting it is the moment it becomes a real choice.
-        if device == COMPUTER_KEYBOARD
-            && let Some(keyboard) = self.keyboard
-            && !self
-                .manual_names()
-                .iter()
-                .any(|name| {
-                    self.midi_config
-                        .inputs(&organ, name)
-                        .iter()
-                        .any(|input| input.device == COMPUTER_KEYBOARD)
-                })
-        {
-            self.assign_keyboard(keyboard.manual);
-        }
         let names = self.manual_names();
         let mut changed = false;
         for (index, name) in names.iter().enumerate() {
@@ -2673,19 +2646,31 @@ mod tests {
         assert_eq!(held_on(&state, manual), vec![48]);
     }
 
-    /// The computer keyboard is an input like any other: the same
-    /// binding vocabulary, the same shift, and it plays without anyone
-    /// assigning it first.
+    /// The computer keyboard is an input like any other: unassigned it
+    /// plays nothing, and once the player gives it a manual it speaks
+    /// the same binding vocabulary and shift as a MIDI console.
     #[test]
     fn computer_keys_play_and_can_be_bound() {
-        let Some((state, _)) = demo_state("Montre 8'") else {
+        let Some((state, manual)) = demo_state("Montre 8'") else {
             return;
         };
+        // Mappable, never mandatory: until the player points it at a
+        // manual, the letter rows are just letters.
+        assert!(
+            state.lock().expect("state").keyboard.is_none(),
+            "unassigned until the player says so"
+        );
+        state.lock().expect("state").key("KeyZ", true);
+        assert!(held_on(&state, manual).is_empty(), "unassigned keys are silent");
+        state.lock().expect("state").key("KeyZ", false);
+
+        assert!(state.lock().expect("state").assign_keyboard(manual));
         let keyboard = state
             .lock()
             .expect("state")
             .keyboard
-            .expect("assigned by default");
+            .expect("assigned now");
+        assert_eq!(keyboard.manual, manual);
         assert_eq!(keyboard.transpose, 0);
 
         state.lock().expect("state").key("KeyZ", true);
@@ -2723,6 +2708,44 @@ mod tests {
             console.stop_states().iter().all(|(_, _, _, _, drawn)| !drawn),
             "and did what it was bound to: cancel"
         );
+    }
+
+    /// A MIDI keyboard's width becomes the manual's compass; the
+    /// computer keyboard's never does. Two QWERTY rows are not a
+    /// console: however it is assigned or shifted, the manual keeps the
+    /// compass it had, and keys pushed past it stay silent.
+    #[test]
+    fn the_computer_keyboard_never_rescales_a_manual() {
+        let Some((state, manual)) = demo_state("Gamba 8'") else {
+            return;
+        };
+        let native = compass_of(&state, manual).expect("a compass");
+        assert!(state.lock().expect("state").assign_keyboard(manual));
+        assert_eq!(
+            compass_of(&state, manual),
+            Some(native),
+            "assignment leaves the compass alone"
+        );
+
+        // Shift it far above the manual's top: still no widening, and
+        // the keys that now land outside the compass say nothing.
+        bind_control(&state, "key:Equal", "transpose:36", COMPUTER_KEYBOARD);
+        state.lock().expect("state").key("Equal", true);
+        assert_eq!(
+            state.lock().expect("state").keyboard.expect("still assigned").transpose,
+            36
+        );
+        assert_eq!(compass_of(&state, manual), Some(native), "shifted, not widened");
+        state.lock().expect("state").key("KeyP", true); // 76 + 36 = 112, past the set
+        assert!(
+            held_on(&state, manual).is_empty(),
+            "a key past the compass is silent, not repitched"
+        );
+
+        // Detached, the letter rows go back to being letters.
+        state.lock().expect("state").unassign_keyboard();
+        assert!(state.lock().expect("state").keyboard.is_none());
+        assert_eq!(compass_of(&state, manual), Some(native));
     }
 
     /// Assignments are per organ and are stored by name, so the same
