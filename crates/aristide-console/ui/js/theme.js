@@ -7,27 +7,14 @@
 // every choice keeps contrast. The 1f/33 alpha suffixes match the
 // soft/glow tokens in style.css. The pickers live in Preferences →
 // Appearance.
+// LED hues: an engaged control fills with the accent and its legend
+// goes ink, like any lit button on a control surface.
 const ACCENTS = {
-  blue: {
-    accent: "#a8c7fa", deep: "#7cacf8", ink: "#062e6f",
-    container: "#004a77", onContainer: "#c2e7ff",
-  },
-  green: {
-    accent: "#6dd58c", deep: "#5bb974", ink: "#072711",
-    container: "#0f5223", onContainer: "#c4eed0",
-  },
-  yellow: {
-    accent: "#fdd663", deep: "#f9ab00", ink: "#402d00",
-    container: "#574500", onContainer: "#ffdf99",
-  },
-  purple: {
-    accent: "#d0bcff", deep: "#ab94f0", ink: "#381e72",
-    container: "#4f378b", onContainer: "#eaddff",
-  },
-  pink: {
-    accent: "#ffb1c8", deep: "#ee7da0", ink: "#5e1133",
-    container: "#703348", onContainer: "#ffd9e2",
-  },
+  amber: { accent: "#ffb02e", deep: "#e08900", ink: "#241500" },
+  cyan: { accent: "#41c7e8", deep: "#279db8", ink: "#04222b" },
+  green: { accent: "#7bd45b", deep: "#54a83a", ink: "#0e2405" },
+  violet: { accent: "#a08eff", deep: "#7f6ae6", ink: "#191140" },
+  coral: { accent: "#ff7a54", deep: "#e05426", ink: "#2b0d02" },
 };
 
 const DENSITIES = ["compact", "regular", "spacious"];
@@ -50,15 +37,12 @@ const store = {
 };
 
 function applyAccent(name) {
-  const { accent, deep, ink, container, onContainer } =
-    ACCENTS[name] ?? ACCENTS.blue;
+  const { accent, deep, ink } = ACCENTS[name] ?? ACCENTS.amber;
   const root = document.documentElement.style;
   root.setProperty("--accent", accent);
-  root.setProperty("--accent-soft", `${accent}1f`);
+  root.setProperty("--accent-soft", `${accent}24`);
   root.setProperty("--accent-deep", deep);
   root.setProperty("--accent-ink", ink);
-  root.setProperty("--accent-container", container);
-  root.setProperty("--on-accent-container", onContainer);
 }
 
 function applyDensity(name) {
@@ -71,7 +55,7 @@ export function wireTheme(root) {
   const swatches = root.getElementById("accent-swatches");
   const segment = root.getElementById("density-segment");
 
-  let accent = store.get("accent", "blue");
+  let accent = store.get("accent", "amber");
   applyAccent(accent);
   for (const [name, { accent: colour }] of Object.entries(ACCENTS)) {
     const swatch = document.createElement("button");
