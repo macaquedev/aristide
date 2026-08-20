@@ -297,26 +297,28 @@ impl MidiPort {
         self.matching(channel, None)
     }
 
-    /// The same for a note, which must also be inside the keyboard's
-    /// own compass — the width the player taught it is the only thing
-    /// that decides which notes exist.
-    fn note_targets(&self, channel: u8, key: u8) -> Vec<usize> {
-        self.matching(channel, Some(key))
-    }
-
-    /// Where a key from this port actually lands, after the shift the
-    /// octave buttons have applied to the keyboard that sent it. `None`
-    /// when the shift pushes it off the MIDI range entirely.
-    fn transpose(&self, channel: u8, key: u8) -> Option<u8> {
-        let shift = self
+    /// Where a note from this port lands, as (manual, shifted key)
+    /// pairs: it must be inside a keyboard's own compass — the width
+    /// the player taught it is the only thing that decides which notes
+    /// exist — and each route applies its own shift, since two manuals
+    /// on one device may sit at different octaves. A shift that pushes
+    /// a key off the MIDI range drops that landing alone.
+    fn note_lands(&self, channel: u8, key: u8) -> Vec<(usize, u8)> {
+        let mut lands: Vec<(usize, u8)> = self
             .routes
             .iter()
-            .find(|route| {
-                route.channel.is_none_or(|on| on == channel + 1)
-                    && (route.keys.0..=route.keys.1).contains(&key)
+            .filter(|route| route.channel.is_none_or(|on| on == channel + 1))
+            .filter(|route| (route.keys.0..=route.keys.1).contains(&key))
+            .filter_map(|route| {
+                u8::try_from(key as i16 + route.transpose as i16)
+                    .ok()
+                    .filter(|shifted| *shifted < 128)
+                    .map(|shifted| (route.manual, shifted))
             })
-            .map_or(0, |route| route.transpose);
-        u8::try_from(key as i16 + shift as i16).ok().filter(|k| *k < 128)
+            .collect();
+        lands.sort_unstable();
+        lands.dedup();
+        lands
     }
 
     fn matching(&self, channel: u8, key: Option<u8>) -> Vec<usize> {
@@ -365,6 +367,60 @@ pub struct ControlLearn {
     started: Instant,
 }
 
+/// A bind parked mid-air: what it proposes already has a job, and the
+/// console is asking whether it now has two. One device driving two
+/// manuals, or one message doing two things, are both legitimate wants
+/// — but never ones to create silently.
+#[derive(Clone)]
+pub enum Pending {
+    /// `input` wants this manual's slot, but the same device (on an
+    /// overlapping channel) already plays the rows in `existing`,
+    /// as (manual index, slot) pairs.
+    Input {
+        manual: usize,
+        slot: usize,
+        input: config::Input,
+        existing: Vec<(usize, usize)>,
+    },
+    /// `control` wants this slot, but the same message from the same
+    /// device is already bound at the slots in `existing`.
+    Control {
+        slot: usize,
+        control: config::Control,
+        existing: Vec<usize>,
+    },
+}
+
+/// The player's answer to a parked bind.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Resolution {
+    /// Both jobs stand: the device drives the old rows and the new one.
+    KeepBoth,
+    /// The old rows go; the new one takes over what they knew about the
+    /// hardware (a learned compass, a shift) unless it states its own.
+    Replace,
+    Cancel,
+}
+
+/// Whether two channel filters can hear the same message: `None` is
+/// "any channel", so it overlaps everything.
+fn channels_overlap(a: Option<u8>, b: Option<u8>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => a == b,
+        _ => true,
+    }
+}
+
+/// Channels and a learned compass mean nothing to the computer
+/// keyboard — its width is the two letter rows, always.
+fn normalize_input(input: &mut config::Input) {
+    if input.device == COMPUTER_KEYBOARD {
+        input.channel = None;
+        input.low = None;
+        input.high = None;
+    }
+}
+
 /// The computer keyboard resolved for play: which manual its rows
 /// address and by how much they are shifted.
 #[derive(Clone, Copy)]
@@ -398,12 +454,18 @@ pub struct State {
     /// Set while it waits for the *control* to press: which binding row
     /// the next message that isn't a note belongs to.
     pub control_learn: Option<ControlLearn>,
+    /// A bind waiting on the player: it would give a device (or one of
+    /// its messages) a second job, and the console is showing the
+    /// keep-both / replace / cancel dialog.
+    pub pending: Option<Pending>,
     /// Bindings on the computer keyboard, which no operating system
     /// enumerates but which is otherwise an input like the rest.
     pub key_bindings: Vec<Binding>,
-    /// Where the computer keyboard's notes go, and how far they are
-    /// shifted. Assigned like any other input, in the config.
-    pub keyboard: Option<KeyboardInput>,
+    /// Where the computer keyboard's notes go, and how far each
+    /// assignment is shifted. Assigned like any other input, in the
+    /// config — and like any device it may drive more than one manual,
+    /// once the player has confirmed that is what they meant.
+    pub keyboard: Vec<KeyboardInput>,
     /// Wind groups the tremulant acts on (from the sidecar; empty when
     /// no set is loaded).
     pub trem_groups: Vec<u8>,
@@ -463,7 +525,7 @@ pub struct Setup {
 }
 
 impl State {
-    fn manual_names(&self) -> Vec<String> {
+    pub fn manual_names(&self) -> Vec<String> {
         match &self.control {
             Control::Organ(console) => console
                 .manual_states()
@@ -564,14 +626,19 @@ impl State {
         // the instrument would rescale a manual nobody asked to change.
         // Keys past the manual's end simply stay silent, and the legend
         // already draws them as unavailable.
-        self.keyboard = assignments.iter().find_map(|(manual, inputs)| {
-            let input = inputs.iter().find(|i| i.device == COMPUTER_KEYBOARD)?;
-            Some(KeyboardInput {
-                manual: *manual,
-                transpose: input.transpose,
-                compass: control::keyboard_compass(),
+        self.keyboard = assignments
+            .iter()
+            .flat_map(|(manual, inputs)| {
+                inputs
+                    .iter()
+                    .filter(|input| input.device == COMPUTER_KEYBOARD)
+                    .map(|input| KeyboardInput {
+                        manual: *manual,
+                        transpose: input.transpose,
+                        compass: control::keyboard_compass(),
+                    })
             })
-        });
+            .collect();
         if let Control::Organ(console) = &mut self.control {
             for (manual, compass) in widened.into_iter().enumerate() {
                 match compass {
@@ -606,42 +673,46 @@ impl State {
             }
             return;
         }
-        let (Some(keyboard), Some(note)) = (self.keyboard, control::key_note(code)) else {
+        let Some(note) = control::key_note(code) else {
             return;
         };
-        let Ok(key) = u8::try_from(note as i16 + keyboard.transpose as i16) else {
-            return;
-        };
-        if key > 127 {
-            return;
-        }
-        let State {
-            engine, control, ..
-        } = &mut *self;
-        let Control::Organ(console) = control else {
-            return;
-        };
-        if pressed {
-            // The compass rule, exactly as MIDI routing applies it: a
-            // key landing outside the manual says nothing, and is not
-            // tracked as held either. The keyboard never widens the
-            // manual to reach it — the legend draws it as unavailable.
-            let within = console
-                .compass(keyboard.manual)
-                .is_some_and(|(low, high)| (low..=high).contains(&(key as i16)));
-            if !within {
+        // The keyboard may drive more than one manual — a confirmed
+        // "keep both" — and each assignment carries its own shift.
+        for keyboard in self.keyboard.clone() {
+            let Ok(key) = u8::try_from(note as i16 + keyboard.transpose as i16) else {
+                continue;
+            };
+            if key > 127 {
+                continue;
+            }
+            let State {
+                engine, control, ..
+            } = &mut *self;
+            let Control::Organ(console) = control else {
                 return;
-            }
-            let (starts, retriggered) = console.note_on_manual(keyboard.manual, key);
-            for handle in retriggered {
-                engine.send(Command::StopVoice { handle });
-            }
-            for start in starts {
-                engine.send(start_command(&start));
-            }
-        } else {
-            for handle in console.note_off_manual(keyboard.manual, key) {
-                engine.send(Command::StopVoice { handle });
+            };
+            if pressed {
+                // The compass rule, exactly as MIDI routing applies it: a
+                // key landing outside the manual says nothing, and is not
+                // tracked as held either. The keyboard never widens the
+                // manual to reach it — the legend draws it as unavailable.
+                let within = console
+                    .compass(keyboard.manual)
+                    .is_some_and(|(low, high)| (low..=high).contains(&(key as i16)));
+                if !within {
+                    continue;
+                }
+                let (starts, retriggered) = console.note_on_manual(keyboard.manual, key);
+                for handle in retriggered {
+                    engine.send(Command::StopVoice { handle });
+                }
+                for start in starts {
+                    engine.send(start_command(&start));
+                }
+            } else {
+                for handle in console.note_off_manual(keyboard.manual, key) {
+                    engine.send(Command::StopVoice { handle });
+                }
             }
         }
     }
@@ -775,43 +846,148 @@ impl State {
             .unwrap_or_default()
     }
 
+    /// The bind path every UI edit takes: commit `input`, unless the
+    /// same device on an overlapping channel already plays another row
+    /// — then park it and ask whether the device now drives both. A
+    /// row's identity is its device and channel: an edit that keeps
+    /// them (a shift, a compass) never asks, so answering "keep both"
+    /// once is answered for good. Returns false when the manual
+    /// doesn't exist.
+    pub fn propose_input(&mut self, manual: usize, slot: usize, mut input: config::Input) -> bool {
+        self.pending = None;
+        let names = self.manual_names();
+        let Some(name) = names.get(manual) else {
+            return false;
+        };
+        normalize_input(&mut input);
+        let organ = self.organ_key.clone();
+        let saved = self.midi_config.inputs(&organ, name).get(slot);
+        let identity_kept =
+            saved.is_some_and(|s| s.device == input.device && s.channel == input.channel);
+        if !identity_kept {
+            let mut existing = Vec::new();
+            for (other_manual, other_name) in names.iter().enumerate() {
+                for (other_slot, other) in
+                    self.midi_config.inputs(&organ, other_name).iter().enumerate()
+                {
+                    if other_manual == manual && other_slot == slot {
+                        continue; // the row being rewritten
+                    }
+                    if other.device == input.device
+                        && channels_overlap(other.channel, input.channel)
+                    {
+                        existing.push((other_manual, other_slot));
+                    }
+                }
+            }
+            if !existing.is_empty() {
+                tracing::info!("midi: {} already plays elsewhere — asking", input.device);
+                self.pending = Some(Pending::Input {
+                    manual,
+                    slot,
+                    input,
+                    existing,
+                });
+                return true;
+            }
+        }
+        self.set_input(manual, slot, input)
+    }
+
+    /// Act on the player's answer to a parked bind. `false` when there
+    /// was nothing pending — the dialog raced an organ load or another
+    /// edit, and there is nothing left to act on.
+    pub fn resolve_pending(&mut self, resolution: Resolution) -> bool {
+        let Some(pending) = self.pending.take() else {
+            return false;
+        };
+        match (resolution, pending) {
+            (Resolution::Cancel, _) => {}
+            (
+                Resolution::KeepBoth,
+                Pending::Input {
+                    manual,
+                    slot,
+                    input,
+                    ..
+                },
+            ) => {
+                self.set_input(manual, slot, input);
+            }
+            (Resolution::KeepBoth, Pending::Control { slot, control, .. }) => {
+                self.set_control(slot, control);
+            }
+            (
+                Resolution::Replace,
+                Pending::Input {
+                    manual,
+                    mut slot,
+                    mut input,
+                    mut existing,
+                },
+            ) => {
+                let organ = self.organ_key.clone();
+                let names = self.manual_names();
+                // The rows being replaced knew things about the hardware
+                // itself — a learned compass, a shift. Replacing means
+                // "this keyboard now plays here instead", so those facts
+                // move with it unless the new row states its own.
+                if let Some(&(other_manual, other_slot)) = existing.first()
+                    && let Some(other_name) = names.get(other_manual)
+                    && let Some(old) = self.midi_config.inputs(&organ, other_name).get(other_slot)
+                {
+                    if input.transpose == 0 {
+                        input.transpose = old.transpose;
+                    }
+                    if input.low.is_none() && input.high.is_none() {
+                        input.low = old.low;
+                        input.high = old.high;
+                    }
+                    normalize_input(&mut input);
+                }
+                // Remove bottom-up so earlier removals never shift the
+                // later slots; the target slides down past any removed
+                // row beneath it on its own manual.
+                existing.sort_unstable();
+                for &(other_manual, other_slot) in existing.iter().rev() {
+                    if let Some(other_name) = names.get(other_manual) {
+                        self.midi_config.remove_input(&organ, other_name, other_slot);
+                    }
+                    if other_manual == manual && other_slot < slot {
+                        slot -= 1;
+                    }
+                }
+                self.set_input(manual, slot, input);
+            }
+            (
+                Resolution::Replace,
+                Pending::Control {
+                    mut slot,
+                    control,
+                    mut existing,
+                },
+            ) => {
+                let organ = self.organ_key.clone();
+                existing.sort_unstable();
+                for &other in existing.iter().rev() {
+                    self.midi_config.remove_control(&organ, other);
+                    if other < slot {
+                        slot -= 1;
+                    }
+                }
+                self.set_control(slot, control);
+            }
+        }
+        true
+    }
+
     /// Assign `input` to one manual's slot (past the end appends), then
     /// re-resolve and save. Returns false when the manual doesn't exist.
     pub fn set_input(&mut self, manual: usize, slot: usize, mut input: config::Input) -> bool {
         let Some(name) = self.manual_names().get(manual).cloned() else {
             return false;
         };
-        // The computer keyboard is picked here like any device, but it
-        // is one keyboard in one place: choosing it takes it off
-        // whatever manual it was on, carrying its shift along. Channels
-        // and a learned compass mean nothing to it — its width is the
-        // two rows, always.
-        let mut slot = slot;
-        if input.device == COMPUTER_KEYBOARD {
-            input.channel = None;
-            input.low = None;
-            input.high = None;
-            let organ = self.organ_key.clone();
-            for other in self.manual_names() {
-                while let Some(found) = self
-                    .midi_config
-                    .inputs(&organ, &other)
-                    .iter()
-                    .position(|i| i.device == COMPUTER_KEYBOARD)
-                {
-                    if other == name && found == slot {
-                        break; // the row being rewritten overwrites itself
-                    }
-                    if input.transpose == 0 {
-                        input.transpose = self.midi_config.inputs(&organ, &other)[found].transpose;
-                    }
-                    self.midi_config.remove_input(&organ, &other, found);
-                    if other == name && found < slot {
-                        slot -= 1; // the removal shifted the target row down
-                    }
-                }
-            }
-        }
+        normalize_input(&mut input);
         tracing::info!(
             "midi: {name} ← {} channel {}",
             input.device,
@@ -827,6 +1003,7 @@ impl State {
     }
 
     pub fn remove_input(&mut self, manual: usize, slot: usize) -> bool {
+        self.pending = None;
         let Some(name) = self.manual_names().get(manual).cloned() else {
             return false;
         };
@@ -1002,6 +1179,7 @@ impl State {
     }
 
     pub fn listen_control(&mut self, slot: usize) {
+        self.pending = None;
         self.control_learn = Some(ControlLearn {
             slot,
             started: Instant::now(),
@@ -1031,9 +1209,53 @@ impl State {
             control.trigger,
             control.action
         );
-        self.midi_config.set_control(&organ, learn.slot, control);
-        self.resolve_routes();
-        self.persist();
+        self.propose_control(learn.slot, control);
+    }
+
+    /// The bind path every UI edit takes: commit `control`, unless the
+    /// same message from the same device is already bound elsewhere —
+    /// then park it and ask. A row's identity is its device, channel
+    /// and trigger: an edit that keeps them (choosing another action,
+    /// naming a manual) never asks, so answering "keep both" once is
+    /// answered for good.
+    pub fn propose_control(&mut self, slot: usize, control: config::Control) {
+        self.pending = None;
+        let organ = self.organ_key.clone();
+        let saved = self.midi_config.controls(&organ).get(slot);
+        let identity_kept = saved.is_some_and(|s| {
+            s.device == control.device
+                && s.channel == control.channel
+                && s.trigger == control.trigger
+        });
+        if !identity_kept && !control.trigger.trim().is_empty() {
+            let existing: Vec<usize> = self
+                .midi_config
+                .controls(&organ)
+                .iter()
+                .enumerate()
+                .filter(|(other, saved)| {
+                    *other != slot
+                        && saved.device == control.device
+                        && saved.trigger == control.trigger
+                        && channels_overlap(saved.channel, control.channel)
+                })
+                .map(|(other, _)| other)
+                .collect();
+            if !existing.is_empty() {
+                tracing::info!(
+                    "control: {} on {} is already bound — asking",
+                    control.trigger,
+                    control.device
+                );
+                self.pending = Some(Pending::Control {
+                    slot,
+                    control,
+                    existing,
+                });
+                return;
+            }
+        }
+        self.set_control(slot, control);
     }
 
     pub fn set_control(&mut self, slot: usize, control: config::Control) {
@@ -1044,6 +1266,7 @@ impl State {
     }
 
     pub fn remove_control(&mut self, slot: usize) {
+        self.pending = None;
         let organ = self.organ_key.clone();
         self.midi_config.remove_control(&organ, slot);
         self.resolve_routes();
@@ -1055,6 +1278,7 @@ impl State {
     }
 
     pub fn listen(&mut self, manual: usize, slot: usize) {
+        self.pending = None;
         self.learn = Some(Learn {
             manual,
             slot,
@@ -1091,7 +1315,7 @@ impl State {
             Some(mut input) => {
                 input.high = Some(key);
                 self.learn = None;
-                self.set_input(learn.manual, learn.slot, input);
+                self.propose_input(learn.manual, learn.slot, input);
             }
         }
     }
@@ -1499,8 +1723,9 @@ fn main() -> Result<()> {
         suggested_channels: Vec::new(),
         learn: None,
         control_learn: None,
+        pending: None,
         key_bindings: Vec::new(),
-        keyboard: None,
+        keyboard: Vec::new(),
         trem_groups: Vec::new(),
         trem_engaged: false,
         master_gain: args.master_gain.unwrap_or(0.178),
@@ -1937,6 +2162,7 @@ fn perform_load(
     state.compass_overrides = Vec::new();
     state.learn = None;
     state.control_learn = None;
+    state.pending = None;
     state.loading = None;
     state.load_error = None;
     state.resolve_routes();
@@ -2276,22 +2502,19 @@ fn handle_midi(message: &[u8], port: usize, state: &Mutex<State>) {
     // note-offs: it sent no note-ons either, so nothing can hang. The M1
     // test tone has no manuals to assign to and always sounds.
     let source = &state.midi_ports[port];
-    // Notes are filtered by the keyboard's compass as well as its
-    // channel; everything else (expression, all-notes-off) is not a key
-    // and only has to reach the right manuals.
-    let targets = match (&state.control, status & 0xF0) {
-        (Control::Tone, _) => Vec::new(),
-        (_, 0x90 | 0x80) => source.note_targets(channel, data1),
-        _ => source.targets(channel),
+    // Notes are filtered by each keyboard's compass as well as its
+    // channel, and land already shifted — per route, because one device
+    // may drive two manuals whose keyboards sit at different octaves.
+    // Everything else (expression, all-notes-off) is not a key and only
+    // has to reach the right manuals.
+    let is_note = matches!(status & 0xF0, 0x90 | 0x80);
+    let (lands, targets) = match (&state.control, is_note) {
+        (Control::Tone, _) => (Vec::new(), Vec::new()),
+        (_, true) => (source.note_lands(channel, data1), Vec::new()),
+        (_, false) => (Vec::new(), source.targets(channel)),
     };
-    // The keyboard's own shift: which pipes its keys reach, exactly as
-    // a transposer on a console moves the whole keyboard.
-    let key = match (status & 0xF0, source.transpose(channel, data1)) {
-        (0x90 | 0x80, Some(shifted)) => shifted,
-        (0x90 | 0x80, None) => return,
-        _ => data1,
-    };
-    if matches!(state.control, Control::Organ(_)) && targets.is_empty() {
+    let key = data1;
+    if matches!(state.control, Control::Organ(_)) && lands.is_empty() && targets.is_empty() {
         return;
     }
     let State {
@@ -2317,7 +2540,7 @@ fn handle_midi(message: &[u8], port: usize, state: &Mutex<State>) {
                 freq_hz: midi_note_to_hz(key),
             }),
             Control::Organ(console) => {
-                for manual in targets {
+                for (manual, key) in lands {
                     let (starts, retriggered) = console.note_on_manual(manual, key);
                     for handle in retriggered {
                         send(Command::StopVoice { handle });
@@ -2340,7 +2563,7 @@ fn handle_midi(message: &[u8], port: usize, state: &Mutex<State>) {
         (0x80, key, _) | (0x90, key, 0) => match control {
             Control::Tone => send(Command::NoteOff { key }),
             Control::Organ(console) => {
-                for manual in targets {
+                for (manual, key) in lands {
                     for handle in console.note_off_manual(manual, key) {
                         send(Command::StopVoice { handle });
                     }
@@ -2471,8 +2694,9 @@ mod tests {
             suggested_channels: Vec::new(),
             learn: None,
             control_learn: None,
+            pending: None,
             key_bindings: Vec::new(),
-            keyboard: None,
+            keyboard: Vec::new(),
             trem_groups: Vec::new(),
             trem_engaged: false,
             master_gain: 0.178,
@@ -2796,7 +3020,7 @@ mod tests {
         // Mappable, never mandatory: until the player points it at a
         // manual, the letter rows are just letters.
         assert!(
-            state.lock().expect("state").keyboard.is_none(),
+            state.lock().expect("state").keyboard.is_empty(),
             "unassigned until the player says so"
         );
         state.lock().expect("state").key("KeyZ", true);
@@ -2804,10 +3028,11 @@ mod tests {
         state.lock().expect("state").key("KeyZ", false);
 
         assert!(bind_computer(&state, manual));
-        let keyboard = state
+        let keyboard = *state
             .lock()
             .expect("state")
             .keyboard
+            .first()
             .expect("assigned now");
         assert_eq!(keyboard.manual, manual);
         assert_eq!(keyboard.transpose, 0);
@@ -2871,7 +3096,7 @@ mod tests {
         bind_control(&state, "key:Equal", "transpose:36", COMPUTER_KEYBOARD);
         state.lock().expect("state").key("Equal", true);
         assert_eq!(
-            state.lock().expect("state").keyboard.expect("still assigned").transpose,
+            state.lock().expect("state").keyboard.first().expect("still assigned").transpose,
             36
         );
         assert_eq!(compass_of(&state, manual), Some(native), "shifted, not widened");
@@ -2881,14 +3106,31 @@ mod tests {
             "a key past the compass is silent, not repitched"
         );
 
-        // One keyboard, one place: picking it for another manual in
-        // the same dropdown moves it, shift and all.
+        // Picking it for another manual is a second job for the same
+        // keyboard: the bind parks and asks. Replace moves it — shift
+        // and all — rather than duplicating it.
         let other = manual - 1;
-        assert!(bind_computer(&state, other));
         {
-            let state = state.lock().expect("state");
-            let keyboard = state.keyboard.expect("still assigned");
-            assert_eq!(keyboard.manual, other, "moved, not duplicated");
+            let mut state = state.lock().expect("state");
+            let slot = state.manual_inputs(other).len();
+            assert!(state.propose_input(
+                other,
+                slot,
+                config::Input {
+                    device: COMPUTER_KEYBOARD.into(),
+                    channel: None,
+                    low: None,
+                    high: None,
+                    transpose: 0,
+                },
+            ));
+            assert!(
+                matches!(state.pending, Some(Pending::Input { .. })),
+                "a second manual for one keyboard is asked about, not assumed"
+            );
+            assert!(state.resolve_pending(Resolution::Replace));
+            let keyboard = *state.keyboard.first().expect("still assigned");
+            assert_eq!(keyboard.manual, other, "replaced means moved");
             assert_eq!(keyboard.transpose, 36, "the shift moved with it");
             assert!(
                 state.manual_inputs(manual).is_empty(),
@@ -2899,8 +3141,171 @@ mod tests {
         // Detached — the row removed like any device's — the letter
         // rows go back to being letters.
         assert!(state.lock().expect("state").remove_input(other, 0));
-        assert!(state.lock().expect("state").keyboard.is_none());
+        assert!(state.lock().expect("state").keyboard.is_empty());
         assert_eq!(compass_of(&state, manual), Some(native));
+    }
+
+    /// One keyboard, two divisions — a confirmed "keep both": the bind
+    /// parks and asks first, and once kept, the same note-on sounds
+    /// both manuals, each through its own shift.
+    #[test]
+    fn a_device_kept_on_two_manuals_plays_both() {
+        let Some((state, manual)) = demo_state("Gamba 8'") else {
+            return;
+        };
+        let other = manual - 1;
+        bind(&state, manual, None);
+        {
+            let mut state = state.lock().expect("state");
+            assert!(state.propose_input(
+                other,
+                0,
+                config::Input {
+                    device: "Test Keyboard".into(),
+                    channel: None,
+                    low: None,
+                    high: None,
+                    transpose: 12,
+                },
+            ));
+            assert!(
+                matches!(state.pending, Some(Pending::Input { .. })),
+                "a second manual for one device is asked about"
+            );
+            assert!(
+                state.manual_inputs(other).is_empty(),
+                "and nothing commits until the answer"
+            );
+            assert!(state.resolve_pending(Resolution::KeepBoth));
+            assert_eq!(state.manual_inputs(other).len(), 1);
+        }
+        handle_midi(&[0x90, 60, 100], 0, &state);
+        assert_eq!(held_on(&state, manual), vec![60]);
+        assert_eq!(
+            held_on(&state, other),
+            vec![72],
+            "each route lands through its own shift"
+        );
+        handle_midi(&[0x80, 60, 0], 0, &state);
+        assert!(held_on(&state, manual).is_empty());
+        assert!(held_on(&state, other).is_empty());
+
+        // Cancel really is a no-op: propose again, walk away.
+        {
+            let mut state = state.lock().expect("state");
+            assert!(state.propose_input(
+                other,
+                1,
+                config::Input {
+                    device: "Test Keyboard".into(),
+                    channel: Some(5),
+                    low: None,
+                    high: None,
+                    transpose: 0,
+                },
+            ));
+            assert!(state.pending.is_some());
+            assert!(state.resolve_pending(Resolution::Cancel));
+            assert_eq!(state.manual_inputs(other).len(), 1, "unchanged");
+            assert!(!state.resolve_pending(Resolution::Cancel), "nothing left");
+        }
+    }
+
+    /// The same message bound twice is asked about — for any trigger, a
+    /// note as much as a control change — and "keep both" means both:
+    /// one press fires both actions. Editing what a kept row *does*
+    /// never re-asks; its identity (device, channel, trigger) stands.
+    #[test]
+    fn a_message_bound_twice_asks_then_fires_both() {
+        let Some((state, manual)) = demo_state("Gamba 8'") else {
+            return;
+        };
+        bind(&state, manual, None);
+        let stop = {
+            let state = state.lock().expect("state");
+            let Control::Organ(console) = &state.control else {
+                panic!("organ expected")
+            };
+            console
+                .stop_states()
+                .iter()
+                .find(|(_, name, _, _, _)| *name == "Gamba 8'")
+                .expect("the fixture's stop")
+                .0
+        };
+        bind_control(&state, "note:36", "stop:Gamba 8'", "Test Keyboard");
+        {
+            let mut state = state.lock().expect("state");
+            state.propose_control(
+                1,
+                config::Control {
+                    device: "Test Keyboard".into(),
+                    channel: None,
+                    trigger: "note:36".into(),
+                    action: "tremulant".into(),
+                    manual: None,
+                },
+            );
+            assert!(
+                matches!(state.pending, Some(Pending::Control { .. })),
+                "the same message twice is asked about"
+            );
+            assert_eq!(state.controls().len(), 1, "parked, not committed");
+            assert!(state.resolve_pending(Resolution::KeepBoth));
+            assert_eq!(state.controls().len(), 2);
+        }
+        handle_midi(&[0x90, 36, 100], 0, &state);
+        {
+            let state = state.lock().expect("state");
+            let Control::Organ(console) = &state.control else {
+                panic!("organ expected")
+            };
+            assert!(
+                !console.is_drawn(stop),
+                "the press worked the stop it names"
+            );
+            assert!(state.trem_engaged, "and the tremulant, both from one press");
+        }
+
+        // Re-pointing the kept row at another action keeps its
+        // identity, so nothing asks again.
+        {
+            let mut state = state.lock().expect("state");
+            state.propose_control(
+                1,
+                config::Control {
+                    device: "Test Keyboard".into(),
+                    channel: None,
+                    trigger: "note:36".into(),
+                    action: "cancel".into(),
+                    manual: None,
+                },
+            );
+            assert!(state.pending.is_none(), "same identity, no question");
+            assert_eq!(state.controls()[1].action, "cancel");
+        }
+
+        // Replace retires the old rows in the new one's favour — and
+        // the target slot slides down past the removals beneath it.
+        {
+            let mut state = state.lock().expect("state");
+            state.propose_control(
+                2,
+                config::Control {
+                    device: "Test Keyboard".into(),
+                    channel: None,
+                    trigger: "note:36".into(),
+                    action: "panic".into(),
+                    manual: None,
+                },
+            );
+            assert!(state.pending.is_some());
+            assert!(state.resolve_pending(Resolution::Replace));
+            let controls = state.controls();
+            assert_eq!(controls.len(), 1, "the old rows are gone");
+            assert_eq!(controls[0].action, "panic");
+            assert_eq!(controls[0].trigger, "note:36");
+        }
     }
 
     /// Assignments are per organ and are stored by name, so the same

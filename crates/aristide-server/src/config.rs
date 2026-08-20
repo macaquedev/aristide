@@ -46,9 +46,11 @@ const HEADER: &str = "\
 #                nearest pipe. Omit both for the set's compass as-is.
 #
 # A manual may list several inputs — two keyboards playing one division
-# is a valid thing to want — and one device may drive several manuals by
-# giving each a different channel, which is how a DIN console with its
-# manuals on separate channels is set up.
+# is a valid thing to want — and one device may drive several manuals:
+# with a different channel each, which is how a DIN console with its
+# manuals on separate channels is set up, or outright, one keyboard
+# sounding two divisions at once. The console asks before creating the
+# latter; written here by hand it is simply believed.
 #
 # A manual that is not listed here has no input and stays silent. Manual
 # names are matched against the loaded organ's own names, so a renamed

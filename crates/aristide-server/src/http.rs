@@ -413,7 +413,7 @@ fn respond(
                             .map_or(0, |input| input.transpose),
                     };
                     state.learn = None;
-                    if !state.set_input(
+                    if !state.propose_input(
                         manual,
                         slot,
                         crate::config::Input {
@@ -541,7 +541,7 @@ fn respond(
                         },
                     };
                     state.control_learn = None;
-                    state.set_control(slot, control);
+                    state.propose_control(slot, control);
                     json(state_json_locked(&state))
                 }
                 (Some(_), Some(_)) => bad_request("no such action"),
@@ -558,6 +558,23 @@ fn respond(
                 }
                 None => bad_request("missing slot"),
             }
+        }
+        // The player's answer to a parked bind — one that would give a
+        // device (or one of its messages) a second job. "keep" commits
+        // it alongside the old rows, "replace" retires them in its
+        // favour, "cancel" drops it.
+        (Method::Post, "/api/conflict") => {
+            let resolution = match param(query, "choice") {
+                Some("keep") => crate::Resolution::KeepBoth,
+                Some("replace") => crate::Resolution::Replace,
+                Some("cancel") => crate::Resolution::Cancel,
+                _ => return bad_request("choice must be keep, replace or cancel"),
+            };
+            let mut state = state.lock().expect("state poisoned");
+            // Nothing pending is not an error: the dialog may have
+            // raced an organ load, and there is nothing left to do.
+            state.resolve_pending(resolution);
+            json(state_json_locked(&state))
         }
         // Auto-detect for controls: press the piston, pedal or key.
         (Method::Post, "/api/control/learn") => {
@@ -947,6 +964,70 @@ fn state_json_locked(state: &State) -> String {
     if let Some(learn) = state.control_learn {
         out.push_str(&format!(",\"control_learning\":{}", learn.slot));
     }
+    // A bind parked mid-air: the console draws the keep-both / replace
+    // / cancel dialog from this, and answers via /api/conflict.
+    if let Some(pending) = &state.pending {
+        let names = state.manual_names();
+        let name_of =
+            |idx: usize| names.get(idx).cloned().unwrap_or_else(|| format!("manual {idx}"));
+        let channel_json =
+            |channel: Option<u8>| channel.map_or_else(|| "null".to_string(), |c| c.to_string());
+        match pending {
+            crate::Pending::Input {
+                manual,
+                slot,
+                input,
+                existing,
+            } => {
+                out.push_str(&format!(
+                    ",\"conflict\":{{\"kind\":\"input\",\"device\":{},\"channel\":{},\"manual\":{},\"slot\":{slot},\"existing\":[",
+                    json_string(&input.device),
+                    channel_json(input.channel),
+                    json_string(&name_of(*manual)),
+                ));
+                for (index, (other_manual, other_slot)) in existing.iter().enumerate() {
+                    if index > 0 {
+                        out.push(',');
+                    }
+                    let row = state.manual_inputs(*other_manual).get(*other_slot).cloned();
+                    out.push_str(&format!(
+                        "{{\"manual\":{},\"slot\":{other_slot},\"channel\":{}}}",
+                        json_string(&name_of(*other_manual)),
+                        channel_json(row.and_then(|r| r.channel)),
+                    ));
+                }
+                out.push_str("]}");
+            }
+            crate::Pending::Control {
+                slot,
+                control,
+                existing,
+            } => {
+                out.push_str(&format!(
+                    ",\"conflict\":{{\"kind\":\"control\",\"device\":{},\"channel\":{},\"trigger\":{},\"action\":{},\"slot\":{slot},\"existing\":[",
+                    json_string(&control.device),
+                    channel_json(control.channel),
+                    json_string(&control.trigger),
+                    json_string(&control.action),
+                ));
+                let controls = state.controls();
+                for (index, other) in existing.iter().enumerate() {
+                    if index > 0 {
+                        out.push(',');
+                    }
+                    let action = controls
+                        .get(*other)
+                        .map(|c| c.action.clone())
+                        .unwrap_or_default();
+                    out.push_str(&format!(
+                        "{{\"slot\":{other},\"action\":{}}}",
+                        json_string(&action),
+                    ));
+                }
+                out.push_str("]}");
+            }
+        }
+    }
     out.push_str(",\"actions\":[");
     for (index, action) in crate::control::CATALOGUE.iter().enumerate() {
         if index > 0 {
@@ -955,7 +1036,10 @@ fn state_json_locked(state: &State) -> String {
         out.push_str(&json_string(action));
     }
     out.push(']');
-    if let Some(keyboard) = state.keyboard {
+    // The legend and the Controls note read one assignment; a keyboard
+    // confirmed onto two manuals shows its first here, and the MIDI tab
+    // lists every row regardless.
+    if let Some(keyboard) = state.keyboard.first() {
         out.push_str(&format!(
             ",\"keyboard\":{{\"manual\":{},\"transpose\":{},\"low\":{},\"high\":{}}}",
             keyboard.manual, keyboard.transpose, keyboard.compass.0, keyboard.compass.1
@@ -1205,8 +1289,9 @@ mod tests {
             suggested_channels: vec![Some(3), Some(1), Some(2)],
             learn: None,
             control_learn: None,
+            pending: None,
             key_bindings: Vec::new(),
-            keyboard: None,
+            keyboard: Vec::new(),
             trem_groups: vec![0, 1],
             trem_engaged: false,
             master_gain: 0.178,
@@ -1684,8 +1769,9 @@ mod tests {
             "the keyboard is shifted, not the division"
         );
 
-        // Picking it in another manual's dropdown moves it: one
-        // keyboard, one place, the shift carried along.
+        // Picking it in another manual's dropdown is a second job for
+        // the same keyboard: nothing moves until the player answers
+        // the keep-both / replace / cancel dialog.
         respond(
             &state,
             &Method::Post,
@@ -1693,16 +1779,43 @@ mod tests {
         );
         let body = state_json(&state);
         assert!(
+            body.contains("\"conflict\":{\"kind\":\"input\",\"device\":\"Computer keyboard\""),
+            "the second manual is asked about, not assumed: {body}"
+        );
+        assert!(
+            body.contains("\"keyboard\":{\"manual\":1,\"transpose\":12"),
+            "and until then nothing has changed: {body}"
+        );
+
+        // Replace moves it, the shift carried along.
+        respond(&state, &Method::Post, "/api/conflict?choice=replace");
+        let body = state_json(&state);
+        assert!(!body.contains("\"conflict\""), "the question is answered");
+        assert!(
             body.contains("\"keyboard\":{\"manual\":2,\"transpose\":12"),
-            "moving it keeps the shift: {body}"
+            "replaced means moved, shift and all: {body}"
         );
         assert!(
             body.matches("\"device\":\"Computer keyboard\"").count() == 1,
-            "and it plays one manual, not two: {body}"
+            "one manual, not two: {body}"
         );
 
-        // Removing the row detaches it, like unplugging any device.
+        // Asked again and told to keep both, it plays both manuals.
+        respond(
+            &state,
+            &Method::Post,
+            "/api/midi/bind?manual=1&slot=0&device=Computer%20keyboard",
+        );
+        respond(&state, &Method::Post, "/api/conflict?choice=keep");
+        let body = state_json(&state);
+        assert!(
+            body.matches("\"device\":\"Computer keyboard\"").count() == 2,
+            "kept means both rows stand: {body}"
+        );
+
+        // Removing the rows detaches it, like unplugging any device.
         respond(&state, &Method::Post, "/api/midi/unbind?manual=2&slot=0");
+        respond(&state, &Method::Post, "/api/midi/unbind?manual=1&slot=0");
         let body = state_json(&state);
         assert!(
             !body.contains("\"keyboard\":{"),
@@ -1788,8 +1901,9 @@ mod tests {
             suggested_channels: Vec::new(),
             learn: None,
             control_learn: None,
+            pending: None,
             key_bindings: Vec::new(),
-            keyboard: None,
+            keyboard: Vec::new(),
             trem_groups: Vec::new(),
             trem_engaged: false,
             master_gain: 0.178,
