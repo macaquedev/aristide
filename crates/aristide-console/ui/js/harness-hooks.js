@@ -60,25 +60,41 @@ export function applyHarnessHooks({ prefs, editor }) {
     }, 400);
   }
 
-  if (params.has("fabMenu")) {
+  if (params.has("addMenu")) {
     setTimeout(() => {
       editor.unlock();
-      document.getElementById("editor-fab-menu").classList.remove("hidden");
+      editor.openAddMenu(window.innerWidth * 0.55, window.innerHeight * 0.4);
     }, 400);
   }
 
-  const fabFormParam = params.get("fabForm"); // "manual" | "pedal" | "enc" | "source"
-  if (fabFormParam) {
+  const addFormParam = params.get("addForm"); // "manual" | "pedal" | "enc" | "source"
+  if (addFormParam) {
     // A real click, not just unhiding the form — "source" also needs the
     // form's own openSourceForm() to run so its directory listing fetches.
     const buttonId = {
-      manual: "editor-fab-add-manual", pedal: "editor-fab-add-pedal",
-      enc: "editor-fab-add-enc", source: "editor-fab-add-source",
-    }[fabFormParam];
+      manual: "editor-add-manual", pedal: "editor-add-pedal",
+      enc: "editor-add-enc", source: "editor-add-source",
+    }[addFormParam];
     setTimeout(() => {
       editor.unlock();
-      document.getElementById("editor-fab").click();
+      editor.openAddMenu(window.innerWidth * 0.55, window.innerHeight * 0.4);
       document.getElementById(buttonId)?.click();
+    }, 400);
+  }
+
+  const divisionMenuParam = params.get("divisionMenu"); // a manual idx
+  if (divisionMenuParam != null) {
+    setTimeout(() => {
+      editor.unlock();
+      const division = document.querySelector(
+        `.division[data-division="${divisionMenuParam}"] .division-add`
+      );
+      division?.click();
+      if (params.has("divisionStops")) {
+        setTimeout(() => {
+          document.querySelector("#editor-division-menu .menu-item")?.click();
+        }, 200);
+      }
     }, 400);
   }
 

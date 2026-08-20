@@ -4,6 +4,15 @@
 // two paths are kept separate: `build` for structure, `refresh` for
 // state. Interaction is optimistic — controls flip visually on click
 // and the next snapshot reconciles.
+//
+// The console is a canvas of panels: one jamb panel per division, one
+// keyboard panel per manual, the coupler rail, the swell-shoe rack.
+// Each panel is absolutely positioned — from `snapshot.layout` (the
+// organ file's own [console.layout], normalized 0..1 fractions of the
+// canvas) when a panel has been placed, otherwise from `defaultLayout`,
+// which reproduces the classic arrangement: jambs flanking, manuals
+// stacked mid-case, pedalboard below, shoes beside it. Moving panels
+// is the editor's job (editor.js); this file only draws and places.
 
 import { commands } from "./api.js";
 
@@ -43,6 +52,9 @@ export class Console {
     this.enterEditMode = enterEditMode;
     this.decorate = null;
     this.signature = null;
+    this.snapshot = null;
+    this.layoutSig = null; // JSON of the last snapshot.layout applied
+    this.panels = new Map(); // panel id -> its element on the canvas
     this.dragging = new Set(); // control ids the pointer currently owns
     this.el = {
       offline: root.getElementById("offline"),
@@ -50,15 +62,13 @@ export class Console {
       gain: root.getElementById("gain"),
       tuning: root.getElementById("tuning"),
       panic: root.getElementById("panic"),
-      jambLeft: root.getElementById("jamb-left"),
-      jambRight: root.getElementById("jamb-right"),
-      center: root.getElementById("console-center"),
-      couplers: root.getElementById("couplers"),
-      manuals: root.getElementById("manuals"),
-      pedals: root.getElementById("pedals"),
+      canvas: root.getElementById("console-canvas"),
       emptyCard: root.getElementById("organ-empty-card"),
     };
     this.wireRail();
+    window.addEventListener("resize", () => {
+      if (this.snapshot) this.layoutPanels(this.snapshot);
+    });
   }
 
   offline(message) {
@@ -67,6 +77,7 @@ export class Console {
   }
 
   render(snapshot) {
+    this.snapshot = snapshot;
     this.el.offline.classList.add("hidden");
     // With no organ there is no console to show — otherwise the lone
     // tremulant knob haunts the empty background behind the loader.
@@ -92,23 +103,20 @@ export class Console {
 
   build(snapshot) {
     this.el.organName.textContent = snapshot.organ ?? "Aristide";
-    // A loaded organ with nothing built yet has no jambs and no
-    // keyboards worth drawing — a lone Tremblant knob and a Cancel
-    // rocker would just haunt an otherwise bare case. Point at the
-    // editor instead.
+    // A loaded organ with nothing built yet has no panels worth drawing —
+    // a card points at the editor instead. The canvas stays live under
+    // it: double-clicking the bare case is how the first manual arrives.
     const empty = !!snapshot.organ && !snapshot.stops.length && !snapshot.manuals.length;
-    this.el.jambLeft.classList.toggle("hidden", empty);
-    this.el.jambRight.classList.toggle("hidden", empty);
-    this.el.center.classList.toggle("hidden", empty);
     this.el.emptyCard.classList.toggle("hidden", !empty);
+    this.layoutSig = null; // panels are new; place them on next refresh
     if (empty) {
+      this.panels.clear();
+      this.el.canvas.replaceChildren();
       this.buildEmptyCard(snapshot);
       this.decorate?.(snapshot);
       return;
     }
-    this.buildJambs(snapshot);
-    this.buildCouplers(snapshot);
-    this.buildKeyboards(snapshot);
+    this.buildPanels(snapshot);
     this.fitLabels();
     this.decorate?.(snapshot);
   }
@@ -118,7 +126,8 @@ export class Console {
     const title = document.createElement("h2");
     title.textContent = snapshot.organ ?? "Untitled organ";
     const note = document.createElement("p");
-    note.textContent = "An empty organ — unlock editing and build it right here.";
+    note.textContent =
+      "An empty organ — unlock editing, then double-click anywhere to add its first manual.";
     const open = document.createElement("button");
     open.type = "button";
     open.textContent = "Unlock and build";
@@ -139,50 +148,120 @@ export class Console {
     }
   }
 
-  buildJambs(snapshot) {
-    // Group stops by division, preserving server order of divisions.
-    const divisions = new Map();
-    for (const stop of snapshot.stops) {
-      if (!divisions.has(stop.manual)) divisions.set(stop.manual, []);
-      divisions.get(stop.manual).push(stop);
-    }
-    const names = [...divisions.keys()];
-    const split = Math.ceil(names.length / 2);
+  // ---- panels -------------------------------------------------------
 
-    for (const [jamb, its] of [
-      [this.el.jambLeft, names.slice(0, split)],
-      [this.el.jambRight, names.slice(split)],
-    ]) {
-      jamb.replaceChildren();
-      for (const name of its) {
-        const column = document.createElement("div");
-        column.className = "division";
-        const title = document.createElement("h2");
-        title.textContent = name;
-        column.append(title);
-        for (const stop of divisions.get(name)) {
-          column.append(this.drawknob(stop.name, `stop-${stop.id}`, (on) =>
-            this.send(commands.stop(stop.id, on))
-          ));
-        }
-        jamb.append(column);
-      }
+  /// One panel: DAW-style chrome (a slim title bar the editor drags,
+  /// visible only while editing) above the content. The chrome is part
+  /// of every panel from birth so locking and unlocking never rebuilds.
+  panel(id, kind, title) {
+    const el = document.createElement("section");
+    el.className = `panel panel-${kind}`;
+    el.dataset.panel = id;
+    const chrome = document.createElement("div");
+    chrome.className = "panel-chrome";
+    const label = document.createElement("span");
+    label.className = "panel-chrome-title";
+    label.textContent = title;
+    chrome.append(label);
+    const body = document.createElement("div");
+    body.className = "panel-body";
+    el.append(chrome, body);
+    this.panels.set(id, el);
+    this.el.canvas.append(el);
+    return body;
+  }
+
+  buildPanels(snapshot) {
+    this.panels.clear();
+    this.el.canvas.replaceChildren();
+
+    // The model says which manual is the pedal; the name sniff only
+    // covers organs loaded before it did.
+    const pedal = snapshot.manuals.find((m) => m.pedal)
+      ?? snapshot.manuals.find((m) => /p[ée]d/i.test(m.name))
+      ?? snapshot.manuals[0];
+    this.pedalName = pedal?.name ?? null;
+
+    // Stops grouped by the manual they sit on, in server stop order.
+    const byManual = new Map(snapshot.manuals.map((m) => [m.idx, []]));
+    for (const stop of snapshot.stops) {
+      if (!byManual.has(stop.midx)) byManual.set(stop.midx, []);
+      byManual.get(stop.midx).push(stop);
     }
+
+    // One jamb panel per division, empty divisions included — an empty
+    // jamb is where a new manual's first stop gets added.
+    let lastColumn = null;
+    for (const manual of snapshot.manuals) {
+      const stops = byManual.get(manual.idx) ?? [];
+      const body = this.panel(`jamb:${manual.name}`, "jamb", `${manual.name} · stops`);
+      const jambPanel = body.parentElement;
+      jambPanel.classList.toggle("empty", !stops.length);
+      const column = document.createElement("div");
+      column.className = "division";
+      column.dataset.division = manual.idx;
+      const head = document.createElement("div");
+      head.className = "division-head";
+      const title = document.createElement("h2");
+      title.textContent = manual.name;
+      head.append(title);
+      column.append(head);
+      for (const stop of stops) {
+        column.append(this.drawknob(stop.name, `stop-${stop.id}`, (on) =>
+          this.send(commands.stop(stop.id, on))
+        ));
+      }
+      body.append(column);
+      if (stops.length) lastColumn = column;
+    }
+
+    // Couplers rail (built before the tremulant so the trem knob has a
+    // home even on an organ with manuals but no stops yet).
+    const couplersBody = this.panel("couplers", "couplers", "Couplers");
+    const rail = document.createElement("div");
+    rail.className = "coupler-rail";
+    // A coupler taken off the console (see the Organ tab) is disengaged,
+    // not deleted — it simply doesn't get a tablet on the rail.
+    for (const coupler of snapshot.couplers.filter((c) => !c.hidden)) {
+      const rocker = document.createElement("button");
+      rocker.className = "rocker";
+      rocker.dataset.key = `coupler-${coupler.idx}`;
+      // Inner face so the ivory tablet can tilt inside the button's slot.
+      const face = document.createElement("span");
+      face.className = "tab";
+      face.textContent = coupler.name;
+      rocker.append(face);
+      rocker.addEventListener("click", () => {
+        const on = !rocker.classList.contains("on");
+        rocker.classList.toggle("on", on);
+        this.send(commands.coupler(coupler.idx, on));
+      });
+      rail.append(rocker);
+    }
+    rail.append(this.cancelPiston());
+    couplersBody.append(rail);
 
     // The tremulant behaves like a stop; it joins the bottom of the last
-    // division column so the jamb reads as one rank of knobs.
-    const jamb = this.el.jambRight.childElementCount
-      ? this.el.jambRight
-      : this.el.jambLeft;
-    let column = jamb.lastElementChild;
-    if (!column) {
-      column = document.createElement("div");
-      column.className = "division";
-      jamb.append(column);
-    }
-    column.append(this.drawknob("Tremblant", "trem", (on) =>
+    // populated division so the jambs read as ranks of knobs.
+    const trem = this.drawknob("Tremblant", "trem", (on) =>
       this.send(commands.tremulant(on))
-    ));
+    );
+    if (lastColumn) lastColumn.append(trem);
+    else rail.append(trem);
+
+    // Keyboard panels: one per manual. Positioning does the stacking
+    // (highest manual on top, pedal at the bottom), not the DOM order.
+    for (const manual of snapshot.manuals) {
+      const kind = manual === pedal ? "pedal" : "manual";
+      const body = this.panel(`keyboard:${manual.name}`, `keyboard panel-${kind}`, `${manual.name} · keyboard`);
+      body.append(this.keyboard(manual, kind));
+    }
+
+    // The swell shoes, a rack of their own beside the pedalboard.
+    const shoes = this.shoes(snapshot);
+    if (shoes.childElementCount) {
+      this.panel("shoes", "shoes", "Swell shoes").append(shoes);
+    }
   }
 
   drawknob(name, key, flip) {
@@ -211,29 +290,6 @@ export class Console {
     return knob;
   }
 
-  buildCouplers(snapshot) {
-    this.el.couplers.replaceChildren();
-    // A coupler taken off the console (see the Organ tab) is disengaged,
-    // not deleted — it simply doesn't get a tablet on the rail.
-    for (const coupler of snapshot.couplers.filter((c) => !c.hidden)) {
-      const rocker = document.createElement("button");
-      rocker.className = "rocker";
-      rocker.dataset.key = `coupler-${coupler.idx}`;
-      // Inner face so the ivory tablet can tilt inside the button's slot.
-      const face = document.createElement("span");
-      face.className = "tab";
-      face.textContent = coupler.name;
-      rocker.append(face);
-      rocker.addEventListener("click", () => {
-        const on = !rocker.classList.contains("on");
-        rocker.classList.toggle("on", on);
-        this.send(commands.coupler(coupler.idx, on));
-      });
-      this.el.couplers.append(rocker);
-    }
-    this.el.couplers.append(this.cancelPiston());
-  }
-
   /// General cancel: pushes in every stop and releases every coupler.
   /// Momentary — it never lights, so it carries no `on` state; the
   /// tremulant is a separate control and survives it.
@@ -260,28 +316,6 @@ export class Console {
 
   panic() {
     this.send(commands.panic());
-  }
-
-  buildKeyboards(snapshot) {
-    // The pedalboard renders at the bottom; manuals stack above it in
-    // reverse server order, so the highest manual sits on top, as on a
-    // real console. The model says which manual is the pedal; the name
-    // sniff only covers organs loaded before it did.
-    const pedal = snapshot.manuals.find((m) => m.pedal)
-      ?? snapshot.manuals.find((m) => /p[ée]d/i.test(m.name))
-      ?? snapshot.manuals[0];
-    const manuals = snapshot.manuals.filter((m) => m !== pedal);
-
-    this.el.manuals.replaceChildren();
-    for (const manual of [...manuals].reverse()) {
-      this.el.manuals.append(this.keyboard(manual, "manual"));
-    }
-
-    this.el.pedals.replaceChildren();
-    if (pedal) {
-      this.el.pedals.append(this.keyboard(pedal, "pedal"));
-      this.el.pedals.append(this.shoes(snapshot));
-    }
   }
 
   keyboard(manual, kind) {
@@ -391,9 +425,112 @@ export class Console {
     shoe.style.setProperty("--open", value);
   }
 
+  // ---- placement ----------------------------------------------------
+
+  /// Positions every panel: placed ones from snapshot.layout (fractions
+  /// of the canvas), the rest from defaultLayout. A panel the editor is
+  /// mid-drag on is left alone — its position is the pointer's.
+  layoutPanels(snapshot) {
+    const W = this.el.canvas.clientWidth;
+    const H = this.el.canvas.clientHeight;
+    if (!W || !H || !this.panels.size) return;
+    const placed = snapshot.layout ?? {};
+    const defaults = this.defaultLayout(snapshot, W, H);
+    for (const [id, el] of this.panels) {
+      if (el.dataset.dragging) continue;
+      const pos = placed[id]
+        ? { x: placed[id].x * W, y: placed[id].y * H }
+        : (defaults.get(id) ?? { x: 24, y: 24 });
+      el.style.left = `${Math.round(pos.x)}px`;
+      el.style.top = `${Math.round(pos.y)}px`;
+    }
+  }
+
+  /// The classic console, derived rather than hard-coded: coupler rail
+  /// on top, manuals stacked beneath it highest-first, pedalboard at
+  /// the bottom with the shoes at its right, jambs flanking — first
+  /// half of the divisions on the left, the rest on the right.
+  defaultLayout(snapshot, W, H) {
+    const pos = new Map();
+    const size = (id) => {
+      const el = this.panels.get(id);
+      return el ? { w: el.offsetWidth, h: el.offsetHeight } : null;
+    };
+    const GAP = 26; // room for the edit-mode title bar above each panel
+    const PAD = 24;
+
+    const pedal = snapshot.manuals.find((m) => m.name === this.pedalName) ?? null;
+    const manuals = snapshot.manuals.filter((m) => m !== pedal);
+
+    // The flanking jambs first — the keyboard stack centers in the
+    // space they leave, never under them.
+    const jambs = snapshot.manuals
+      .map((m) => `jamb:${m.name}`)
+      .filter((id) => this.panels.has(id));
+    const split = Math.ceil(jambs.length / 2);
+    const leftJambs = jambs.slice(0, split);
+    const rightJambs = jambs.slice(split);
+    const groupWidth = (ids) =>
+      ids.reduce((sum, id) => sum + (size(id)?.w ?? 0), 0) + 14 * Math.max(0, ids.length - 1);
+    let x = PAD;
+    for (const id of leftJambs) {
+      const s = size(id);
+      pos.set(id, { x, y: Math.max(PAD, (H - s.h) / 2) });
+      x += s.w + 14;
+    }
+    x = W - PAD;
+    for (const id of rightJambs.slice().reverse()) {
+      const s = size(id);
+      x -= s.w;
+      pos.set(id, { x, y: Math.max(PAD, (H - s.h) / 2) });
+      x -= 14;
+    }
+
+    const stack = [];
+    if (this.panels.has("couplers")) stack.push("couplers");
+    for (const manual of [...manuals].reverse()) stack.push(`keyboard:${manual.name}`);
+    if (pedal) stack.push(`keyboard:${pedal.name}`);
+
+    const innerLeft = PAD + groupWidth(leftJambs) + (leftJambs.length ? GAP : 0);
+    const innerRight = W - PAD - groupWidth(rightJambs) - (rightJambs.length ? GAP : 0);
+    const stackW = Math.max(0, ...stack.map((id) => size(id)?.w ?? 0));
+    const cx = innerLeft + Math.max(0, (innerRight - innerLeft - stackW) / 2);
+    const totalH = stack.reduce((sum, id) => sum + (size(id)?.h ?? 0), 0)
+      + GAP * Math.max(0, stack.length - 1);
+    let y = Math.max(PAD, (H - totalH) / 2);
+    for (const id of stack) {
+      const s = size(id);
+      if (!s) continue;
+      pos.set(id, { x: cx + Math.max(0, (stackW - s.w) / 2), y });
+      y += s.h + GAP;
+    }
+
+    // Shoes go beside the pedalboard, tops level with it: the manuals
+    // above and the jambs beside stay clear, and the rack hangs down
+    // into the apron, which is bare anyway.
+    if (this.panels.has("shoes")) {
+      const s = size("shoes");
+      const anchor = pedal && pos.get(`keyboard:${pedal.name}`);
+      const anchorSize = pedal && size(`keyboard:${pedal.name}`);
+      pos.set("shoes", anchor
+        ? {
+            x: anchor.x + anchorSize.w + GAP,
+            y: Math.min(anchor.y, H - s.h - PAD),
+          }
+        : { x: W - s.w - PAD, y: H - s.h - PAD });
+    }
+    return pos;
+  }
+
   // ---- state --------------------------------------------------------
 
   refresh(snapshot) {
+    const layoutSig = JSON.stringify(snapshot.layout ?? {});
+    if (layoutSig !== this.layoutSig) {
+      this.layoutSig = layoutSig;
+      this.layoutPanels(snapshot);
+    }
+
     for (const stop of snapshot.stops) this.setToggle(`stop-${stop.id}`, stop.on);
     for (const coupler of snapshot.couplers) {
       this.setToggle(`coupler-${coupler.idx}`, coupler.on);

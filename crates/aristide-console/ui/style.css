@@ -746,7 +746,7 @@ input[type="range"]:hover::-webkit-slider-thumb { filter: brightness(1.15); }
 
 .organ-coupler-name { font-size: 12px; }
 
-/* The FAB, the bin and the remove-confirm card float over the Organ
+/* The bin and the remove-confirm card float over the Organ
    pane's own scroll — positioned against the dialog card itself
    (the nearest positioned ancestor `.organ-floats` skips to, since it
    isn't one), not against the pane, so scrolling that pane can never
@@ -1021,56 +1021,35 @@ input[type="range"]:hover::-webkit-slider-thumb { filter: brightness(1.15); }
   color: var(--accent);
 }
 
-/* ---- the "+" FAB, docked bottom-right over the scroll ------------------ */
+/* ---- the add popover: opened where the canvas was double-clicked ------- */
 
-.organ-fab-dock {
-  position: absolute;
-  right: 16px;
-  bottom: 16px;
-  z-index: 10;
-  pointer-events: auto;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 8px;
+.editor-add {
+  position: fixed;
+  z-index: 48;
 }
-.organ-fab-dock.dragging { opacity: 0.25; pointer-events: none; }
 
-.organ-fab {
-  width: 38px;
-  height: 38px;
-  border: 1px solid #000000d0;
-  border-radius: 50%;
-  cursor: pointer;
-  background: linear-gradient(180deg, #ffffff26, #ffffff00 45%), var(--accent);
-  color: var(--accent-ink);
-  font-size: 19px;
-  font-weight: 600;
-  line-height: 1;
-  box-shadow: var(--bevel), 0 6px 16px #000a;
-  transition: filter 0.1s ease, transform 0.1s ease;
-}
-.organ-fab:hover { filter: brightness(1.12); }
-.organ-fab:active { transform: scale(0.94); }
-
-@keyframes organ-fab-pulse {
-  0%, 100% { box-shadow: var(--bevel), 0 6px 16px #000a, 0 0 0 0 var(--accent-soft); }
-  50% { box-shadow: var(--bevel), 0 6px 16px #000a, 0 0 0 8px transparent; }
-}
-.organ-fab.pulse { animation: organ-fab-pulse 1.8s ease-in-out infinite; }
-
-.organ-fab-menu {
+.editor-add-menu,
+#editor-division-menu {
   display: flex;
   flex-direction: column;
   min-width: 150px;
+  max-height: 60vh;
+  overflow-y: auto;
   padding: 5px 0;
   border: 1px solid #000000d0;
   border-radius: 4px;
   background: #26282b;
   box-shadow: var(--bevel), 0 12px 32px #000c;
 }
+#editor-division-menu:empty { display: none; }
 
-.organ-fab-form {
+.division-add-group { display: flex; flex-direction: column; }
+.division-add-group .organ-stop-group-title {
+  padding: 7px 12px 3px;
+}
+.division-add-group + .division-add-group { margin-top: 4px; }
+
+.editor-add-form {
   display: flex;
   flex-direction: column;
   gap: 9px;
@@ -1081,7 +1060,7 @@ input[type="range"]:hover::-webkit-slider-thumb { filter: brightness(1.15); }
   background: #26282b;
   box-shadow: var(--bevel), 0 12px 32px #000c;
 }
-.organ-fab-form input[type="text"] {
+.editor-add-form input[type="text"] {
   width: 100%;
   padding: 6px 9px;
   border: 1px solid #000000d0;
@@ -1092,25 +1071,24 @@ input[type="range"]:hover::-webkit-slider-thumb { filter: brightness(1.15); }
   font-family: var(--sans);
   font-size: 12px;
 }
-.organ-fab-form input[type="text"]:focus { outline: none; border-color: var(--accent); }
-.organ-fab-form-row { display: flex; align-items: center; gap: 10px; }
-.organ-fab-form-row label {
+.editor-add-form input[type="text"]:focus { outline: none; border-color: var(--accent); }
+.editor-add-form-row { display: flex; align-items: center; gap: 10px; }
+.editor-add-form-row label {
   display: flex;
   align-items: center;
   gap: 6px;
   font-size: 10.5px;
   color: var(--text-dim);
 }
-.organ-fab-form-row input[type="number"] { width: 52px; }
-.organ-fab-form-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.editor-add-form-row input[type="number"] { width: 52px; }
+.editor-add-form-actions { display: flex; justify-content: flex-end; gap: 8px; }
 
-.organ-fab-browse { display: flex; flex-direction: column; gap: 6px; }
-.organ-fab-browse-head { display: flex; align-items: center; gap: 8px; }
-.organ-fab-browse-head .ghost { padding: 3px 8px; font-size: 9px; }
-.organ-fab-browse #organ-fab-browse-list,
-.organ-fab-browse-list { max-height: 130px; }
+.editor-add-browse { display: flex; flex-direction: column; gap: 6px; }
+.editor-add-browse-head { display: flex; align-items: center; gap: 8px; }
+.editor-add-browse-head .ghost { padding: 3px 8px; font-size: 9px; }
+.editor-add-browse .picker-browse-list { max-height: 130px; }
 
-/* an empty organ leans on the FAB to say what to do next */
+/* an empty organ says what to do next */
 .organ-hint {
   margin: 4px 0;
   padding: 20px 14px;
@@ -1672,20 +1650,77 @@ input[type="range"]:hover::-webkit-slider-thumb { filter: brightness(1.15); }
 /* ---- frame ----------------------------------------------------------- */
 
 .console {
-  display: grid;
-  grid-template-columns: minmax(170px, auto) 1fr minmax(170px, auto);
-  gap: 18px;
-  padding: 20px 22px 26px;
-  /* fill the window below the bar and seat the jambs and manuals mid-case
-     instead of leaving a bare apron under the pedalboard */
+  position: relative; /* seats the empty-organ card */
   min-height: calc(100vh - var(--bar-h));
-  align-items: center;
-  justify-items: center;
 }
+
+/* ---- the panel canvas ------------------------------------------------ */
+/* The console is a canvas of absolutely-placed panels; console.js seats
+   them from the organ file's [console.layout] or the default layout.
+   Locked, a panel is invisible chrome around the same old controls;
+   unlocked, each grows a slim DAW-style title bar to move it by. */
+
+.console-canvas {
+  position: relative;
+  height: calc(100vh - var(--bar-h));
+  overflow: hidden;
+}
+
+.panel {
+  position: absolute;
+  left: 24px;
+  top: 24px;
+}
+
+.panel-chrome {
+  display: none;
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -19px;
+  height: 19px;
+  align-items: center;
+  padding: 0 8px;
+  border: 1px solid #000000d0;
+  border-bottom: 0;
+  border-radius: 4px 4px 0 0;
+  background: linear-gradient(180deg, #383b3f, #2c2f32);
+  box-shadow: var(--bevel);
+  cursor: grab;
+  user-select: none;
+}
+.panel-chrome:active { cursor: grabbing; }
+
+.panel-chrome-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 8.5px;
+  font-weight: 700;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  white-space: nowrap;
+  color: var(--text-dim);
+}
+
+body.editing .panel-chrome { display: flex; }
+body.editing .panel {
+  outline: 1px dashed #ffffff24;
+  outline-offset: 1px;
+}
+body.editing .panel:hover { outline-color: #ffffff45; }
+.panel.dragging {
+  z-index: 40;
+  outline: 1px dashed var(--accent) !important;
+}
+
+/* An empty division is a drop target and a place to add stops — it only
+   earns screen space while the editor is open. */
+.panel-jamb.empty { display: none; }
+body.editing .panel-jamb.empty { display: block; }
 
 /* ---- stop jambs ------------------------------------------------------ */
 
-.jamb {
+.panel-jamb .panel-body {
   display: flex;
   gap: 14px;
   padding: 14px 12px 16px;
@@ -1700,7 +1735,33 @@ input[type="range"]:hover::-webkit-slider-thumb { filter: brightness(1.15); }
   flex-direction: column;
   align-items: center;
   gap: 10px;
+  min-width: 88px;
 }
+
+.division-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* the per-division add: stops from the sources, or a swell box */
+.division-add {
+  display: none;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 1px solid #000000d0;
+  border-radius: 50%;
+  cursor: pointer;
+  background: linear-gradient(180deg, #383b3f, #2c2f32);
+  box-shadow: var(--bevel);
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1;
+  margin-bottom: 7px; /* sit level with the h2 text, above its divider */
+}
+body.editing .division-add { display: block; }
+.division-add:hover { color: var(--accent); border-color: var(--accent); }
 
 .division h2 {
   margin: 0 0 2px;
@@ -1784,9 +1845,9 @@ input[type="range"]:hover::-webkit-slider-thumb { filter: brightness(1.15); }
 .coupler-rail {
   display: flex;
   justify-content: center;
+  align-items: center;
   gap: 6px;
   padding: 6px 8px;
-  margin-bottom: 14px;
   border-radius: 5px;
   background: var(--surface);
   border: 1px solid #000000d0;
@@ -1841,15 +1902,6 @@ input[type="range"]:hover::-webkit-slider-thumb { filter: brightness(1.15); }
 .rocker.cancel:hover .tab { color: var(--danger); }
 
 /* ---- keyboards -------------------------------------------------------- */
-
-.center { display: flex; flex-direction: column; align-items: center; }
-
-.manuals {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 6px;
-}
 
 .keyboard {
   position: relative; /* anchors the cheek's rename input, see editor.js */
@@ -1926,13 +1978,6 @@ input[type="range"]:hover::-webkit-slider-thumb { filter: brightness(1.15); }
 .keyboard.pedal .key.natural.held { background: var(--accent); }
 .keyboard.pedal .key.sharp { height: 55%; }
 
-.pedals {
-  display: flex;
-  align-items: flex-end;
-  gap: 22px;
-  margin-top: 18px;
-}
-
 /* ---- swell shoes: vertical faders ------------------------------------- */
 
 .shoes { display: flex; gap: 14px; }
@@ -1998,27 +2043,23 @@ input[type="range"]:hover::-webkit-slider-thumb { filter: brightness(1.15); }
    theme.js. Key geometry scales cleanly because every x position is
    derived from --nat-w. */
 
-body[data-density="compact"] .console { gap: 14px; padding: 14px 16px 18px; }
-body[data-density="compact"] .jamb { gap: 12px; padding: 12px 10px 14px; }
+body[data-density="compact"] .panel-jamb .panel-body { gap: 12px; padding: 12px 10px 14px; }
 body[data-density="compact"] .division { gap: 7px; }
 body[data-density="compact"] .knob { width: 78px; min-height: 46px; }
-body[data-density="compact"] .coupler-rail { margin-bottom: 12px; padding: 6px 10px; }
+body[data-density="compact"] .coupler-rail { padding: 6px 10px; }
 body[data-density="compact"] .rocker { min-width: 58px; height: 28px; }
 body[data-density="compact"] .keyboard.manual { --nat-w: 20px; --kb-h: 84px; --sharp-w: 11px; }
 body[data-density="compact"] .keyboard.pedal { --nat-w: 24px; --kb-h: 72px; --sharp-w: 13px; }
 body[data-density="compact"] .shoe-track { height: 108px; }
-body[data-density="compact"] .pedals { margin-top: 14px; }
 
-body[data-density="spacious"] .console { gap: 24px; padding: 26px 30px 34px; }
-body[data-density="spacious"] .jamb { gap: 20px; padding: 20px 18px 22px; }
+body[data-density="spacious"] .panel-jamb .panel-body { gap: 20px; padding: 20px 18px 22px; }
 body[data-density="spacious"] .division { gap: 13px; }
 body[data-density="spacious"] .knob { width: 98px; min-height: 58px; }
-body[data-density="spacious"] .coupler-rail { margin-bottom: 20px; padding: 10px 14px; }
+body[data-density="spacious"] .coupler-rail { padding: 10px 14px; }
 body[data-density="spacious"] .rocker { min-width: 70px; height: 36px; }
 body[data-density="spacious"] .keyboard.manual { --nat-w: 26px; --kb-h: 108px; --sharp-w: 15px; }
 body[data-density="spacious"] .keyboard.pedal { --nat-w: 30px; --kb-h: 94px; --sharp-w: 17px; }
 body[data-density="spacious"] .shoe-track { height: 146px; }
-body[data-density="spacious"] .pedals { margin-top: 22px; }
 
 /* organ-less: the loader is the whole interface */
 body.no-organ .console { visibility: hidden; }
@@ -2027,7 +2068,13 @@ body.no-organ .console { visibility: hidden; }
    keyboards to show, so a card takes the console's place rather than
    leaving a lone tremulant knob adrift on the background */
 .organ-empty-card {
-  grid-column: 1 / -1;
+  /* floats mid-case over the (empty) canvas, which stays live under it
+     so the double-click add gesture has somewhere to land */
+  position: absolute;
+  left: 50%;
+  top: 40%;
+  transform: translate(-50%, -50%);
+  z-index: 5;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -2073,17 +2120,13 @@ body.no-organ .console { visibility: hidden; }
 
 /* ---- the console editor: Max-patch style, unlockable right on the
    console -------------------------------------------------------------- */
-/* The FAB, the bin and the remove-confirm card reuse the exact classes
-   the old Preferences → Organ pane defined for them (`.organ-fab-dock`,
-   `.organ-bin`, `.organ-remove-confirm`, `.organ-drag-ghost`, and the
+/* The bin and the remove-confirm card reuse the exact classes the old
+   Preferences → Organ pane defined for them (`.organ-bin`,
+   `.organ-remove-confirm`, `.organ-drag-ghost`, and the
    `.organ-offerings*` family for the drawer) — those already carry the
    right panel chrome; only the positioning context changes, from a
    modal card to the viewport itself. */
 
-#editor-fab-dock {
-  position: fixed;
-  z-index: 45;
-}
 #editor-bin {
   position: fixed;
   left: 0;
@@ -2107,7 +2150,9 @@ body.no-organ .console { visibility: hidden; }
 }
 
 /* Always visible — dim when locked, that's the discoverability
-   affordance; lit like any engaged control once unlocked. */
+   affordance. Unlocked it says so with the open-shackle glyph and full
+   brightness, not a lit accent: editing is a mode, not an engaged
+   control. */
 .editor-lock {
   width: 34px;
   height: 34px;
@@ -2124,11 +2169,29 @@ body.no-organ .console { visibility: hidden; }
 .editor-lock:hover { opacity: 0.85; filter: brightness(1.1); }
 .editor-lock.on {
   opacity: 1;
-  background: linear-gradient(180deg, #ffffff26, #ffffff00 45%), var(--accent);
-  color: var(--accent-ink);
-  box-shadow: var(--bevel), 0 0 10px var(--accent-soft);
+  background: linear-gradient(180deg, #3c4045, #33363a);
+  color: var(--text);
 }
 .editor-lock-glyph { display: block; }
+
+/* what the unlocked canvas can do, quietly, above the padlock */
+.editor-hint {
+  position: fixed;
+  left: 16px;
+  bottom: 58px;
+  z-index: 47;
+  margin: 0;
+  padding: 6px 10px;
+  border: 1px solid #000000d0;
+  border-radius: 4px;
+  background: var(--surface-2);
+  box-shadow: var(--bevel);
+  font-size: 10px;
+  letter-spacing: 0.3px;
+  color: var(--text-dim);
+  max-width: 250px;
+  line-height: 1.6;
+}
 
 .editor-lock-note {
   max-width: 240px;
@@ -2173,7 +2236,10 @@ body.no-organ .console { visibility: hidden; }
   position: fixed;
   right: 0;
   top: 50%;
-  transform: translateY(-50%) rotate(180deg);
+  /* vertical-rl alone reads top-to-bottom with the letter tops toward
+     the screen edge — the right-edge convention. No 180° flip: that's
+     the hack for *left*-edge spines, and here it reads upside down. */
+  transform: translateY(-50%);
   writing-mode: vertical-rl;
   z-index: 43;
   padding: 16px 6px;

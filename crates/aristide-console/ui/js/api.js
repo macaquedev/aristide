@@ -129,6 +129,11 @@ export const commands = {
   // numeric id from snapshot.stops[], `enclosure` its name.
   organEnclosureAssign: (enclosure, stopId, inBox) =>
     `/api/organ/enclosure/assign?enclosure=${encodeURIComponent(enclosure)}&stop=${stopId}&in=${inBox ? 1 : 0}`,
+  // Where a console panel sits on the canvas, as fractions of its size.
+  // Cosmetic: written to the organ file but no rebuild. Panel ids are
+  // "keyboard:<manual>", "jamb:<manual>", "couplers", "shoes".
+  organPanelPlace: (panel, x, y) =>
+    `/api/organ/panel/place?panel=${encodeURIComponent(panel)}&x=${x.toFixed(4)}&y=${y.toFixed(4)}`,
   // Takes a coupler off the console (keep=0) or restores it (keep=1) —
   // distinct from the rail's own on/off, which only engages a coupler
   // that's already on the console.

@@ -298,27 +298,27 @@
 
   <main id="console" class="console">
     <div id="organ-empty-card" class="organ-empty-card hidden"></div>
-    <section id="jamb-left" class="jamb"></section>
-    <section id="console-center" class="center">
-      <div id="couplers" class="coupler-rail"></div>
-      <div id="manuals" class="manuals"></div>
-      <div id="pedals" class="pedals"></div>
-    </section>
-    <section id="jamb-right" class="jamb"></section>
+    <div id="console-canvas" class="console-canvas"></div>
   </main>
 
   <!-- The organ-structure editor: Max-MSP-style patch editing right on the
-       console, not a dialog. Fixed to the viewport rather than the console
-       grid, so none of it moves with density or scroll. Locked = today's
-       console; the padlock (also Ctrl+E) unlocks the FAB, the drawer tab
-       and plain-drag editing — ctrl-drag works either way. See editor.js. -->
+       console, not a dialog. The console is a canvas of panels (jambs,
+       keyboards, the coupler rail, the shoe rack); unlocked, panels move
+       by their title bars and double-clicking empty canvas adds to the
+       organ right there — ctrl reaches through the lock for all of it.
+       See editor.js. -->
   <div id="editor-lock-dock" class="editor-lock-dock">
     <p id="editor-lock-note" class="editor-lock-note hidden"></p>
     <button id="editor-lock" class="editor-lock" aria-pressed="false"
       aria-label="Unlock editing" data-tip="Unlock editing (Ctrl+E)">
-      <span class="editor-lock-glyph" aria-hidden="true">&#128274;</span>
+      <span class="editor-lock-glyph" id="editor-lock-glyph" aria-hidden="true">&#128274;</span>
     </button>
   </div>
+
+  <p id="editor-hint" class="editor-hint hidden">
+    double-click empty space to add &middot; drag a panel&rsquo;s title to
+    move it &middot; drag stops between divisions
+  </p>
 
   <p id="editor-status" class="editor-status hidden">
     <span class="spinner" aria-hidden="true"></span>
@@ -353,51 +353,58 @@
     </div>
   </div>
 
-  <div class="organ-fab-dock hidden" id="editor-fab-dock">
-    <div class="organ-fab-menu hidden" id="editor-fab-menu">
-      <button class="menu-item" id="editor-fab-add-manual"><span>Manual&hellip;</span></button>
-      <button class="menu-item" id="editor-fab-add-pedal"><span>Pedalboard&hellip;</span></button>
-      <button class="menu-item" id="editor-fab-add-enc"><span>Swell box&hellip;</span></button>
-      <button class="menu-item" id="editor-fab-add-source"><span>Sample set&hellip;</span></button>
+  <!-- The add popover: opened by double-clicking empty canvas (see
+       editor.js), anchored where the click landed so the new panel can
+       land there too. One child visible at a time. -->
+  <div class="editor-add hidden" id="editor-add">
+    <div class="editor-add-menu hidden" id="editor-add-menu">
+      <button class="menu-item" id="editor-add-manual"><span>Manual&hellip;</span></button>
+      <button class="menu-item" id="editor-add-pedal"><span>Pedalboard&hellip;</span></button>
+      <button class="menu-item" id="editor-add-enc"><span>Swell box&hellip;</span></button>
+      <button class="menu-item" id="editor-add-source"><span>Sample set&hellip;</span></button>
     </div>
-    <form class="organ-fab-form hidden" id="editor-fab-manual-form">
-      <input id="editor-fab-manual-name" type="text" placeholder="Name" autocomplete="off" spellcheck="false" />
-      <span class="organ-fab-form-row">
-        <label>Low <input id="editor-fab-manual-low" type="number" min="0" max="127" /></label>
-        <label>High <input id="editor-fab-manual-high" type="number" min="0" max="127" /></label>
+    <form class="editor-add-form hidden" id="editor-add-manual-form">
+      <input id="editor-add-manual-name" type="text" placeholder="Name" autocomplete="off" spellcheck="false" />
+      <span class="editor-add-form-row">
+        <label>Low <input id="editor-add-manual-low" type="number" min="0" max="127" /></label>
+        <label>High <input id="editor-add-manual-high" type="number" min="0" max="127" /></label>
       </span>
-      <span class="organ-fab-form-actions">
+      <span class="editor-add-form-actions">
         <button class="ghost" type="submit">Add</button>
-        <button class="ghost" type="button" id="editor-fab-manual-cancel">Cancel</button>
+        <button class="ghost" type="button" id="editor-add-manual-cancel">Cancel</button>
       </span>
     </form>
-    <form class="organ-fab-form hidden" id="editor-fab-enc-form">
-      <input id="editor-fab-enc-name" type="text" placeholder="Box name" autocomplete="off" spellcheck="false" />
-      <span class="organ-fab-form-actions">
+    <form class="editor-add-form hidden" id="editor-add-enc-form">
+      <input id="editor-add-enc-name" type="text" placeholder="Box name" autocomplete="off" spellcheck="false" />
+      <span class="editor-add-form-actions">
         <button class="ghost" type="submit">Add</button>
-        <button class="ghost" type="button" id="editor-fab-enc-cancel">Cancel</button>
+        <button class="ghost" type="button" id="editor-add-enc-cancel">Cancel</button>
       </span>
     </form>
-    <div class="organ-fab-form hidden" id="editor-fab-source-form">
-      <span class="organ-fab-form-row">
-        <input id="editor-fab-source-path" type="text" placeholder="/path/to/a/sample/set"
+    <div class="editor-add-form hidden" id="editor-add-source-form">
+      <span class="editor-add-form-row">
+        <input id="editor-add-source-path" type="text" placeholder="/path/to/a/sample/set"
           autocomplete="off" spellcheck="false" />
-        <button class="ghost" id="editor-fab-source-add">Add</button>
+        <button class="ghost" id="editor-add-source-add">Add</button>
       </span>
-      <div class="organ-fab-browse">
-        <div class="organ-fab-browse-head">
-          <button class="ghost" id="editor-fab-browse-up">&uarr; Up</button>
-          <span id="editor-fab-browse-dir" class="picker-dir"></span>
+      <div class="editor-add-browse">
+        <div class="editor-add-browse-head">
+          <button class="ghost" id="editor-add-browse-up">&uarr; Up</button>
+          <span id="editor-add-browse-dir" class="picker-dir"></span>
         </div>
-        <p class="organ-edit-error hidden" id="editor-fab-browse-error"></p>
-        <div id="editor-fab-browse-list" class="picker-browse-list"></div>
+        <p class="organ-edit-error hidden" id="editor-add-browse-error"></p>
+        <div id="editor-add-browse-list" class="picker-browse-list"></div>
       </div>
-      <span class="organ-fab-form-actions">
-        <button class="ghost" type="button" id="editor-fab-source-cancel">Close</button>
+      <span class="editor-add-form-actions">
+        <button class="ghost" type="button" id="editor-add-source-cancel">Close</button>
       </span>
     </div>
-    <button class="organ-fab" id="editor-fab" aria-haspopup="true" aria-label="Add to this organ">+</button>
   </div>
+
+  <!-- The per-division add popover, anchored to a jamb panel's + button:
+       "Add a stop" swaps the menu for a pick-list of what the sources
+       still offer. Contents are built by editor.js. -->
+  <div class="editor-add hidden" id="editor-division-menu"></div>
 
   <script type="module" src="js/main.js"></script>
 </body>
