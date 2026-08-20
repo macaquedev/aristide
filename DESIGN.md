@@ -193,14 +193,27 @@ it (comment-preserving), while plain sets keep wiring in the user config.
 Every organ IS a composite with an organ file (locked 2026-08-19): a GO/HW
 package is only ever a *source*, never the organ itself. Loading a raw set
 path adopts it — the library's organ file that already wraps the set is
-loaded instead when one exists, else a wrapper is created under the config
-`organs/` dir: the set's name, the set as its one source, the set's sidecar
-sections carried in verbatim (a composite is its own sidecar; adoption is
-proven byte-equivalent to the direct load by test), and any wiring the user
-config already held for that organ. Renames, wiring and every per-organ edit
-then have a durable home from the first load. The only un-adopted loads are
-multi-set CLI launches (the implicit combination, until saved) and the
-no-config-directory fallback.
+loaded instead when one exists, else one is created under the config
+`organs/` dir.
+
+Adoption writes an inventory, not a pointer (locked 2026-08-20, revising
+the above): the organ file *snapshots* the set's console — every manual
+declared with its name and compass, every stop an explicit `[[stop]]` pull
+(`manual`-filtered so same-named stops on different divisions stay distinct),
+every coupler a `[[couplers.define]]` route bundle — plus the set's sidecar
+sections verbatim and any wiring the user config already held. From then on
+the file is the sole authority on the instrument's shape; the set is
+consulted only for what the pulls read: ranks, pipes, samples and their
+recording-level facts (loop points, pitches — facts about the sounds, not
+opinions about the console). `layout = true` on the source keeps its
+windchest/enclosure numbering whole so `[tremulant] chests` etc. keep
+meaning what the set meant. Adoption is proven byte-equivalent to the
+direct load by test — but a later set update no longer flows through, by
+design: the organ cannot change shape behind the player's back, and every
+console-level fact is a line the editor (and the player) can change or
+delete. Renames, wiring and every per-organ edit have a durable home from
+the first load. The only un-adopted loads are multi-set CLI launches (the
+implicit combination, until saved) and the no-config-directory fallback.
 
 The console edits the instrument live, and every edit lands in its file:
 declared compasses (`[[manual]] low/high`), stops moved between manuals

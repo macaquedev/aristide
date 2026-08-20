@@ -136,9 +136,9 @@ impl MidiConfig {
             if def.sources.len() != 1 {
                 return false;
             }
-            let source = def.sources.values().next().expect("one source");
+            let source = def.sources.values().next().expect("one source").path();
             let resolved = if source.is_absolute() {
-                source.clone()
+                source.to_path_buf()
             } else {
                 candidate.parent().unwrap_or(Path::new("")).join(source)
             };
@@ -398,31 +398,95 @@ fn organ_file_path<'a>(dir: &Path, name: &'a str) -> Result<(&'a str, PathBuf), 
     Ok((name, path))
 }
 
-/// Wrap a sample set as an organ of its own: a composite file whose one
-/// source is the set, carrying the set's sidecar sections verbatim (a
-/// composite is its own sidecar, and the two files share those
-/// sections' schema) so the organ loads exactly as the set did, plus
-/// whatever `wiring` this machine already remembers for it — the file
-/// owns the wiring from here on, and adopting a set must not unwire it.
+/// Adopt a sample set as an organ of its own: a composite file that
+/// *inventories* the set — every manual declared with its compass,
+/// every stop an explicit pull, every coupler a `[[couplers.define]]`
+/// — so the file, not the set, is the instrument from here on. The set
+/// stays what the pulls read pipes and samples from (`layout = true`
+/// keeps its windchest and enclosure numbering whole); its opinions
+/// about the console are snapshotted here and never consulted again.
+/// The set's sidecar sections are carried verbatim (a composite is its
+/// own sidecar), plus whatever `wiring` this machine already remembers
+/// — the file owns the wiring from here on, and adopting a set must
+/// not unwire it. Proven byte-equivalent to the direct load by test.
 pub fn create_wrapper_organ(
     dir: &Path,
     name: &str,
     set: &Path,
+    organ: &aristide_model::Organ,
     wiring: Option<&OrganConfig>,
 ) -> Result<PathBuf, String> {
     let (name, path) = organ_file_path(dir, name)?;
     let mut doc = toml_edit::DocumentMut::new();
     doc["name"] = toml_edit::value(name);
     let mut sources = toml_edit::Table::new();
-    sources.insert("s1", toml_edit::value(set.to_string_lossy().as_ref()));
+    let mut source = toml_edit::InlineTable::new();
+    source.insert("path", set.to_string_lossy().as_ref().into());
+    source.insert("layout", true.into());
+    sources.insert("s1", toml_edit::value(source));
     doc["sources"] = toml_edit::Item::Table(sources);
+
+    let manual_name = |id: aristide_model::ManualId| {
+        organ
+            .manuals
+            .iter()
+            .find(|manual| manual.id == id)
+            .map(|manual| manual.name.as_str())
+    };
+
+    let mut manuals = toml_edit::ArrayOfTables::new();
+    for manual in &organ.manuals {
+        let mut table = toml_edit::Table::new();
+        table["name"] = toml_edit::value(manual.name.as_str());
+        table["low"] = toml_edit::value(manual.first_midi_note as i64);
+        table["high"] = toml_edit::value(
+            (manual.first_midi_note as i64 + manual.key_count as i64 - 1).clamp(0, 127),
+        );
+        manuals.push(table);
+    }
+    if !manuals.is_empty() {
+        doc["manual"] = toml_edit::Item::ArrayOfTables(manuals);
+    }
+
+    // One pull per stop, in the set's own order. Exact names match
+    // exactly (and all together): two same-named stops on one manual
+    // are one line pulling both, so the line is written once.
+    let mut stops = toml_edit::ArrayOfTables::new();
+    let mut written: std::collections::HashSet<(String, String)> = Default::default();
+    for stop in &organ.stops {
+        let Some(manual) = manual_name(stop.manual) else {
+            tracing::warn!(
+                "adoption: stop {:?} sits on a manual the set hasn't got — not inventoried",
+                stop.name
+            );
+            continue;
+        };
+        if !written.insert((manual.to_lowercase(), stop.name.to_lowercase())) {
+            continue;
+        }
+        let mut table = toml_edit::Table::new();
+        table["from"] = toml_edit::value("s1");
+        table["manual"] = toml_edit::value(manual);
+        table["stop"] = toml_edit::value(stop.name.as_str());
+        table["on"] = toml_edit::value(manual);
+        stops.push(table);
+    }
+    if !stops.is_empty() {
+        doc["stop"] = toml_edit::Item::ArrayOfTables(stops);
+    }
+
     let sidecar_path = aristide_formats::sidecar::path_for(set);
     match std::fs::read_to_string(&sidecar_path) {
         Ok(text) => match text.parse::<toml_edit::DocumentMut>() {
             Ok(sidecar) => {
                 for (key, item) in sidecar.iter() {
-                    // A sidecar rename became this file's own name above.
-                    if key != "name" {
+                    // A sidecar rename became this file's own name
+                    // above; the structural keys are this file's own —
+                    // a sidecar has no business declaring them anyway.
+                    if !matches!(
+                        key,
+                        "name" | "sources" | "manual" | "division" | "stop" | "move"
+                    ) {
                         doc.insert(key, item.clone());
                     }
                 }
@@ -456,10 +520,78 @@ pub fn create_wrapper_organ(
             );
         }
     }
+
+    // The set's couplers, snapshotted as route definitions — ahead of
+    // any the sidecar defines, matching the order a direct load gives
+    // them (the set's own first, the player's custom ones after).
+    let mut defines = toml_edit::ArrayOfTables::new();
+    for coupler in &organ.couplers {
+        let mut routes = toml_edit::ArrayOfTables::new();
+        let mut sound = true;
+        for route in &coupler.routes {
+            let mut table = toml_edit::Table::new();
+            let Some(from) = manual_name(route.from_manual) else {
+                sound = false;
+                break;
+            };
+            table["from"] = toml_edit::value(from);
+            if let Some(target) = &route.target {
+                let Some(to) = manual_name(target.manual) else {
+                    sound = false;
+                    break;
+                };
+                table["to"] = toml_edit::value(to);
+                if target.key_shift != 0 {
+                    table["shift"] = toml_edit::value(target.key_shift as i64);
+                }
+                if let Some(repitch) = target.repitch {
+                    table["repitch"] = toml_edit::value(repitch);
+                }
+            }
+            if let Some(low) = route.low_key {
+                table["low"] = toml_edit::value(low as i64);
+            }
+            if let Some(high) = route.high_key {
+                table["high"] = toml_edit::value(high as i64);
+            }
+            if route.unison_off {
+                table["unison_off"] = toml_edit::value(true);
+            }
+            routes.push(table);
+        }
+        if !sound {
+            tracing::warn!(
+                "adoption: coupler {:?} routes to a manual the set hasn't got — not inventoried",
+                coupler.name
+            );
+            continue;
+        }
+        let mut table = toml_edit::Table::new();
+        table["name"] = toml_edit::value(coupler.name.as_str());
+        table["route"] = toml_edit::Item::ArrayOfTables(routes);
+        defines.push(table);
+    }
+    if !defines.is_empty() {
+        let couplers = doc
+            .entry("couplers")
+            .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+        let couplers = couplers
+            .as_table_mut()
+            .ok_or_else(|| "[couplers] is not a table".to_string())?;
+        couplers.set_implicit(true);
+        if let Some(existing) = couplers.get("define").and_then(|d| d.as_array_of_tables()) {
+            for table in existing.iter() {
+                defines.push(table.clone());
+            }
+        }
+        couplers["define"] = toml_edit::Item::ArrayOfTables(defines);
+    }
+
     let body = format!(
-        "# An Aristide organ, made from the sample set under [sources].\n\
-         # This file is the instrument: its name, wiring and settings\n\
-         # live here, not in the set.\n\
+        "# An Aristide organ, born from the sample set under [sources].\n\
+         # This file is the whole instrument — manuals, stops, couplers,\n\
+         # wiring and settings live here; the set only supplies pipes\n\
+         # and samples. Edit freely: the console writes back here too.\n\
          {doc}"
     );
     std::fs::write(&path, body).map_err(|err| format!("{}: {err}", path.display()))?;
@@ -909,6 +1041,45 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// A small instrument to inventory: two manuals, two stops, one
+    /// coupler — enough shape for adoption to write every section.
+    fn test_organ() -> aristide_model::Organ {
+        use aristide_model::{Coupler, Manual, ManualId, Organ, Stop, StopId};
+        Organ {
+            name: "Village".into(),
+            manuals: vec![
+                Manual {
+                    id: ManualId(0),
+                    name: "Pedal".into(),
+                    first_midi_note: 36,
+                    key_count: 32,
+                },
+                Manual {
+                    id: ManualId(1),
+                    name: "Great".into(),
+                    first_midi_note: 36,
+                    key_count: 61,
+                },
+            ],
+            stops: vec![
+                Stop {
+                    id: StopId(0),
+                    name: "Subbass 16".into(),
+                    manual: ManualId(0),
+                    ranks: Vec::new(),
+                },
+                Stop {
+                    id: StopId(1),
+                    name: "Montre 8".into(),
+                    manual: ManualId(1),
+                    ranks: Vec::new(),
+                },
+            ],
+            couplers: vec![Coupler::simple("Great to Pedal", ManualId(1), ManualId(0), 0)],
+            ..Default::default()
+        }
+    }
+
     /// Adopting a set makes a real organ file: the set as the one
     /// source, the sidecar's sections carried in (its rename becoming
     /// the file's own name, its relative reverb IR resolved — the file
@@ -933,7 +1104,7 @@ mod tests {
             .insert("Great".into(), vec![input("Test Keys", Some(1))]);
 
         let organs = dir.join("organs");
-        let path = create_wrapper_organ(&organs, "Chapelle", &set, Some(&wiring))
+        let path = create_wrapper_organ(&organs, "Chapelle", &set, &test_organ(), Some(&wiring))
             .expect("wrapper created");
         let text = std::fs::read_to_string(&path).expect("reads");
         assert!(text.contains("# gentle bellows"), "sidecar comments ride along");
@@ -941,7 +1112,19 @@ mod tests {
             toml::from_str(&text).expect("a valid organ file");
         assert_eq!(def.name, "Chapelle", "one name — the file's");
         assert_eq!(def.sources.len(), 1);
-        assert_eq!(def.sources.values().next().expect("source"), &set);
+        let source = def.sources.values().next().expect("source");
+        assert_eq!(source.path(), &set);
+        assert!(source.layout(), "the set's chest and box numbering is kept whole");
+        assert_eq!(def.manuals.len(), 2, "every manual declared");
+        assert_eq!(def.manuals[0].name, "Pedal");
+        assert_eq!(def.stops.len(), 2, "every stop an explicit pull");
+        assert_eq!(def.stops[1].stop, "Montre 8");
+        assert_eq!(def.stops[1].manual.as_deref(), Some("Great"));
+        assert_eq!(def.stops[1].on, "Great");
+        assert_eq!(def.couplers.define.len(), 1, "the set's couplers are route definitions now");
+        assert_eq!(def.couplers.define[0].name, "Great to Pedal");
+        assert_eq!(def.couplers.define[0].routes[0].from, "Great");
+        assert_eq!(def.couplers.define[0].routes[0].to.as_deref(), Some("Pedal"));
         assert_eq!(def.wind.sag_cents, 3.0, "engine settings carried in");
         assert_eq!(
             std::path::Path::new(&def.reverb.ir),
@@ -954,7 +1137,7 @@ mod tests {
         // A set with no sidecar wraps to just a name and a source.
         let bare_set = dir.join("bare.organ");
         std::fs::write(&bare_set, "[Organ]").expect("fixture set");
-        let bare = create_wrapper_organ(&organs, "Bare", &bare_set, None)
+        let bare = create_wrapper_organ(&organs, "Bare", &bare_set, &test_organ(), None)
             .expect("wrapper created");
         let def: aristide_formats::instrument::Definition =
             toml::from_str(&std::fs::read_to_string(&bare).expect("reads"))
@@ -975,7 +1158,8 @@ mod tests {
         let set = dir.join("village.organ");
         std::fs::write(&set, "[Organ]").expect("fixture set");
         let canonical = set.canonicalize().expect("canonicalizes");
-        let wrapper = create_wrapper_organ(&dir.join("organs"), "Chapelle", &canonical, None)
+        let wrapper =
+            create_wrapper_organ(&dir.join("organs"), "Chapelle", &canonical, &test_organ(), None)
             .expect("wrapper created");
         // Distractors: a multi-source composite and a plain set entry.
         let combo = dir.join("combo.toml");

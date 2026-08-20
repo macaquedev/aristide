@@ -604,10 +604,12 @@ mod tests {
         let direct =
             prepare(std::slice::from_ref(&demo), &[], 48_000.0, &|_| {}).expect("direct load");
         let canonical = demo.canonicalize().expect("demo canonicalizes");
+        let organ = load_organ(&canonical).expect("demo parses");
         let wrapper = crate::config::create_wrapper_organ(
             &dir,
             direct.console.organ_name(),
             &canonical,
+            &organ,
             None,
         )
         .expect("wrapper created");

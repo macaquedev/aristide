@@ -2008,7 +2008,7 @@ fn adopt_set(
         .midi_config
         .organ(&name)
         .cloned();
-    match config::create_wrapper_organ(&dir, &name, &canonical, wiring.as_ref()) {
+    match config::create_wrapper_organ(&dir, &name, &canonical, &organ, wiring.as_ref()) {
         Ok(path) => {
             tracing::info!("organ file created: {}", path.display());
             let mut state = state.lock().expect("state poisoned");

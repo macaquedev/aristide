@@ -87,9 +87,9 @@ fn invalid(message: impl Into<String>) -> InstrumentError {
 #[serde(deny_unknown_fields)]
 pub struct Definition {
     pub name: String,
-    /// Alias → path of a source set, relative to this file.
+    /// Alias → source set, relative to this file.
     #[serde(default)]
-    pub sources: BTreeMap<String, PathBuf>,
+    pub sources: BTreeMap<String, SourceDef>,
     #[serde(default, rename = "manual")]
     pub manuals: Vec<ManualDef>,
     #[serde(default, rename = "division")]
@@ -116,6 +116,42 @@ pub struct Definition {
     pub enclosures: sidecar::EnclosuresConfig,
     #[serde(default)]
     pub couplers: sidecar::CouplersConfig,
+}
+
+/// One `[sources]` entry: a bare path, or a table adding options.
+///
+/// `layout = true` registers the source's windchests and enclosures up
+/// front, whole and in the source's own order, even when the pulls are
+/// selective — so chest numbers (`[tremulant] chests`…) and enclosure
+/// order keep meaning exactly what they mean in the source. Adoption
+/// writes it, which is what keeps an inventory of per-stop pulls
+/// loading identically to the set itself. Without it, selective pulls
+/// carry only the chests and boxes their pipes actually touch.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum SourceDef {
+    Path(PathBuf),
+    Detailed {
+        path: PathBuf,
+        #[serde(default)]
+        layout: bool,
+    },
+}
+
+impl SourceDef {
+    pub fn path(&self) -> &Path {
+        match self {
+            SourceDef::Path(path) => path,
+            SourceDef::Detailed { path, .. } => path,
+        }
+    }
+
+    pub fn layout(&self) -> bool {
+        match self {
+            SourceDef::Path(_) => false,
+            SourceDef::Detailed { layout, .. } => *layout,
+        }
+    }
 }
 
 /// A manual declared by the composite. Compass is optional: omitted,
@@ -163,6 +199,10 @@ pub struct DivisionPull {
 #[serde(deny_unknown_fields)]
 pub struct StopPull {
     pub from: String,
+    /// Restrict the stop pattern to one source manual's stops — two
+    /// divisions routinely both have a "Bourdon 8", and an inventory
+    /// must be able to mean exactly one of them.
+    pub manual: Option<String>,
     pub stop: String,
     pub on: String,
     /// New console name; only applied when the pattern matched exactly
@@ -232,7 +272,9 @@ impl Definition {
     }
 
     /// Aliases a pull actually names; with no pulls at all, every
-    /// source contributes everything, so all of them.
+    /// source contributes everything, so all of them. A `layout = true`
+    /// source is used by definition — its chests and boxes shape the
+    /// instrument even before anything is pulled from it.
     fn used_sources(&self) -> HashSet<&str> {
         if self.divisions.is_empty() && self.stops.is_empty() {
             self.sources.keys().map(String::as_str).collect()
@@ -241,6 +283,12 @@ impl Definition {
                 .iter()
                 .map(|d| d.from.as_str())
                 .chain(self.stops.iter().map(|s| s.from.as_str()))
+                .chain(
+                    self.sources
+                        .iter()
+                        .filter(|(_, source)| source.layout())
+                        .map(|(alias, _)| alias.as_str()),
+                )
                 .collect()
         }
     }
@@ -290,13 +338,14 @@ pub fn load(path: &Path) -> Result<Assembled, InstrumentError> {
     let used = def.used_sources();
     let mut sources = Vec::new();
     let mut warnings = Vec::new();
-    for (alias, source_path) in &def.sources {
+    for (alias, source) in &def.sources {
         if !used.contains(alias.as_str()) {
             warnings.push(format!("source {alias:?} is never used — not loaded"));
             continue;
         }
+        let source_path = source.path();
         let resolved = if source_path.is_absolute() {
-            source_path.clone()
+            source_path.to_path_buf()
         } else {
             dir.join(source_path)
         };
@@ -398,6 +447,27 @@ pub fn assemble(
             }
         }
     } else {
+        // Layout sources first: their chests and boxes register whole,
+        // in the source's own order, before any pull touches them —
+        // the same up-front pass the implicit branch does, so numbering
+        // survives selective pulls.
+        for (alias, source) in &def.sources {
+            if !source.layout() {
+                continue;
+            }
+            let Ok(source_idx) = assembly.source(alias) else {
+                continue; // not loaded (unreadable earlier, already reported)
+            };
+            let organ = &sources[source_idx].1;
+            for enclosure in 0..organ.enclosures.len() as u32 {
+                assembly.enclosure_index(source_idx, enclosure);
+            }
+            let mut numbers: Vec<u32> = organ.windchests.iter().map(|c| c.number).collect();
+            numbers.sort_unstable();
+            for number in numbers {
+                assembly.chest_number(source_idx, number);
+            }
+        }
         for pull in &def.divisions {
             let source_idx = assembly.source(&pull.from)?;
             let organ = &sources[source_idx].1;
@@ -416,8 +486,42 @@ pub fn assemble(
         for pull in &def.stops {
             let source_idx = assembly.source(&pull.from)?;
             let organ = &sources[source_idx].1;
-            let names: Vec<&str> = organ.stops.iter().map(|s| s.name.as_str()).collect();
-            let matches = sidecar::match_names(&names, &pull.stop);
+            // A `manual` filter narrows the candidates to one source
+            // division's stops before the name pattern runs.
+            let candidates: Vec<usize> = match &pull.manual {
+                Some(pattern) => {
+                    let manual_names: Vec<&str> =
+                        organ.manuals.iter().map(|m| m.name.as_str()).collect();
+                    let manuals: HashSet<ManualId> =
+                        sidecar::match_names(&manual_names, pattern)
+                            .into_iter()
+                            .map(|index| organ.manuals[index].id)
+                            .collect();
+                    if manuals.is_empty() {
+                        assembly.warnings.push(format!(
+                            "stop {:?}: {:?} has no manual {pattern:?} — skipped",
+                            pull.stop, pull.from
+                        ));
+                        continue;
+                    }
+                    organ
+                        .stops
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, stop)| manuals.contains(&stop.manual))
+                        .map(|(index, _)| index)
+                        .collect()
+                }
+                None => (0..organ.stops.len()).collect(),
+            };
+            let names: Vec<&str> = candidates
+                .iter()
+                .map(|&index| organ.stops[index].name.as_str())
+                .collect();
+            let matches: Vec<usize> = sidecar::match_names(&names, &pull.stop)
+                .into_iter()
+                .map(|at| candidates[at])
+                .collect();
             if matches.is_empty() {
                 assembly.warnings.push(format!(
                     "stop {:?}: {:?} has no such stop — skipped",
@@ -1063,6 +1167,7 @@ mod tests {
         definition.manuals = vec![manual("Solo", Some(48), Some(96))];
         definition.stops = vec![StopPull {
             from: "A".into(),
+            manual: None,
             stop: "Principal 8".into(),
             on: "Solo".into(),
             rename: Some("Montre 8".into()),
@@ -1092,6 +1197,7 @@ mod tests {
         definition.manuals = vec![manual("Solo", None, None)];
         definition.stops = vec![StopPull {
             from: "A".into(),
+            manual: None,
             stop: "Hautbois 8".into(),
             on: "Solo".into(),
             rename: None,
@@ -1122,6 +1228,7 @@ mod tests {
         definition.manuals = vec![manual("Solo", None, None)];
         definition.stops = vec![StopPull {
             from: "A".into(),
+            manual: None,
             stop: "Hautbois 8".into(),
             on: "Solo".into(),
             rename: None,
@@ -1174,6 +1281,7 @@ mod tests {
         let mut definition = def("Broken");
         definition.stops = vec![StopPull {
             from: "nope".into(),
+            manual: None,
             stop: "Principal 8".into(),
             on: "Great".into(),
             rename: None,
@@ -1182,6 +1290,7 @@ mod tests {
         let mut definition = def("Broken too");
         definition.stops = vec![StopPull {
             from: "A".into(),
+            manual: None,
             stop: "Principal 8".into(),
             on: "Choir".into(),
             rename: None,
