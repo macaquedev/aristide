@@ -423,6 +423,27 @@ fn respond(
                 _ => bad_request("missing enclosure/stop/in"),
             }
         }
+        // Move a console panel on the canvas: `x`/`y` are normalized
+        // fractions, clamped rather than refused. Cosmetic — this
+        // writes the file but, unlike the edits above, never queues a
+        // rebuild.
+        (Method::Post, "/api/organ/panel/place") => {
+            let mut state = state.lock().expect("state poisoned");
+            if state.loading.is_some() || state.pending_load.is_some() {
+                return bad_request("an organ is already loading");
+            }
+            match (
+                param(query, "panel").map(unescape),
+                param(query, "x").and_then(|v| v.parse::<f32>().ok()),
+                param(query, "y").and_then(|v| v.parse::<f32>().ok()),
+            ) {
+                (Some(panel), Some(x), Some(y)) => match state.place_panel(&panel, x, y) {
+                    Ok(()) => json(state_json_locked(&state)),
+                    Err(err) => bad_request(&err),
+                },
+                _ => bad_request("missing panel/x/y"),
+            }
+        }
         // What every source of this organ offers, for the pane's
         // source browser: manuals, stops, and what is already pulled.
         // Sources are parsed on demand (an ODF parse, no samples).
@@ -1263,6 +1284,21 @@ fn state_json_locked(state: &State) -> String {
             ));
         }
         out.push(']');
+        // Only panels a player has explicitly placed; anything absent
+        // auto-layouts on the canvas.
+        out.push_str(",\"layout\":{");
+        for (index, (panel, pos)) in state.layout.iter().enumerate() {
+            if index > 0 {
+                out.push(',');
+            }
+            out.push_str(&format!(
+                "{}:{{\"x\":{},\"y\":{}}}",
+                json_string(panel),
+                pos.x,
+                pos.y
+            ));
+        }
+        out.push('}');
     }
     // How this instrument was put together: the setup dialog opens on
     // `implicit` (combined on the CLI, nothing on disk yet), the Organ
@@ -1590,6 +1626,7 @@ mod tests {
             pending_load: None,
             loading: None,
             load_error: None,
+            layout: Default::default(),
         }));
         // As the server does once before it opens any device: routing,
         // bindings and the computer keyboard all come from this.
@@ -2117,6 +2154,168 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Panel placement (`/api/organ/panel/place`) is cosmetic console
+    /// geometry, not organ structure: it writes `[console.layout]` and
+    /// updates the snapshot, but — unlike every editor above — never
+    /// queues a rebuild. Manual renames/removals carry a placed panel's
+    /// key along or drop it.
+    #[test]
+    fn panel_placement_persists_without_reloading() {
+        let Some(state) = demo_state() else { return };
+
+        // No organ at all: refused outright.
+        let none = tone_state();
+        let no_organ = respond(
+            &none,
+            &Method::Post,
+            "/api/organ/panel/place?panel=shoes&x=0&y=0",
+        );
+        assert_eq!(no_organ.status_code().0, 400);
+
+        // An organ that isn't saved as a file yet (the fixture's
+        // `demo_state` never sets `composite_path`): refused the same
+        // way every other structural editor is.
+        let implicit = respond(
+            &state,
+            &Method::Post,
+            "/api/organ/panel/place?panel=shoes&x=0&y=0",
+        );
+        assert_eq!(implicit.status_code().0, 400);
+
+        let demo = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testsets/grandorgue-demo/demo.organ");
+        let dir = std::env::temp_dir().join("aristide-panel-place-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let organ = aristide_formats::grandorgue::load(&demo).expect("demo parses").organ;
+        let canonical = demo.canonicalize().expect("canonicalizes");
+        let file =
+            crate::config::create_wrapper_organ(&dir, "Panel Test", &canonical, &organ, None)
+                .expect("inventory written");
+        state.lock().expect("state").composite_path = Some(file.clone());
+
+        // Place a keyboard panel: 200, the snapshot carries it, the
+        // file on disk has the line — and nothing was queued for
+        // reload, unlike every structural edit.
+        let ok = respond(
+            &state,
+            &Method::Post,
+            "/api/organ/panel/place?panel=keyboard%3AFirst%20Manual&x=0.4375&y=0.3125",
+        );
+        assert_eq!(ok.status_code().0, 200);
+        assert!(
+            state.lock().expect("state").pending_load.is_none(),
+            "a cosmetic edit never queues a rebuild"
+        );
+        let value: serde_json::Value =
+            serde_json::from_str(&state_json(&state)).expect("valid JSON");
+        assert_eq!(value["layout"]["keyboard:First Manual"]["x"], 0.4375);
+        assert_eq!(value["layout"]["keyboard:First Manual"]["y"], 0.3125);
+        let text = std::fs::read_to_string(&file).expect("reads");
+        assert!(text.contains("[console.layout]"), "{text}");
+        assert!(text.contains("\"keyboard:First Manual\""), "{text}");
+        assert!(text.contains("0.4375") && text.contains("0.3125"), "{text}");
+
+        // Out-of-range coordinates are clamped, not refused.
+        let clamped = respond(
+            &state,
+            &Method::Post,
+            "/api/organ/panel/place?panel=shoes&x=-0.5&y=1.75",
+        );
+        assert_eq!(clamped.status_code().0, 200);
+        let value: serde_json::Value =
+            serde_json::from_str(&state_json(&state)).expect("valid JSON");
+        assert_eq!(value["layout"]["shoes"]["x"], 0.0);
+        assert_eq!(value["layout"]["shoes"]["y"], 1.0);
+
+        // Invalid panel ids are refused outright, nothing written.
+        let no_such_manual = respond(
+            &state,
+            &Method::Post,
+            "/api/organ/panel/place?panel=keyboard%3ANope&x=0&y=0",
+        );
+        assert_eq!(no_such_manual.status_code().0, 400);
+        let garbage = respond(
+            &state,
+            &Method::Post,
+            "/api/organ/panel/place?panel=garbage&x=0&y=0",
+        );
+        assert_eq!(garbage.status_code().0, 400);
+        assert!(
+            !std::fs::read_to_string(&file).expect("reads").contains("Nope"),
+            "the refused edit never touched the file"
+        );
+
+        // Placing on a manual's jamb too, then renaming that manual:
+        // both its panel keys — keyboard and jamb — follow the rename,
+        // in the snapshot and in the file.
+        respond(
+            &state,
+            &Method::Post,
+            "/api/organ/panel/place?panel=jamb%3AFirst%20Manual&x=0.1&y=0.2",
+        );
+        let renamed = respond(
+            &state,
+            &Method::Post,
+            "/api/organ/manual/rename?manual=1&name=Grand",
+        );
+        assert_eq!(renamed.status_code().0, 200);
+        {
+            // No main loop runs in tests: a structural edit still
+            // queues a rebuild (unlike panel placement), so it must be
+            // cleared before the next editor call is allowed.
+            let mut state = state.lock().expect("state");
+            assert!(state.pending_load.is_some(), "the rename is structural");
+            state.pending_load = None;
+            state.loading = None;
+        }
+        let value: serde_json::Value =
+            serde_json::from_str(&state_json(&state)).expect("valid JSON");
+        let layout = value["layout"].as_object().expect("layout object");
+        assert!(layout.contains_key("keyboard:Grand"), "{layout:?}");
+        assert!(layout.contains_key("jamb:Grand"), "{layout:?}");
+        assert!(
+            !layout.contains_key("keyboard:First Manual") && !layout.contains_key("jamb:First Manual"),
+            "the old keys are gone: {layout:?}"
+        );
+        let text = std::fs::read_to_string(&file).expect("reads");
+        assert!(text.contains("\"keyboard:Grand\""), "{text}");
+        assert!(text.contains("\"jamb:Grand\""), "{text}");
+
+        // Placing on, then removing, an unrelated manual drops just
+        // its own panel key.
+        respond(
+            &state,
+            &Method::Post,
+            "/api/organ/panel/place?panel=keyboard%3ASecond%20Manual&x=0.6&y=0.6",
+        );
+        let removed = respond(&state, &Method::Post, "/api/organ/manual/remove?manual=2");
+        assert_eq!(removed.status_code().0, 200);
+        {
+            let mut state = state.lock().expect("state");
+            assert!(state.pending_load.is_some());
+            state.pending_load = None;
+            state.loading = None;
+        }
+        let value: serde_json::Value =
+            serde_json::from_str(&state_json(&state)).expect("valid JSON");
+        let layout = value["layout"].as_object().expect("layout object");
+        assert!(
+            !layout.contains_key("keyboard:Second Manual"),
+            "the removed manual's panel is gone: {layout:?}"
+        );
+        assert!(layout.contains_key("keyboard:Grand"), "the untouched manual survives");
+        assert!(layout.contains_key("shoes"));
+
+        // Reloading the file straight through the format layer (the
+        // test runs no main loop to reload the live console) carries
+        // exactly what survived: shoes, and Grand's two panels.
+        let reloaded = aristide_formats::instrument::load(&file).expect("reloads");
+        let mut keys: Vec<&str> = reloaded.console_layout.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["jamb:Grand", "keyboard:Grand", "shoes"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Couplers reaching for pipes a division hasn't got is off, and
     /// switchable without editing the set.
     #[test]
@@ -2298,6 +2497,7 @@ mod tests {
             pending_load: None,
             loading: None,
             load_error: None,
+            layout: Default::default(),
         }))
     }
 

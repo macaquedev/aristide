@@ -124,6 +124,10 @@ pub struct Definition {
     pub enclosures: sidecar::EnclosuresConfig,
     #[serde(default)]
     pub couplers: sidecar::CouplersConfig,
+    /// Where the console's movable panels sit on the canvas — purely
+    /// cosmetic, never read by anything that assembles the instrument.
+    #[serde(default)]
+    pub console: ConsoleDef,
 }
 
 /// One `[sources]` entry: a bare path, or a table adding options.
@@ -279,6 +283,34 @@ pub struct ControlDef {
     pub manual: Option<String>,
 }
 
+/// The console canvas's own geometry: `[console.layout]` maps a panel
+/// id (`"keyboard:<manual>"`, `"jamb:<manual>"`, `"couplers"`,
+/// `"shoes"`) to where it sits. Cosmetic only — an organ with no
+/// `[console.layout]` at all, or one missing an entry, still loads and
+/// plays identically; the console just auto-lays-out whatever isn't
+/// placed.
+///
+/// ```toml
+/// [console.layout]
+/// "keyboard:Great" = { x = 0.42, y = 0.31 }
+/// "jamb:Great" = { x = 0.02, y = 0.2 }
+/// ```
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConsoleDef {
+    #[serde(default)]
+    pub layout: BTreeMap<String, PanelPos>,
+}
+
+/// One panel's top-left corner, as a fraction of the console canvas
+/// (0..1 on each axis).
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PanelPos {
+    pub x: f32,
+    pub y: f32,
+}
+
 impl Definition {
     /// Everything downstream of loading treats a composite exactly
     /// like a set + sidecar; this is that sidecar.
@@ -354,6 +386,11 @@ pub struct Assembled {
     /// Declared manuals that carry a tuning of their own. Parsing the
     /// temperament is the server's business — the format stays a name.
     pub manual_tuning: Vec<ManualTuningDef>,
+    /// The file's `[console.layout]`, verbatim — cosmetic console-canvas
+    /// positions, meaningful only when this definition is the organ's
+    /// own file (never merged from a source, unlike everything else
+    /// here).
+    pub console_layout: BTreeMap<String, PanelPos>,
     pub warnings: Vec<String>,
 }
 
@@ -641,6 +678,7 @@ pub fn assemble(
         stop_map: assembly.stop_map,
         division_pulls: assembly.division_pulls,
         manual_tuning,
+        console_layout: def.console.layout.clone(),
         warnings: assembly.warnings,
     })
 }
@@ -1648,6 +1686,30 @@ drop = ["Swell to Great"]
             [(1, Some("meantone".to_string()), Some(415.0), None)]
         );
         assert_eq!(built.sidecar.couplers.drop, ["Swell to Great"]);
+    }
+
+    /// `[console.layout]` is purely cosmetic console-canvas geometry:
+    /// it parses into `Definition.console.layout`, and a file without
+    /// the section at all still parses (the default is empty).
+    #[test]
+    fn console_layout_round_trips_and_is_optional() {
+        let text = r#"
+name = "Laid out"
+
+[console.layout]
+"keyboard:Great" = { x = 0.42, y = 0.31 }
+"jamb:Great" = { x = 0.02, y = 0.2 }
+couplers = { x = 0.5, y = 0.9 }
+"#;
+        let definition: Definition = toml::from_str(text).expect("parses");
+        assert_eq!(definition.console.layout.len(), 3);
+        let great_kb = definition.console.layout["keyboard:Great"];
+        assert_eq!((great_kb.x, great_kb.y), (0.42, 0.31));
+        let great_jamb = definition.console.layout["jamb:Great"];
+        assert_eq!((great_jamb.x, great_jamb.y), (0.02, 0.2));
+
+        let bare: Definition = toml::from_str("name = \"Bare\"\n").expect("parses");
+        assert!(bare.console.layout.is_empty());
     }
 
     #[test]

@@ -494,6 +494,13 @@ pub struct State {
     pub loading: Option<String>,
     /// Why the last load failed, kept until the next one starts.
     pub load_error: Option<String>,
+    /// Where the console's movable panels sit, by panel id
+    /// (`"keyboard:<manual>"`, `"jamb:<manual>"`, `"couplers"`,
+    /// `"shoes"`) — only the ones a player has explicitly placed.
+    /// Loaded from the organ file's `[console.layout]` and kept in
+    /// step with it; purely cosmetic, so editing it never rebuilds the
+    /// engine.
+    pub layout: std::collections::BTreeMap<String, instrument::PanelPos>,
 }
 
 /// One request to load an instrument, from the picker or the CLI.
@@ -1650,6 +1657,11 @@ impl State {
                 }
             }
         }
+        for prefix in ["keyboard", "jamb"] {
+            if let Some(pos) = self.layout.remove(&format!("{prefix}:{old}")) {
+                self.layout.insert(format!("{prefix}:{name}"), pos);
+            }
+        }
         self.persist();
         self.reload_organ_file(path);
         Ok(())
@@ -1675,6 +1687,9 @@ impl State {
                     .as_deref()
                     .is_some_and(|m| m.eq_ignore_ascii_case(name))
             });
+        }
+        for prefix in ["keyboard", "jamb"] {
+            self.layout.remove(&format!("{prefix}:{name}"));
         }
         self.persist();
         self.reload_organ_file(path);
@@ -1806,6 +1821,34 @@ impl State {
             ));
         }
         self.reload_organ_file(path);
+        Ok(())
+    }
+
+    /// Move a console panel to a spot on the canvas: `x`/`y` are
+    /// normalized fractions, clamped into `[0, 1]` and rounded to four
+    /// decimals before they're written. Cosmetic geometry only — unlike
+    /// every structural edit above, this never queues a rebuild; the
+    /// in-memory layout is updated directly instead.
+    pub fn place_panel(&mut self, panel: &str, x: f32, y: f32) -> Result<(), String> {
+        if !matches!(self.control, Control::Organ(_)) {
+            return Err("no organ is loaded".into());
+        }
+        let manual_names = self.manual_names();
+        let valid = matches!(panel, "couplers" | "shoes")
+            || ["keyboard:", "jamb:"].iter().any(|prefix| {
+                panel
+                    .strip_prefix(prefix)
+                    .is_some_and(|name| manual_names.iter().any(|existing| existing == name))
+            });
+        if !valid {
+            return Err(format!("{panel:?} is not a panel of this organ"));
+        }
+        let path = self.organ_file()?;
+        let round4 = |v: f32| (v.clamp(0.0, 1.0) * 10_000.0).round() / 10_000.0;
+        let (x, y) = (round4(x), round4(y));
+        config::write_composite_panel(&path, panel, x, y)?;
+        self.layout
+            .insert(panel.to_string(), instrument::PanelPos { x, y });
         Ok(())
     }
 
@@ -1979,6 +2022,7 @@ fn main() -> Result<()> {
         loading: pending_load.as_ref().map(|_| "loading…".to_string()),
         pending_load,
         load_error: None,
+        layout: Default::default(),
     }));
     // Assignments exist before any hardware does: the computer
     // keyboard and every binding are live from the first note.
@@ -2294,6 +2338,7 @@ fn perform_load(
         composite,
         suggested_channels,
         setup,
+        layout,
     } = load::prepare(&request.paths, &request.stops, audio.sample_rate, &progress)?;
 
     // Fault every sample page in NOW; doing it lazily means page faults
@@ -2402,6 +2447,7 @@ fn perform_load(
     state.composite_path = composite.map(|(path, _)| path);
     state.setup = setup;
     state.compass_overrides = Vec::new();
+    state.layout = layout;
     state.learn = None;
     state.control_learn = None;
     state.pending = None;
@@ -2950,6 +2996,7 @@ mod tests {
             pending_load: None,
             loading: None,
             load_error: None,
+            layout: Default::default(),
         }));
         // Everything downstream reads the resolved tables, exactly as
         // the server does once before it opens any device.

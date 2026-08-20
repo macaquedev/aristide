@@ -32,6 +32,9 @@ pub struct PreparedInstrument {
     pub composite: Option<(PathBuf, instrument::MidiDef)>,
     pub suggested_channels: Vec<Option<u8>>,
     pub setup: Setup,
+    /// The organ file's `[console.layout]` — empty unless it is a
+    /// composite loaded alone, same condition as `composite` above.
+    pub layout: std::collections::BTreeMap<String, instrument::PanelPos>,
 }
 
 pub fn load_organ(path: &Path) -> Result<Organ> {
@@ -177,6 +180,8 @@ pub fn prepare(
     let first_path = &paths[0];
     let mut composite_midi: Option<(PathBuf, instrument::MidiDef)> = None;
     let mut manual_tuning_defs: Vec<instrument::ManualTuningDef> = Vec::new();
+    let mut console_layout: std::collections::BTreeMap<String, instrument::PanelPos> =
+        std::collections::BTreeMap::new();
     let mut setup = Setup::default();
 
     // Every path is a source: a sample set with its sidecar, or a
@@ -208,6 +213,7 @@ pub fn prepare(
             if paths.len() == 1 {
                 composite_midi = Some((path.clone(), assembled.midi));
                 manual_tuning_defs = assembled.manual_tuning;
+                console_layout = assembled.console_layout;
             } else if !assembled.midi.inputs.is_empty()
                 || !assembled.midi.controls.is_empty()
                 || !assembled.manual_tuning.is_empty()
@@ -560,6 +566,7 @@ pub fn prepare(
         composite: composite_midi,
         suggested_channels: suggested,
         setup,
+        layout: console_layout,
     })
 }
 

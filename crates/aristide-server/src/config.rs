@@ -1105,6 +1105,13 @@ pub fn rename_composite_manual(path: &Path, from: &str, to: &str) -> Result<bool
             }
         }
     }
+    if let Some(layout) = console_layout_mut(&mut doc) {
+        for prefix in ["keyboard", "jamb"] {
+            if let Some(item) = layout.remove(&format!("{prefix}:{from}")) {
+                layout.insert(&format!("{prefix}:{to}"), item);
+            }
+        }
+    }
     write_atomically(path, doc.to_string())?;
     Ok(true)
 }
@@ -1165,6 +1172,16 @@ pub fn remove_composite_manual(path: &Path, name: &str) -> Result<bool, String> 
             if let Some(tables) = midi.get_mut(key).and_then(|i| i.as_array_of_tables_mut()) {
                 tables.retain(|table| !field_is(table, "manual", name));
             }
+        }
+    }
+    if let Some(layout) = console_layout_mut(&mut doc) {
+        for prefix in ["keyboard", "jamb"] {
+            layout.remove(&format!("{prefix}:{name}"));
+        }
+        if layout.is_empty()
+            && let Some(console) = doc.get_mut("console").and_then(|c| c.as_table_mut())
+        {
+            console.remove("layout");
         }
     }
     write_atomically(path, doc.to_string())?;
@@ -1397,6 +1414,46 @@ pub fn assign_composite_enclosure_stop(
     }
     write_atomically(path, doc.to_string())?;
     Ok(true)
+}
+
+/// Every `[console.layout]` entry, mutably. Missing sections yield
+/// nothing rather than creating one — cosmetic geometry is optional,
+/// so renaming/removing a manual before any panel was ever placed is a
+/// no-op here.
+fn console_layout_mut(doc: &mut toml_edit::DocumentMut) -> Option<&mut toml_edit::Table> {
+    doc.get_mut("console")
+        .and_then(|console| console.get_mut("layout"))
+        .and_then(|layout| layout.as_table_mut())
+}
+
+/// Upsert one console panel's canvas position: creates `[console.layout]`
+/// if the file doesn't have it yet, and writes (or replaces) the
+/// panel's quoted key inside it — `"keyboard:Great" = { x = .., y = .. }`.
+/// Purely cosmetic: unlike the structural editors above, nothing calls
+/// this expects a reload — the caller updates the in-memory snapshot
+/// itself.
+pub fn write_composite_panel(path: &Path, panel: &str, x: f32, y: f32) -> Result<(), String> {
+    let mut doc = composite_doc(path)?;
+    let console = doc
+        .entry("console")
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+    let Some(console) = console.as_table_mut() else {
+        return Err("[console] is not a table".into());
+    };
+    // Only "layout" lives under it so far; stay out of the way of a
+    // future `[console]` key of its own by not forcing a header here.
+    console.set_implicit(true);
+    let layout = console
+        .entry("layout")
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+    let Some(layout) = layout.as_table_mut() else {
+        return Err("[console.layout] is not a table".into());
+    };
+    let mut pos = toml_edit::InlineTable::new();
+    pos.insert("x", (x as f64).into());
+    pos.insert("y", (y as f64).into());
+    layout.insert(panel, toml_edit::Item::Value(toml_edit::Value::InlineTable(pos)));
+    write_atomically(path, doc.to_string())
 }
 
 /// Rename a sample-set organ without touching the set: the name goes
