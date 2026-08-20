@@ -31,11 +31,17 @@ function splitLabel(name) {
 export class Console {
   /// `openPreferences(tab)` is how the console reaches the settings that
   /// no longer live on the bar itself — the tuning readout is a button
-  /// onto its own preferences tab.
-  constructor(root, send, openPreferences) {
+  /// onto its own preferences tab. `enterEditMode()` is what an empty
+  /// organ's card offers instead: straight into the editor, no dialog.
+  /// `decorate` is set by main.js after construction (see editor.js) and
+  /// called at the end of every structural `build()` — Console builds
+  /// the DOM, the editor only ever decorates what's already there.
+  constructor(root, send, openPreferences, enterEditMode) {
     this.root = root;
     this.send = send;
     this.openPreferences = openPreferences;
+    this.enterEditMode = enterEditMode;
+    this.decorate = null;
     this.signature = null;
     this.dragging = new Set(); // control ids the pointer currently owns
     this.el = {
@@ -97,12 +103,14 @@ export class Console {
     this.el.emptyCard.classList.toggle("hidden", !empty);
     if (empty) {
       this.buildEmptyCard(snapshot);
+      this.decorate?.(snapshot);
       return;
     }
     this.buildJambs(snapshot);
     this.buildCouplers(snapshot);
     this.buildKeyboards(snapshot);
     this.fitLabels();
+    this.decorate?.(snapshot);
   }
 
   buildEmptyCard(snapshot) {
@@ -110,11 +118,11 @@ export class Console {
     const title = document.createElement("h2");
     title.textContent = snapshot.organ ?? "Untitled organ";
     const note = document.createElement("p");
-    note.textContent = "An empty organ — build it in Preferences → Organ.";
+    note.textContent = "An empty organ — unlock editing and build it right here.";
     const open = document.createElement("button");
     open.type = "button";
-    open.textContent = "Open Preferences";
-    open.addEventListener("click", () => this.openPreferences("organ"));
+    open.textContent = "Unlock and build";
+    open.addEventListener("click", () => this.enterEditMode());
     this.el.emptyCard.append(title, note, open);
   }
 

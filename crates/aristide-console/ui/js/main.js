@@ -1,6 +1,7 @@
 import { resolveBase, connect, commands } from "./api.js";
 import { ConflictDialog } from "./conflict.js";
 import { Console } from "./console.js";
+import { Editor } from "./editor.js";
 import { applyHarnessHooks } from "./harness-hooks.js";
 import { PianoKeys } from "./keys.js";
 import { MenuBar } from "./menu.js";
@@ -15,14 +16,16 @@ let send;
 let snapshot = {}; // the latest state, for menus that ask what is true now
 const prefs = new Preferences(document, base, (query) => send(query));
 const picker = new Picker(document, base, (query) => send(query));
-const view = new Console(document, (query) => send(query), (tab) => prefs.open(tab));
+const editor = new Editor(document, base, (query) => send(query));
+const view = new Console(document, (query) => send(query), (tab) => prefs.open(tab), () => editor.unlock());
+view.decorate = (snapshot) => editor.decorateConsole(snapshot);
 const keys = new PianoKeys(document, (query) => send(query));
 const conflict = new ConflictDialog(document, (query) => send(query));
 
 // See harness-hooks.js: a handful of `?param` switches the screenshot
 // script uses to reach states a static screenshot can't drive to itself.
 // Inert without those params.
-applyHarnessHooks({ prefs });
+applyHarnessHooks({ prefs, editor });
 
 function fullscreen() {
   if (document.fullscreenElement) document.exitFullscreen();
@@ -153,6 +156,7 @@ send = connect(
     prefs.update(snapshot);
     picker.update(snapshot);
     conflict.update(snapshot);
+    editor.update(snapshot);
   },
   (message) => view.offline(message),
 );

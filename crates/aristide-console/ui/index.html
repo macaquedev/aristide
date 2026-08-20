@@ -54,6 +54,12 @@
           <div class="pane-head">
             <h2>Instrument</h2>
           </div>
+          <p class="pane-note">
+            Stops, manuals, sample sets and swell boxes are edited on the
+            console itself, patch-style — unlock it with the padlock
+            (bottom-left, or Ctrl+E) or ctrl-drag right through the lock.
+            This pane keeps the things that are settings, not structure.
+          </p>
           <p class="pane-warn hidden" id="organ-implicit-note">
             This instrument was combined ad hoc from the sets given on the
             command line and doesn't live in a file of its own yet. Give a
@@ -64,7 +70,6 @@
             <span class="spinner" aria-hidden="true"></span>
             <span id="organ-loading-text"></span>
           </p>
-          <p class="organ-edit-error hidden" id="organ-edit-error"></p>
           <div id="organ-summary" class="organ-summary"></div>
           <div id="organ-save" class="organ-save hidden">
             <label class="settings-row" id="organ-save-row">
@@ -84,35 +89,6 @@
           </p>
           <div id="organ-compass" class="organ-compass"></div>
 
-          <h2>Stops</h2>
-          <p class="pane-note">
-            Grouped by the manual their division plays from, in the order
-            the organ keeps them. Double-click a manual's name (or its
-            pencil) to rename it. Ctrl-drag a stop onto another manual to
-            move it, or onto the bin to drop it from the organ; ctrl-drag
-            a manual's header to reorder the manuals or to remove one.
-            The dropdown on a stop works the same without a mouse that
-            can drag.
-          </p>
-          <div id="organ-stops" class="organ-stops"></div>
-
-          <h2>Swell boxes</h2>
-          <p class="pane-note">
-            Every stop a box encloses, drawn from whichever manual it
-            actually lives on. Ctrl-drag a stop from a manual above into a
-            box to enclose it; ctrl-drag it (or press its &times;) to take
-            it back out. Ctrl-drag a box's own header to the bin to remove
-            the box — its stops stay, just unenclosed.
-          </p>
-          <div id="organ-enclosures" class="organ-stops"></div>
-
-          <h2 id="organ-offerings-heading" class="hidden">Sources</h2>
-          <p class="pane-note hidden" id="organ-offerings-note">
-            Everything each source offers this organ. Ctrl-drag a stop, or
-            a whole division, onto a manual above to pull it in.
-          </p>
-          <div id="organ-offerings" class="organ-offerings hidden"></div>
-
           <h2>Couplers</h2>
           <p class="pane-note">
             Unchecking takes a coupler off the console without deleting
@@ -122,74 +98,6 @@
           </p>
           <div id="organ-couplers" class="organ-couplers"></div>
         </section>
-
-        <!-- Positioned against the dialog card, not the scrolling Organ
-             pane above: a FAB and a drop bin that float "over the
-             scroll" have to stay put regardless of how far that pane is
-             scrolled, and a confirm card centered on the pane's own
-             scrollable box would drift out of view along with it.
-             Preferences.select() shows this only while the Organ tab is
-             the one open. -->
-        <div id="organ-floats" class="organ-floats hidden">
-          <div id="organ-bin" class="organ-bin" data-drop-bin>
-            <span class="organ-bin-glyph" aria-hidden="true">&#128465;</span>
-            <span>Remove from this organ</span>
-          </div>
-
-          <div id="organ-remove-confirm" class="organ-remove-confirm hidden">
-            <p id="organ-remove-confirm-text"></p>
-            <div class="organ-remove-confirm-actions">
-              <button class="ghost danger" id="organ-remove-confirm-yes">Remove</button>
-              <button class="ghost" id="organ-remove-confirm-no">Cancel</button>
-            </div>
-          </div>
-
-          <div class="organ-fab-dock" id="organ-fab-dock">
-            <div class="organ-fab-menu hidden" id="organ-fab-menu">
-              <button class="menu-item" id="organ-fab-add-manual"><span>Manual&hellip;</span></button>
-              <button class="menu-item" id="organ-fab-add-pedal"><span>Pedalboard&hellip;</span></button>
-              <button class="menu-item" id="organ-fab-add-enc"><span>Swell box&hellip;</span></button>
-              <button class="menu-item" id="organ-fab-add-source"><span>Sample set&hellip;</span></button>
-            </div>
-            <form class="organ-fab-form hidden" id="organ-fab-manual-form">
-              <input id="organ-fab-manual-name" type="text" placeholder="Name" autocomplete="off" spellcheck="false" />
-              <span class="organ-fab-form-row">
-                <label>Low <input id="organ-fab-manual-low" type="number" min="0" max="127" /></label>
-                <label>High <input id="organ-fab-manual-high" type="number" min="0" max="127" /></label>
-              </span>
-              <span class="organ-fab-form-actions">
-                <button class="ghost" type="submit">Add</button>
-                <button class="ghost" type="button" id="organ-fab-manual-cancel">Cancel</button>
-              </span>
-            </form>
-            <form class="organ-fab-form hidden" id="organ-fab-enc-form">
-              <input id="organ-fab-enc-name" type="text" placeholder="Box name" autocomplete="off" spellcheck="false" />
-              <span class="organ-fab-form-actions">
-                <button class="ghost" type="submit">Add</button>
-                <button class="ghost" type="button" id="organ-fab-enc-cancel">Cancel</button>
-              </span>
-            </form>
-            <div class="organ-fab-form hidden" id="organ-fab-source-form">
-              <span class="organ-fab-form-row">
-                <input id="organ-fab-source-path" type="text" placeholder="/path/to/a/sample/set"
-                  autocomplete="off" spellcheck="false" />
-                <button class="ghost" id="organ-fab-source-add">Add</button>
-              </span>
-              <div class="organ-fab-browse">
-                <div class="organ-fab-browse-head">
-                  <button class="ghost" id="organ-fab-browse-up">&uarr; Up</button>
-                  <span id="organ-fab-browse-dir" class="picker-dir"></span>
-                </div>
-                <p class="organ-edit-error hidden" id="organ-fab-browse-error"></p>
-                <div id="organ-fab-browse-list" class="picker-browse-list"></div>
-              </div>
-              <span class="organ-fab-form-actions">
-                <button class="ghost" type="button" id="organ-fab-source-cancel">Close</button>
-              </span>
-            </div>
-            <button class="organ-fab" id="organ-fab" aria-haspopup="true" aria-label="Add to this organ">+</button>
-          </div>
-        </div>
 
         <section class="pane" data-pane="midi">
           <div class="pane-head">
@@ -398,6 +306,99 @@
     </section>
     <section id="jamb-right" class="jamb"></section>
   </main>
+
+  <!-- The organ-structure editor: Max-MSP-style patch editing right on the
+       console, not a dialog. Fixed to the viewport rather than the console
+       grid, so none of it moves with density or scroll. Locked = today's
+       console; the padlock (also Ctrl+E) unlocks the FAB, the drawer tab
+       and plain-drag editing — ctrl-drag works either way. See editor.js. -->
+  <div id="editor-lock-dock" class="editor-lock-dock">
+    <p id="editor-lock-note" class="editor-lock-note hidden"></p>
+    <button id="editor-lock" class="editor-lock" aria-pressed="false"
+      aria-label="Unlock editing" data-tip="Unlock editing (Ctrl+E)">
+      <span class="editor-lock-glyph" aria-hidden="true">&#128274;</span>
+    </button>
+  </div>
+
+  <p id="editor-status" class="editor-status hidden">
+    <span class="spinner" aria-hidden="true"></span>
+    <span id="editor-status-text"></span>
+  </p>
+  <p id="editor-error" class="editor-error hidden"></p>
+
+  <button id="editor-drawer-tab" class="editor-drawer-tab hidden" aria-haspopup="true"
+    aria-label="Open the library drawer">Library</button>
+  <aside id="editor-drawer" class="editor-drawer hidden" aria-label="Sample set library">
+    <div class="editor-drawer-head">
+      <h2>Library</h2>
+      <button id="editor-drawer-close" class="editor-drawer-close" aria-label="Close the library drawer">&times;</button>
+    </div>
+    <p class="pane-note">
+      Ctrl-drag — or plain-drag, unlocked — a stop, or a whole division,
+      onto a manual to pull it in.
+    </p>
+    <div id="editor-offerings" class="organ-offerings"></div>
+  </aside>
+
+  <div id="editor-bin" class="organ-bin" data-drop-bin>
+    <span class="organ-bin-glyph" aria-hidden="true">&#128465;</span>
+    <span>Remove from this organ</span>
+  </div>
+
+  <div id="editor-remove-confirm" class="organ-remove-confirm hidden">
+    <p id="editor-remove-confirm-text"></p>
+    <div class="organ-remove-confirm-actions">
+      <button class="ghost danger" id="editor-remove-confirm-yes">Remove</button>
+      <button class="ghost" id="editor-remove-confirm-no">Cancel</button>
+    </div>
+  </div>
+
+  <div class="organ-fab-dock hidden" id="editor-fab-dock">
+    <div class="organ-fab-menu hidden" id="editor-fab-menu">
+      <button class="menu-item" id="editor-fab-add-manual"><span>Manual&hellip;</span></button>
+      <button class="menu-item" id="editor-fab-add-pedal"><span>Pedalboard&hellip;</span></button>
+      <button class="menu-item" id="editor-fab-add-enc"><span>Swell box&hellip;</span></button>
+      <button class="menu-item" id="editor-fab-add-source"><span>Sample set&hellip;</span></button>
+    </div>
+    <form class="organ-fab-form hidden" id="editor-fab-manual-form">
+      <input id="editor-fab-manual-name" type="text" placeholder="Name" autocomplete="off" spellcheck="false" />
+      <span class="organ-fab-form-row">
+        <label>Low <input id="editor-fab-manual-low" type="number" min="0" max="127" /></label>
+        <label>High <input id="editor-fab-manual-high" type="number" min="0" max="127" /></label>
+      </span>
+      <span class="organ-fab-form-actions">
+        <button class="ghost" type="submit">Add</button>
+        <button class="ghost" type="button" id="editor-fab-manual-cancel">Cancel</button>
+      </span>
+    </form>
+    <form class="organ-fab-form hidden" id="editor-fab-enc-form">
+      <input id="editor-fab-enc-name" type="text" placeholder="Box name" autocomplete="off" spellcheck="false" />
+      <span class="organ-fab-form-actions">
+        <button class="ghost" type="submit">Add</button>
+        <button class="ghost" type="button" id="editor-fab-enc-cancel">Cancel</button>
+      </span>
+    </form>
+    <div class="organ-fab-form hidden" id="editor-fab-source-form">
+      <span class="organ-fab-form-row">
+        <input id="editor-fab-source-path" type="text" placeholder="/path/to/a/sample/set"
+          autocomplete="off" spellcheck="false" />
+        <button class="ghost" id="editor-fab-source-add">Add</button>
+      </span>
+      <div class="organ-fab-browse">
+        <div class="organ-fab-browse-head">
+          <button class="ghost" id="editor-fab-browse-up">&uarr; Up</button>
+          <span id="editor-fab-browse-dir" class="picker-dir"></span>
+        </div>
+        <p class="organ-edit-error hidden" id="editor-fab-browse-error"></p>
+        <div id="editor-fab-browse-list" class="picker-browse-list"></div>
+      </div>
+      <span class="organ-fab-form-actions">
+        <button class="ghost" type="button" id="editor-fab-source-cancel">Close</button>
+      </span>
+    </div>
+    <button class="organ-fab" id="editor-fab" aria-haspopup="true" aria-label="Add to this organ">+</button>
+  </div>
+
   <script type="module" src="js/main.js"></script>
 </body>
 </html>
