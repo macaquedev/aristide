@@ -45,9 +45,13 @@
 //! channel = 1
 //! ```
 //!
-//! With no `[[stop]]`/`[[division]]` at all, every source contributes
-//! everything — so wrapping an existing GrandOrgue or Hauptwerk set as
-//! an Aristide organ is just `name` plus one `[sources]` line.
+//! A file that declares nothing — no `[[manual]]`, `[[stop]]` or
+//! `[[division]]` — takes every source whole, so wrapping an existing
+//! GrandOrgue or Hauptwerk set as an Aristide organ is just `name`
+//! plus one `[sources]` line. The moment the file declares any shape
+//! of its own, sources contribute only what is pulled (a declared
+//! manual with no pulls stays empty rather than having the whole set
+//! dumped onto the instrument mid-edit).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -163,6 +167,9 @@ impl SourceDef {
 #[serde(deny_unknown_fields)]
 pub struct ManualDef {
     pub name: String,
+    /// `"pedal"` marks the pedalboard; anything else (or nothing) is a
+    /// hand keyboard. Consoles render the pedal at the bottom.
+    pub kind: Option<String>,
     pub low: Option<KeySpec>,
     pub high: Option<KeySpec>,
     pub temperament: Option<String>,
@@ -271,12 +278,19 @@ impl Definition {
         }
     }
 
-    /// Aliases a pull actually names; with no pulls at all, every
-    /// source contributes everything, so all of them. A `layout = true`
-    /// source is used by definition — its chests and boxes shape the
-    /// instrument even before anything is pulled from it.
+    /// Whether this file declares any shape of its own. A file that
+    /// doesn't takes every source whole; one that does gets exactly
+    /// what it pulls.
+    fn declares(&self) -> bool {
+        !self.manuals.is_empty() || !self.divisions.is_empty() || !self.stops.is_empty()
+    }
+
+    /// Aliases a pull actually names; a file declaring nothing takes
+    /// every source whole, so all of them. A `layout = true` source is
+    /// used by definition — its chests and boxes shape the instrument
+    /// even before anything is pulled from it.
     fn used_sources(&self) -> HashSet<&str> {
-        if self.divisions.is_empty() && self.stops.is_empty() {
+        if !self.declares() {
             self.sources.keys().map(String::as_str).collect()
         } else {
             self.divisions
@@ -424,11 +438,15 @@ pub fn assemble(
     };
     for manual in &def.manuals {
         let compass = declared_compass(manual)?;
-        assembly.create_manual(manual.name.clone(), compass);
+        let pedal = manual
+            .kind
+            .as_deref()
+            .is_some_and(|kind| kind.eq_ignore_ascii_case("pedal"));
+        assembly.create_manual(manual.name.clone(), compass, pedal);
     }
-    if def.divisions.is_empty() && def.stops.is_empty() {
-        // No pulls: every source contributes everything — wrapping a
-        // set as an organ is just naming it as a source. Wind and
+    if !def.declares() {
+        // Nothing declared: every source contributes everything —
+        // wrapping a set as an organ is just naming it as a source. Wind and
         // boxes register up front in the source's own order, so a
         // wrapped set keeps its numbering exactly (its sidecar's
         // `[tremulant] chests` still mean the same chests); selective
@@ -636,7 +654,7 @@ impl Assembly<'_> {
             .ok_or_else(|| invalid(format!("{alias:?} is not a [sources] alias")))
     }
 
-    fn create_manual(&mut self, name: String, declared: Option<(u8, u8)>) -> usize {
+    fn create_manual(&mut self, name: String, declared: Option<(u8, u8)>, pedal: bool) -> usize {
         let index = self.manuals.len();
         self.manuals.push(Manual {
             id: ManualId(index as u32),
@@ -644,6 +662,7 @@ impl Assembly<'_> {
             // Placeholders; `finish` settles every compass at once.
             first_midi_note: 36,
             key_count: 61,
+            pedal,
         });
         self.declared.push(declared);
         index
@@ -687,7 +706,7 @@ impl Assembly<'_> {
                 let low = source_manual.first_midi_note;
                 let high =
                     (low as i32 + source_manual.key_count as i32 - 1).clamp(0, 127) as u8;
-                self.create_manual(name, Some((low, high)))
+                self.create_manual(name, Some((low, high)), source_manual.pedal)
             }
         };
         self.division_map[source_idx].insert(source_manual.id, target);
@@ -1029,12 +1048,14 @@ mod tests {
                     name: "Great".into(),
                     first_midi_note: 36,
                     key_count: 61,
+                    pedal: false,
                 },
                 Manual {
                     id: ManualId(1),
                     name: "Swell".into(),
                     first_midi_note: 36,
                     key_count: 61,
+                    pedal: false,
                 },
             ],
             stops: vec![
@@ -1117,12 +1138,51 @@ mod tests {
     fn manual(name: &str, low: Option<i64>, high: Option<i64>) -> ManualDef {
         ManualDef {
             name: name.into(),
+            kind: None,
             low: low.map(KeySpec::Number),
             high: high.map(KeySpec::Number),
             temperament: None,
             a4_hz: None,
             transpose: None,
         }
+    }
+
+    /// The editor's blank-organ path: manuals declared out of thin
+    /// air, no sources at all — a playable (silent) instrument, with
+    /// `kind = "pedal"` marking the pedalboard.
+    #[test]
+    fn declared_manuals_stand_without_sources() {
+        let mut definition = def("Console vide");
+        definition.manuals = vec![
+            ManualDef {
+                kind: Some("pedal".into()),
+                ..manual("Pédale", Some(36), Some(67))
+            },
+            manual("Grand orgue", Some(36), Some(96)),
+        ];
+        let built = assemble(&definition, &[], Vec::new()).expect("assembles");
+        let organ = &built.organ;
+        assert_eq!(organ.manuals.len(), 2);
+        assert!(organ.manuals[0].pedal);
+        assert!(!organ.manuals[1].pedal);
+        assert_eq!(organ.manuals[1].first_midi_note, 36);
+        assert_eq!(organ.manuals[1].key_count, 61);
+        assert!(organ.stops.is_empty());
+    }
+
+    /// Declaring a manual makes the file explicit: sources contribute
+    /// only what is pulled, rather than dumping whole sets onto an
+    /// organ mid-edit. A file declaring nothing still takes everything.
+    #[test]
+    fn a_declaring_file_pulls_nothing_implicitly() {
+        let sources = vec![("A".to_string(), source("A", "/a"))];
+        let mut definition = def("Édité");
+        definition.manuals = vec![manual("Clavier", Some(36), Some(96))];
+        let built = assemble(&definition, &sources, Vec::new()).expect("assembles");
+        assert_eq!(built.organ.manuals.len(), 1, "only the declared manual");
+        assert!(built.organ.stops.is_empty(), "nothing pulled");
+        let implicit = assemble(&def("Entier"), &sources, Vec::new()).expect("assembles");
+        assert!(!implicit.organ.stops.is_empty(), "an undeclared file takes it all");
     }
 
     #[test]

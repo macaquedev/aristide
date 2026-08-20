@@ -250,6 +250,148 @@ fn respond(
                 bad_request("no such manual")
             }
         }
+        // ---- organ-pane editor --------------------------------------
+        //
+        // Structural edits: each writes its line into the organ's own
+        // file, then reloads the file. Edits that trigger a rebuild are
+        // refused while a load is already in flight.
+        (Method::Post, "/api/organ/manual/add") => {
+            let Some(name) = param(query, "name").map(unescape) else {
+                return bad_request("missing name");
+            };
+            let pedal = param(query, "pedal").is_some_and(|v| v != "0");
+            let low = match param(query, "low").map(|v| v.parse::<u8>()) {
+                Some(Ok(low)) if low < 128 => low,
+                None => 36,
+                _ => return bad_request("low must be a MIDI note"),
+            };
+            let high = match param(query, "high").map(|v| v.parse::<u8>()) {
+                Some(Ok(high)) if high < 128 => high,
+                None => {
+                    if pedal {
+                        67
+                    } else {
+                        96
+                    }
+                }
+                _ => return bad_request("high must be a MIDI note"),
+            };
+            if low > high {
+                return bad_request("low is above high");
+            }
+            let mut state = state.lock().expect("state poisoned");
+            if state.loading.is_some() || state.pending_load.is_some() {
+                return bad_request("an organ is already loading");
+            }
+            match state.add_manual(&name, low, high, pedal) {
+                Ok(()) => json(state_json_locked(&state)),
+                Err(err) => bad_request(&err),
+            }
+        }
+        (Method::Post, "/api/organ/manual/rename") => {
+            let mut state = state.lock().expect("state poisoned");
+            if state.loading.is_some() || state.pending_load.is_some() {
+                return bad_request("an organ is already loading");
+            }
+            match (
+                param(query, "manual").and_then(|v| v.parse::<usize>().ok()),
+                param(query, "name").map(unescape),
+            ) {
+                (Some(manual), Some(name)) => match state.rename_manual(manual, &name) {
+                    Ok(()) => json(state_json_locked(&state)),
+                    Err(err) => bad_request(&err),
+                },
+                _ => bad_request("missing manual/name"),
+            }
+        }
+        (Method::Post, "/api/organ/manual/remove") => {
+            let mut state = state.lock().expect("state poisoned");
+            if state.loading.is_some() || state.pending_load.is_some() {
+                return bad_request("an organ is already loading");
+            }
+            match param(query, "manual").and_then(|v| v.parse::<usize>().ok()) {
+                Some(manual) => match state.remove_manual(manual) {
+                    Ok(()) => json(state_json_locked(&state)),
+                    Err(err) => bad_request(&err),
+                },
+                None => bad_request("missing manual"),
+            }
+        }
+        (Method::Post, "/api/organ/manual/order") => {
+            let mut state = state.lock().expect("state poisoned");
+            if state.loading.is_some() || state.pending_load.is_some() {
+                return bad_request("an organ is already loading");
+            }
+            match (
+                param(query, "manual").and_then(|v| v.parse::<usize>().ok()),
+                param(query, "to").and_then(|v| v.parse::<usize>().ok()),
+            ) {
+                (Some(manual), Some(to)) => match state.reorder_manual(manual, to) {
+                    Ok(()) => json(state_json_locked(&state)),
+                    Err(err) => bad_request(&err),
+                },
+                _ => bad_request("missing manual/to"),
+            }
+        }
+        (Method::Post, "/api/organ/source/add") => {
+            let Some(path) = param(query, "path").map(unescape) else {
+                return bad_request("missing path");
+            };
+            let mut state = state.lock().expect("state poisoned");
+            match state.add_organ_source(std::path::Path::new(&path)) {
+                Ok(_) => json(state_json_locked(&state)),
+                Err(err) => bad_request(&err),
+            }
+        }
+        (Method::Post, "/api/organ/pull") => {
+            let mut state = state.lock().expect("state poisoned");
+            if state.loading.is_some() || state.pending_load.is_some() {
+                return bad_request("an organ is already loading");
+            }
+            match (
+                param(query, "from").map(unescape),
+                param(query, "manual").map(unescape),
+                param(query, "on").map(unescape),
+            ) {
+                (Some(from), Some(manual), Some(on)) => {
+                    let stop = param(query, "stop").map(unescape);
+                    match state.pull_from_source(&from, &manual, stop.as_deref(), &on) {
+                        Ok(()) => json(state_json_locked(&state)),
+                        Err(err) => bad_request(&err),
+                    }
+                }
+                _ => bad_request("missing from/manual/on"),
+            }
+        }
+        (Method::Post, "/api/organ/unpull") => {
+            let mut state = state.lock().expect("state poisoned");
+            if state.loading.is_some() || state.pending_load.is_some() {
+                return bad_request("an organ is already loading");
+            }
+            match param(query, "stop").and_then(|v| v.parse::<u32>().ok()) {
+                Some(stop) => match state.remove_stop(aristide_model::StopId(stop)) {
+                    Ok(()) => json(state_json_locked(&state)),
+                    Err(err) => bad_request(&err),
+                },
+                None => bad_request("missing stop"),
+            }
+        }
+        // What every source of this organ offers, for the pane's
+        // source browser: manuals, stops, and what is already pulled.
+        // Sources are parsed on demand (an ODF parse, no samples).
+        (Method::Get, "/api/organ/offerings") => {
+            let path = {
+                let state = state.lock().expect("state poisoned");
+                state.composite_path.clone()
+            };
+            let Some(path) = path else {
+                return bad_request("this organ has no file yet");
+            };
+            match offerings_json(&path) {
+                Ok(body) => json(body),
+                Err(err) => bad_request(&err),
+            }
+        }
         // Load an instrument: one or more paths to `.organ` sets or
         // composite `.toml` files. The load itself happens on the main
         // thread (it owns the audio stream); this only queues it, and
@@ -805,8 +947,9 @@ fn state_json_locked(state: &State) -> String {
             first = false;
             let held: Vec<String> = held.iter().map(|k| k.to_string()).collect();
             out.push_str(&format!(
-                "{{\"idx\":{idx},\"name\":{},\"first_key\":{first_key},\"key_count\":{key_count},\"held\":[{}]}}",
+                "{{\"idx\":{idx},\"name\":{},\"first_key\":{first_key},\"key_count\":{key_count},\"pedal\":{},\"held\":[{}]}}",
                 json_string(name),
+                console.manual_pedal(idx),
                 held.join(",")
             ));
         }
@@ -1238,6 +1381,97 @@ fn browse_json(dir: &std::path::Path) -> Result<String, String> {
             json_string(name),
             json_string(&dir.join(name).display().to_string())
         ));
+    }
+    out.push_str("]}");
+    Ok(out)
+}
+
+/// What each source of a composite offers, with what the file already
+/// pulls marked. Parsing a source is an ODF read, no samples; an
+/// unreadable source reports its error instead of hiding the rest.
+fn offerings_json(path: &std::path::Path) -> Result<String, String> {
+    let text =
+        std::fs::read_to_string(path).map_err(|err| format!("{}: {err}", path.display()))?;
+    let def: aristide_formats::instrument::Definition =
+        toml::from_str(&text).map_err(|err| format!("{}: {err}", path.display()))?;
+    let dir = path.parent().unwrap_or(std::path::Path::new(""));
+
+    // What the file already pulls, per source alias: whole divisions
+    // by source-manual name, single stops by (source manual, name) —
+    // the shapes the pane itself writes. Hand-written patterns that
+    // aren't exact names may not be recognized; that only marks a stop
+    // as still offered, never hides one.
+    let division_pulled = |alias: &str, manual: &str| {
+        def.divisions
+            .iter()
+            .any(|pull| pull.from == alias && manual.eq_ignore_ascii_case(&pull.manual))
+    };
+    let stop_pulled = |alias: &str, manual: &str, stop: &str| {
+        def.stops.iter().any(|pull| {
+            pull.from == alias
+                && stop.eq_ignore_ascii_case(&pull.stop)
+                && pull
+                    .manual
+                    .as_deref()
+                    .is_none_or(|pattern| manual.eq_ignore_ascii_case(pattern))
+        })
+    };
+
+    let mut out = String::from("{\"sources\":[");
+    let mut first_source = true;
+    for (alias, source) in &def.sources {
+        if !first_source {
+            out.push(',');
+        }
+        first_source = false;
+        let source_path = source.path();
+        let resolved = if source_path.is_absolute() {
+            source_path.to_path_buf()
+        } else {
+            dir.join(source_path)
+        };
+        out.push_str(&format!(
+            "{{\"alias\":{},\"path\":{}",
+            json_string(alias),
+            json_string(&resolved.display().to_string())
+        ));
+        match aristide_formats::grandorgue::load(&resolved) {
+            Ok(loaded) => {
+                let organ = loaded.organ;
+                out.push_str(&format!(",\"name\":{},\"manuals\":[", json_string(&organ.name)));
+                let mut first_manual = true;
+                for manual in &organ.manuals {
+                    if !first_manual {
+                        out.push(',');
+                    }
+                    first_manual = false;
+                    let whole = division_pulled(alias, &manual.name);
+                    out.push_str(&format!(
+                        "{{\"name\":{},\"pedal\":{},\"pulled\":{whole},\"stops\":[",
+                        json_string(&manual.name),
+                        manual.pedal
+                    ));
+                    let mut first_stop = true;
+                    for stop in organ.stops.iter().filter(|stop| stop.manual == manual.id) {
+                        if !first_stop {
+                            out.push(',');
+                        }
+                        first_stop = false;
+                        let pulled = whole || stop_pulled(alias, &manual.name, &stop.name);
+                        out.push_str(&format!(
+                            "{{\"name\":{},\"pulled\":{pulled}}}",
+                            json_string(&stop.name)
+                        ));
+                    }
+                    out.push_str("]}");
+                }
+                out.push(']');
+            }
+            Err(err) => {
+                out.push_str(&format!(",\"error\":{}", json_string(&err.to_string())));
+            }
+        }
+        out.push('}');
     }
     out.push_str("]}");
     Ok(out)

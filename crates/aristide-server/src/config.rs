@@ -438,6 +438,9 @@ pub fn create_wrapper_organ(
     for manual in &organ.manuals {
         let mut table = toml_edit::Table::new();
         table["name"] = toml_edit::value(manual.name.as_str());
+        if manual.pedal {
+            table["kind"] = toml_edit::value("pedal");
+        }
         table["low"] = toml_edit::value(manual.first_midi_note as i64);
         table["high"] = toml_edit::value(
             (manual.first_midi_note as i64 + manual.key_count as i64 - 1).clamp(0, 127),
@@ -953,6 +956,359 @@ pub fn write_composite_name(path: &Path, name: &str) -> Result<(), String> {
     write_atomically(path, doc.to_string())
 }
 
+// ---- organ-pane editor writers -------------------------------------
+//
+// Every edit the organ pane makes is a line of the composite file:
+// these writers add, rename, reorder and remove those lines,
+// comment-preservingly, and the server reloads the file afterwards so
+// the console always plays exactly what the file says.
+
+fn composite_doc(path: &Path) -> Result<toml_edit::DocumentMut, String> {
+    let text =
+        std::fs::read_to_string(path).map_err(|err| format!("{}: {err}", path.display()))?;
+    text.parse().map_err(|err| format!("{}: {err}", path.display()))
+}
+
+fn field_is(table: &toml_edit::Table, key: &str, wanted: &str) -> bool {
+    table
+        .get(key)
+        .and_then(|value| value.as_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case(wanted))
+}
+
+/// Replace a string value, keeping its decor — a trailing `# comment`
+/// on the line belongs to the value and must survive the edit.
+fn set_string_preserving(table: &mut toml_edit::Table, key: &str, to: &str) {
+    if let Some(value) = table.get_mut(key).and_then(|item| item.as_value_mut()) {
+        let decor = value.decor().clone();
+        *value = to.into();
+        *value.decor_mut() = decor;
+    } else {
+        table[key] = toml_edit::value(to);
+    }
+}
+
+fn rename_field(table: &mut toml_edit::Table, key: &str, from: &str, to: &str) {
+    if field_is(table, key, from) {
+        set_string_preserving(table, key, to);
+    }
+}
+
+/// Every table of an array-of-tables at `doc[key]`, mutably; a missing
+/// key yields nothing.
+fn tables_mut<'a>(
+    doc: &'a mut toml_edit::DocumentMut,
+    key: &str,
+) -> impl Iterator<Item = &'a mut toml_edit::Table> {
+    doc.get_mut(key)
+        .and_then(|item| item.as_array_of_tables_mut())
+        .into_iter()
+        .flat_map(|tables| tables.iter_mut())
+}
+
+/// Declare a new manual in a composite file. The compass is written
+/// out (a declared manual with nothing pulled yet has no other way to
+/// have one), `kind = "pedal"` marks the pedalboard.
+pub fn append_composite_manual(
+    path: &Path,
+    name: &str,
+    low: u8,
+    high: u8,
+    pedal: bool,
+) -> Result<(), String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("the manual needs a name".into());
+    }
+    if low > high {
+        return Err("low is above high".into());
+    }
+    let mut doc = composite_doc(path)?;
+    if let Some(manuals) = doc.get("manual").and_then(|m| m.as_array_of_tables())
+        && manuals.iter().any(|table| field_is(table, "name", name))
+    {
+        return Err(format!("this organ already has a manual named {name:?}"));
+    }
+    let manuals = doc
+        .entry("manual")
+        .or_insert(toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new()));
+    let Some(manuals) = manuals.as_array_of_tables_mut() else {
+        return Err("[[manual]] is not an array of tables".into());
+    };
+    let mut table = toml_edit::Table::new();
+    table["name"] = toml_edit::value(name);
+    if pedal {
+        table["kind"] = toml_edit::value("pedal");
+    }
+    table["low"] = toml_edit::value(low as i64);
+    table["high"] = toml_edit::value(high as i64);
+    manuals.push(table);
+    write_atomically(path, doc.to_string())
+}
+
+/// Rename a declared manual, everywhere the file says its name: the
+/// `[[manual]]` itself, pulls landing on it, moves, coupler routes and
+/// MIDI wiring. Source-side names (`[[stop]] manual`, which division a
+/// pull reads from) are the source's own and stay. `Ok(false)` when
+/// the file declares no such manual.
+pub fn rename_composite_manual(path: &Path, from: &str, to: &str) -> Result<bool, String> {
+    let to = to.trim();
+    if to.is_empty() {
+        return Err("the manual needs a name".into());
+    }
+    let mut doc = composite_doc(path)?;
+    let mut found = false;
+    for table in tables_mut(&mut doc, "manual") {
+        if field_is(table, "name", from) {
+            set_string_preserving(table, "name", to);
+            found = true;
+        }
+    }
+    if !found {
+        return Ok(false);
+    }
+    for table in tables_mut(&mut doc, "stop") {
+        rename_field(table, "on", from, to);
+    }
+    for table in tables_mut(&mut doc, "division") {
+        rename_field(table, "on", from, to);
+    }
+    for table in tables_mut(&mut doc, "move") {
+        rename_field(table, "from", from, to);
+        rename_field(table, "to", from, to);
+    }
+    if let Some(defines) = doc
+        .get_mut("couplers")
+        .and_then(|couplers| couplers.get_mut("define"))
+        .and_then(|define| define.as_array_of_tables_mut())
+    {
+        for define in defines.iter_mut() {
+            if let Some(routes) = define.get_mut("route").and_then(|r| r.as_array_of_tables_mut())
+            {
+                for route in routes.iter_mut() {
+                    rename_field(route, "from", from, to);
+                    rename_field(route, "to", from, to);
+                }
+            }
+        }
+    }
+    if let Some(midi) = doc.get_mut("midi").and_then(|midi| midi.as_table_like_mut()) {
+        for key in ["input", "control"] {
+            if let Some(tables) = midi.get_mut(key).and_then(|i| i.as_array_of_tables_mut()) {
+                for table in tables.iter_mut() {
+                    rename_field(table, "manual", from, to);
+                }
+            }
+        }
+    }
+    write_atomically(path, doc.to_string())?;
+    Ok(true)
+}
+
+/// Remove a declared manual and everything the file lands on it:
+/// pulls, moves, coupler routes and MIDI wiring naming it. `Ok(false)`
+/// when the file declares no such manual — the bin can only take what
+/// the file owns.
+pub fn remove_composite_manual(path: &Path, name: &str) -> Result<bool, String> {
+    let mut doc = composite_doc(path)?;
+    let Some(manuals) = doc.get_mut("manual").and_then(|m| m.as_array_of_tables_mut()) else {
+        return Ok(false);
+    };
+    let before = manuals.len();
+    manuals.retain(|table| !field_is(table, "name", name));
+    if manuals.len() == before {
+        return Ok(false);
+    }
+    if manuals.is_empty() {
+        doc.remove("manual");
+    }
+    for key in ["stop", "division"] {
+        if let Some(tables) = doc.get_mut(key).and_then(|i| i.as_array_of_tables_mut()) {
+            tables.retain(|table| !field_is(table, "on", name));
+            if tables.is_empty() {
+                doc.remove(key);
+            }
+        }
+    }
+    if let Some(moves) = doc.get_mut("move").and_then(|m| m.as_array_of_tables_mut()) {
+        moves.retain(|table| !field_is(table, "from", name) && !field_is(table, "to", name));
+        if moves.is_empty() {
+            doc.remove("move");
+        }
+    }
+    if let Some(defines) = doc
+        .get_mut("couplers")
+        .and_then(|couplers| couplers.get_mut("define"))
+        .and_then(|define| define.as_array_of_tables_mut())
+    {
+        for define in defines.iter_mut() {
+            if let Some(routes) = define.get_mut("route").and_then(|r| r.as_array_of_tables_mut())
+            {
+                routes.retain(|route| {
+                    !field_is(route, "from", name) && !field_is(route, "to", name)
+                });
+            }
+        }
+        defines.retain(|define| {
+            define
+                .get("route")
+                .and_then(|r| r.as_array_of_tables())
+                .is_some_and(|routes| !routes.is_empty())
+        });
+    }
+    if let Some(midi) = doc.get_mut("midi").and_then(|midi| midi.as_table_like_mut()) {
+        for key in ["input", "control"] {
+            if let Some(tables) = midi.get_mut(key).and_then(|i| i.as_array_of_tables_mut()) {
+                tables.retain(|table| !field_is(table, "manual", name));
+            }
+        }
+    }
+    write_atomically(path, doc.to_string())?;
+    Ok(true)
+}
+
+/// Move a declared manual to another position among the declarations —
+/// declaration order is console stacking order. `Ok(false)` when the
+/// file declares no such manual.
+pub fn reorder_composite_manual(path: &Path, name: &str, to: usize) -> Result<bool, String> {
+    let mut doc = composite_doc(path)?;
+    let Some(manuals) = doc.get_mut("manual").and_then(|m| m.as_array_of_tables_mut()) else {
+        return Ok(false);
+    };
+    let mut tables: Vec<toml_edit::Table> = manuals.iter().cloned().collect();
+    let Some(at) = tables.iter().position(|table| field_is(table, "name", name)) else {
+        return Ok(false);
+    };
+    // A cloned table remembers where in the document it was; the new
+    // order must take over the old positions or the file serializes
+    // exactly as before.
+    let mut positions: Vec<Option<isize>> = tables.iter().map(|table| table.position()).collect();
+    positions.sort_unstable();
+    let table = tables.remove(at);
+    tables.insert(to.min(tables.len()), table);
+    manuals.clear();
+    for (table, position) in tables.iter_mut().zip(positions) {
+        table.set_position(position);
+        manuals.push(table.clone());
+    }
+    write_atomically(path, doc.to_string())?;
+    Ok(true)
+}
+
+/// Add a sample set to a composite's `[sources]`, returning the alias
+/// it got. Adding a source pulls nothing by itself — its material
+/// becomes available to pull.
+pub fn append_composite_source(path: &Path, set: &Path) -> Result<String, String> {
+    let mut doc = composite_doc(path)?;
+    let sources = doc
+        .entry("sources")
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+    let Some(sources) = sources.as_table_mut() else {
+        return Err("[sources] is not a table".into());
+    };
+    let set_text = set.to_string_lossy();
+    for (_, value) in sources.iter() {
+        let existing = value
+            .as_str()
+            .or_else(|| value.get("path").and_then(|p| p.as_str()));
+        if existing == Some(set_text.as_ref()) {
+            return Err("this organ already has that set as a source".into());
+        }
+    }
+    let mut nth = 1;
+    let alias = loop {
+        let alias = format!("s{nth}");
+        if !sources.contains_key(&alias) {
+            break alias;
+        }
+        nth += 1;
+    };
+    sources.insert(&alias, toml_edit::value(set_text.as_ref()));
+    write_atomically(path, doc.to_string())?;
+    Ok(alias)
+}
+
+/// Append one `[[stop]]` pull (or with no stop pattern a whole
+/// `[[division]]` pull) onto a manual.
+pub fn append_composite_pull(
+    path: &Path,
+    from: &str,
+    source_manual: &str,
+    stop: Option<&str>,
+    on: &str,
+) -> Result<(), String> {
+    let mut doc = composite_doc(path)?;
+    // A pull naming a source the file hasn't got would poison the next
+    // load; refuse it here rather than bricking the file.
+    if !doc
+        .get("sources")
+        .and_then(|sources| sources.as_table())
+        .is_some_and(|sources| sources.contains_key(from))
+    {
+        return Err(format!("{from:?} is not a [sources] alias of this organ"));
+    }
+    let key = if stop.is_some() { "stop" } else { "division" };
+    let tables = doc
+        .entry(key)
+        .or_insert(toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new()));
+    let Some(tables) = tables.as_array_of_tables_mut() else {
+        return Err(format!("[[{key}]] is not an array of tables"));
+    };
+    let mut table = toml_edit::Table::new();
+    table["from"] = toml_edit::value(from);
+    table["manual"] = toml_edit::value(source_manual);
+    if let Some(stop) = stop {
+        table["stop"] = toml_edit::value(stop);
+    }
+    table["on"] = toml_edit::value(on);
+    tables.push(table);
+    write_atomically(path, doc.to_string())
+}
+
+/// Remove the `[[stop]]` pull that brought `stop` in, and any
+/// `[[move]]` lines about it. `on` is the manual the pull named (where
+/// the stop first landed). `Ok(false)` when no pull matches — a stop
+/// that came in as part of a `[[division]]` pull has no line of its
+/// own to remove.
+pub fn remove_composite_stop_pull(path: &Path, stop: &str, on: &str) -> Result<bool, String> {
+    let mut doc = composite_doc(path)?;
+    let Some(stops) = doc.get_mut("stop").and_then(|s| s.as_array_of_tables_mut()) else {
+        return Ok(false);
+    };
+    let named: Vec<usize> = (0..stops.len())
+        .filter(|&i| stops.get(i).is_some_and(|table| field_is(table, "stop", stop)))
+        .collect();
+    let landed: Vec<usize> = named
+        .iter()
+        .copied()
+        .filter(|&i| stops.get(i).is_some_and(|table| field_is(table, "on", on)))
+        .collect();
+    let doomed = if !landed.is_empty() {
+        landed
+    } else if named.len() == 1 {
+        named
+    } else {
+        return Ok(false);
+    };
+    let mut index = 0;
+    stops.retain(|_| {
+        let keep = !doomed.contains(&index);
+        index += 1;
+        keep
+    });
+    if stops.is_empty() {
+        doc.remove("stop");
+    }
+    if let Some(moves) = doc.get_mut("move").and_then(|m| m.as_array_of_tables_mut()) {
+        moves.retain(|table| !field_is(table, "stop", stop));
+        if moves.is_empty() {
+            doc.remove("move");
+        }
+    }
+    write_atomically(path, doc.to_string())?;
+    Ok(true)
+}
+
 /// Rename a sample-set organ without touching the set: the name goes
 /// into the set's Aristide sidecar (created if the set has none),
 /// where the loader reads it back as the organ's name. Any existing
@@ -1053,12 +1409,14 @@ mod tests {
                     name: "Pedal".into(),
                     first_midi_note: 36,
                     key_count: 32,
+                    pedal: true,
                 },
                 Manual {
                     id: ManualId(1),
                     name: "Great".into(),
                     first_midi_note: 36,
                     key_count: 61,
+                    pedal: false,
                 },
             ],
             stops: vec![
@@ -1117,6 +1475,8 @@ mod tests {
         assert!(source.layout(), "the set's chest and box numbering is kept whole");
         assert_eq!(def.manuals.len(), 2, "every manual declared");
         assert_eq!(def.manuals[0].name, "Pedal");
+        assert_eq!(def.manuals[0].kind.as_deref(), Some("pedal"));
+        assert_eq!(def.manuals[1].kind, None);
         assert_eq!(def.stops.len(), 2, "every stop an explicit pull");
         assert_eq!(def.stops[1].stop, "Montre 8");
         assert_eq!(def.stops[1].manual.as_deref(), Some("Great"));
@@ -1318,6 +1678,139 @@ mod tests {
         let second = create_blank_organ(&dir, "Église St-Jean").expect("creates again");
         assert_ne!(second, path, "same name, own file");
         assert!(second.is_file());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The organ-pane editor's whole file vocabulary, exercised on one
+    /// growing file: declare manuals, add a source, pull a stop, then
+    /// rename, reorder and delete — every edit a line, comments kept.
+    #[test]
+    fn editor_writers_grow_and_prune_a_composite() {
+        let dir = std::env::temp_dir().join("aristide-editor-writers-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = create_blank_organ(&dir, "Atelier").expect("creates");
+
+        append_composite_manual(&path, "Grand orgue", 36, 96, false).expect("manual");
+        append_composite_manual(&path, "Pédale", 36, 67, true).expect("pedal");
+        assert!(
+            append_composite_manual(&path, "grand ORGUE", 36, 96, false).is_err(),
+            "duplicate names refused"
+        );
+
+        let set = dir.join("village.organ");
+        std::fs::write(&set, "[Organ]").expect("fixture set");
+        let alias = append_composite_source(&path, &set).expect("source added");
+        assert_eq!(alias, "s1");
+        assert!(
+            append_composite_source(&path, &set).is_err(),
+            "the same set twice is one source"
+        );
+
+        assert!(
+            append_composite_pull(&path, "s9", "Great", Some("Montre 8"), "Grand orgue")
+                .is_err(),
+            "a pull naming no source must not poison the file"
+        );
+        append_composite_pull(&path, "s1", "Great", Some("Montre 8"), "Grand orgue")
+            .expect("stop pull");
+        append_composite_pull(&path, "s1", "Pedal", None, "Pédale").expect("division pull");
+        append_composite_move(&path, "Montre 8", "Grand orgue", "Pédale").expect("move");
+
+        let def = |path: &Path| -> aristide_formats::instrument::Definition {
+            toml::from_str(&std::fs::read_to_string(path).expect("reads")).expect("parses")
+        };
+        let parsed = def(&path);
+        assert_eq!(parsed.manuals.len(), 2);
+        assert_eq!(parsed.manuals[1].kind.as_deref(), Some("pedal"));
+        assert_eq!(parsed.stops.len(), 1);
+        assert_eq!(parsed.stops[0].manual.as_deref(), Some("Great"));
+        assert_eq!(parsed.divisions.len(), 1);
+
+        // Rename follows the name everywhere the file says it.
+        assert!(rename_composite_manual(&path, "Grand orgue", "Hauptwerk").expect("renames"));
+        assert!(!rename_composite_manual(&path, "Ghost", "X").expect("no ghost"));
+        let parsed = def(&path);
+        assert_eq!(parsed.manuals[0].name, "Hauptwerk");
+        assert_eq!(parsed.stops[0].on, "Hauptwerk");
+        assert_eq!(parsed.moves[0].from, "Hauptwerk");
+        assert_eq!(
+            parsed.stops[0].manual.as_deref(),
+            Some("Great"),
+            "the source's own division name is the source's business"
+        );
+
+        assert!(reorder_composite_manual(&path, "Pédale", 0).expect("reorders"));
+        assert_eq!(def(&path).manuals[0].name, "Pédale");
+
+        // Deleting the stop's pull also forgets its moves; deleting a
+        // manual takes every line landing on it.
+        assert!(remove_composite_stop_pull(&path, "Montre 8", "Hauptwerk").expect("unpulls"));
+        let parsed = def(&path);
+        assert!(parsed.stops.is_empty());
+        assert!(parsed.moves.is_empty());
+        assert!(remove_composite_manual(&path, "Pédale").expect("removes"));
+        let parsed = def(&path);
+        assert_eq!(parsed.manuals.len(), 1);
+        assert!(parsed.divisions.is_empty(), "the pull landing on it went too");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Renaming a manual keeps couplers and wiring pointing at it.
+    #[test]
+    fn manual_rename_and_removal_follow_couplers_and_wiring() {
+        let dir = std::env::temp_dir().join("aristide-editor-rename-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        let path = dir.join("organ.toml");
+        std::fs::write(
+            &path,
+            r#"# hand-made
+name = "Atelier"
+
+[sources]
+s1 = "village.organ"
+
+[[manual]]
+name = "Récit" # expressive
+low = 36
+high = 96
+
+[[manual]]
+name = "Positif"
+low = 36
+high = 96
+
+[[couplers.define]]
+name = "Récit au Positif"
+[[couplers.define.route]]
+from = "Récit"
+to = "Positif"
+
+[[midi.input]]
+manual = "Récit"
+device = "Keys"
+"#,
+        )
+        .expect("writes");
+
+        assert!(rename_composite_manual(&path, "Récit", "Solo").expect("renames"));
+        let text = std::fs::read_to_string(&path).expect("reads");
+        assert!(text.contains("# expressive"), "comments survive");
+        let def: aristide_formats::instrument::Definition =
+            toml::from_str(&text).expect("parses");
+        assert_eq!(def.couplers.define[0].routes[0].from, "Solo");
+        assert_eq!(def.couplers.define[0].routes[0].to.as_deref(), Some("Positif"));
+        assert_eq!(def.midi.inputs[0].manual, "Solo");
+
+        assert!(remove_composite_manual(&path, "Solo").expect("removes"));
+        let def: aristide_formats::instrument::Definition =
+            toml::from_str(&std::fs::read_to_string(&path).expect("reads")).expect("parses");
+        assert_eq!(def.manuals.len(), 1);
+        assert!(
+            def.couplers.define.is_empty(),
+            "a coupler with no surviving routes goes with its manual"
+        );
+        assert!(def.midi.inputs.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

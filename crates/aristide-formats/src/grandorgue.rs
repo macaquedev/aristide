@@ -367,6 +367,7 @@ impl Builder<'_> {
                 name: section.string("Name")?.to_string(),
                 first_midi_note: first_midi_note as u8,
                 key_count: accessible_keys as u16,
+                pedal: manual_index == 0,
             });
             // MIDI note of logical key 1 (see notes §2) — the pitch origin
             // that old-style stops derive their rank numbering from.

@@ -229,8 +229,10 @@ export class Console {
   buildKeyboards(snapshot) {
     // The pedalboard renders at the bottom; manuals stack above it in
     // reverse server order, so the highest manual sits on top, as on a
-    // real console.
-    const pedal = snapshot.manuals.find((m) => /p[ée]d/i.test(m.name))
+    // real console. The model says which manual is the pedal; the name
+    // sniff only covers organs loaded before it did.
+    const pedal = snapshot.manuals.find((m) => m.pedal)
+      ?? snapshot.manuals.find((m) => /p[ée]d/i.test(m.name))
       ?? snapshot.manuals[0];
     const manuals = snapshot.manuals.filter((m) => m !== pedal);
 

@@ -182,10 +182,13 @@ declares any number of manuals, `[[division]]`/`[[stop]]` pull whole divisions
 or single stops onto any manual (loading only the ranks actually used, borrows
 followed), `[[couplers.define]]` couples across all of it, and the sidecar
 sections (tuning, wind, reverb…) apply instrument-wide. Stops anchor by pitch
-when they move between manuals. A file with sources and no pulls is those
-organs whole — each manual and coupler exactly as its set provides (locked
-default) — so wrapping a GO/HW set is three lines, and launching the server
-with several set paths builds the same implicit composite. The composite file
+when they move between manuals. A file that declares nothing — no manuals,
+no pulls — is those organs whole, each manual and coupler exactly as its set
+provides (locked default), so wrapping a GO/HW set is three lines, and
+launching the server with several set paths builds the same implicit
+composite. The moment a file declares any shape of its own, sources
+contribute only what is pulled: adding a source to an organ being edited
+offers its material without dumping the whole set onto the console. The composite file
 also owns its rig's `[midi]` wiring (locked 2026-08-18): device/control
 bindings load from it and interactively learned bindings are written back into
 it (comment-preserving), while plain sets keep wiring in the user config.

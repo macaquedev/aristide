@@ -1567,6 +1567,194 @@ impl State {
         Ok(())
     }
 
+    // ---- organ-pane editor ---------------------------------------------
+    //
+    // Structural edits go through the organ's file: write the line,
+    // then reload the file so the console plays exactly what it says.
+    // The running organ keeps sounding until the rebuilt one swaps in.
+
+    /// The file every organ-pane edit writes to. Blank and adopted
+    /// organs always have one; only unsaved CLI combinations don't.
+    fn organ_file(&self) -> Result<PathBuf, String> {
+        self.composite_path.clone().ok_or_else(|| {
+            "this combination isn't saved as a file yet — save it in \
+             Preferences → Organ first"
+                .to_string()
+        })
+    }
+
+    /// Queue reloading the organ's own file after a structural edit.
+    fn reload_organ_file(&mut self, path: PathBuf) {
+        self.loading = Some("rebuilding the organ…".to_string());
+        self.load_error = None;
+        self.pending_load = Some(LoadRequest {
+            paths: vec![path],
+            stops: Vec::new(),
+            initial: false,
+        });
+    }
+
+    pub fn add_manual(&mut self, name: &str, low: u8, high: u8, pedal: bool) -> Result<(), String> {
+        if self
+            .manual_names()
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(name.trim()))
+        {
+            return Err(format!("this organ already has a manual named {:?}", name.trim()));
+        }
+        let path = self.organ_file()?;
+        config::append_composite_manual(&path, name, low, high, pedal)?;
+        self.reload_organ_file(path);
+        Ok(())
+    }
+
+    pub fn rename_manual(&mut self, manual: usize, name: &str) -> Result<(), String> {
+        let names = self.manual_names();
+        let Some(old) = names.get(manual) else {
+            return Err("no such manual".into());
+        };
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("the manual needs a name".into());
+        }
+        if old == name {
+            return Ok(());
+        }
+        if names.iter().any(|existing| existing.eq_ignore_ascii_case(name)) {
+            return Err(format!("this organ already has a manual named {name:?}"));
+        }
+        let path = self.organ_file()?;
+        if !config::rename_composite_manual(&path, old, name)? {
+            return Err(format!(
+                "{} has no [[manual]] named {old:?} — it wasn't declared by this file",
+                path.display()
+            ));
+        }
+        // Assignments are keyed by manual name; they follow the rename
+        // or the manual would silently unwire.
+        if let Some(organ) = self.midi_config.organs.get_mut(&self.organ_key) {
+            if let Some(inputs) = organ.manuals.remove(old.as_str()) {
+                organ.manuals.insert(name.to_string(), inputs);
+            }
+            for control in &mut organ.controls {
+                if control
+                    .manual
+                    .as_deref()
+                    .is_some_and(|m| m.eq_ignore_ascii_case(old))
+                {
+                    control.manual = Some(name.to_string());
+                }
+            }
+        }
+        self.persist();
+        self.reload_organ_file(path);
+        Ok(())
+    }
+
+    pub fn remove_manual(&mut self, manual: usize) -> Result<(), String> {
+        let names = self.manual_names();
+        let Some(name) = names.get(manual) else {
+            return Err("no such manual".into());
+        };
+        let path = self.organ_file()?;
+        if !config::remove_composite_manual(&path, name)? {
+            return Err(format!(
+                "{} has no [[manual]] named {name:?} — it wasn't declared by this file",
+                path.display()
+            ));
+        }
+        if let Some(organ) = self.midi_config.organs.get_mut(&self.organ_key) {
+            organ.manuals.remove(name.as_str());
+            organ.controls.retain(|control| {
+                !control
+                    .manual
+                    .as_deref()
+                    .is_some_and(|m| m.eq_ignore_ascii_case(name))
+            });
+        }
+        self.persist();
+        self.reload_organ_file(path);
+        Ok(())
+    }
+
+    pub fn reorder_manual(&mut self, manual: usize, to: usize) -> Result<(), String> {
+        let names = self.manual_names();
+        let Some(name) = names.get(manual) else {
+            return Err("no such manual".into());
+        };
+        let path = self.organ_file()?;
+        if !config::reorder_composite_manual(&path, name, to)? {
+            return Err(format!(
+                "{} has no [[manual]] named {name:?} — it wasn't declared by this file",
+                path.display()
+            ));
+        }
+        self.reload_organ_file(path);
+        Ok(())
+    }
+
+    /// Add a sample set to the organ's `[sources]`. Nothing is pulled
+    /// yet — the pane's source browser offers its material from here.
+    pub fn add_organ_source(&mut self, set: &std::path::Path) -> Result<String, String> {
+        if !set.is_file() {
+            return Err(format!("{}: not a file", set.display()));
+        }
+        if instrument::is_definition(set) {
+            return Err("a source must be a sample set, not another organ file".into());
+        }
+        let canonical = set.canonicalize().unwrap_or_else(|_| set.to_path_buf());
+        let path = self.organ_file()?;
+        config::append_composite_source(&path, &canonical)
+    }
+
+    /// Pull one stop (or with `stop` absent a whole division) from a
+    /// source onto a manual of this organ.
+    pub fn pull_from_source(
+        &mut self,
+        from: &str,
+        source_manual: &str,
+        stop: Option<&str>,
+        on: &str,
+    ) -> Result<(), String> {
+        if !self
+            .manual_names()
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(on))
+        {
+            return Err(format!("this organ has no manual named {on:?}"));
+        }
+        let path = self.organ_file()?;
+        config::append_composite_pull(&path, from, source_manual, stop, on)?;
+        self.reload_organ_file(path);
+        Ok(())
+    }
+
+    /// Delete a stop: remove the `[[stop]]` line that pulled it in.
+    /// The source still offers it, so the pane can pull it back.
+    pub fn remove_stop(&mut self, stop: StopId) -> Result<(), String> {
+        let Control::Organ(console) = &self.control else {
+            return Err("no organ is loaded".into());
+        };
+        let Some((name, manual_name)) = console
+            .stop_states()
+            .iter()
+            .find(|(id, ..)| *id == stop)
+            .map(|(_, name, manual, _, _)| (name.to_string(), manual.to_string()))
+        else {
+            return Err("no such stop".into());
+        };
+        let path = self.organ_file()?;
+        if !config::remove_composite_stop_pull(&path, &name, &manual_name)? {
+            return Err(format!(
+                "{name:?} came in as part of a whole division — edit its \
+                 [[division]] line in {}",
+                path.display()
+            ));
+        }
+        self.reload_organ_file(path);
+        Ok(())
+    }
+
     /// Drop an organ from the picker's library and save the change.
     pub fn forget_organ(&mut self, path: &std::path::Path) -> bool {
         let removed = self.midi_config.forget(path);

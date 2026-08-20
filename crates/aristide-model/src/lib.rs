@@ -26,6 +26,11 @@ pub struct Manual {
     /// mapping; the input-mapping layer may override arbitrarily).
     pub first_midi_note: u8,
     pub key_count: u16,
+    /// Played by the feet: renders as the pedalboard, at the bottom of
+    /// the console. Loaders set it from the format (GO's `Manual000`);
+    /// composites declare it (`kind = "pedal"`).
+    #[serde(default)]
+    pub pedal: bool,
 }
 
 /// A sustain loop within a sample, in frames.
