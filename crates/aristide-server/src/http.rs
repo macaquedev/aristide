@@ -2028,6 +2028,95 @@ mod tests {
         assert!(state_json(&state).contains("\"controls\":[]"), "refused");
     }
 
+    /// The organ-pane editor endpoints against a real inventory file:
+    /// each edit answers 200, writes its line, and queues a rebuild;
+    /// bad edits answer 400 with the reason and leave the file alone.
+    #[test]
+    fn the_editor_endpoints_write_the_file_and_queue_a_reload() {
+        let Some(state) = demo_state() else { return };
+        let demo = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testsets/grandorgue-demo/demo.organ");
+        let dir = std::env::temp_dir().join("aristide-editor-endpoints-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let organ = aristide_formats::grandorgue::load(&demo).expect("demo parses").organ;
+        let canonical = demo.canonicalize().expect("canonicalizes");
+        let file =
+            crate::config::create_wrapper_organ(&dir, "Editor Test", &canonical, &organ, None)
+                .expect("inventory written");
+        state.lock().expect("state").composite_path = Some(file.clone());
+        // The tests run no main loop; each edit queues a rebuild that
+        // must be cleared before the next edit is allowed.
+        let settle = |state: &Arc<Mutex<State>>| {
+            let mut state = state.lock().expect("state");
+            assert!(state.pending_load.is_some(), "a rebuild was queued");
+            state.pending_load = None;
+            state.loading = None;
+        };
+
+        let ok = respond(
+            &state,
+            &Method::Post,
+            "/api/organ/manual/add?name=Solo&low=48&high=84",
+        );
+        assert_eq!(ok.status_code().0, 200);
+        settle(&state);
+        let text = std::fs::read_to_string(&file).expect("reads");
+        assert!(text.contains("name = \"Solo\""), "the manual was declared: {text}");
+
+        let dup = respond(&state, &Method::Post, "/api/organ/manual/add?name=solo");
+        assert_eq!(dup.status_code().0, 400, "duplicate names are refused");
+
+        let renamed = respond(
+            &state,
+            &Method::Post,
+            "/api/organ/manual/rename?manual=1&name=Grand",
+        );
+        assert_eq!(renamed.status_code().0, 200);
+        settle(&state);
+        let text = std::fs::read_to_string(&file).expect("reads");
+        assert!(text.contains("name = \"Grand\""), "{text}");
+        assert!(text.contains("on = \"Grand\""), "its pulls followed: {text}");
+
+        let boxed = respond(&state, &Method::Post, "/api/organ/enclosure/add?name=Box");
+        assert_eq!(boxed.status_code().0, 200);
+        settle(&state);
+        let assigned = respond(
+            &state,
+            &Method::Post,
+            "/api/organ/enclosure/assign?enclosure=Box&stop=16&in=1",
+        );
+        assert_eq!(assigned.status_code().0, 200);
+        settle(&state);
+        let text = std::fs::read_to_string(&file).expect("reads");
+        assert!(text.contains("[[enclosure]]"), "{text}");
+        assert!(text.contains("Montre 8'"), "the stop joined the box by name: {text}");
+
+        let unpulled = respond(&state, &Method::Post, "/api/organ/unpull?stop=16");
+        assert_eq!(unpulled.status_code().0, 200);
+        settle(&state);
+        let def: aristide_formats::instrument::Definition =
+            toml::from_str(&std::fs::read_to_string(&file).expect("reads")).expect("parses");
+        assert!(
+            !def.stops.iter().any(|pull| pull.stop == "Montre 8'"),
+            "the pull line is gone"
+        );
+
+        let offerings = respond(&state, &Method::Get, "/api/organ/offerings");
+        assert_eq!(offerings.status_code().0, 200);
+        use std::io::Read;
+        let mut body = String::new();
+        offerings
+            .into_reader()
+            .read_to_string(&mut body)
+            .expect("reads");
+        assert!(body.contains("\"alias\":\"s1\""), "{body}");
+        assert!(
+            body.contains("\"name\":\"Montre 8'\",\"pulled\":false"),
+            "the unpulled stop is offered again: {body}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Couplers reaching for pipes a division hasn't got is off, and
     /// switchable without editing the set.
     #[test]
