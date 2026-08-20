@@ -1,4 +1,5 @@
 import { resolveBase, connect, commands } from "./api.js";
+import { ConflictDialog } from "./conflict.js";
 import { Console } from "./console.js";
 import { PianoKeys } from "./keys.js";
 import { MenuBar } from "./menu.js";
@@ -15,6 +16,7 @@ const prefs = new Preferences(document, base, (query) => send(query));
 const picker = new Picker(document, base, (query) => send(query));
 const view = new Console(document, (query) => send(query), (tab) => prefs.open(tab));
 const keys = new PianoKeys(document, (query) => send(query));
+const conflict = new ConflictDialog(document, (query) => send(query));
 
 function fullscreen() {
   if (document.fullscreenElement) document.exitFullscreen();
@@ -144,6 +146,7 @@ send = connect(
     keys.update(snapshot);
     prefs.update(snapshot);
     picker.update(snapshot);
+    conflict.update(snapshot);
   },
   (message) => view.offline(message),
 );

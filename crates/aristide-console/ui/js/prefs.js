@@ -56,7 +56,7 @@ const ACTION_LABELS = {
   "coupler:": "Coupler…",
   "enclosure:": "Enclosure…",
 };
-function actionLabel(action) {
+export function actionLabel(action) {
   return ACTION_LABELS[action] ?? action;
 }
 
@@ -86,7 +86,7 @@ const KEY_GLYPHS = {
   Semicolon: ";", Quote: "'", BracketLeft: "[", BracketRight: "]",
   Backquote: "`", Backslash: "\\", Space: "Space",
 };
-function keyGlyph(code) {
+export function keyGlyph(code) {
   if (code in KEY_GLYPHS) return KEY_GLYPHS[code];
   if (code.startsWith("Key")) return code.slice(3);
   if (code.startsWith("Digit")) return code.slice(5);

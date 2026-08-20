@@ -728,6 +728,45 @@ input[type="range"]:hover::-webkit-slider-thumb { filter: brightness(1.15); }
 .about-body { display: block; padding: 18px 20px 22px; font-size: 12.5px; line-height: 1.6; }
 .about-body p { margin: 0 0 10px; }
 
+/* ---- conflict dialog --------------------------------------------------- */
+
+/* A small centered prompt, not a full sheet: the server holds a parked
+   bind, so this is the whole interface until the player answers. */
+.conflict-card { width: min(26rem, 100%); height: auto; }
+.conflict-body { display: block; padding: 18px 20px 20px; }
+.conflict-body .pane-note { margin: 0 0 8px; color: var(--text); }
+.conflict-body .pane-note:last-of-type { margin-bottom: 16px; color: var(--text-dim); }
+
+.conflict-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.conflict-actions button {
+  padding: 6px 14px;
+  border: 1px solid #000000d0;
+  border-radius: 3px;
+  cursor: pointer;
+  background: linear-gradient(180deg, #383b3f, #2e3134);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  box-shadow: var(--bevel);
+  transition: filter 0.1s ease;
+}
+.conflict-actions button:hover { filter: brightness(1.12); }
+.conflict-actions button:active { filter: brightness(0.85); }
+
+/* the recommended way out: lit like a drawn stop or an armed piston */
+.conflict-actions button.conflict-primary {
+  background: linear-gradient(180deg, #ffffff26, #ffffff00 45%), var(--accent);
+  color: var(--accent-ink);
+}
+
 /* ---- the load dialog --------------------------------------------------- */
 
 /* A utility window, dense as a browser panel: title strip, a row of

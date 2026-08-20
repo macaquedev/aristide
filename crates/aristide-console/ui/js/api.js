@@ -104,6 +104,9 @@ export const commands = {
   organRename: (name) => `/api/organ/rename?name=${encodeURIComponent(name)}`,
   // Drops one entry from the library without touching the file itself.
   libraryForget: (path) => `/api/library/forget?path=${encodeURIComponent(path)}`,
+  // Resolves a parked MIDI bind that would give a device or message a
+  // second job: keep both, replace the existing one, or drop the new bind.
+  conflict: (choice) => `/api/conflict?choice=${choice}`,
 };
 
 /// Start the client. Calls `onState(snapshot)` for every fresh snapshot
