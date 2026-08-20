@@ -1219,6 +1219,31 @@ impl Console {
         self.organ.manuals.get(manual).is_some_and(|m| m.pedal)
     }
 
+    /// Which enclosures a stop's own pipes sit in (indices into the
+    /// snapshot's enclosure list): its ranges' ranks → their chests →
+    /// the boxes those chests are inside. Borrowed pipes stand with
+    /// their own rank and answer to its boxes at sounding time.
+    pub fn stop_enclosures(&self, stop: StopId) -> Vec<u32> {
+        let Some(stop) = self.organ.stops.iter().find(|s| s.id == stop) else {
+            return Vec::new();
+        };
+        let mut boxes: Vec<u32> = stop
+            .ranks
+            .iter()
+            .filter_map(|range| self.organ.rank(range.rank))
+            .filter_map(|rank| {
+                self.organ
+                    .windchests
+                    .iter()
+                    .find(|chest| chest.number == rank.windchest)
+            })
+            .flat_map(|chest| chest.enclosures.iter().copied())
+            .collect();
+        boxes.sort_unstable();
+        boxes.dedup();
+        boxes
+    }
+
     /// Rename the loaded organ. Only the name changes — every stop,
     /// manual and coupler keeps its identity; persisting the new name
     /// (and re-keying the assignments stored under it) is the caller's

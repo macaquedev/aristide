@@ -102,6 +102,10 @@ pub struct Definition {
     pub stops: Vec<StopPull>,
     #[serde(default, rename = "move")]
     pub moves: Vec<MoveDef>,
+    /// Swell boxes of the file's own devising (`[[enclosure]]`), on
+    /// top of whatever boxes the sources carry in.
+    #[serde(default, rename = "enclosure")]
+    pub enclosure_defs: Vec<EnclosureDef>,
     #[serde(default)]
     pub midi: MidiDef,
     #[serde(default)]
@@ -215,6 +219,25 @@ pub struct StopPull {
     /// New console name; only applied when the pattern matched exactly
     /// one stop.
     pub rename: Option<String>,
+}
+
+/// A swell box of the composite's own devising: a name and the stops
+/// (or whole manuals) whose pipes stand inside it. Enclosure is
+/// physical — a box holds *pipes* — so a member stop encloses the
+/// ranks its ranges actually sound; pipes it merely borrows stand
+/// wherever their own rank does and stay outside. A windchest shared
+/// between member and non-member ranks is split so the box closes
+/// over exactly its own pipes and nothing else.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnclosureDef {
+    pub name: String,
+    /// Stop-name patterns, resolved on the assembled console.
+    #[serde(default)]
+    pub stops: Vec<String>,
+    /// Manual-name patterns: every stop on them is a member.
+    #[serde(default)]
+    pub manuals: Vec<String>,
 }
 
 /// The composite's own MIDI wiring — this file is where the rig lives,
@@ -609,7 +632,8 @@ pub fn assemble(
             )
         })
         .collect();
-    let organ = assembly.finish(def.name.clone());
+    let mut organ = assembly.finish(def.name.clone());
+    apply_enclosure_defs(&mut organ, &def.enclosure_defs, &mut assembly.warnings);
     Ok(Assembled {
         organ,
         sidecar: def.to_sidecar(),
@@ -619,6 +643,117 @@ pub fn assemble(
         manual_tuning,
         warnings: assembly.warnings,
     })
+}
+
+/// How closed a defined box can get, as GO expresses it: a linear
+/// amplitude percentage. ~25% is ≈ −12 dB broadband before the
+/// engine's extra treble shelf — a realistic wooden box. The
+/// instrument-wide `[enclosures] floor_db` overrides it as usual.
+const DEFINED_BOX_FLOOR_PERCENT: f64 = 25.0;
+
+/// Realize `[[enclosure]]` definitions on the assembled organ: each
+/// becomes a model enclosure whose member ranks' windchests list it,
+/// splitting any chest shared with non-members. An empty box is kept —
+/// the console's editor creates a box first and drags stops in after.
+fn apply_enclosure_defs(organ: &mut Organ, defs: &[EnclosureDef], warnings: &mut Vec<String>) {
+    for def in defs {
+        let mut members: HashSet<usize> = HashSet::new();
+        {
+            let stop_names: Vec<&str> = organ.stops.iter().map(|s| s.name.as_str()).collect();
+            for pattern in &def.stops {
+                let matches = sidecar::match_names(&stop_names, pattern);
+                if matches.is_empty() {
+                    warnings.push(format!(
+                        "enclosure {:?}: no stop matches {pattern:?}",
+                        def.name
+                    ));
+                }
+                members.extend(matches);
+            }
+            let manual_names: Vec<&str> = organ.manuals.iter().map(|m| m.name.as_str()).collect();
+            for pattern in &def.manuals {
+                let matches = sidecar::match_names(&manual_names, pattern);
+                if matches.is_empty() {
+                    warnings.push(format!(
+                        "enclosure {:?}: no manual matches {pattern:?}",
+                        def.name
+                    ));
+                }
+                let manuals: HashSet<ManualId> =
+                    matches.into_iter().map(|index| organ.manuals[index].id).collect();
+                members.extend(
+                    organ
+                        .stops
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, stop)| manuals.contains(&stop.manual))
+                        .map(|(index, _)| index),
+                );
+            }
+        }
+        let member_ranks: HashSet<RankId> = members
+            .iter()
+            .flat_map(|&index| organ.stops[index].ranks.iter().map(|range| range.rank))
+            .collect();
+        let enclosure_index = organ.enclosures.len() as u32;
+        organ.enclosures.push(Enclosure {
+            name: def.name.clone(),
+            amp_minimum_level: DEFINED_BOX_FLOOR_PERCENT,
+            midi_input_number: None,
+            displayed: true,
+        });
+
+        let mut next_chest = organ.windchests.iter().map(|c| c.number).max().unwrap_or(0);
+        let member_chests: HashSet<u32> = organ
+            .ranks
+            .iter()
+            .filter(|rank| member_ranks.contains(&rank.id))
+            .map(|rank| rank.windchest)
+            .collect();
+        for chest in member_chests {
+            let shared = organ
+                .ranks
+                .iter()
+                .any(|rank| rank.windchest == chest && !member_ranks.contains(&rank.id));
+            let existing = organ.windchests.iter_mut().find(|c| c.number == chest);
+            match existing {
+                Some(existing) if !shared => {
+                    if !existing.enclosures.contains(&enclosure_index) {
+                        existing.enclosures.push(enclosure_index);
+                    }
+                }
+                _ => {
+                    // Shared (or chest 0, the "no chest" marker): the
+                    // box's own pipes move onto a chest of their own,
+                    // carrying whatever boxes the old chest was in.
+                    let mut own = organ
+                        .windchests
+                        .iter()
+                        .find(|c| c.number == chest)
+                        .cloned()
+                        .unwrap_or(Windchest {
+                            number: chest,
+                            name: String::new(),
+                            enclosures: Vec::new(),
+                        });
+                    next_chest += 1;
+                    own.number = next_chest;
+                    own.name = if own.name.is_empty() {
+                        def.name.clone()
+                    } else {
+                        format!("{} — {}", own.name, def.name)
+                    };
+                    own.enclosures.push(enclosure_index);
+                    organ.windchests.push(own);
+                    for rank in &mut organ.ranks {
+                        if rank.windchest == chest && member_ranks.contains(&rank.id) {
+                            rank.windchest = next_chest;
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn declared_compass(manual: &ManualDef) -> Result<Option<(u8, u8)>, InstrumentError> {
@@ -1183,6 +1318,94 @@ mod tests {
         assert!(built.organ.stops.is_empty(), "nothing pulled");
         let implicit = assemble(&def("Entier"), &sources, Vec::new()).expect("assembles");
         assert!(!implicit.organ.stops.is_empty(), "an undeclared file takes it all");
+    }
+
+    /// A defined swell box closes over exactly its own pipes: a chest
+    /// shared with non-member ranks (here the Hautbois' borrow donor)
+    /// is split, and the donor — whose pipes stand outside the box —
+    /// keeps speaking unenclosed.
+    #[test]
+    fn a_defined_enclosure_splits_shared_chests() {
+        let sources = vec![("A".to_string(), source("A", "/a"))];
+        let mut definition = def("Boxed");
+        definition.manuals = vec![manual("Solo", None, None)];
+        definition.stops = vec![StopPull {
+            from: "A".into(),
+            manual: None,
+            stop: "Hautbois 8".into(),
+            on: "Solo".into(),
+            rename: None,
+        }];
+        definition.enclosure_defs = vec![EnclosureDef {
+            name: "Boîte".into(),
+            stops: vec!["Hautbois 8".into()],
+            manuals: Vec::new(),
+        }];
+        let built = assemble(&definition, &sources, Vec::new()).expect("assembles");
+        let organ = &built.organ;
+        let boxed = organ.enclosures.last().expect("the box exists");
+        assert_eq!(boxed.name, "Boîte");
+        assert!(boxed.displayed);
+        let box_index = organ.enclosures.len() as u32 - 1;
+        // The Hautbois rank moved to a chest of its own inside the box;
+        // the donor stayed on the shared chest, outside.
+        let hautbois = &organ.ranks[0];
+        let donor = &organ.ranks[1];
+        assert_ne!(hautbois.windchest, donor.windchest, "the shared chest split");
+        let chest_of = |number: u32| {
+            organ
+                .windchests
+                .iter()
+                .find(|c| c.number == number)
+                .expect("chest exists")
+        };
+        assert!(chest_of(hautbois.windchest).enclosures.contains(&box_index));
+        assert!(!chest_of(donor.windchest).enclosures.contains(&box_index));
+        // The carried Swell box still encloses both, as in the source.
+        assert!(!chest_of(hautbois.windchest).enclosures.is_empty());
+    }
+
+    /// A box over a whole manual needs no split when every rank on the
+    /// chest belongs to it; an empty box still exists, because the
+    /// editor makes the box first and fills it afterwards.
+    #[test]
+    fn enclosures_by_manual_and_empty_boxes() {
+        let sources = vec![("A".to_string(), source("A", "/a"))];
+        let mut definition = def("Boxed");
+        definition.manuals = vec![manual("Solo", None, None)];
+        definition.stops = vec![StopPull {
+            from: "A".into(),
+            manual: None,
+            stop: "Principal 8".into(),
+            on: "Solo".into(),
+            rename: None,
+        }];
+        definition.enclosure_defs = vec![
+            EnclosureDef {
+                name: "Générale".into(),
+                stops: Vec::new(),
+                manuals: vec!["Solo".into()],
+            },
+            EnclosureDef {
+                name: "Vide".into(),
+                stops: Vec::new(),
+                manuals: Vec::new(),
+            },
+        ];
+        let built = assemble(&definition, &sources, Vec::new()).expect("assembles");
+        let organ = &built.organ;
+        let general = organ.enclosures.iter().position(|e| e.name == "Générale").unwrap() as u32;
+        let principal = &organ.ranks[0];
+        let chest = organ
+            .windchests
+            .iter()
+            .find(|c| c.number == principal.windchest)
+            .expect("chest exists");
+        assert!(chest.enclosures.contains(&general), "no split needed, chest joins the box");
+        assert!(
+            organ.enclosures.iter().any(|e| e.name == "Vide"),
+            "an empty box exists for the editor to fill"
+        );
     }
 
     #[test]

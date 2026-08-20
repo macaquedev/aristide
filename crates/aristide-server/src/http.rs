@@ -376,6 +376,53 @@ fn respond(
                 None => bad_request("missing stop"),
             }
         }
+        (Method::Post, "/api/organ/enclosure/add") => {
+            let Some(name) = param(query, "name").map(unescape) else {
+                return bad_request("missing name");
+            };
+            let mut state = state.lock().expect("state poisoned");
+            if state.loading.is_some() || state.pending_load.is_some() {
+                return bad_request("an organ is already loading");
+            }
+            match state.add_enclosure(&name) {
+                Ok(()) => json(state_json_locked(&state)),
+                Err(err) => bad_request(&err),
+            }
+        }
+        (Method::Post, "/api/organ/enclosure/remove") => {
+            let Some(name) = param(query, "name").map(unescape) else {
+                return bad_request("missing name");
+            };
+            let mut state = state.lock().expect("state poisoned");
+            if state.loading.is_some() || state.pending_load.is_some() {
+                return bad_request("an organ is already loading");
+            }
+            match state.remove_enclosure(&name) {
+                Ok(()) => json(state_json_locked(&state)),
+                Err(err) => bad_request(&err),
+            }
+        }
+        // Put a stop in a swell box (`in=1`) or take it out (`in=0`).
+        (Method::Post, "/api/organ/enclosure/assign") => {
+            let mut state = state.lock().expect("state poisoned");
+            if state.loading.is_some() || state.pending_load.is_some() {
+                return bad_request("an organ is already loading");
+            }
+            match (
+                param(query, "enclosure").map(unescape),
+                param(query, "stop").and_then(|v| v.parse::<u32>().ok()),
+                param(query, "in").map(|v| v != "0"),
+            ) {
+                (Some(enclosure), Some(stop), Some(inside)) => {
+                    match state.assign_enclosure(&enclosure, aristide_model::StopId(stop), inside)
+                    {
+                        Ok(()) => json(state_json_locked(&state)),
+                        Err(err) => bad_request(&err),
+                    }
+                }
+                _ => bad_request("missing enclosure/stop/in"),
+            }
+        }
         // What every source of this organ offers, for the pane's
         // source browser: manuals, stops, and what is already pulled.
         // Sources are parsed on demand (an ODF parse, no samples).
@@ -908,14 +955,20 @@ fn state_json_locked(state: &State) -> String {
                 out.push(',');
             }
             first = false;
+            let boxes: Vec<String> = console
+                .stop_enclosures(id)
+                .iter()
+                .map(|index| index.to_string())
+                .collect();
             out.push_str(&format!(
-                "{{\"id\":{},\"name\":{},\"manual\":{},\"midx\":{},\"on\":{}}}",
+                "{{\"id\":{},\"name\":{},\"manual\":{},\"midx\":{},\"enc\":[{}],\"on\":{}}}",
                 id.0,
                 json_string(name),
                 json_string(manual),
                 // usize::MAX marks a stop on a manual the set hasn't
                 // got — loaders prevent it, but JSON must stay finite.
                 manual_index.min(u32::MAX as usize),
+                boxes.join(","),
                 drawn
             ));
         }
@@ -1956,10 +2009,17 @@ mod tests {
 
         // And the binding does what it says, from a computer key.
         respond(&state, &Method::Post, "/api/key?code=Equal&on=1");
-        assert!(
-            state_json(&state).contains("{\"id\":16,\"name\":\"Montre 8'\",\"manual\":\"First Manual\",\"midx\":1,\"on\":true}"),
-            "the bound key drew the stop it names"
-        );
+        let value: serde_json::Value =
+            serde_json::from_str(&state_json(&state)).expect("valid JSON");
+        let montre = value["stops"]
+            .as_array()
+            .expect("stops")
+            .iter()
+            .find(|stop| stop["id"] == 16)
+            .expect("stop 16 exists");
+        assert_eq!(montre["name"], "Montre 8'");
+        assert_eq!(montre["manual"], "First Manual");
+        assert_eq!(montre["on"], true, "the bound key drew the stop it names");
 
         respond(&state, &Method::Post, "/api/control/unbind?slot=0");
         assert!(state_json(&state).contains("\"controls\":[]"));

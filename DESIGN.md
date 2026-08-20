@@ -222,7 +222,14 @@ The console edits the instrument live, and every edit lands in its file:
 declared compasses (`[[manual]] low/high`), stops moved between manuals
 (`[[move]]` — pitch-anchored, replayed after the pulls), couplers taken off the
 console (`[couplers] drop` — hidden and disengaged, never deleted, so always
-restorable), and per-manual tuning (`[[manual]] temperament/a4_hz/transpose`) —
+restorable), swell boxes of the file's own (`[[enclosure]]` — a name plus
+member stops/manuals; enclosure is physical, so a box holds the ranks its
+member stops actually sound, splitting a windchest shared with outsiders,
+while borrowed pipes stand with their own rank and stay outside), the organ's
+whole structure (manuals declared/renamed/reordered/removed, sources added,
+stops pulled and unpulled — the pane's editor, each edit a line in the file
+followed by a reload), and per-manual tuning
+(`[[manual]] temperament/a4_hz/transpose`) —
 a 415 meantone Positif against a 440 equal Great is one instrument. Tuning is
 physical: a coupled copy sounds the destination division's pipes, so it speaks
 that division's temperament; a division's transpose moves only its own

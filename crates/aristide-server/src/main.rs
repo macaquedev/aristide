@@ -1475,6 +1475,10 @@ impl State {
                 .map(|t| (t.temperament.name().to_string(), t.a4_hz, t.transpose));
                 config::SavedManual {
                     name: name.clone(),
+                    pedal: match &self.control {
+                        Control::Organ(console) => console.manual_pedal(manual),
+                        Control::Tone => false,
+                    },
                     low,
                     high,
                     tuning,
@@ -1749,6 +1753,56 @@ impl State {
                 "{name:?} came in as part of a whole division — edit its \
                  [[division]] line in {}",
                 path.display()
+            ));
+        }
+        self.reload_organ_file(path);
+        Ok(())
+    }
+
+    /// Define a new (empty) swell box; the pane drags stops in after.
+    pub fn add_enclosure(&mut self, name: &str) -> Result<(), String> {
+        let path = self.organ_file()?;
+        config::append_composite_enclosure(&path, name)?;
+        self.reload_organ_file(path);
+        Ok(())
+    }
+
+    /// Remove a file-defined swell box. Boxes a source carries in have
+    /// no line here to remove, and the error says so.
+    pub fn remove_enclosure(&mut self, name: &str) -> Result<(), String> {
+        let path = self.organ_file()?;
+        if !config::remove_composite_enclosure(&path, name)? {
+            return Err(format!(
+                "{name:?} is the sample set's own box, not one this file defines"
+            ));
+        }
+        self.reload_organ_file(path);
+        Ok(())
+    }
+
+    /// Put a stop into (or take it out of) a file-defined swell box.
+    pub fn assign_enclosure(
+        &mut self,
+        enclosure: &str,
+        stop: StopId,
+        inside: bool,
+    ) -> Result<(), String> {
+        let Control::Organ(console) = &self.control else {
+            return Err("no organ is loaded".into());
+        };
+        let Some(name) = console
+            .stop_states()
+            .iter()
+            .find(|(id, ..)| *id == stop)
+            .map(|(_, name, ..)| name.to_string())
+        else {
+            return Err("no such stop".into());
+        };
+        let path = self.organ_file()?;
+        if !config::assign_composite_enclosure_stop(&path, enclosure, &name, inside)? {
+            return Err(format!(
+                "{enclosure:?} is the sample set's own box — only boxes this \
+                 file defines hold stops by name"
             ));
         }
         self.reload_organ_file(path);

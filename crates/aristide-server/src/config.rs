@@ -732,6 +732,7 @@ pub fn write_composite_midi(path: &Path, organ: Option<&OrganConfig>) -> Result<
 /// tuning of its own as (temperament name, a4 Hz, transpose).
 pub struct SavedManual {
     pub name: String,
+    pub pedal: bool,
     pub low: u8,
     pub high: u8,
     pub tuning: Option<(String, f64, i8)>,
@@ -769,6 +770,9 @@ pub fn save_composite(
     for manual in manuals {
         let mut table = toml_edit::Table::new();
         table["name"] = toml_edit::value(manual.name.as_str());
+        if manual.pedal {
+            table["kind"] = toml_edit::value("pedal");
+        }
         table["low"] = toml_edit::value(manual.low as i64);
         table["high"] = toml_edit::value(manual.high as i64);
         if let Some((temperament, a4, transpose)) = &manual.tuning {
@@ -1309,6 +1313,92 @@ pub fn remove_composite_stop_pull(path: &Path, stop: &str, on: &str) -> Result<b
     Ok(true)
 }
 
+/// Define a new (empty) swell box in a composite file. The pane fills
+/// it by dragging stops in afterwards.
+pub fn append_composite_enclosure(path: &Path, name: &str) -> Result<(), String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("the swell box needs a name".into());
+    }
+    let mut doc = composite_doc(path)?;
+    if let Some(enclosures) = doc.get("enclosure").and_then(|e| e.as_array_of_tables())
+        && enclosures.iter().any(|table| field_is(table, "name", name))
+    {
+        return Err(format!("this organ already defines a swell box named {name:?}"));
+    }
+    let enclosures = doc
+        .entry("enclosure")
+        .or_insert(toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new()));
+    let Some(enclosures) = enclosures.as_array_of_tables_mut() else {
+        return Err("[[enclosure]] is not an array of tables".into());
+    };
+    let mut table = toml_edit::Table::new();
+    table["name"] = toml_edit::value(name);
+    table["stops"] = toml_edit::value(toml_edit::Array::new());
+    enclosures.push(table);
+    write_atomically(path, doc.to_string())
+}
+
+/// Remove a file-defined swell box. `Ok(false)` when the file defines
+/// no such box — a box carried in from a source has no line to remove.
+pub fn remove_composite_enclosure(path: &Path, name: &str) -> Result<bool, String> {
+    let mut doc = composite_doc(path)?;
+    let Some(enclosures) = doc.get_mut("enclosure").and_then(|e| e.as_array_of_tables_mut())
+    else {
+        return Ok(false);
+    };
+    let before = enclosures.len();
+    enclosures.retain(|table| !field_is(table, "name", name));
+    if enclosures.len() == before {
+        return Ok(false);
+    }
+    if enclosures.is_empty() {
+        doc.remove("enclosure");
+    }
+    write_atomically(path, doc.to_string())?;
+    Ok(true)
+}
+
+/// Put a stop into (or take it out of) a file-defined swell box, by
+/// exact name in the box's `stops` list. `Ok(false)` when the file
+/// defines no such box.
+pub fn assign_composite_enclosure_stop(
+    path: &Path,
+    enclosure: &str,
+    stop: &str,
+    inside: bool,
+) -> Result<bool, String> {
+    let mut doc = composite_doc(path)?;
+    let Some(enclosures) = doc.get_mut("enclosure").and_then(|e| e.as_array_of_tables_mut())
+    else {
+        return Ok(false);
+    };
+    let Some(table) = enclosures
+        .iter_mut()
+        .find(|table| field_is(table, "name", enclosure))
+    else {
+        return Ok(false);
+    };
+    let stops = table
+        .entry("stops")
+        .or_insert(toml_edit::value(toml_edit::Array::new()));
+    let Some(stops) = stops.as_array_mut() else {
+        return Err("the box's stops list is not an array".into());
+    };
+    let listed = stops
+        .iter()
+        .position(|value| value.as_str().is_some_and(|v| v.eq_ignore_ascii_case(stop)));
+    match (inside, listed) {
+        (true, None) => stops.push(stop),
+        (false, Some(at)) => {
+            stops.remove(at);
+        }
+        _ => return Ok(true), // already as asked
+    }
+    write_atomically(path, doc.to_string())?;
+    Ok(true)
+}
+
 /// Rename a sample-set organ without touching the set: the name goes
 /// into the set's Aristide sidecar (created if the set has none),
 /// where the loader reads it back as the organ's name. Any existing
@@ -1752,6 +1842,44 @@ mod tests {
         let parsed = def(&path);
         assert_eq!(parsed.manuals.len(), 1);
         assert!(parsed.divisions.is_empty(), "the pull landing on it went too");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A swell box lives and dies as `[[enclosure]]` lines: created
+    /// empty, filled a stop at a time, and only file-defined boxes can
+    /// be touched at all.
+    #[test]
+    fn enclosure_writers_define_fill_and_remove_boxes() {
+        let dir = std::env::temp_dir().join("aristide-enclosure-writers-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = create_blank_organ(&dir, "Atelier").expect("creates");
+
+        append_composite_enclosure(&path, "Boîte").expect("box defined");
+        assert!(
+            append_composite_enclosure(&path, "boîte").is_err(),
+            "duplicate box names refused"
+        );
+        assert!(
+            assign_composite_enclosure_stop(&path, "Boîte", "Hautbois 8", true).expect("assigns"),
+            "the defined box takes a stop"
+        );
+        assert!(
+            !assign_composite_enclosure_stop(&path, "Swell box", "Hautbois 8", true)
+                .expect("no ghost"),
+            "a box the file doesn't define isn't editable"
+        );
+        let def: aristide_formats::instrument::Definition =
+            toml::from_str(&std::fs::read_to_string(&path).expect("reads")).expect("parses");
+        assert_eq!(def.enclosure_defs.len(), 1);
+        assert_eq!(def.enclosure_defs[0].stops, ["Hautbois 8"]);
+
+        assign_composite_enclosure_stop(&path, "Boîte", "Hautbois 8", false).expect("unassigns");
+        let def: aristide_formats::instrument::Definition =
+            toml::from_str(&std::fs::read_to_string(&path).expect("reads")).expect("parses");
+        assert!(def.enclosure_defs[0].stops.is_empty());
+
+        assert!(remove_composite_enclosure(&path, "Boîte").expect("removes"));
+        assert!(!remove_composite_enclosure(&path, "Boîte").expect("already gone"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
