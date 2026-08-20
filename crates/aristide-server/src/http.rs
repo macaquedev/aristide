@@ -321,7 +321,10 @@ fn respond(
             }
             None => bad_request("missing name"),
         },
-        // Take an organ off the picker. Its assignments are kept.
+        // Take an organ off the picker's Recent list. Nothing else is
+        // touched: the organ file stays where it is (Browse's organs
+        // shortcut still reaches it, and loading its set finds it
+        // again), and its assignments are kept.
         (Method::Post, "/api/library/forget") => match param(query, "path").map(unescape) {
             Some(path) => {
                 let mut state = state.lock().expect("state poisoned");
@@ -1118,8 +1121,18 @@ fn browse_json(dir: &std::path::Path) -> Result<String, String> {
     let key = |name: &String| name.to_lowercase();
     dirs.sort_by_key(key);
     files.sort_by_key(key);
+    // Where the console's own organ files live, so the browser can
+    // offer a jump there: the config directory is a dotfile, which
+    // this listing (rightly) hides, so without the shortcut an organ
+    // taken off Recent would be unreachable.
+    let organs = crate::config::organs_dir()
+        .filter(|dir| dir.is_dir())
+        .map_or_else(
+            || "null".to_string(),
+            |dir| json_string(&dir.display().to_string()),
+        );
     let mut out = format!(
-        "{{\"dir\":{},\"parent\":{},\"entries\":[",
+        "{{\"dir\":{},\"parent\":{},\"organs\":{organs},\"entries\":[",
         json_string(&dir.display().to_string()),
         dir.parent().map_or_else(
             || "null".to_string(),

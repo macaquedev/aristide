@@ -1745,7 +1745,7 @@ fn adopt_set(
         .lock()
         .expect("state poisoned")
         .midi_config
-        .wrapper_for(&canonical);
+        .wrapper_for(&canonical, Some(&dir));
     if let Some(path) = wrapper {
         tracing::info!(
             "organ file for {}: {}",

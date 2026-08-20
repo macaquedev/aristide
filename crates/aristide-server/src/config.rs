@@ -68,8 +68,9 @@ const HEADER: &str = "\
 #                means every keyboard on the same device.
 #
 # A [[library]] entry is one organ this machine has loaded — the
-# console's picker lists them, most recent first. Removing one only
-# removes it from the picker; its assignments below are kept.
+# console's picker lists them as Recent, most recent first. Removing
+# one only removes it from that list; the organ's file and its
+# assignments below are kept.
 #
 # Aristide rewrites this file whenever you change an assignment in
 # Preferences → MIDI or load an organ. Hand edits are read back on the
@@ -110,37 +111,49 @@ impl MidiConfig {
         );
     }
 
-    /// The library's organ file that wraps `set`, when one exists: a
-    /// composite whose one source is that set. Loading the set again
-    /// means that organ — the file is the organ, the set only feeds it
-    /// — and the most recently played match wins. `set` should be
+    /// The organ file that wraps `set`, when one exists: a composite
+    /// whose one source is that set. Loading the set again means that
+    /// organ — the file is the organ, the set only feeds it. Recent
+    /// entries are tried first (most recently played wins), then every
+    /// file in `organs_dir`: an organ removed from Recent is not gone,
+    /// and reloading its set must find it rather than silently making
+    /// a second organ without its name and wiring. `set` should be
     /// canonical; the candidates' sources are canonicalized to compare.
-    pub fn wrapper_for(&self, set: &Path) -> Option<PathBuf> {
-        for entry in &self.library {
-            if !aristide_formats::instrument::is_definition(&entry.path) {
-                continue;
+    pub fn wrapper_for(&self, set: &Path, organs_dir: Option<&Path>) -> Option<PathBuf> {
+        let wraps = |candidate: &Path| {
+            if !aristide_formats::instrument::is_definition(candidate) {
+                return false;
             }
-            let Ok(text) = std::fs::read_to_string(&entry.path) else {
-                continue;
+            let Ok(text) = std::fs::read_to_string(candidate) else {
+                return false;
             };
             let Ok(def) = toml::from_str::<aristide_formats::instrument::Definition>(&text)
             else {
-                continue;
+                return false;
             };
             if def.sources.len() != 1 {
-                continue;
+                return false;
             }
             let source = def.sources.values().next().expect("one source");
             let resolved = if source.is_absolute() {
                 source.clone()
             } else {
-                entry.path.parent().unwrap_or(Path::new("")).join(source)
+                candidate.parent().unwrap_or(Path::new("")).join(source)
             };
-            if resolved.canonicalize().ok().as_deref() == Some(set) {
+            resolved.canonicalize().ok().as_deref() == Some(set)
+        };
+        for entry in &self.library {
+            if wraps(&entry.path) {
                 return Some(entry.path.clone());
             }
         }
-        None
+        let mut candidates: Vec<PathBuf> = std::fs::read_dir(organs_dir?)
+            .ok()?
+            .flatten()
+            .map(|entry| entry.path())
+            .collect();
+        candidates.sort();
+        candidates.into_iter().find(|path| wraps(path))
     }
 
     /// Drop an organ from the picker. Its assignments stay: forgetting
@@ -977,11 +990,21 @@ mod tests {
         config.remember("Chapelle", &wrapper);
         config.remember("Combo", &combo);
         config.remember("Raw", &canonical);
-        assert_eq!(config.wrapper_for(&canonical), Some(wrapper));
+        assert_eq!(config.wrapper_for(&canonical, None), Some(wrapper.clone()));
         assert_eq!(
-            config.wrapper_for(&dir.join("elsewhere.organ")),
+            config.wrapper_for(&dir.join("elsewhere.organ"), None),
             None,
-            "nothing wraps a set the library has never seen"
+            "nothing wraps a set this machine has never seen"
+        );
+
+        // Removed from Recent is not gone: the organs folder still
+        // holds the file, and reloading the set finds it there rather
+        // than making a second organ without its name and wiring.
+        config.forget(&wrapper);
+        assert_eq!(config.wrapper_for(&canonical, None), None);
+        assert_eq!(
+            config.wrapper_for(&canonical, Some(&dir.join("organs"))),
+            Some(wrapper)
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

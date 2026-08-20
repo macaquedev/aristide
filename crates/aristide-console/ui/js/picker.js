@@ -8,9 +8,12 @@
 // Three ways in: a new blank organ (a name becomes a composite file,
 // via organNew), a sample set picked in the native file dialog (Tauri;
 // a plain browser falls back to the server-side directory listing),
-// and the library — organs this machine has loaded before. All end the
-// same way — POSTing a load, which the usual send()/poll loop turns
-// into a `loading` snapshot and eventually a new `organ`.
+// and Recent — organs this machine has played before, most recent
+// first. All end the same way — POSTing a load, which the usual
+// send()/poll loop turns into a `loading` snapshot and eventually a
+// new `organ`. Taking an organ off Recent removes only the list entry:
+// its file stays (Browse's "Your organs" shortcut still reaches it)
+// and loading its set finds it again.
 
 import { commands } from "./api.js";
 
@@ -46,6 +49,7 @@ export class Picker {
     // directory listing, fetched directly rather than polled.
     this.dir = null;
     this.browseParent = null;
+    this.browseOrgans = null; // where the console's own organ files live
     this.browseEntries = null;
     this.browseError = null;
     this.el = {
@@ -62,6 +66,7 @@ export class Picker {
       library: root.getElementById("picker-library"),
       browsePane: root.getElementById("picker-browse"),
       up: root.getElementById("picker-up"),
+      organs: root.getElementById("picker-organs"),
       dir: root.getElementById("picker-dir"),
       browseError: root.getElementById("picker-browse-error"),
       browseList: root.getElementById("picker-browse-list"),
@@ -122,6 +127,7 @@ export class Picker {
     this.el.browsePane.classList.add("hidden");
     this.dir = null;
     this.browseParent = null;
+    this.browseOrgans = null;
     this.browseEntries = null;
     this.browseError = null;
   }
@@ -174,6 +180,12 @@ export class Picker {
     });
     this.el.up.addEventListener("click", () => {
       if (this.browseParent) this.browse(this.browseParent);
+    });
+    // The organs folder lives under a dotted config directory the
+    // listing hides, so this shortcut is how an organ taken off Recent
+    // is found again.
+    this.el.organs.addEventListener("click", () => {
+      if (this.browseOrgans) this.browse(this.browseOrgans);
     });
   }
 
@@ -275,8 +287,8 @@ export class Picker {
     forget.type = "button";
     forget.className = "picker-forget";
     forget.textContent = "×";
-    forget.title = "Forget";
-    forget.setAttribute("aria-label", `Forget ${entry.name}`);
+    forget.title = "Remove from Recent (the organ's file is kept)";
+    forget.setAttribute("aria-label", `Remove ${entry.name} from Recent`);
     forget.addEventListener("click", (event) => {
       event.stopPropagation(); // don't also trigger the row's own load
       this.send(commands.libraryForget(entry.path));
@@ -315,6 +327,7 @@ export class Picker {
       const data = await response.json();
       this.dir = data.dir;
       this.browseParent = data.parent;
+      this.browseOrgans = data.organs ?? null;
       this.browseEntries = data.entries;
       this.browseError = null;
       this.renderBrowse();
@@ -328,6 +341,8 @@ export class Picker {
     this.el.dir.textContent = this.dir ?? "";
     this.el.dir.title = this.dir ?? "";
     this.el.up.disabled = !this.browseParent;
+    this.el.organs.classList.toggle("hidden", !this.browseOrgans);
+    this.el.organs.disabled = this.dir === this.browseOrgans;
 
     this.el.browseError.classList.toggle("hidden", !this.browseError);
     this.el.browseError.textContent = this.browseError ?? "";
