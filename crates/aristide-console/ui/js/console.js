@@ -46,9 +46,11 @@ export class Console {
       panic: root.getElementById("panic"),
       jambLeft: root.getElementById("jamb-left"),
       jambRight: root.getElementById("jamb-right"),
+      center: root.getElementById("console-center"),
       couplers: root.getElementById("couplers"),
       manuals: root.getElementById("manuals"),
       pedals: root.getElementById("pedals"),
+      emptyCard: root.getElementById("organ-empty-card"),
     };
     this.wireRail();
   }
@@ -84,10 +86,36 @@ export class Console {
 
   build(snapshot) {
     this.el.organName.textContent = snapshot.organ ?? "Aristide";
+    // A loaded organ with nothing built yet has no jambs and no
+    // keyboards worth drawing — a lone Tremblant knob and a Cancel
+    // rocker would just haunt an otherwise bare case. Point at the
+    // editor instead.
+    const empty = !!snapshot.organ && !snapshot.stops.length && !snapshot.manuals.length;
+    this.el.jambLeft.classList.toggle("hidden", empty);
+    this.el.jambRight.classList.toggle("hidden", empty);
+    this.el.center.classList.toggle("hidden", empty);
+    this.el.emptyCard.classList.toggle("hidden", !empty);
+    if (empty) {
+      this.buildEmptyCard(snapshot);
+      return;
+    }
     this.buildJambs(snapshot);
     this.buildCouplers(snapshot);
     this.buildKeyboards(snapshot);
     this.fitLabels();
+  }
+
+  buildEmptyCard(snapshot) {
+    this.el.emptyCard.replaceChildren();
+    const title = document.createElement("h2");
+    title.textContent = snapshot.organ ?? "Untitled organ";
+    const note = document.createElement("p");
+    note.textContent = "An empty organ — build it in Preferences → Organ.";
+    const open = document.createElement("button");
+    open.type = "button";
+    open.textContent = "Open Preferences";
+    open.addEventListener("click", () => this.openPreferences("organ"));
+    this.el.emptyCard.append(title, note, open);
   }
 
   /// Long stop names ("Trompette", "Tremblant") must never break

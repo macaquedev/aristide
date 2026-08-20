@@ -122,6 +122,16 @@ export class Preferences {
     this.controlLearning = null;
     this.controlsCount = 0;
     this.organSignature = null;
+    this.lastSnapshot = null;
+    this.offerings = null; // last-fetched /api/organ/offerings, or null
+    this.renamingManual = null; // manual idx whose header is a rename input
+    this.drag = null; // the live ctrl-drag, if any — see startDrag()
+    this.pendingRemove = null; // {kind: "manual"|"enclosure", ...} awaiting confirm
+    this.fabPedal = false; // which form the FAB's manual form is for
+    this.fabBrowseDir = null;
+    this.fabBrowseParent = null;
+    this.fabBrowseEntries = null;
+    this.fabBrowseError = null;
     this.tab = "midi";
     this.el = {
       modal: root.getElementById("prefs"),
@@ -136,7 +146,43 @@ export class Preferences {
       organSaveError: root.getElementById("organ-save-error"),
       organCompass: root.getElementById("organ-compass"),
       organStops: root.getElementById("organ-stops"),
+      organEnclosures: root.getElementById("organ-enclosures"),
       organCouplers: root.getElementById("organ-couplers"),
+      organFloats: root.getElementById("organ-floats"),
+      organLoadingStatus: root.getElementById("organ-loading-status"),
+      organLoadingText: root.getElementById("organ-loading-text"),
+      organEditError: root.getElementById("organ-edit-error"),
+      organOfferingsHeading: root.getElementById("organ-offerings-heading"),
+      organOfferingsNote: root.getElementById("organ-offerings-note"),
+      organOfferings: root.getElementById("organ-offerings"),
+      organBin: root.getElementById("organ-bin"),
+      organRemoveConfirm: root.getElementById("organ-remove-confirm"),
+      organRemoveConfirmText: root.getElementById("organ-remove-confirm-text"),
+      organRemoveConfirmYes: root.getElementById("organ-remove-confirm-yes"),
+      organRemoveConfirmNo: root.getElementById("organ-remove-confirm-no"),
+      organFabDock: root.getElementById("organ-fab-dock"),
+      organFab: root.getElementById("organ-fab"),
+      organFabMenu: root.getElementById("organ-fab-menu"),
+      organFabAddManual: root.getElementById("organ-fab-add-manual"),
+      organFabAddPedal: root.getElementById("organ-fab-add-pedal"),
+      organFabAddEnc: root.getElementById("organ-fab-add-enc"),
+      organFabAddSource: root.getElementById("organ-fab-add-source"),
+      organFabManualForm: root.getElementById("organ-fab-manual-form"),
+      organFabManualName: root.getElementById("organ-fab-manual-name"),
+      organFabManualLow: root.getElementById("organ-fab-manual-low"),
+      organFabManualHigh: root.getElementById("organ-fab-manual-high"),
+      organFabManualCancel: root.getElementById("organ-fab-manual-cancel"),
+      organFabEncForm: root.getElementById("organ-fab-enc-form"),
+      organFabEncName: root.getElementById("organ-fab-enc-name"),
+      organFabEncCancel: root.getElementById("organ-fab-enc-cancel"),
+      organFabSourceForm: root.getElementById("organ-fab-source-form"),
+      organFabSourcePath: root.getElementById("organ-fab-source-path"),
+      organFabSourceAdd: root.getElementById("organ-fab-source-add"),
+      organFabSourceCancel: root.getElementById("organ-fab-source-cancel"),
+      organFabBrowseUp: root.getElementById("organ-fab-browse-up"),
+      organFabBrowseDir: root.getElementById("organ-fab-browse-dir"),
+      organFabBrowseError: root.getElementById("organ-fab-browse-error"),
+      organFabBrowseList: root.getElementById("organ-fab-browse-list"),
       manuals: root.getElementById("midi-manuals"),
       ports: root.getElementById("midi-ports"),
       unassigned: root.getElementById("midi-unassigned"),
@@ -201,6 +247,11 @@ export class Preferences {
     for (const pane of this.el.panes) {
       pane.classList.toggle("hidden", pane.dataset.pane !== this.tab);
     }
+    // The FAB/bin/confirm float over the Organ pane specifically, but
+    // live outside it (see organ-floats' own comment in index.html) so
+    // its scroll can never carry them out of place.
+    this.el.organFloats.classList.toggle("hidden", this.tab !== "organ");
+    if (this.tab === "organ" && this.lastSnapshot?.setup?.file) this.fetchOfferings();
   }
 
   wire() {
@@ -846,9 +897,19 @@ export class Preferences {
         this.saveOrgan();
       }
     });
+    this.el.organRemoveConfirmYes.addEventListener("click", () => {
+      const target = this.pendingRemove;
+      this.hideRemoveConfirm();
+      if (!target) return;
+      if (target.kind === "enclosure") this.organCommand(commands.organEnclosureRemove(target.name));
+      else this.organCommand(commands.organManualRemove(target.idx));
+    });
+    this.el.organRemoveConfirmNo.addEventListener("click", () => this.hideRemoveConfirm());
+    this.wireOrganFab();
   }
 
   refreshOrgan(snapshot) {
+    this.lastSnapshot = snapshot;
     const setup = snapshot.setup ?? null;
     const manuals = snapshot.manuals ?? [];
     const signature = JSON.stringify([
@@ -859,19 +920,40 @@ export class Preferences {
       (setup?.compass ?? []).map((c) => [
         c.idx, c.low, c.high, c.native_low, c.native_high, c.declared,
       ]),
-      manuals.map((m) => [m.idx, m.name]),
-      (snapshot.stops ?? []).map((s) => [s.id, s.name, s.midx]),
+      manuals.map((m) => [m.idx, m.name, !!m.pedal]),
+      (snapshot.stops ?? []).map((s) => [s.id, s.name, s.midx, s.enc ?? []]),
       (snapshot.couplers ?? []).map((c) => [c.idx, c.name, !!c.hidden]),
+      (snapshot.enclosures ?? []).map((e) => [e.idx, e.name]),
     ]);
-    if (signature === this.organSignature) return;
-    this.organSignature = signature;
+    const structuralChange = signature !== this.organSignature;
+    if (structuralChange) {
+      this.organSignature = signature;
 
-    this.el.organImplicitNote.classList.toggle("hidden", !setup?.implicit);
-    this.buildOrganSummary(snapshot, setup);
-    this.buildOrganSave(setup);
-    this.buildOrganCompass(setup, manuals);
-    this.buildOrganStops(snapshot, manuals);
-    this.buildOrganCouplers(snapshot);
+      this.el.organImplicitNote.classList.toggle("hidden", !setup?.implicit);
+      this.buildOrganSummary(snapshot, setup);
+      this.buildOrganSave(setup);
+      this.buildOrganCompass(setup, manuals);
+      this.buildOrganStops(snapshot, manuals);
+      this.buildOrganEnclosures(snapshot);
+      this.buildOrganCouplers(snapshot);
+    }
+    // These run every poll rather than only on a structural change: the
+    // rebuild status and which sources are on offer both need to track
+    // `loading` (which flips independently of the shape it's rebuilding
+    // towards) and the offerings fetch (which reads a different endpoint
+    // the signature above says nothing about).
+    this.refreshOrganStatus(snapshot);
+    this.updateOfferingsSection(setup, structuralChange);
+  }
+
+  /// The rebuild strip: a structural edit answers immediately but the
+  /// organ it names doesn't swap in until a later poll finds `loading`
+  /// gone. Shown only once something is actually loaded — a first load
+  /// has the picker's own progress for that.
+  refreshOrganStatus(snapshot) {
+    const show = !!snapshot.organ && !!snapshot.loading;
+    this.el.organLoadingStatus.classList.toggle("hidden", !show);
+    this.el.organLoadingText.textContent = snapshot.loading ?? "";
   }
 
   buildOrganSummary(snapshot, setup) {
@@ -1003,22 +1085,36 @@ export class Preferences {
     return { wrap, input };
   }
 
-  // ---- organ stops --------------------------------------------------------
+  // ---- organ stops: editable manual groups ---------------------------------
   //
   // Grouped by the manual whose division actually plays them (`midx`),
   // not by whichever jamb they were drawn on when their set loaded —
   // that's the whole point of being able to move one. A stop reporting
   // an out-of-range `midx` (a set whose manual didn't survive the
   // combination) is treated as unassigned rather than guessed at.
+  //
+  // A manual's own header doubles as its drag handle (reorder, or drop
+  // it on the bin to remove it) and its rename control; a stop row is
+  // both a ctrl-drag source (move it, or bin it) and a drop target isn't
+  // — it's the *group* underneath it that receives drops. Everything
+  // here rebuilds only on a structural change, same discipline as the
+  // rest of the pane; a rename or drag in progress is tracked apart from
+  // the snapshot and threaded back through on the next rebuild.
 
   buildOrganStops(snapshot, manuals) {
     this.el.organStops.replaceChildren();
-    const stops = snapshot.stops ?? [];
-    if (!stops.length) {
-      this.el.organStops.append(this.emptyNote("No stops on this organ."));
+    this.el.organFab.classList.toggle("pulse", !manuals.length);
+    if (!manuals.length) {
+      const hint = document.createElement("p");
+      hint.className = "organ-hint";
+      hint.textContent =
+        "This organ is empty — add a manual, then pull stops onto it from a sample set.";
+      this.el.organStops.append(hint);
       return;
     }
+    const stops = snapshot.stops ?? [];
     const manualByIdx = new Map(manuals.map((m) => [m.idx, m]));
+    const enclosuresByIdx = new Map((snapshot.enclosures ?? []).map((e) => [e.idx, e.name]));
     const groups = new Map(); // manual idx (or null, unassigned) -> stops
     for (const stop of stops) {
       const manual = manualByIdx.get(stop.midx);
@@ -1027,41 +1123,160 @@ export class Preferences {
       groups.get(key).push(stop);
     }
     for (const manual of manuals) {
-      const group = groups.get(manual.idx);
-      if (group) {
-        this.el.organStops.append(this.organStopGroup(manual.name, group, manual.idx, manuals));
-      }
+      this.el.organStops.append(
+        this.organManualGroup(manual, groups.get(manual.idx) ?? [], manuals, enclosuresByIdx)
+      );
     }
     const unassigned = groups.get(null);
     if (unassigned) {
-      this.el.organStops.append(this.organStopGroup("Unassigned", unassigned, null, manuals));
+      this.el.organStops.append(
+        this.organManualGroup(
+          { idx: null, name: "Unassigned", pedal: false }, unassigned, manuals, enclosuresByIdx
+        )
+      );
     }
   }
 
-  organStopGroup(title, stops, currentIdx, manuals) {
+  /// Rebuilds the manual groups from whatever snapshot is on hand —
+  /// entering or leaving a rename, or reflecting a drag's result, is a
+  /// local state change the poll knows nothing about.
+  rerenderOrganManuals() {
+    if (this.lastSnapshot) this.buildOrganStops(this.lastSnapshot, this.lastSnapshot.manuals ?? []);
+  }
+
+  startManualRename(idx) {
+    this.renamingManual = idx;
+    this.rerenderOrganManuals();
+  }
+
+  organManualGroup(manual, stops, manuals, enclosuresByIdx) {
+    const real = manual.idx != null; // false only for the synthetic "Unassigned" group
     const group = document.createElement("div");
-    group.className = "organ-stop-group";
-    const heading = document.createElement("h3");
-    heading.className = "organ-stop-group-title";
-    heading.textContent = title;
-    group.append(heading);
-    for (const stop of stops) group.append(this.organStopRow(stop, currentIdx, manuals));
+    group.className = "organ-manual-group";
+    if (real) {
+      group.dataset.dropManual = manual.idx;
+      group.dataset.manualName = manual.name;
+    }
+
+    const header = document.createElement("div");
+    header.className = "organ-manual-header";
+    if (real) {
+      header.addEventListener("pointerdown", (event) => {
+        if (!event.ctrlKey || this.renamingManual === manual.idx) return;
+        this.startDrag(
+          event, "manual",
+          { idx: manual.idx, name: manual.name, stopCount: stops.length },
+          manual.name
+        );
+      });
+      header.addEventListener("dblclick", () => this.startManualRename(manual.idx));
+    }
+
+    if (real && this.renamingManual === manual.idx) {
+      header.append(this.manualRenameField(manual));
+    } else {
+      const title = document.createElement("h3");
+      title.className = "organ-stop-group-title";
+      title.textContent = manual.name;
+      header.append(title);
+      if (manual.pedal) {
+        const tag = document.createElement("span");
+        tag.className = "organ-manual-pedal-tag";
+        tag.textContent = "pedal";
+        header.append(tag);
+      }
+      if (real) {
+        const rename = document.createElement("button");
+        rename.type = "button";
+        rename.className = "organ-manual-rename-btn";
+        rename.textContent = "✎";
+        rename.title = "Rename this manual";
+        rename.setAttribute("aria-label", `Rename ${manual.name}`);
+        rename.addEventListener("click", (event) => {
+          event.stopPropagation();
+          this.startManualRename(manual.idx);
+        });
+        header.append(rename);
+      }
+    }
+    group.append(header);
+
+    for (const stop of stops) group.append(this.organStopRow(stop, manual.idx, manuals, enclosuresByIdx));
+    if (!stops.length) {
+      const empty = document.createElement("p");
+      empty.className = "pane-empty";
+      empty.textContent = real
+        ? "Nothing pulled onto this manual yet."
+        : "No stops.";
+      group.append(empty);
+    }
     return group;
   }
 
-  /// A stop's name plus a select of the *other* manuals — choosing one
-  /// moves it there. Nothing to type, nothing to blur: picking an
+  manualRenameField(manual) {
+    const input = document.createElement("input");
+    input.className = "organ-manual-rename-input";
+    input.value = manual.name;
+    input.setAttribute("aria-label", `Rename ${manual.name}`);
+    const commit = () => {
+      if (this.renamingManual !== manual.idx) return;
+      this.renamingManual = null;
+      const name = input.value.trim();
+      if (name && name !== manual.name) {
+        this.organCommand(commands.organManualRename(manual.idx, name));
+      }
+      this.rerenderOrganManuals();
+    };
+    input.addEventListener("keydown", (event) => {
+      event.stopPropagation();
+      if (event.key === "Enter") {
+        event.preventDefault();
+        commit();
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        this.renamingManual = null;
+        this.rerenderOrganManuals();
+      }
+    });
+    input.addEventListener("blur", commit);
+    requestAnimationFrame(() => {
+      input.focus();
+      input.select();
+    });
+    return input;
+  }
+
+  /// A stop's name, a ctrl-drag handle (move it, or bin it), plus a
+  /// select of the *other* manuals as a no-drag fallback. Picking an
   /// option closes the dropdown itself, so committing on `change` alone
   /// is enough to never fight a mid-poll rebuild.
-  organStopRow(stop, currentIdx, manuals) {
+  organStopRow(stop, currentIdx, manuals, enclosuresByIdx) {
     const row = document.createElement("div");
     row.className = "organ-stop-row";
+    row.addEventListener("pointerdown", (event) => {
+      if (!event.ctrlKey) return;
+      this.startDrag(event, "stop", { id: stop.id, midx: currentIdx, name: stop.name }, stop.name);
+    });
 
     const name = document.createElement("span");
     name.className = "organ-stop-name";
     name.textContent = stop.name;
     name.title = stop.name;
     row.append(name);
+
+    // A stop a swell box already encloses carries that box's name —
+    // the first one, if more than one box somehow shares it.
+    const enc = stop.enc ?? [];
+    if (enc.length && enclosuresByIdx) {
+      const boxNames = enc.map((idx) => enclosuresByIdx.get(idx)).filter(Boolean);
+      if (boxNames.length) {
+        const tag = document.createElement("span");
+        tag.className = "organ-stop-enc-tag";
+        tag.textContent = boxNames[0];
+        tag.title = boxNames.length > 1 ? `In swell boxes: ${boxNames.join(", ")}` : `In the ${boxNames[0]} box`;
+        row.append(tag);
+      }
+    }
 
     const move = document.createElement("select");
     move.className = "organ-stop-move";
@@ -1078,6 +1293,578 @@ export class Preferences {
     row.append(move);
 
     return row;
+  }
+
+  // ---- swell boxes ----------------------------------------------------------
+  //
+  // A box is a cross-cutting view over the same stops the manual groups
+  // above already show — enclosing one doesn't move it off its manual,
+  // it just adds it to a box's membership. So each box lists its member
+  // stops as a second reference to the same stop ids, with its own
+  // ctrl-drag (out of the box) and a plain × button as the no-drag
+  // fallback (the manual groups' equivalent is the "Move to…" select).
+
+  buildOrganEnclosures(snapshot) {
+    this.el.organEnclosures.replaceChildren();
+    const enclosures = snapshot.enclosures ?? [];
+    if (!enclosures.length) {
+      this.el.organEnclosures.append(this.emptyNote("No swell boxes on this organ."));
+      return;
+    }
+    const stops = snapshot.stops ?? [];
+    for (const enclosure of enclosures) {
+      const members = stops.filter((s) => (s.enc ?? []).includes(enclosure.idx));
+      this.el.organEnclosures.append(this.organEnclosureGroup(enclosure, members));
+    }
+  }
+
+  organEnclosureGroup(enclosure, members) {
+    const group = document.createElement("div");
+    group.className = "organ-manual-group organ-enclosure-group";
+    group.dataset.dropEnclosure = enclosure.name;
+
+    const header = document.createElement("div");
+    header.className = "organ-manual-header";
+    header.addEventListener("pointerdown", (event) => {
+      if (!event.ctrlKey) return;
+      this.startDrag(
+        event, "enclosure",
+        { name: enclosure.name, stopCount: members.length },
+        enclosure.name
+      );
+    });
+
+    const glyph = document.createElement("span");
+    glyph.className = "organ-enclosure-glyph";
+    glyph.textContent = "◐";
+    glyph.setAttribute("aria-hidden", "true");
+    header.append(glyph);
+
+    const title = document.createElement("h3");
+    title.className = "organ-stop-group-title";
+    title.textContent = enclosure.name;
+    header.append(title);
+
+    const tag = document.createElement("span");
+    tag.className = "organ-manual-pedal-tag";
+    tag.textContent = "enc";
+    header.append(tag);
+
+    group.append(header);
+
+    for (const stop of members) group.append(this.organEnclosureMemberRow(enclosure, stop));
+    if (!members.length) {
+      const empty = document.createElement("p");
+      empty.className = "pane-empty";
+      empty.textContent = "No stops in this box yet — ctrl-drag one in from a manual above.";
+      group.append(empty);
+    }
+    return group;
+  }
+
+  organEnclosureMemberRow(enclosure, stop) {
+    const row = document.createElement("div");
+    row.className = "organ-stop-row";
+    row.addEventListener("pointerdown", (event) => {
+      if (!event.ctrlKey) return;
+      this.startDrag(
+        event, "boxed-stop",
+        { id: stop.id, enclosure: enclosure.name, name: stop.name },
+        stop.name
+      );
+    });
+
+    const name = document.createElement("span");
+    name.className = "organ-stop-name";
+    name.textContent = stop.name;
+    name.title = stop.name;
+    row.append(name);
+
+    const takeOut = document.createElement("button");
+    takeOut.type = "button";
+    takeOut.className = "ghost remove-input";
+    takeOut.textContent = "×";
+    takeOut.title = `Take out of ${enclosure.name}`;
+    takeOut.setAttribute("aria-label", `Take ${stop.name} out of the ${enclosure.name} box`);
+    takeOut.addEventListener("click", () =>
+      this.organCommand(commands.organEnclosureAssign(enclosure.name, stop.id, false))
+    );
+    row.append(takeOut);
+
+    return row;
+  }
+
+  // ---- ctrl-drag: stops, manuals, and offerings onto a manual group -------
+  //
+  // Plain pointer events, not HTML5 drag-and-drop — the ctrl key gates
+  // it (a plain drag has to keep scrolling the pane), a floating label
+  // follows the pointer, and the drop target is read straight off
+  // `elementFromPoint` rather than fired dragenter/dragover events.
+
+  binAllowed(kind) {
+    return kind === "stop" || kind === "manual" || kind === "enclosure";
+  }
+
+  /// A stop already sitting in a box, an unpulled offering, and a box's
+  /// own header are none of them meaningful drops onto a manual group.
+  manualAllowed(kind) {
+    return kind !== "enclosure";
+  }
+
+  /// Only a plain organ stop can be dropped into a swell box — a box
+  /// doesn't take manuals, offerings, or another box's member.
+  encAllowed(kind) {
+    return kind === "stop";
+  }
+
+  startDrag(event, kind, payload, label) {
+    event.preventDefault();
+    event.stopPropagation();
+    const ghost = document.createElement("div");
+    ghost.className = "organ-drag-ghost";
+    ghost.textContent = label;
+    this.root.body.append(ghost);
+    this.drag = { kind, payload, ghost, targetType: null, targetIdx: null, targetName: null };
+    this.positionGhost(event.clientX, event.clientY);
+    this.el.organFabDock.classList.add("dragging");
+    if (this.binAllowed(kind)) this.el.organBin.classList.add("visible");
+    this._dragMove = (e) => this.dragMove(e);
+    window.addEventListener("pointermove", this._dragMove);
+    window.addEventListener("pointerup", (e) => this.endDrag(e), { once: true });
+  }
+
+  positionGhost(x, y) {
+    if (!this.drag) return;
+    this.drag.ghost.style.left = `${x}px`;
+    this.drag.ghost.style.top = `${y}px`;
+  }
+
+  dragMove(event) {
+    if (!this.drag) return;
+    this.positionGhost(event.clientX, event.clientY);
+    this.applyDropHighlight(this.findDropTarget(event.clientX, event.clientY));
+  }
+
+  findDropTarget(x, y) {
+    const el = this.root.elementFromPoint(x, y);
+    if (!el || !this.drag) return null;
+    const bin = el.closest("[data-drop-bin]");
+    if (bin && this.binAllowed(this.drag.kind)) return { type: "bin" };
+    const enclosure = el.closest("[data-drop-enclosure]");
+    if (enclosure && this.encAllowed(this.drag.kind)) {
+      return { type: "enclosure", name: enclosure.dataset.dropEnclosure };
+    }
+    const group = el.closest("[data-drop-manual]");
+    if (group && this.manualAllowed(this.drag.kind)) {
+      return { type: "manual", idx: Number(group.dataset.dropManual), name: group.dataset.manualName };
+    }
+    return null;
+  }
+
+  applyDropHighlight(hit) {
+    for (const el of this.root.querySelectorAll(".organ-manual-group.drop-target")) {
+      el.classList.remove("drop-target");
+    }
+    this.el.organBin.classList.remove("drop-target");
+    this.drag.targetType = hit?.type ?? null;
+    this.drag.targetIdx = hit?.idx ?? null;
+    this.drag.targetName = hit?.name ?? null;
+    if (!hit) return;
+    if (hit.type === "bin") {
+      this.el.organBin.classList.add("drop-target");
+      return;
+    }
+    if (hit.type === "enclosure") {
+      this.root
+        .querySelector(`.organ-enclosure-group[data-drop-enclosure="${CSS.escape(hit.name)}"]`)
+        ?.classList.add("drop-target");
+      return;
+    }
+    // Dropping a stop back on its own manual, or a manual header on its
+    // own group, isn't a move — no need to light it up as one.
+    if (this.drag.kind === "stop" && hit.idx === this.drag.payload.midx) return;
+    if (this.drag.kind === "manual" && hit.idx === this.drag.payload.idx) return;
+    this.root
+      .querySelector(`.organ-manual-group[data-drop-manual="${hit.idx}"]`)
+      ?.classList.add("drop-target");
+  }
+
+  endDrag(event) {
+    window.removeEventListener("pointermove", this._dragMove);
+    const drag = this.drag;
+    this.drag = null;
+    if (!drag) return;
+    this.positionGhost(event.clientX, event.clientY);
+    drag.ghost.remove();
+    this.el.organFabDock.classList.remove("dragging");
+    this.el.organBin.classList.remove("visible", "drop-target");
+    for (const el of this.root.querySelectorAll(".organ-manual-group.drop-target")) {
+      el.classList.remove("drop-target");
+    }
+
+    const { targetType, targetIdx, targetName } = drag;
+    if (!targetType) return;
+
+    if (drag.kind === "stop") {
+      if (targetType === "bin") {
+        this.organCommand(commands.organUnpull(drag.payload.id));
+      } else if (targetType === "enclosure") {
+        this.organCommand(commands.organEnclosureAssign(targetName, drag.payload.id, true));
+      } else if (targetType === "manual" && targetIdx !== drag.payload.midx) {
+        // A live reassignment, not a rebuild — optimistic, the next
+        // poll reconciles it like any other control.
+        this.send(commands.organMove(drag.payload.id, targetIdx));
+      }
+    } else if (drag.kind === "manual") {
+      if (targetType === "bin") {
+        this.showRemoveConfirm("manual", drag.payload);
+      } else if (targetType === "manual" && targetIdx !== drag.payload.idx) {
+        this.organCommand(commands.organManualOrder(drag.payload.idx, targetIdx));
+      }
+    } else if (drag.kind === "boxed-stop" && targetType === "manual") {
+      // Dropped back onto a manual — any of them — takes it out of the
+      // box it came from; which manual plays it doesn't change.
+      this.organCommand(commands.organEnclosureAssign(drag.payload.enclosure, drag.payload.id, false));
+    } else if (drag.kind === "enclosure" && targetType === "bin") {
+      this.showRemoveConfirm("enclosure", drag.payload);
+    } else if (drag.kind === "offering-stop" && targetType === "manual") {
+      this.organCommand(
+        commands.organPull(drag.payload.alias, drag.payload.manualName, targetName, drag.payload.stopName)
+      );
+    } else if (drag.kind === "offering-division" && targetType === "manual") {
+      this.organCommand(commands.organPull(drag.payload.alias, drag.payload.manualName, targetName));
+    }
+  }
+
+  /// `kind` is "manual" (payload: {idx, name, stopCount}) or "enclosure"
+  /// (payload: {name, stopCount}) — the two things this pane lets you
+  /// remove outright, both confirmed the same way.
+  showRemoveConfirm(kind, payload) {
+    this.pendingRemove = { kind, ...payload };
+    const n = payload.stopCount;
+    this.el.organRemoveConfirmText.textContent =
+      kind === "enclosure"
+        ? `Remove the ${payload.name} box? Its stops stay, unenclosed.`
+        : `Remove ${payload.name} and its ${n} stop${n === 1 ? "" : "s"}? ` +
+          "Sources still offer everything.";
+    this.el.organRemoveConfirm.classList.remove("hidden");
+  }
+
+  hideRemoveConfirm() {
+    this.pendingRemove = null;
+    this.el.organRemoveConfirm.classList.add("hidden");
+  }
+
+  // ---- organ edits: a fetch of their own, not send()/poll ------------------
+  //
+  // Every other command's failure just means "the organ is unreachable";
+  // these can 400 with a specific, useful reason (a duplicate name, a
+  // load already running) that's worth showing exactly, so — like
+  // saveOrgan — they bypass the optimistic send() and read the response
+  // themselves. A structural edit also doesn't land immediately: the
+  // server answers with a snapshot mid-rebuild and the real result
+  // arrives over the ordinary poll once `loading` clears.
+
+  async organCommand(query) {
+    this.hideOrganEditError();
+    try {
+      const response = await fetch(this.base + query, { method: "POST" });
+      if (!response.ok) {
+        this.showOrganEditError((await response.text()) || `${response.status} ${response.statusText}`);
+        return false;
+      }
+      return true;
+    } catch (err) {
+      this.showOrganEditError(String(err));
+      return false;
+    }
+  }
+
+  showOrganEditError(text) {
+    this.el.organEditError.textContent = text;
+    this.el.organEditError.classList.remove("hidden");
+  }
+
+  hideOrganEditError() {
+    this.el.organEditError.classList.add("hidden");
+    this.el.organEditError.textContent = "";
+  }
+
+  // ---- sources: what each one offers, and what's already pulled -----------
+
+  updateOfferingsSection(setup, structuralChange) {
+    const hasFile = !!setup?.file;
+    this.el.organOfferingsHeading.classList.toggle("hidden", !hasFile);
+    this.el.organOfferingsNote.classList.toggle("hidden", !hasFile);
+    this.el.organOfferings.classList.toggle("hidden", !hasFile);
+    if (!hasFile) {
+      this.offerings = null;
+      return;
+    }
+    if (structuralChange || this.offerings === null) this.fetchOfferings();
+  }
+
+  async fetchOfferings() {
+    try {
+      const response = await fetch(this.base + commands.organOfferings());
+      this.offerings = response.ok ? ((await response.json()).sources ?? []) : null;
+    } catch {
+      this.offerings = null;
+    }
+    this.buildOfferings(this.offerings);
+  }
+
+  buildOfferings(sources) {
+    const container = this.el.organOfferings;
+    container.replaceChildren();
+    if (sources == null) {
+      container.append(this.emptyNote("Couldn't read this organ's sources."));
+      return;
+    }
+    if (!sources.length) {
+      container.append(this.emptyNote("No sources yet — add one with the + button below."));
+      return;
+    }
+    for (const source of sources) container.append(this.offeringSourceRow(source));
+  }
+
+  offeringSourceRow(source) {
+    const details = document.createElement("details");
+    details.className = "organ-offerings-source";
+
+    const summary = document.createElement("summary");
+    const alias = document.createElement("span");
+    alias.className = "organ-offerings-alias";
+    alias.textContent = source.alias;
+    const name = document.createElement("span");
+    name.className = "organ-offerings-name";
+    name.textContent = source.name ?? "(unreadable)";
+    const path = document.createElement("span");
+    path.className = "organ-offerings-path";
+    path.textContent = source.path;
+    path.title = source.path;
+    summary.append(alias, name, path);
+    details.append(summary);
+
+    if (source.error) {
+      const error = document.createElement("p");
+      error.className = "organ-offerings-error";
+      error.textContent = source.error;
+      details.append(error);
+      return details;
+    }
+
+    const body = document.createElement("div");
+    body.className = "organ-offerings-body";
+    for (const manual of source.manuals ?? []) body.append(this.offeringDivision(source.alias, manual));
+    details.append(body);
+    return details;
+  }
+
+  offeringDivision(alias, manual) {
+    const div = document.createElement("div");
+    div.className = "organ-offerings-division";
+
+    const head = document.createElement("div");
+    head.className = "organ-offerings-division-head";
+    if (!manual.pulled) {
+      head.addEventListener("pointerdown", (event) => {
+        if (!event.ctrlKey) return;
+        this.startDrag(
+          event, "offering-division",
+          { alias, manualName: manual.name },
+          `${manual.name} (whole division)`
+        );
+      });
+    }
+    const title = document.createElement("span");
+    title.className = "organ-stop-group-title";
+    title.textContent = manual.name;
+    head.append(title);
+    if (manual.pedal) {
+      const tag = document.createElement("span");
+      tag.className = "organ-manual-pedal-tag";
+      tag.textContent = "pedal";
+      head.append(tag);
+    }
+    if (manual.pulled) {
+      const tag = document.createElement("span");
+      tag.className = "organ-manual-pedal-tag";
+      tag.textContent = "pulled";
+      head.append(tag);
+    }
+    div.append(head);
+
+    for (const stop of manual.stops ?? []) div.append(this.offeringStop(alias, manual.name, stop));
+    return div;
+  }
+
+  offeringStop(alias, manualName, stop) {
+    const row = document.createElement("div");
+    row.className = "organ-offerings-stop";
+    row.classList.toggle("pulled", !!stop.pulled);
+    if (!stop.pulled) {
+      row.addEventListener("pointerdown", (event) => {
+        if (!event.ctrlKey) return;
+        this.startDrag(event, "offering-stop", { alias, manualName, stopName: stop.name }, stop.name);
+      });
+    }
+    const check = document.createElement("span");
+    check.className = "organ-offerings-stop-check";
+    check.textContent = stop.pulled ? "✓" : "";
+    const name = document.createElement("span");
+    name.textContent = stop.name;
+    row.append(check, name);
+    return row;
+  }
+
+  // ---- the "+" FAB: add a manual, a pedalboard, or a sample set -----------
+
+  wireOrganFab() {
+    this.el.organFab.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const opening = this.el.organFabMenu.classList.contains("hidden") &&
+        this.el.organFabManualForm.classList.contains("hidden") &&
+        this.el.organFabEncForm.classList.contains("hidden") &&
+        this.el.organFabSourceForm.classList.contains("hidden");
+      this.closeFabPanels();
+      if (opening) this.el.organFabMenu.classList.remove("hidden");
+    });
+    for (const el of [
+      this.el.organFabMenu, this.el.organFabManualForm, this.el.organFabEncForm, this.el.organFabSourceForm,
+    ]) {
+      el.addEventListener("click", (event) => event.stopPropagation());
+    }
+    window.addEventListener("click", () => this.closeFabPanels());
+
+    this.el.organFabAddManual.addEventListener("click", () => this.openManualForm(false));
+    this.el.organFabAddPedal.addEventListener("click", () => this.openManualForm(true));
+    this.el.organFabAddEnc.addEventListener("click", () => this.openEncForm());
+    this.el.organFabAddSource.addEventListener("click", () => this.openSourceForm());
+    this.el.organFabManualCancel.addEventListener("click", () => this.closeFabPanels());
+    this.el.organFabEncCancel.addEventListener("click", () => this.closeFabPanels());
+    this.el.organFabSourceCancel.addEventListener("click", () => this.closeFabPanels());
+
+    this.el.organFabManualForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const name = this.el.organFabManualName.value.trim();
+      if (!name) return;
+      const low = clampNote(this.el.organFabManualLow.value);
+      const high = clampNote(this.el.organFabManualHigh.value);
+      this.organCommand(commands.organManualAdd(name, low, high, this.fabPedal ? 1 : 0)).then(
+        (ok) => ok && this.closeFabPanels()
+      );
+    });
+
+    this.el.organFabEncForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const name = this.el.organFabEncName.value.trim();
+      if (!name) return;
+      this.organCommand(commands.organEnclosureAdd(name)).then((ok) => ok && this.closeFabPanels());
+    });
+
+    this.el.organFabSourceAdd.addEventListener("click", () => {
+      const path = this.el.organFabSourcePath.value.trim();
+      if (!path) return;
+      this.organCommand(commands.organSourceAdd(path)).then((ok) => {
+        if (ok) this.el.organFabSourcePath.value = "";
+      });
+    });
+    this.el.organFabBrowseUp.addEventListener("click", () => {
+      if (this.fabBrowseParent) this.fabBrowse(this.fabBrowseParent);
+    });
+  }
+
+  closeFabPanels() {
+    this.el.organFabMenu.classList.add("hidden");
+    this.el.organFabManualForm.classList.add("hidden");
+    this.el.organFabEncForm.classList.add("hidden");
+    this.el.organFabSourceForm.classList.add("hidden");
+  }
+
+  openManualForm(pedal) {
+    this.fabPedal = pedal;
+    this.closeFabPanels();
+    this.el.organFabManualForm.classList.remove("hidden");
+    this.el.organFabManualName.value = "";
+    this.el.organFabManualLow.value = 36;
+    this.el.organFabManualHigh.value = pedal ? 67 : 96;
+    requestAnimationFrame(() => this.el.organFabManualName.focus());
+  }
+
+  openEncForm() {
+    this.closeFabPanels();
+    this.el.organFabEncForm.classList.remove("hidden");
+    this.el.organFabEncName.value = "";
+    requestAnimationFrame(() => this.el.organFabEncName.focus());
+  }
+
+  openSourceForm() {
+    this.closeFabPanels();
+    this.el.organFabSourceForm.classList.remove("hidden");
+    this.el.organFabSourcePath.value = "";
+    this.fabBrowseDir = null;
+    this.fabBrowseParent = null;
+    this.fabBrowse();
+  }
+
+  /// This organ's own directory listing, the same idiom as the picker's
+  /// Browse pane but scoped to this form: fetched directly, not
+  /// snapshot-driven, and picking a file adds it as a source outright
+  /// rather than loading it.
+  async fabBrowse(dir) {
+    try {
+      const query = dir ? `/api/browse?dir=${encodeURIComponent(dir)}` : "/api/browse";
+      const response = await fetch(this.base + query);
+      if (!response.ok) {
+        this.fabBrowseError = (await response.text()) || `${response.status} ${response.statusText}`;
+        this.renderFabBrowse();
+        return;
+      }
+      const data = await response.json();
+      this.fabBrowseDir = data.dir;
+      this.fabBrowseParent = data.parent;
+      this.fabBrowseEntries = data.entries;
+      this.fabBrowseError = null;
+      this.renderFabBrowse();
+    } catch (err) {
+      this.fabBrowseError = String(err);
+      this.renderFabBrowse();
+    }
+  }
+
+  renderFabBrowse() {
+    this.el.organFabBrowseDir.textContent = this.fabBrowseDir ?? "";
+    this.el.organFabBrowseDir.title = this.fabBrowseDir ?? "";
+    this.el.organFabBrowseUp.disabled = !this.fabBrowseParent;
+    this.el.organFabBrowseError.classList.toggle("hidden", !this.fabBrowseError);
+    this.el.organFabBrowseError.textContent = this.fabBrowseError ?? "";
+    this.el.organFabBrowseList.replaceChildren();
+    if (this.fabBrowseError) return;
+    const entries = this.fabBrowseEntries ?? [];
+    if (!entries.length) {
+      this.el.organFabBrowseList.append(this.emptyNote("Nothing here."));
+      return;
+    }
+    for (const entry of entries) {
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = entry.dir ? "picker-row picker-browse-dir" : "picker-row";
+      row.title = entry.path;
+      row.addEventListener("click", () => {
+        if (entry.dir) {
+          this.fabBrowse(entry.path);
+        } else {
+          this.el.organFabSourcePath.value = entry.path;
+          this.organCommand(commands.organSourceAdd(entry.path));
+        }
+      });
+      const name = document.createElement("span");
+      name.className = "picker-row-name";
+      name.textContent = entry.name;
+      row.append(name);
+      this.el.organFabBrowseList.append(row);
+    }
   }
 
   // ---- organ couplers -------------------------------------------------------

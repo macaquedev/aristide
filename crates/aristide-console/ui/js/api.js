@@ -87,6 +87,48 @@ export const commands = {
   organSave: (path) => `/api/organ/save?path=${encodeURIComponent(path)}`,
   // Reassigns a stop to a different manual's division.
   organMove: (stopId, manual) => `/api/organ/move?stop=${stopId}&manual=${manual}`,
+  // Structural edits to the organ's own manuals — unlike organMove these
+  // rewrite the composite file and trigger a rebuild: the response is a
+  // snapshot mid-reload, not the finished result, so the caller has to
+  // wait out `loading` on the next poll to see it land. All 400 with a
+  // plain-text reason (including "not saved as a file yet" if the organ
+  // has no file for these to write into).
+  organManualAdd: (name, low, high, pedal) =>
+    `/api/organ/manual/add?name=${encodeURIComponent(name)}` +
+    (low == null ? "" : `&low=${low}`) +
+    (high == null ? "" : `&high=${high}`) +
+    (pedal ? "&pedal=1" : ""),
+  organManualRename: (manual, name) =>
+    `/api/organ/manual/rename?manual=${manual}&name=${encodeURIComponent(name)}`,
+  organManualRemove: (manual) => `/api/organ/manual/remove?manual=${manual}`,
+  // `to` is the index the manual should end up at.
+  organManualOrder: (manual, to) => `/api/organ/manual/order?manual=${manual}&to=${to}`,
+  // Adds a sample set as a source the organ can pull from, without
+  // pulling anything yet.
+  organSourceAdd: (path) => `/api/organ/source/add?path=${encodeURIComponent(path)}`,
+  // Pulls a stop (or, with no `stop`, the whole division) from a source's
+  // own manual onto one of this organ's manuals. `from` is the source's
+  // alias, `manual` its own manual name, `on` the destination.
+  organPull: (from, manual, on, stop) =>
+    `/api/organ/pull?from=${encodeURIComponent(from)}&manual=${encodeURIComponent(manual)}` +
+    `&on=${encodeURIComponent(on)}` +
+    (stop == null ? "" : `&stop=${encodeURIComponent(stop)}`),
+  // Drops a pulled stop from the organ. `stopId` is the numeric id from
+  // snapshot.stops[], the same one organMove takes.
+  organUnpull: (stopId) => `/api/organ/unpull?stop=${stopId}`,
+  // What each source of this organ offers to pull from, and how much of
+  // it is already on the console. 400s (no file yet) same as above.
+  organOfferings: () => "/api/organ/offerings",
+  // Swell boxes: same structural-edit contract as the manual/pull/unpull
+  // family above (a rebuild, not a live change; 400s with a plain-text
+  // reason). `remove` 400s for a box the sample set itself defines —
+  // only ones this organ's own file declares can be removed.
+  organEnclosureAdd: (name) => `/api/organ/enclosure/add?name=${encodeURIComponent(name)}`,
+  organEnclosureRemove: (name) => `/api/organ/enclosure/remove?name=${encodeURIComponent(name)}`,
+  // Puts a stop in a box (in=1) or takes it out (in=0); `stopId` is the
+  // numeric id from snapshot.stops[], `enclosure` its name.
+  organEnclosureAssign: (enclosure, stopId, inBox) =>
+    `/api/organ/enclosure/assign?enclosure=${encodeURIComponent(enclosure)}&stop=${stopId}&in=${inBox ? 1 : 0}`,
   // Takes a coupler off the console (keep=0) or restores it (keep=1) —
   // distinct from the rail's own on/off, which only engages a coupler
   // that's already on the console.

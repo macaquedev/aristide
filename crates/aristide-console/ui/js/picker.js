@@ -199,11 +199,14 @@ export class Picker {
     this.lastOrgan = snapshot.organ;
     this.library = library;
 
-    // Auto-open: there is nothing behind the console to use, or a load
-    // (started from the organ-name menu, perhaps) whose progress and
-    // errors need somewhere to show.
-    if (!this.isOpen && (!hasOrgan || loading)) {
-      this.openedWithOrgan = hasOrgan ? this.lastOrgan : undefined;
+    // Auto-open: there is nothing behind the console to use. `loading`
+    // alone no longer forces this open — once an organ is up, it also
+    // flags an in-place structural edit (a manual added, a stop pulled,
+    // from the Organ pane), and that must never pop the picker over
+    // Preferences. A load started with no organ yet (the common case)
+    // still opens this because !hasOrgan already covers it.
+    if (!this.isOpen && !hasOrgan) {
+      this.openedWithOrgan = undefined;
       this.show();
     }
 

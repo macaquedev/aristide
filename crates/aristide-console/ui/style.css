@@ -704,6 +704,31 @@ input[type="range"]:hover::-webkit-slider-thumb { filter: brightness(1.15); }
 
 .organ-stop-move { flex: 0 0 auto; max-width: 160px; }
 
+/* the dim box-name tag a stop carries when a swell box already encloses
+   it — first box's name if there happen to be several */
+.organ-stop-enc-tag {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border-radius: 2px;
+  background: #ffffff0d;
+  font-size: 9px;
+  letter-spacing: 0.4px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+/* ---- swell boxes -------------------------------------------------------- */
+
+.organ-enclosure-glyph {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+/* a member row's take-out button sits where a manual's "Move to…" would */
+.organ-enclosure-group .organ-stop-row .remove-input {
+  margin-left: auto;
+}
+
 /* every coupler, hidden ones included — the console rail only ever
    shows the checked ones */
 .organ-couplers { display: flex; flex-direction: column; gap: 6px; }
@@ -720,6 +745,382 @@ input[type="range"]:hover::-webkit-slider-thumb { filter: brightness(1.15); }
 }
 
 .organ-coupler-name { font-size: 12px; }
+
+/* The FAB, the bin and the remove-confirm card float over the Organ
+   pane's own scroll — positioned against the dialog card itself
+   (the nearest positioned ancestor `.organ-floats` skips to, since it
+   isn't one), not against the pane, so scrolling that pane can never
+   drag them out of place or bury one under whatever row is currently
+   at the bottom. `left: 140px` throughout matches the tabs rail's own
+   width, so these sit over the pane's area, not the tab list. */
+.organ-floats {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+/* a strip of live status, not a warning: the rebuild in progress */
+.pane-status {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 0;
+  padding: 7px 12px;
+  border: 1px solid #000000d0;
+  border-radius: 3px;
+  background: var(--well);
+  box-shadow: var(--bevel-well);
+  font-size: 11.5px;
+  color: var(--accent);
+}
+
+.organ-edit-error {
+  margin: 0;
+  padding: 2px 0 2px 10px;
+  border-left: 2px solid var(--danger);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--danger);
+}
+
+/* ---- editable manual groups -------------------------------------------- */
+
+.organ-manual-group {
+  border-radius: 3px;
+  transition: background 0.12s ease, box-shadow 0.12s ease;
+}
+
+/* a manual group is a ctrl-drop target for stops pulled off a source, or
+   moved from another manual; the header alone is the drag handle for
+   reordering the manual itself */
+.organ-manual-group.drop-target {
+  background: var(--accent-soft);
+  box-shadow: 0 0 0 1px var(--accent) inset;
+}
+
+.organ-manual-header {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 6px;
+  cursor: grab;
+}
+.organ-manual-header:active { cursor: grabbing; }
+
+.organ-manual-header .organ-stop-group-title {
+  margin: 0;
+  cursor: text;
+}
+
+.organ-manual-pedal-tag {
+  padding: 1px 6px;
+  border-radius: 2px;
+  background: #ffffff14;
+  font-size: 8.5px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.organ-manual-rename-btn {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 0;
+  border-radius: 2px;
+  cursor: pointer;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 10px;
+  line-height: 1;
+  opacity: 0;
+  transition: opacity 0.1s ease;
+}
+.organ-manual-header:hover .organ-manual-rename-btn,
+.organ-manual-rename-btn:focus-visible { opacity: 1; }
+.organ-manual-rename-btn:hover { color: var(--text); background: #ffffff12; }
+
+.organ-manual-remove-hint {
+  margin-left: auto;
+  font-size: 9px;
+  color: var(--text-dim);
+}
+
+.organ-manual-rename-input {
+  height: 20px;
+  padding: 0 7px;
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  background: #1c1e20;
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  outline: none;
+  width: 140px;
+}
+
+/* a stop row is itself a ctrl-drag source */
+.organ-stop-row { cursor: grab; }
+.organ-stop-row:active { cursor: grabbing; }
+
+/* the ghost that follows the pointer during a ctrl-drag */
+.organ-drag-ghost {
+  position: fixed;
+  z-index: 60;
+  padding: 5px 10px;
+  border: 1px solid #000000d0;
+  border-radius: 3px;
+  background: linear-gradient(180deg, #ffffff26, #ffffff00 45%), var(--accent);
+  color: var(--accent-ink);
+  font-family: var(--sans);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  box-shadow: 0 8px 20px #000a;
+  pointer-events: none;
+  transform: translate(-50%, -140%);
+}
+
+/* the bin: a drop bar docked at the pane's own bottom edge, present only
+   while a ctrl-drag that can be dropped there is live */
+.organ-bin {
+  display: none;
+  position: absolute;
+  left: 140px;
+  right: 0;
+  bottom: 0;
+  z-index: 8;
+  pointer-events: auto;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  padding: 12px 20px;
+  border-top: 1px solid var(--border-strong);
+  background: #26161766;
+  backdrop-filter: blur(2px);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  color: #ffb0b0;
+}
+.organ-bin.visible { display: flex; }
+.organ-bin.drop-target {
+  background: var(--danger-fill);
+  color: #fff;
+}
+.organ-bin-glyph { font-size: 14px; }
+
+/* the confirm card for removing a manual — small and centered, like the
+   conflict dialog, but scoped to this pane rather than a new modal */
+.organ-remove-confirm {
+  position: absolute;
+  z-index: 12;
+  pointer-events: auto;
+  top: 50%;
+  /* centered over the pane's own area, to the right of the tabs rail */
+  left: calc(140px + (100% - 140px) / 2);
+  transform: translate(-50%, -50%);
+  width: min(300px, 90%);
+  padding: 16px 18px;
+  border: 1px solid #000000d0;
+  border-radius: 5px;
+  background: var(--surface-2);
+  box-shadow: var(--bevel), 0 16px 40px #000c;
+}
+.organ-remove-confirm p {
+  margin: 0 0 14px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text);
+}
+.organ-remove-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.ghost.danger { color: #ffb0b0; }
+.ghost.danger:hover { filter: brightness(1.15); }
+
+/* ---- sources / offerings ------------------------------------------------ */
+
+.organ-offerings { display: flex; flex-direction: column; gap: 6px; }
+
+.organ-offerings-source {
+  border: 0;
+  border-radius: 3px;
+  background: #ffffff08;
+  overflow: hidden;
+}
+
+.organ-offerings-source > summary {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 9px 12px;
+  cursor: pointer;
+  list-style: none;
+}
+.organ-offerings-source > summary::-webkit-details-marker { display: none; }
+.organ-offerings-source > summary::before {
+  content: "\203a";
+  display: inline-block;
+  width: 8px;
+  color: var(--text-dim);
+  transition: transform 0.1s ease;
+}
+.organ-offerings-source[open] > summary::before { transform: rotate(90deg); }
+
+.organ-offerings-alias {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-dim);
+}
+.organ-offerings-name { font-size: 12px; color: var(--text); }
+.organ-offerings-path {
+  min-width: 0;
+  flex: 1;
+  color: var(--text-dim);
+  font-size: 10.5px;
+  font-family: var(--mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.organ-offerings-body { padding: 0 12px 10px 22px; display: flex; flex-direction: column; gap: 10px; }
+.organ-offerings-error { margin: 0 12px 10px 22px; font-size: 11.5px; color: var(--danger); }
+
+.organ-offerings-division { display: flex; flex-direction: column; gap: 4px; }
+
+.organ-offerings-division-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: grab;
+}
+.organ-offerings-division-head:active { cursor: grabbing; }
+
+.organ-offerings-stop {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 2px;
+  font-size: 11.5px;
+  cursor: grab;
+}
+.organ-offerings-stop:active { cursor: grabbing; }
+.organ-offerings-stop.pulled { color: var(--text-dim); cursor: default; }
+.organ-offerings-stop-check {
+  flex: 0 0 auto;
+  width: 11px;
+  color: var(--accent);
+}
+
+/* ---- the "+" FAB, docked bottom-right over the scroll ------------------ */
+
+.organ-fab-dock {
+  position: absolute;
+  right: 16px;
+  bottom: 16px;
+  z-index: 10;
+  pointer-events: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+}
+.organ-fab-dock.dragging { opacity: 0.25; pointer-events: none; }
+
+.organ-fab {
+  width: 38px;
+  height: 38px;
+  border: 1px solid #000000d0;
+  border-radius: 50%;
+  cursor: pointer;
+  background: linear-gradient(180deg, #ffffff26, #ffffff00 45%), var(--accent);
+  color: var(--accent-ink);
+  font-size: 19px;
+  font-weight: 600;
+  line-height: 1;
+  box-shadow: var(--bevel), 0 6px 16px #000a;
+  transition: filter 0.1s ease, transform 0.1s ease;
+}
+.organ-fab:hover { filter: brightness(1.12); }
+.organ-fab:active { transform: scale(0.94); }
+
+@keyframes organ-fab-pulse {
+  0%, 100% { box-shadow: var(--bevel), 0 6px 16px #000a, 0 0 0 0 var(--accent-soft); }
+  50% { box-shadow: var(--bevel), 0 6px 16px #000a, 0 0 0 8px transparent; }
+}
+.organ-fab.pulse { animation: organ-fab-pulse 1.8s ease-in-out infinite; }
+
+.organ-fab-menu {
+  display: flex;
+  flex-direction: column;
+  min-width: 150px;
+  padding: 5px 0;
+  border: 1px solid #000000d0;
+  border-radius: 4px;
+  background: #26282b;
+  box-shadow: var(--bevel), 0 12px 32px #000c;
+}
+
+.organ-fab-form {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  width: 240px;
+  padding: 12px;
+  border: 1px solid #000000d0;
+  border-radius: 4px;
+  background: #26282b;
+  box-shadow: var(--bevel), 0 12px 32px #000c;
+}
+.organ-fab-form input[type="text"] {
+  width: 100%;
+  padding: 6px 9px;
+  border: 1px solid #000000d0;
+  border-radius: 3px;
+  background: var(--well);
+  box-shadow: var(--bevel-well);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 12px;
+}
+.organ-fab-form input[type="text"]:focus { outline: none; border-color: var(--accent); }
+.organ-fab-form-row { display: flex; align-items: center; gap: 10px; }
+.organ-fab-form-row label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10.5px;
+  color: var(--text-dim);
+}
+.organ-fab-form-row input[type="number"] { width: 52px; }
+.organ-fab-form-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+.organ-fab-browse { display: flex; flex-direction: column; gap: 6px; }
+.organ-fab-browse-head { display: flex; align-items: center; gap: 8px; }
+.organ-fab-browse-head .ghost { padding: 3px 8px; font-size: 9px; }
+.organ-fab-browse #organ-fab-browse-list,
+.organ-fab-browse-list { max-height: 130px; }
+
+/* an empty organ leans on the FAB to say what to do next */
+.organ-hint {
+  margin: 4px 0;
+  padding: 20px 14px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-dim);
+  text-align: center;
+}
 
 /* the division picker atop the tuning pane */
 .tuning-target-field { display: flex; align-items: center; gap: 8px; }
@@ -1620,3 +2021,51 @@ body[data-density="spacious"] .pedals { margin-top: 22px; }
 
 /* organ-less: the loader is the whole interface */
 body.no-organ .console { visibility: hidden; }
+
+/* an organ that loaded but has nothing built yet — no jambs, no
+   keyboards to show, so a card takes the console's place rather than
+   leaving a lone tremulant knob adrift on the background */
+.organ-empty-card {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  width: min(420px, 100%);
+  padding: 30px 26px;
+  border-radius: 6px;
+  background: var(--surface);
+  border: 1px solid #000000d0;
+  box-shadow: var(--bevel), 0 16px 40px #000c;
+  text-align: center;
+}
+.organ-empty-card h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+}
+.organ-empty-card p {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--text-dim);
+}
+.organ-empty-card button {
+  margin-top: 6px;
+  padding: 8px 18px;
+  border: 1px solid #000000d0;
+  border-radius: 3px;
+  cursor: pointer;
+  background: linear-gradient(180deg, #ffffff26, #ffffff00 45%), var(--accent);
+  color: var(--accent-ink);
+  font-family: var(--sans);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  box-shadow: var(--bevel);
+  transition: filter 0.1s ease;
+}
+.organ-empty-card button:hover { filter: brightness(1.12); }
+.organ-empty-card button:active { filter: brightness(0.85); }

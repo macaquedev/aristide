@@ -1,6 +1,7 @@
 import { resolveBase, connect, commands } from "./api.js";
 import { ConflictDialog } from "./conflict.js";
 import { Console } from "./console.js";
+import { applyHarnessHooks } from "./harness-hooks.js";
 import { PianoKeys } from "./keys.js";
 import { MenuBar } from "./menu.js";
 import { Picker } from "./picker.js";
@@ -17,6 +18,11 @@ const picker = new Picker(document, base, (query) => send(query));
 const view = new Console(document, (query) => send(query), (tab) => prefs.open(tab));
 const keys = new PianoKeys(document, (query) => send(query));
 const conflict = new ConflictDialog(document, (query) => send(query));
+
+// See harness-hooks.js: a handful of `?param` switches the screenshot
+// script uses to reach states a static screenshot can't drive to itself.
+// Inert without those params.
+applyHarnessHooks({ prefs });
 
 function fullscreen() {
   if (document.fullscreenElement) document.exitFullscreen();
