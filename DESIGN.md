@@ -190,6 +190,18 @@ also owns its rig's `[midi]` wiring (locked 2026-08-18): device/control
 bindings load from it and interactively learned bindings are written back into
 it (comment-preserving), while plain sets keep wiring in the user config.
 
+Every organ IS a composite with an organ file (locked 2026-08-19): a GO/HW
+package is only ever a *source*, never the organ itself. Loading a raw set
+path adopts it — the library's organ file that already wraps the set is
+loaded instead when one exists, else a wrapper is created under the config
+`organs/` dir: the set's name, the set as its one source, the set's sidecar
+sections carried in verbatim (a composite is its own sidecar; adoption is
+proven byte-equivalent to the direct load by test), and any wiring the user
+config already held for that organ. Renames, wiring and every per-organ edit
+then have a durable home from the first load. The only un-adopted loads are
+multi-set CLI launches (the implicit combination, until saved) and the
+no-config-directory fallback.
+
 The console edits the instrument live, and every edit lands in its file:
 declared compasses (`[[manual]] low/high`), stops moved between manuals
 (`[[move]]` — pitch-anchored, replayed after the pulls), couplers taken off the

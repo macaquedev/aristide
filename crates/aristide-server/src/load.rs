@@ -586,6 +586,97 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The adoption invariant: a set wrapped as an organ file loads
+    /// exactly as the set does directly — same console, same engine
+    /// settings. If this drifts, adopting a set silently changes the
+    /// organ, and the demo set must load exactly as its ODF defines.
+    #[test]
+    fn an_adopted_set_loads_exactly_like_the_set_itself() {
+        let demo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testsets/grandorgue-demo/demo.organ");
+        if !demo.is_file() {
+            eprintln!("skipping: demo set not present");
+            return;
+        }
+        let dir = std::env::temp_dir().join("aristide-adopt-fidelity-test");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let direct =
+            prepare(std::slice::from_ref(&demo), &[], 48_000.0, &|_| {}).expect("direct load");
+        let canonical = demo.canonicalize().expect("demo canonicalizes");
+        let wrapper = crate::config::create_wrapper_organ(
+            &dir,
+            direct.console.organ_name(),
+            &canonical,
+            None,
+        )
+        .expect("wrapper created");
+        let adopted = prepare(&[wrapper], &[], 48_000.0, &|_| {}).expect("adopted load");
+
+        assert_eq!(adopted.console.organ_name(), direct.console.organ_name());
+        let stops = |prepared: &PreparedInstrument| {
+            prepared
+                .console
+                .stop_states()
+                .iter()
+                .map(|(_, name, manual, midx, drawn)| {
+                    (name.to_string(), manual.to_string(), *midx, *drawn)
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(stops(&adopted), stops(&direct), "same stops on the same manuals");
+        let manuals = |prepared: &PreparedInstrument| {
+            prepared
+                .console
+                .manual_states()
+                .iter()
+                .map(|(idx, name, first, count, _)| (*idx, name.to_string(), *first, *count))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(manuals(&adopted), manuals(&direct), "same manuals, same compasses");
+        assert_eq!(
+            format!("{:?}", adopted.console.coupler_states()),
+            format!("{:?}", direct.console.coupler_states()),
+            "same couplers"
+        );
+        assert_eq!(
+            format!("{:?}", adopted.console.enclosure_states()),
+            format!("{:?}", direct.console.enclosure_states()),
+            "same enclosures"
+        );
+        assert_eq!(
+            format!("{:?}", adopted.wind),
+            format!("{:?}", direct.wind),
+            "the sidecar's wind model survives adoption"
+        );
+        assert_eq!(
+            format!("{:?}", adopted.tremulant),
+            format!("{:?}", direct.tremulant)
+        );
+        assert_eq!(
+            format!("{:?}", adopted.enclosures),
+            format!("{:?}", direct.enclosures)
+        );
+        assert_eq!(adopted.expression_cc, direct.expression_cc);
+        assert_eq!(
+            adopted.suggested_channels, direct.suggested_channels,
+            "the sidecar's channel suggestions survive"
+        );
+        assert_eq!(
+            format!("{:?}", adopted.console.tuning()),
+            format!("{:?}", direct.console.tuning())
+        );
+        assert_eq!(adopted.console.noises(), direct.console.noises());
+        assert_eq!(
+            adopted.console.coupler_repitch(),
+            direct.console.coupler_repitch()
+        );
+        assert_eq!(adopted.bank.len(), direct.bank.len(), "every sample decoded");
+        assert!(adopted.composite.is_some(), "the organ file owns the wiring");
+        assert!(direct.composite.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A sidecar `name` renames the organ on load — that name is what
     /// the console shows and what the assignments are keyed under. The
     /// real demo set is symlinked into a scratch directory so it gets a

@@ -110,6 +110,39 @@ impl MidiConfig {
         );
     }
 
+    /// The library's organ file that wraps `set`, when one exists: a
+    /// composite whose one source is that set. Loading the set again
+    /// means that organ — the file is the organ, the set only feeds it
+    /// — and the most recently played match wins. `set` should be
+    /// canonical; the candidates' sources are canonicalized to compare.
+    pub fn wrapper_for(&self, set: &Path) -> Option<PathBuf> {
+        for entry in &self.library {
+            if !aristide_formats::instrument::is_definition(&entry.path) {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&entry.path) else {
+                continue;
+            };
+            let Ok(def) = toml::from_str::<aristide_formats::instrument::Definition>(&text)
+            else {
+                continue;
+            };
+            if def.sources.len() != 1 {
+                continue;
+            }
+            let source = def.sources.values().next().expect("one source");
+            let resolved = if source.is_absolute() {
+                source.clone()
+            } else {
+                entry.path.parent().unwrap_or(Path::new("")).join(source)
+            };
+            if resolved.canonicalize().ok().as_deref() == Some(set) {
+                return Some(entry.path.clone());
+            }
+        }
+        None
+    }
+
     /// Drop an organ from the picker. Its assignments stay: forgetting
     /// where a set lives must not silently unwire it.
     pub fn forget(&mut self, path: &Path) -> bool {
@@ -310,6 +343,22 @@ pub fn organs_dir() -> Option<PathBuf> {
 /// is a slug of the name, uniquified so creating "Chapel" twice yields
 /// two files rather than one organ silently replacing another.
 pub fn create_blank_organ(dir: &Path, name: &str) -> Result<PathBuf, String> {
+    let (name, path) = organ_file_path(dir, name)?;
+    let mut doc = toml_edit::DocumentMut::new();
+    doc["name"] = toml_edit::value(name);
+    let body = format!(
+        "# An Aristide organ. Point [sources] at sample sets and pull stops\n\
+         # or divisions onto manuals — this file is the whole instrument.\n\
+         {doc}"
+    );
+    std::fs::write(&path, body).map_err(|err| format!("{}: {err}", path.display()))?;
+    Ok(path)
+}
+
+/// A fresh file under `dir` for an organ called `name`: the filename is
+/// a slug of the name, uniquified so a second organ with the same name
+/// gets its own file rather than silently replacing the first.
+fn organ_file_path<'a>(dir: &Path, name: &'a str) -> Result<(&'a str, PathBuf), String> {
     let name = name.trim();
     if name.is_empty() {
         return Err("the organ needs a name".into());
@@ -331,14 +380,77 @@ pub fn create_blank_organ(dir: &Path, name: &str) -> Result<PathBuf, String> {
         path = dir.join(format!("{slug}-{nth}.toml"));
         nth += 1;
     }
+    Ok((name, path))
+}
+
+/// Wrap a sample set as an organ of its own: a composite file whose one
+/// source is the set, carrying the set's sidecar sections verbatim (a
+/// composite is its own sidecar, and the two files share those
+/// sections' schema) so the organ loads exactly as the set did, plus
+/// whatever `wiring` this machine already remembers for it — the file
+/// owns the wiring from here on, and adopting a set must not unwire it.
+pub fn create_wrapper_organ(
+    dir: &Path,
+    name: &str,
+    set: &Path,
+    wiring: Option<&OrganConfig>,
+) -> Result<PathBuf, String> {
+    let (name, path) = organ_file_path(dir, name)?;
     let mut doc = toml_edit::DocumentMut::new();
     doc["name"] = toml_edit::value(name);
+    let mut sources = toml_edit::Table::new();
+    sources.insert("s1", toml_edit::value(set.to_string_lossy().as_ref()));
+    doc["sources"] = toml_edit::Item::Table(sources);
+    let sidecar_path = aristide_formats::sidecar::path_for(set);
+    match std::fs::read_to_string(&sidecar_path) {
+        Ok(text) => match text.parse::<toml_edit::DocumentMut>() {
+            Ok(sidecar) => {
+                for (key, item) in sidecar.iter() {
+                    // A sidecar rename became this file's own name above.
+                    if key != "name" {
+                        doc.insert(key, item.clone());
+                    }
+                }
+                // The one sidecar value that is relative to the set:
+                // this file doesn't live next to the set, so resolve it.
+                if let Some(ir) = doc
+                    .get_mut("reverb")
+                    .and_then(|reverb| reverb.get_mut("ir"))
+                    && let Some(spec) = ir.as_str()
+                    && !spec.is_empty()
+                    && !spec.eq_ignore_ascii_case("synthetic")
+                    && Path::new(spec).is_relative()
+                {
+                    let resolved = set.parent().unwrap_or(Path::new("")).join(spec);
+                    *ir = toml_edit::value(resolved.to_string_lossy().as_ref());
+                }
+            }
+            Err(err) => {
+                // The direct load ignores an unreadable sidecar too.
+                tracing::warn!(
+                    "sidecar not carried into the organ file: {}: {err}",
+                    sidecar_path.display()
+                );
+            }
+        },
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            tracing::warn!(
+                "sidecar not carried into the organ file: {}: {err}",
+                sidecar_path.display()
+            );
+        }
+    }
     let body = format!(
-        "# An Aristide organ. Point [sources] at sample sets and pull stops\n\
-         # or divisions onto manuals — this file is the whole instrument.\n\
+        "# An Aristide organ, made from the sample set under [sources].\n\
+         # This file is the instrument: its name, wiring and settings\n\
+         # live here, not in the set.\n\
          {doc}"
     );
     std::fs::write(&path, body).map_err(|err| format!("{}: {err}", path.display()))?;
+    if wiring.is_some_and(|organ| organ != &OrganConfig::default()) {
+        write_composite_midi(&path, wiring)?;
+    }
     Ok(path)
 }
 
@@ -780,6 +892,98 @@ mod tests {
         assert!(!text.contains("midi"));
         assert!(text.contains("# my precious hand-written organ"));
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// Adopting a set makes a real organ file: the set as the one
+    /// source, the sidecar's sections carried in (its rename becoming
+    /// the file's own name, its relative reverb IR resolved — the file
+    /// doesn't live next to the set), and the wiring this machine
+    /// already had for the organ, so adoption never unwires anything.
+    #[test]
+    fn a_wrapper_organ_carries_the_sidecar_and_the_wiring() {
+        let dir = std::env::temp_dir().join("aristide-wrapper-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        let set = dir.join("village.organ");
+        std::fs::write(&set, "[Organ]").expect("fixture set");
+        std::fs::write(
+            aristide_formats::sidecar::path_for(&set),
+            "name = \"Chapelle\"\n\n[wind]\n# gentle bellows\nsag_cents = 3.0\n\n\
+             [reverb]\nir = \"hall.wav\"\nwet = 0.2\n",
+        )
+        .expect("fixture sidecar");
+        let mut wiring = OrganConfig::default();
+        wiring
+            .manuals
+            .insert("Great".into(), vec![input("Test Keys", Some(1))]);
+
+        let organs = dir.join("organs");
+        let path = create_wrapper_organ(&organs, "Chapelle", &set, Some(&wiring))
+            .expect("wrapper created");
+        let text = std::fs::read_to_string(&path).expect("reads");
+        assert!(text.contains("# gentle bellows"), "sidecar comments ride along");
+        let def: aristide_formats::instrument::Definition =
+            toml::from_str(&text).expect("a valid organ file");
+        assert_eq!(def.name, "Chapelle", "one name — the file's");
+        assert_eq!(def.sources.len(), 1);
+        assert_eq!(def.sources.values().next().expect("source"), &set);
+        assert_eq!(def.wind.sag_cents, 3.0, "engine settings carried in");
+        assert_eq!(
+            std::path::Path::new(&def.reverb.ir),
+            dir.join("hall.wav"),
+            "the set-relative IR is resolved"
+        );
+        assert_eq!(def.midi.inputs.len(), 1, "existing wiring carried in");
+        assert_eq!(def.midi.inputs[0].device, "Test Keys");
+
+        // A set with no sidecar wraps to just a name and a source.
+        let bare_set = dir.join("bare.organ");
+        std::fs::write(&bare_set, "[Organ]").expect("fixture set");
+        let bare = create_wrapper_organ(&organs, "Bare", &bare_set, None)
+            .expect("wrapper created");
+        let def: aristide_formats::instrument::Definition =
+            toml::from_str(&std::fs::read_to_string(&bare).expect("reads"))
+                .expect("a valid organ file");
+        assert_eq!(def.name, "Bare");
+        assert!(def.midi.inputs.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Loading a set that already has an organ file means that organ:
+    /// the library lookup finds the composite whose one source is the
+    /// set, and ignores everything else.
+    #[test]
+    fn the_library_finds_the_wrapper_for_a_set() {
+        let dir = std::env::temp_dir().join("aristide-wrapper-lookup-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        let set = dir.join("village.organ");
+        std::fs::write(&set, "[Organ]").expect("fixture set");
+        let canonical = set.canonicalize().expect("canonicalizes");
+        let wrapper = create_wrapper_organ(&dir.join("organs"), "Chapelle", &canonical, None)
+            .expect("wrapper created");
+        // Distractors: a multi-source composite and a plain set entry.
+        let combo = dir.join("combo.toml");
+        std::fs::write(
+            &combo,
+            format!(
+                "name = \"Combo\"\n[sources]\na = {:?}\nb = \"other.organ\"\n",
+                canonical.display().to_string()
+            ),
+        )
+        .expect("fixture combo");
+
+        let mut config = MidiConfig::default();
+        config.remember("Chapelle", &wrapper);
+        config.remember("Combo", &combo);
+        config.remember("Raw", &canonical);
+        assert_eq!(config.wrapper_for(&canonical), Some(wrapper));
+        assert_eq!(
+            config.wrapper_for(&dir.join("elsewhere.organ")),
+            None,
+            "nothing wraps a set the library has never seen"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Renaming a composite touches the `name` key and nothing else;

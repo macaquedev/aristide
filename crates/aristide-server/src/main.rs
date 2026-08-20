@@ -1713,6 +1713,96 @@ impl AudioOutput {
     }
 }
 
+/// Every organ is a composite with an organ file of its own; a sample
+/// set is only ever a source. A load that names a raw set is adopted
+/// before it happens: the library's organ file that already wraps this
+/// set is loaded when there is one, else a wrapper file is created —
+/// the set's name, the set as its one source, its sidecar sections
+/// carried in, and whatever wiring this machine already remembers for
+/// that organ (the file owns the wiring from then on). Loading then
+/// proceeds as for any composite, so renaming, wiring and every other
+/// per-organ edit has a durable home from the very first load.
+///
+/// Two loads stay un-adopted: a multi-set launch (CLI) remains the
+/// implicit combination, with saving as its way to a file; and with no
+/// config directory there is nowhere to keep organ files, so the set
+/// loads as itself. Adoption failures fall back the same way — a
+/// read-only disk must not make an organ unplayable.
+fn adopt_set(
+    state: &Mutex<State>,
+    request: LoadRequest,
+    progress: &dyn Fn(String),
+) -> LoadRequest {
+    if request.paths.len() != 1 || instrument::is_definition(&request.paths[0]) {
+        return request;
+    }
+    let Some(dir) = config::organs_dir() else {
+        return request;
+    };
+    let set = request.paths[0].clone();
+    let canonical = set.canonicalize().unwrap_or_else(|_| set.clone());
+    let wrapper = state
+        .lock()
+        .expect("state poisoned")
+        .midi_config
+        .wrapper_for(&canonical);
+    if let Some(path) = wrapper {
+        tracing::info!(
+            "organ file for {}: {}",
+            set.display(),
+            path.display()
+        );
+        let mut state = state.lock().expect("state poisoned");
+        state.midi_config.forget(&canonical);
+        return LoadRequest {
+            paths: vec![path],
+            ..request
+        };
+    }
+    // No wrapper yet: read the set for its name (its sidecar may rename
+    // it — the same override the direct load applies) and make one.
+    // The set is parsed once more inside the load that follows; ODF
+    // parsing is cheap next to decoding the samples.
+    progress("adopting the set as an organ…".to_string());
+    let organ = match load::load_organ(&set) {
+        Ok(organ) => organ,
+        Err(err) => {
+            tracing::warn!("set unreadable, loading it directly: {err:#}");
+            return request;
+        }
+    };
+    let name = match aristide_formats::sidecar::load_for(&set) {
+        Ok(Some(sidecar)) if !sidecar.name.trim().is_empty() => {
+            sidecar.name.trim().to_string()
+        }
+        _ => organ.name.clone(),
+    };
+    let wiring = state
+        .lock()
+        .expect("state poisoned")
+        .midi_config
+        .organ(&name)
+        .cloned();
+    match config::create_wrapper_organ(&dir, &name, &canonical, wiring.as_ref()) {
+        Ok(path) => {
+            tracing::info!("organ file created: {}", path.display());
+            let mut state = state.lock().expect("state poisoned");
+            state.midi_config.forget(&canonical);
+            LoadRequest {
+                paths: vec![path],
+                ..request
+            }
+        }
+        Err(err) => {
+            tracing::warn!(
+                "no organ file for {} ({err}) — loading the set directly",
+                set.display()
+            );
+            request
+        }
+    }
+}
+
 /// Prepare the requested instrument off the shared lock, then swap it
 /// in: new engine and stream, engine-wide settings, console, routing.
 /// On error the running organ (or the bare test tone) stays untouched.
@@ -1725,6 +1815,7 @@ fn perform_load(
         state.lock().expect("state poisoned").loading = Some(phase);
     };
     progress("loading…".to_string());
+    let request = adopt_set(state, request, &progress);
     let load::PreparedInstrument {
         console,
         bank,
