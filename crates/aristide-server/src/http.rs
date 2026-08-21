@@ -489,6 +489,7 @@ fn respond(
             // "clicked an organ, nothing happened" must not exist.
             state.loading = Some("loading…".to_string());
             state.load_error = None;
+            state.load_warnings.clear();
             state.pending_load = Some(crate::LoadRequest {
                 paths,
                 stops: Vec::new(),
@@ -511,6 +512,7 @@ fn respond(
                 Ok(path) => {
                     state.loading = Some("loading…".to_string());
                     state.load_error = None;
+            state.load_warnings.clear();
                     state.pending_load = Some(crate::LoadRequest {
                         paths: vec![path],
                         stops: Vec::new(),
@@ -1046,6 +1048,19 @@ fn state_json_locked(state: &State) -> String {
     }
     if let Some(error) = &state.load_error {
         out.push_str(&format!(",\"load_error\":{}", json_string(error)));
+    }
+    // What the last load skipped (dangling refs healed over) — the
+    // console shows these, or an organ that heals to emptier than its
+    // file intends would look like it simply lost its stops.
+    if !state.load_warnings.is_empty() {
+        out.push_str(",\"load_warnings\":[");
+        for (index, warning) in state.load_warnings.iter().enumerate() {
+            if index > 0 {
+                out.push(',');
+            }
+            out.push_str(&json_string(warning));
+        }
+        out.push(']');
     }
     out.push_str(",\"library\":[");
     for (index, entry) in state.midi_config.library.iter().enumerate() {
@@ -1630,6 +1645,7 @@ mod tests {
             pending_load: None,
             loading: None,
             load_error: None,
+            load_warnings: Vec::new(),
             layout: Default::default(),
         }));
         // As the server does once before it opens any device: routing,
@@ -2501,6 +2517,7 @@ mod tests {
             pending_load: None,
             loading: None,
             load_error: None,
+            load_warnings: Vec::new(),
             layout: Default::default(),
         }))
     }

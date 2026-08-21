@@ -35,6 +35,11 @@ pub struct PreparedInstrument {
     /// The organ file's `[console.layout]` — empty unless it is a
     /// composite loaded alone, same condition as `composite` above.
     pub layout: std::collections::BTreeMap<String, instrument::PanelPos>,
+    /// Everything this load skipped or ignored (dangling references
+    /// healed over, sidecar lines that didn't resolve) — surfaced to
+    /// the console, because "loaded, but emptier than the file says"
+    /// must never be silent.
+    pub warnings: Vec<String>,
 }
 
 pub fn load_organ(path: &Path) -> Result<Organ> {
@@ -183,6 +188,7 @@ pub fn prepare(
     let mut console_layout: std::collections::BTreeMap<String, instrument::PanelPos> =
         std::collections::BTreeMap::new();
     let mut setup = Setup::default();
+    let mut load_warnings: Vec<String> = Vec::new();
 
     // Every path is a source: a sample set with its sidecar, or a
     // composite definition (`.toml`), which assembles first and then
@@ -203,6 +209,7 @@ pub fn prepare(
             for warning in &assembled.warnings {
                 tracing::warn!("instrument: {warning}");
             }
+            load_warnings.extend(assembled.warnings.iter().cloned());
             tracing::info!(
                 "instrument: {} ({} manuals, {} stops) from {}",
                 assembled.organ.name,
@@ -257,6 +264,7 @@ pub fn prepare(
             aristide_formats::sidecar::resolve_couplers(&organ, &sidecar.couplers.define);
         for warning in warnings {
             tracing::warn!("sidecar couplers: {warning}");
+            load_warnings.push(format!("sidecar couplers: {warning}"));
         }
         if !custom.is_empty() {
             tracing::info!(
@@ -337,6 +345,7 @@ pub fn prepare(
         for warning in &assembled.warnings {
             tracing::warn!("instrument: {warning}");
         }
+        load_warnings.extend(assembled.warnings.iter().cloned());
         tracing::info!(
             "composite: {} ({} manuals) — engine settings from the first \
              set's sidecar",
@@ -567,6 +576,7 @@ pub fn prepare(
         suggested_channels: suggested,
         setup,
         layout: console_layout,
+        warnings: load_warnings,
     })
 }
 

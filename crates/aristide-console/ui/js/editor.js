@@ -195,9 +195,19 @@ export class Editor {
     // A load that failed with the picker closed (an organ picked from
     // the menu's Recent list) would otherwise fail into silence: the
     // picker shows load_error only while it is up, so the error strip
-    // carries it here. Only transitions matter — repainting on every
-    // poll would clobber the strip's own transient command errors.
-    const loadError = snapshot.load_error ?? null;
+    // carries it here. Warnings ride along — an organ whose file lines
+    // were healed over loads emptier than the file intends, and that
+    // must say so where the player is looking. Only transitions matter
+    // — repainting on every poll would clobber the strip's own
+    // transient command errors.
+    const warnings = snapshot.load_warnings ?? [];
+    const loadError =
+      snapshot.load_error ??
+      (warnings.length
+        ? `the organ loaded, but ${warnings.length} line${
+            warnings.length === 1 ? "" : "s"
+          } of its file did not resolve — e.g. ${warnings[0]}`
+        : null);
     if (loadError !== this.lastLoadError) {
       this.lastLoadError = loadError;
       loadError ? this.showError(loadError) : this.hideError();

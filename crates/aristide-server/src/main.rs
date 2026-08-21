@@ -494,6 +494,11 @@ pub struct State {
     pub loading: Option<String>,
     /// Why the last load failed, kept until the next one starts.
     pub load_error: Option<String>,
+    /// What the last load skipped or papered over (dangling organ-file
+    /// references, ignored sidecar lines), kept until the next one
+    /// starts — an organ that loads emptier than its file intends must
+    /// say so where the player is looking, not only in the log.
+    pub load_warnings: Vec<String>,
     /// Where the console's movable panels sit, by panel id
     /// (`"keyboard:<manual>"`, `"jamb:<manual>"`, `"couplers"`,
     /// `"shoes"`) — only the ones a player has explicitly placed.
@@ -1598,6 +1603,7 @@ impl State {
     fn reload_organ_file(&mut self, path: PathBuf) {
         self.loading = Some("rebuilding the organ…".to_string());
         self.load_error = None;
+        self.load_warnings.clear();
         self.pending_load = Some(LoadRequest {
             paths: vec![path],
             stops: Vec::new(),
@@ -2022,6 +2028,7 @@ fn main() -> Result<()> {
         loading: pending_load.as_ref().map(|_| "loading…".to_string()),
         pending_load,
         load_error: None,
+        load_warnings: Vec::new(),
         layout: Default::default(),
     }));
     // Assignments exist before any hardware does: the computer
@@ -2064,6 +2071,7 @@ fn main() -> Result<()> {
                     state.loading = None;
                 }
                 state.load_error = Some(format!("{err:#}"));
+                state.load_warnings.clear();
             }
             // Another pick may have queued while this one loaded;
             // start it now rather than after the sleep below.
@@ -2359,6 +2367,7 @@ fn perform_load(
         suggested_channels,
         setup,
         layout,
+        warnings,
     } = load::prepare(&request.paths, &request.stops, audio.sample_rate, &progress)?;
 
     // Fault every sample page in NOW; doing it lazily means page faults
@@ -2477,6 +2486,7 @@ fn perform_load(
         state.loading = None;
     }
     state.load_error = None;
+    state.load_warnings = warnings;
     state.resolve_routes();
     state.persist();
     tracing::info!("organ ready: {}", state.organ_key);
@@ -3020,6 +3030,7 @@ mod tests {
             pending_load: None,
             loading: None,
             load_error: None,
+            load_warnings: Vec::new(),
             layout: Default::default(),
         }));
         // Everything downstream reads the resolved tables, exactly as
