@@ -115,26 +115,30 @@ impl MidiConfig {
 
     /// The organ file that wraps `set`, when one exists: a composite
     /// whose one source is that set. Loading the set again means that
-    /// organ — the file is the organ, the set only feeds it. Recent
-    /// entries are tried first (most recently played wins), then every
-    /// file in `organs_dir`: an organ removed from Recent is not gone,
-    /// and reloading its set must find it rather than silently making
-    /// a second organ without its name and wiring. `set` should be
+    /// organ — the file is the organ, the set only feeds it. Several
+    /// organs can share one set (the adopted wrapper plus anything
+    /// built on the console from it), so `name` — the library entry
+    /// the player actually clicked — decides between them: an organ
+    /// named exactly that wins. Without a name match, Recent order
+    /// decides (most recently played wins), then every file in
+    /// `organs_dir`: an organ removed from Recent is not gone, and
+    /// reloading its set must find it rather than silently making a
+    /// second organ without its name and wiring. `set` should be
     /// canonical; the candidates' sources are canonicalized to compare.
-    pub fn wrapper_for(&self, set: &Path, organs_dir: Option<&Path>) -> Option<PathBuf> {
-        let wraps = |candidate: &Path| {
+    pub fn wrapper_for(
+        &self,
+        set: &Path,
+        name: Option<&str>,
+        organs_dir: Option<&Path>,
+    ) -> Option<PathBuf> {
+        let wraps = |candidate: &Path| -> Option<String> {
             if !aristide_formats::instrument::is_definition(candidate) {
-                return false;
+                return None;
             }
-            let Ok(text) = std::fs::read_to_string(candidate) else {
-                return false;
-            };
-            let Ok(def) = toml::from_str::<aristide_formats::instrument::Definition>(&text)
-            else {
-                return false;
-            };
+            let text = std::fs::read_to_string(candidate).ok()?;
+            let def = toml::from_str::<aristide_formats::instrument::Definition>(&text).ok()?;
             if def.sources.len() != 1 {
-                return false;
+                return None;
             }
             let source = def.sources.values().next().expect("one source").path();
             let resolved = if source.is_absolute() {
@@ -142,20 +146,31 @@ impl MidiConfig {
             } else {
                 candidate.parent().unwrap_or(Path::new("")).join(source)
             };
-            resolved.canonicalize().ok().as_deref() == Some(set)
+            (resolved.canonicalize().ok().as_deref() == Some(set)).then_some(def.name)
         };
-        for entry in &self.library {
-            if wraps(&entry.path) {
-                return Some(entry.path.clone());
-            }
+        let mut fallback: Option<PathBuf> = None;
+        let mut candidates: Vec<PathBuf> =
+            self.library.iter().map(|entry| entry.path.clone()).collect();
+        if let Some(dir) = organs_dir {
+            let mut on_disk: Vec<PathBuf> = std::fs::read_dir(dir)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|entry| entry.path())
+                .collect();
+            on_disk.sort();
+            candidates.extend(on_disk);
         }
-        let mut candidates: Vec<PathBuf> = std::fs::read_dir(organs_dir?)
-            .ok()?
-            .flatten()
-            .map(|entry| entry.path())
-            .collect();
-        candidates.sort();
-        candidates.into_iter().find(|path| wraps(path))
+        for candidate in candidates {
+            let Some(organ_name) = wraps(&candidate) else {
+                continue;
+            };
+            if name.is_some_and(|wanted| organ_name == wanted) {
+                return Some(candidate);
+            }
+            fallback.get_or_insert(candidate);
+        }
+        fallback
     }
 
     /// Drop an organ from the picker. Its assignments stay: forgetting
@@ -1683,9 +1698,12 @@ mod tests {
         config.remember("Chapelle", &wrapper);
         config.remember("Combo", &combo);
         config.remember("Raw", &canonical);
-        assert_eq!(config.wrapper_for(&canonical, None), Some(wrapper.clone()));
         assert_eq!(
-            config.wrapper_for(&dir.join("elsewhere.organ"), None),
+            config.wrapper_for(&canonical, None, None),
+            Some(wrapper.clone())
+        );
+        assert_eq!(
+            config.wrapper_for(&dir.join("elsewhere.organ"), None, None),
             None,
             "nothing wraps a set this machine has never seen"
         );
@@ -1694,10 +1712,70 @@ mod tests {
         // holds the file, and reloading the set finds it there rather
         // than making a second organ without its name and wiring.
         config.forget(&wrapper);
-        assert_eq!(config.wrapper_for(&canonical, None), None);
+        assert_eq!(config.wrapper_for(&canonical, None, None), None);
         assert_eq!(
-            config.wrapper_for(&canonical, Some(&dir.join("organs"))),
+            config.wrapper_for(&canonical, None, Some(&dir.join("organs"))),
             Some(wrapper)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Several organs can wrap one set — the adopted wrapper plus
+    /// organs built on the console from it. The name of the library
+    /// entry the player clicked decides which one loads; without it
+    /// (or when nothing carries that name) the most recently played
+    /// one wins, never silently a different organ than the click said.
+    #[test]
+    fn the_clicked_name_picks_among_organs_sharing_a_set() {
+        let dir = std::env::temp_dir().join("aristide-wrapper-name-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        let set = dir.join("village.organ");
+        std::fs::write(&set, "[Organ]").expect("fixture set");
+        let canonical = set.canonicalize().expect("canonicalizes");
+        let organs = dir.join("organs");
+        let adopted =
+            create_wrapper_organ(&organs, "Chapelle", &canonical, &test_organ(), None)
+                .expect("wrapper created");
+        let built = dir.join("my-organ.toml");
+        std::fs::write(
+            &built,
+            format!(
+                "name = \"My Organ\"\n[sources]\ns1 = {:?}\n",
+                canonical.display().to_string()
+            ),
+        )
+        .expect("fixture built organ");
+
+        let mut config = MidiConfig::default();
+        config.remember("Chapelle", &adopted);
+        config.remember("My Organ", &built); // most recently played
+        assert_eq!(
+            config.wrapper_for(&canonical, Some("Chapelle"), None),
+            Some(adopted.clone()),
+            "the clicked name wins over recency"
+        );
+        assert_eq!(
+            config.wrapper_for(&canonical, Some("My Organ"), None),
+            Some(built.clone())
+        );
+        assert_eq!(
+            config.wrapper_for(&canonical, None, None),
+            Some(built.clone()),
+            "no name: most recent wins"
+        );
+        assert_eq!(
+            config.wrapper_for(&canonical, Some("Renamed Since"), None),
+            Some(built),
+            "a stale name still resolves rather than duplicating the organ"
+        );
+
+        // The name also reaches into the organs folder for an organ
+        // taken off Recent.
+        config.forget(&adopted);
+        assert_eq!(
+            config.wrapper_for(&canonical, Some("Chapelle"), Some(&organs)),
+            Some(adopted)
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

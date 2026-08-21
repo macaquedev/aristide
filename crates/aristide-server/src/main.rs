@@ -2252,11 +2252,21 @@ fn adopt_set(
     };
     let set = request.paths[0].clone();
     let canonical = set.canonicalize().unwrap_or_else(|_| set.clone());
-    let wrapper = state
-        .lock()
-        .expect("state poisoned")
-        .midi_config
-        .wrapper_for(&canonical, Some(&dir));
+    let wrapper = {
+        let state = state.lock().expect("state poisoned");
+        // The library entry being loaded names WHICH organ the player
+        // picked; several organs can wrap the same set, and clicking
+        // "GrandOrgue demo" must never quietly reload another of them.
+        let clicked = state
+            .midi_config
+            .library
+            .iter()
+            .find(|entry| entry.path == canonical || entry.path == set)
+            .map(|entry| entry.name.clone());
+        state
+            .midi_config
+            .wrapper_for(&canonical, clicked.as_deref(), Some(&dir))
+    };
     if let Some(path) = wrapper {
         tracing::info!(
             "organ file for {}: {}",
