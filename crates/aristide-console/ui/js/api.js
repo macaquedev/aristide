@@ -156,11 +156,13 @@ export const commands = {
   conflict: (choice) => `/api/conflict?choice=${choice}`,
 };
 
-/// Start the client. Calls `onState(snapshot)` for every fresh snapshot
-/// and `onError(message)` when the server is unreachable. Returns
-/// `send(query)`, which POSTs one command and feeds its response back
-/// through `onState`.
-export function connect(base, onState, onError) {
+/// Start the client. Calls `onState(snapshot)` for every fresh snapshot,
+/// `onError(message)` when the server is unreachable, and
+/// `onRefused(reason)` when it answered but said no (a 4xx with its
+/// plain-text reason) — a refusal is the organ talking, not a dead
+/// connection, and must never dress up as one. Returns `send(query)`,
+/// which POSTs one command and feeds its response back through `onState`.
+export function connect(base, onState, onError, onRefused) {
   let pollTimer = null;
   let issued = 0; // requests dispatched, in order
   let applied = 0; // the newest request whose snapshot has been applied
@@ -175,7 +177,13 @@ export function connect(base, onState, onError) {
     const id = ++issued;
     try {
       const response = await fetch(base + query, { method });
-      if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+      if (!response.ok) {
+        const reason =
+          (await response.text().catch(() => "")) ||
+          `${response.status} ${response.statusText}`;
+        (onRefused ?? onError)(reason);
+        return;
+      }
       const snapshot = await response.json();
       if (id > applied) {
         applied = id;

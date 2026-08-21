@@ -159,4 +159,8 @@ send = connect(
     editor.update(snapshot);
   },
   (message) => view.offline(message),
+  // A refused command (a 4xx and its reason) lands in the editor's
+  // status strip — the same place rebuild errors show — instead of
+  // masquerading as a lost connection.
+  (reason) => editor.showError(reason),
 );

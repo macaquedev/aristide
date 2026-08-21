@@ -192,6 +192,17 @@ export class Editor {
     this.el.status.classList.toggle("hidden", !showStatus);
     this.el.statusText.textContent = snapshot.loading ?? "";
 
+    // A load that failed with the picker closed (an organ picked from
+    // the menu's Recent list) would otherwise fail into silence: the
+    // picker shows load_error only while it is up, so the error strip
+    // carries it here. Only transitions matter — repainting on every
+    // poll would clobber the strip's own transient command errors.
+    const loadError = snapshot.load_error ?? null;
+    if (loadError !== this.lastLoadError) {
+      this.lastLoadError = loadError;
+      loadError ? this.showError(loadError) : this.hideError();
+    }
+
     const file = snapshot.setup?.file ?? null;
     if (file !== this.offeringsFile) {
       this.offeringsFile = file;

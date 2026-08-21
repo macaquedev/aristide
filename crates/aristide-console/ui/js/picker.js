@@ -43,6 +43,7 @@ export class Picker {
     this.send = send;
     this.lastOrgan = undefined; // mirrors snapshot.organ, kept even while closed
     this.openedWithOrgan = undefined; // snapshot.organ at the moment this opened
+    this.pickedHere = false; // a load was started from this open picker
     this.library = []; // mirrors snapshot.library — the Load menu reads it too
     this.signature = null;
     // Browse state lives outside the snapshot — it's this client's own
@@ -89,6 +90,7 @@ export class Picker {
   /// again wouldn't be mistaken for one that didn't land at all.
   open() {
     this.openedWithOrgan = this.lastOrgan;
+    this.pickedHere = false;
     this.show();
   }
 
@@ -173,7 +175,10 @@ export class Picker {
     this.el.nameForm.addEventListener("submit", (event) => {
       event.preventDefault();
       const name = this.el.name.value.trim();
-      if (name) this.send(commands.organNew(name));
+      if (name) {
+        this.pickedHere = true;
+        this.send(commands.organNew(name));
+      }
     });
     this.el.newSet.addEventListener("click", () => {
       window.__TAURI__ ? this.pickSampleSet() : this.showBrowse();
@@ -207,13 +212,19 @@ export class Picker {
     // still opens this because !hasOrgan already covers it.
     if (!this.isOpen && !hasOrgan) {
       this.openedWithOrgan = undefined;
+      this.pickedHere = false;
       this.show();
     }
 
-    // A pick landed — either the auto-opened picker's first load, or a
-    // manually opened one whose choice differs from what was loaded
-    // when it was opened.
-    if (this.isOpen && hasOrgan && snapshot.organ !== this.openedWithOrgan) {
+    // A pick landed — either the auto-opened picker's first load (an
+    // organ where there was none), or a pick made from this open picker
+    // that finished cleanly, even one that circled back to the organ it
+    // opened over (picks queue last-click-wins, so a change of mind can
+    // land on "home" again). Not while `loading`: an organ landing with
+    // another still on the way stays up until the last one lands.
+    const landed =
+      snapshot.organ !== this.openedWithOrgan || (this.pickedHere && !error);
+    if (this.isOpen && hasOrgan && !loading && landed) {
       this.close();
     }
 
@@ -302,6 +313,7 @@ export class Picker {
   }
 
   load(path) {
+    this.pickedHere = this.isOpen;
     this.send(commands.organLoad(path));
   }
 
