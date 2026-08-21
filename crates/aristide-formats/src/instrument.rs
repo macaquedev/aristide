@@ -629,8 +629,22 @@ pub fn assemble(
     // relocates by name — ranges stay pitch-anchored until `finish`,
     // so re-anchoring onto the new manual is automatic.
     for wanted in &def.moves {
-        let from = assembly.find_manual(&wanted.from)?;
-        let to = assembly.find_manual(&wanted.to)?;
+        // A move that no longer resolves is dropped with a warning, not
+        // a load failure — same treatment as its stop going missing
+        // below. A stale one (a console gesture that raced a rename's
+        // rebuild, a manual since removed) must never brick the organ.
+        let (from, to) = match (
+            assembly.find_manual(&wanted.from),
+            assembly.find_manual(&wanted.to),
+        ) {
+            (Ok(from), Ok(to)) => (from, to),
+            (Err(err), _) | (_, Err(err)) => {
+                assembly
+                    .warnings
+                    .push(format!("move: {:?}: {err} — skipped", wanted.stop));
+                continue;
+            }
+        };
         let on_from: Vec<usize> = assembly
             .placed
             .iter()

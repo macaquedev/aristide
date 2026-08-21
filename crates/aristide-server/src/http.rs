@@ -193,6 +193,12 @@ fn respond(
         // one.
         (Method::Post, "/api/organ/move") => {
             let mut state = state.lock().expect("state poisoned");
+            // Live, but it writes manual NAMES to the file — mid-rebuild
+            // the console's names can be stale (a rename just rewrote
+            // them), and a stale [[move]] leaves the file unloadable.
+            if state.loading.is_some() || state.pending_load.is_some() {
+                return bad_request("an organ is already loading");
+            }
             match (
                 param(query, "stop").and_then(|v| v.parse::<u32>().ok()),
                 param(query, "manual").and_then(|v| v.parse::<usize>().ok()),
@@ -2802,6 +2808,82 @@ mod tests {
             "directories come first"
         );
         assert!(browse_json(&dir.join("nowhere")).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Every console-editor write against a real inventory leaves the
+    /// file loadable — including a stop-move racing a rename's rebuild,
+    /// which once wrote the stale manual name into a [[move]] and left
+    /// the organ permanently unloadable (hit in the field, 2026-08-21).
+    #[test]
+    fn every_edit_leaves_the_file_loadable() {
+        let Some(state) = demo_state() else { return };
+        let demo = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testsets/grandorgue-demo/demo.organ");
+        let dir = std::env::temp_dir().join("aristide-repro-night-edits");
+        let _ = std::fs::remove_dir_all(&dir);
+        let organ = aristide_formats::grandorgue::load(&demo).expect("demo parses").organ;
+        let canonical = demo.canonicalize().expect("canonicalizes");
+        let file = crate::config::create_wrapper_organ(&dir, "Repro", &canonical, &organ, None)
+            .expect("inventory written");
+        state.lock().expect("state").composite_path = Some(file.clone());
+
+        let clear = |state: &Mutex<State>| {
+            let mut state = state.lock().expect("state");
+            state.pending_load = None;
+            state.loading = None;
+        };
+        let check = |step: &str| {
+            if let Err(err) = aristide_formats::instrument::load(&file) {
+                let text = std::fs::read_to_string(&file).unwrap_or_default();
+                panic!("unloadable after {step}: {err}\n---\n{text}");
+            }
+        };
+
+        let steps: &[(&str, &str)] = &[
+            ("place keyboard", "/api/organ/panel/place?panel=keyboard%3AFirst%20Manual&x=0.4&y=0.3"),
+            ("place jamb", "/api/organ/panel/place?panel=jamb%3AFirst%20Manual&x=0.1&y=0.3"),
+            ("move a stop", "/api/organ/move?stop=16&manual=0"),
+            ("enclose: add box named like the manual", "/api/organ/enclosure/add?name=First%20Manual"),
+            ("enclose: assign a stop", "/api/organ/enclosure/assign?enclosure=First%20Manual&stop=17&in=1"),
+            ("rename the manual", "/api/organ/manual/rename?manual=1&name=Grand"),
+        ];
+        for (step, url) in steps {
+            let response = respond(&state, &Method::Post, url);
+            assert_eq!(response.status_code().0, 200, "{step} refused");
+            clear(&state);
+            check(step);
+        }
+
+        // The race: the rename above rewrote the file ("Grand") and its
+        // rebuild is still in flight — the live console still says
+        // "First Manual". A stop-move now must be refused, or it would
+        // write the stale name into a [[move]].
+        {
+            let mut state = state.lock().expect("state");
+            state.pending_load = Some(crate::LoadRequest {
+                paths: vec![file.clone()],
+                stops: Vec::new(),
+                initial: false,
+            });
+        }
+        let raced = respond(&state, &Method::Post, "/api/organ/move?stop=18&manual=0");
+        assert_eq!(raced.status_code().0, 400, "a mid-rebuild move is refused");
+        clear(&state);
+        check("move raced against a rename's rebuild");
+
+        // A file that already carries a stale move (written before the
+        // guard existed) still loads: the move is skipped with a
+        // warning, never a failure.
+        let mut text = std::fs::read_to_string(&file).expect("reads");
+        text.push_str("\n[[move]]\nstop = \"Montre 8'\"\nfrom = \"First Manual\"\nto = \"Pedal\"\n");
+        std::fs::write(&file, text).expect("writes");
+        let healed = aristide_formats::instrument::load(&file).expect("a stale move never bricks the organ");
+        assert!(
+            healed.warnings.iter().any(|w| w.contains("skipped")),
+            "the stale move is called out: {:?}",
+            healed.warnings
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

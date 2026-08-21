@@ -678,9 +678,10 @@ export class Editor {
           this.organCommand(commands.organEnclosureAssign(enclosure.name, drag.payload.id, !already));
         }
       } else if (targetType === "manual" && targetIdx !== drag.payload.midx) {
-        // A live reassignment, not a rebuild — optimistic, the next
-        // poll reconciles it like any other control.
-        this.send(commands.organMove(drag.payload.id, targetIdx));
+        // A live reassignment, not a rebuild — but the server refuses
+        // it mid-rebuild (stale names would poison the file), so it
+        // goes through the queue, which waits any rebuild out.
+        this.runQueue([commands.organMove(drag.payload.id, targetIdx)]);
       }
     } else if (drag.kind === "manual") {
       if (targetType === "bin") {
