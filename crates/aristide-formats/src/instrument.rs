@@ -558,7 +558,19 @@ pub fn assemble(
                 ));
             }
             for manual_idx in matches {
-                assembly.pull_division(source_idx, manual_idx, pull.on.as_deref())?;
+                // Same healing as [[move]] and [[stop]] below: an `on`
+                // naming a manual this organ no longer declares (a
+                // console gesture that raced a rename's rebuild, a
+                // manual since removed) skips with a warning — it must
+                // never brick the organ file.
+                if let Err(err) =
+                    assembly.pull_division(source_idx, manual_idx, pull.on.as_deref())
+                {
+                    assembly.warnings.push(format!(
+                        "division {:?} from {:?}: {err} — skipped",
+                        pull.manual, pull.from
+                    ));
+                }
             }
         }
         for pull in &def.stops {
@@ -619,7 +631,20 @@ pub fn assemble(
                 }
                 _ => None,
             };
-            let target = assembly.find_manual(&pull.on)?;
+            // An `on` naming a manual this organ no longer declares is
+            // dropped with a warning, not a load failure — the same
+            // healing [[move]] got when a raced rename bricked a file
+            // in the field (2026-08-21); a [[stop]] line proved able to
+            // do the very same thing.
+            let target = match assembly.find_manual(&pull.on) {
+                Ok(target) => target,
+                Err(err) => {
+                    assembly
+                        .warnings
+                        .push(format!("stop {:?}: {err} — skipped", pull.stop));
+                    continue;
+                }
+            };
             for stop_idx in matches {
                 assembly.place_stop(source_idx, stop_idx, target, rename.clone());
             }
@@ -1611,7 +1636,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_alias_and_unknown_manual_error() {
+    fn unknown_alias_errors() {
         let sources = vec![("A".to_string(), source("A", "/a"))];
         let mut definition = def("Broken");
         definition.stops = vec![StopPull {
@@ -1622,15 +1647,50 @@ mod tests {
             rename: None,
         }];
         assert!(assemble(&definition, &sources, Vec::new()).is_err());
-        let mut definition = def("Broken too");
-        definition.stops = vec![StopPull {
+    }
+
+    /// A pull whose `on` names a manual the organ no longer declares is
+    /// dropped with a warning, exactly like a dangling [[move]]: these
+    /// lines are gesture-recorded (a stop-move racing a rename's
+    /// rebuild wrote stale names in the field, 2026-08-21), and a stale
+    /// one must never brick the organ file.
+    #[test]
+    fn dangling_pull_targets_warn_and_skip() {
+        let sources = vec![("A".to_string(), source("A", "/a"))];
+        let mut definition = def("Healed");
+        definition.manuals = vec![manual("Great", Some(36), Some(96))];
+        definition.stops = vec![
+            StopPull {
+                from: "A".into(),
+                manual: None,
+                stop: "Principal 8".into(),
+                on: "Great".into(),
+                rename: None,
+            },
+            StopPull {
+                from: "A".into(),
+                manual: None,
+                stop: "Hautbois 8".into(),
+                on: "First Manual".into(), // renamed since; must not brick
+                rename: None,
+            },
+        ];
+        definition.divisions = vec![DivisionPull {
             from: "A".into(),
-            manual: None,
-            stop: "Principal 8".into(),
-            on: "Choir".into(),
-            rename: None,
+            manual: "Swell".into(),
+            on: Some("Choir".into()), // likewise gone
         }];
-        assert!(assemble(&definition, &sources, Vec::new()).is_err());
+        let built = assemble(&definition, &sources, Vec::new()).expect("still assembles");
+        assert_eq!(built.organ.stops.len(), 1, "the resolvable pull lands");
+        assert_eq!(built.organ.stops[0].name, "Principal 8");
+        assert_eq!(built.organ.manuals.len(), 1, "no manual conjured");
+        assert_eq!(
+            built.warnings.len(),
+            2,
+            "both dangling refs reported: {:?}",
+            built.warnings
+        );
+        assert!(built.warnings.iter().all(|w| w.contains("skipped")));
     }
 
     /// A [[move]] relocates a pulled stop by name after all pulls,
