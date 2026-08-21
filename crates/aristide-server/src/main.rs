@@ -2057,8 +2057,18 @@ fn main() -> Result<()> {
                 }
                 tracing::warn!("organ load failed: {err:#}");
                 let mut state = state.lock().expect("state poisoned");
-                state.loading = None;
+                // A pick queued during this load keeps the narration
+                // alive — the console must not flash "done" between
+                // back-to-back loads.
+                if state.pending_load.is_none() {
+                    state.loading = None;
+                }
                 state.load_error = Some(format!("{err:#}"));
+            }
+            // Another pick may have queued while this one loaded;
+            // start it now rather than after the sleep below.
+            if !SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
+                continue;
             }
         }
         std::thread::sleep(std::time::Duration::from_millis(500));
@@ -2461,7 +2471,11 @@ fn perform_load(
     state.learn = None;
     state.control_learn = None;
     state.pending = None;
-    state.loading = None;
+    // A pick queued while this one loaded is already the next load;
+    // its narration stays up until that one lands too.
+    if state.pending_load.is_none() {
+        state.loading = None;
+    }
     state.load_error = None;
     state.resolve_routes();
     state.persist();

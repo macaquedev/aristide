@@ -483,9 +483,10 @@ fn respond(
                 }
             }
             let mut state = state.lock().expect("state poisoned");
-            if state.loading.is_some() || state.pending_load.is_some() {
-                return bad_request("an organ is already loading");
-            }
+            // Last pick wins: while one organ decodes, picking another
+            // replaces the queued request instead of being refused — a
+            // refusal here surfaces nowhere the player is looking, and
+            // "clicked an organ, nothing happened" must not exist.
             state.loading = Some("loading…".to_string());
             state.load_error = None;
             state.pending_load = Some(crate::LoadRequest {
@@ -503,9 +504,6 @@ fn respond(
                 return bad_request("missing name");
             };
             let mut state = state.lock().expect("state poisoned");
-            if state.loading.is_some() || state.pending_load.is_some() {
-                return bad_request("an organ is already loading");
-            }
             let Some(dir) = crate::config::organs_dir() else {
                 return bad_request("no config directory to keep organs in");
             };
@@ -2515,6 +2513,8 @@ mod tests {
         let state = tone_state();
         let file = std::env::temp_dir().join("aristide-load-queue-test.organ");
         std::fs::write(&file, "[Organ]").expect("fixture written");
+        let other = std::env::temp_dir().join("aristide-load-queue-other.organ");
+        std::fs::write(&other, "[Organ]").expect("fixture written");
 
         let missing = respond(&state, &Method::Post, "/api/organ/load");
         assert_eq!(missing.status_code().0, 400, "a path is required");
@@ -2537,26 +2537,35 @@ mod tests {
         }
         assert!(state_json(&state).contains("\"loading\":"));
 
-        // One at a time: a second request is refused, not stacked.
-        let refused = respond(&state, &Method::Post, &url);
-        assert_eq!(refused.status_code().0, 400);
+        // Last pick wins: a second pick replaces the queued one — the
+        // player changing their mind mid-load must never be refused
+        // into a silent no-op.
+        let replaced = respond(
+            &state,
+            &Method::Post,
+            &format!("/api/organ/load?path={}", other.display()),
+        );
+        assert_eq!(replaced.status_code().0, 200);
+        {
+            let state = state.lock().expect("state poisoned");
+            let pending = state.pending_load.as_ref().expect("request queued");
+            assert_eq!(pending.paths, vec![other.clone()]);
+        }
         let _ = std::fs::remove_file(&file);
+        let _ = std::fs::remove_file(&other);
     }
 
-    /// The blank-organ endpoint enforces the same rules as loading:
-    /// a real name, one load at a time. (Creation itself is proven in
-    /// `config::tests` — here would write into the user's config.)
+    /// The blank-organ endpoint needs a real name. (Creation itself is
+    /// proven in `config::tests` — here would write into the user's
+    /// config; a load already running no longer refuses, it is
+    /// replaced — last pick wins, same as `/api/organ/load`.)
     #[test]
-    fn a_blank_organ_needs_a_name_and_a_free_load_slot() {
+    fn a_blank_organ_needs_a_name() {
         let state = tone_state();
         let missing = respond(&state, &Method::Post, "/api/organ/new");
         assert_eq!(missing.status_code().0, 400, "a name is required");
         let blank = respond(&state, &Method::Post, "/api/organ/new?name=%20%20");
         assert_eq!(blank.status_code().0, 400, "whitespace is not a name");
-
-        state.lock().expect("state poisoned").loading = Some("loading…".into());
-        let busy = respond(&state, &Method::Post, "/api/organ/new?name=Chapel");
-        assert_eq!(busy.status_code().0, 400, "one load at a time");
     }
 
     #[test]
