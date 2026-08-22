@@ -14,6 +14,14 @@
 
 import { commands } from "./api.js";
 
+// What the native add-source dialog offers. Narrower than the picker's
+// filter: a source must be a sample set — the server refuses another
+// organ file — so Aristide's own .toml composites are left out.
+const SET_FILTER = {
+  name: "Sample sets (GrandOrgue, Hauptwerk)",
+  extensions: ["organ", "Organ_Hauptwerk_xml"],
+};
+
 function clampNote(value) {
   return Math.min(127, Math.max(0, Math.trunc(Number(value) || 0)));
 }
@@ -1141,6 +1149,14 @@ export class Editor {
   }
 
   openSourceForm() {
+    // The desktop shell has a real file dialog — use it, as the picker
+    // does. The in-form browser below stays the web fallback, and the
+    // right tool again should this console ever front a remote server
+    // (a native dialog would then pick paths on the wrong machine).
+    if (window.__TAURI__) {
+      this.pickSourceNative();
+      return;
+    }
     this.closeAddPanels();
     this.el.addSourceForm.classList.remove("hidden");
     this.el.addSourcePath.value = "";
@@ -1148,6 +1164,25 @@ export class Editor {
     this.addBrowseParent = null;
     if (this.addAnchor) this.positionPopover(this.el.add, this.addAnchor.x, this.addAnchor.y);
     this.addBrowse();
+  }
+
+  /// The native open dialog, filtered to sample sets. A cancelled
+  /// dialog is not an error — nothing happens; a pick goes straight to
+  /// the server, whose refusals surface like any other edit's.
+  async pickSourceNative() {
+    this.closeAdd();
+    const picked = await window.__TAURI__.core
+      .invoke("plugin:dialog|open", {
+        options: {
+          title: "Choose a sample set",
+          filters: [SET_FILTER],
+          multiple: false,
+          directory: false,
+        },
+      })
+      .catch(() => null);
+    const path = Array.isArray(picked) ? picked[0] : picked;
+    if (typeof path === "string" && path) this.organCommand(commands.organSourceAdd(path));
   }
 
   /// This organ's own directory listing, the same idiom as the picker's
