@@ -119,19 +119,26 @@ impl MidiConfig {
     /// organs can share one set (the adopted wrapper plus anything
     /// built on the console from it), so `name` — the library entry
     /// the player actually clicked — decides between them: an organ
-    /// named exactly that wins. Without a name match, Recent order
-    /// decides (most recently played wins), then every file in
-    /// `organs_dir`: an organ removed from Recent is not gone, and
-    /// reloading its set must find it rather than silently making a
-    /// second organ without its name and wiring. `set` should be
-    /// canonical; the candidates' sources are canonicalized to compare.
+    /// named exactly that wins. Without a name match, only *adopted*
+    /// wrappers qualify — `layout = true` on the source (adoption
+    /// writes it), or a bare file with no structure of its own (how
+    /// adoption wrote them before the inventory). An organ merely
+    /// *built from* the set — its own manuals, its own pulls — is
+    /// reached by its name, never by naming the raw set: browsing to
+    /// the set means the set's own organ, not silently the most
+    /// recent thing built on it. Among wrappers, Recent order decides
+    /// (most recently played wins), then every file in `organs_dir`:
+    /// an organ removed from Recent is not gone, and reloading its
+    /// set must find it rather than silently making a second organ
+    /// without its name and wiring. `set` should be canonical; the
+    /// candidates' sources are canonicalized to compare.
     pub fn wrapper_for(
         &self,
         set: &Path,
         name: Option<&str>,
         organs_dir: Option<&Path>,
     ) -> Option<PathBuf> {
-        let wraps = |candidate: &Path| -> Option<String> {
+        let wraps = |candidate: &Path| -> Option<(String, bool)> {
             if !aristide_formats::instrument::is_definition(candidate) {
                 return None;
             }
@@ -140,13 +147,22 @@ impl MidiConfig {
             if def.sources.len() != 1 {
                 return None;
             }
-            let source = def.sources.values().next().expect("one source").path();
-            let resolved = if source.is_absolute() {
-                source.to_path_buf()
+            let source = def.sources.values().next().expect("one source");
+            let path = source.path();
+            let resolved = if path.is_absolute() {
+                path.to_path_buf()
             } else {
-                candidate.parent().unwrap_or(Path::new("")).join(source)
+                candidate.parent().unwrap_or(Path::new("")).join(path)
             };
-            (resolved.canonicalize().ok().as_deref() == Some(set)).then_some(def.name)
+            if resolved.canonicalize().ok().as_deref() != Some(set) {
+                return None;
+            }
+            let adopted = source.layout()
+                || (def.manuals.is_empty()
+                    && def.divisions.is_empty()
+                    && def.stops.is_empty()
+                    && def.moves.is_empty());
+            Some((def.name, adopted))
         };
         let mut fallback: Option<PathBuf> = None;
         let mut candidates: Vec<PathBuf> =
@@ -162,13 +178,15 @@ impl MidiConfig {
             candidates.extend(on_disk);
         }
         for candidate in candidates {
-            let Some(organ_name) = wraps(&candidate) else {
+            let Some((organ_name, adopted)) = wraps(&candidate) else {
                 continue;
             };
             if name.is_some_and(|wanted| organ_name == wanted) {
                 return Some(candidate);
             }
-            fallback.get_or_insert(candidate);
+            if adopted {
+                fallback.get_or_insert(candidate);
+            }
         }
         fallback
     }
@@ -1776,6 +1794,58 @@ mod tests {
         assert_eq!(
             config.wrapper_for(&canonical, Some("Chapelle"), Some(&organs)),
             Some(adopted)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An organ built ON a set — its own manuals, its own pulls — is
+    /// not that set's wrapper. Browsing to the raw set means the
+    /// set's own organ: the adopted wrapper wins however recently the
+    /// built organ played, and with no wrapper at all the lookup
+    /// comes up empty so adoption makes one, rather than silently
+    /// loading whatever was built from the set. The built organ is
+    /// still reachable the way organs are: by its name.
+    #[test]
+    fn a_built_organ_never_hijacks_a_direct_set_load() {
+        let dir = std::env::temp_dir().join("aristide-wrapper-hijack-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        let set = dir.join("village.organ");
+        std::fs::write(&set, "[Organ]").expect("fixture set");
+        let canonical = set.canonicalize().expect("canonicalizes");
+        let adopted =
+            create_wrapper_organ(&dir.join("organs"), "Chapelle", &canonical, &test_organ(), None)
+                .expect("wrapper created");
+        let built = dir.join("built.toml");
+        std::fs::write(
+            &built,
+            format!(
+                "name = \"Built\"\n[sources]\ns1 = {:?}\n\
+                 [[manual]]\nname = \"Great\"\nlow = 36\nhigh = 96\n\
+                 [[stop]]\nfrom = \"s1\"\nstop = \"Montre\"\non = \"Great\"\n",
+                canonical.display().to_string()
+            ),
+        )
+        .expect("fixture built organ");
+
+        let mut config = MidiConfig::default();
+        config.remember("Chapelle", &adopted);
+        config.remember("Built", &built); // most recently played
+        assert_eq!(
+            config.wrapper_for(&canonical, None, None),
+            Some(adopted.clone()),
+            "the adopted wrapper wins over a more recent built organ"
+        );
+        assert_eq!(
+            config.wrapper_for(&canonical, Some("Built"), None),
+            Some(built.clone()),
+            "the clicked name still reaches the built organ"
+        );
+        config.forget(&adopted);
+        assert_eq!(
+            config.wrapper_for(&canonical, None, None),
+            None,
+            "no wrapper: adopt a fresh one instead of hijacking the built organ"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
