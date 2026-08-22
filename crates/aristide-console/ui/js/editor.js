@@ -13,6 +13,7 @@
 // is called on every poll, the same as Preferences and the other panels.
 
 import { commands } from "./api.js";
+import { parseKeyName } from "./pitch.js";
 
 // What the native add-source dialog offers. Narrower than the picker's
 // filter: a source must be a sample set — the server refuses another
@@ -21,10 +22,6 @@ const SET_FILTER = {
   name: "Sample sets (GrandOrgue, Hauptwerk)",
   extensions: ["organ", "Organ_Hauptwerk_xml"],
 };
-
-function clampNote(value) {
-  return Math.min(127, Math.max(0, Math.trunc(Number(value) || 0)));
-}
 
 /// Swallows the click a suppressed drag would otherwise leave behind —
 /// a drag that crossed the threshold must not also toggle the drawknob
@@ -1069,8 +1066,14 @@ export class Editor {
       event.preventDefault();
       const name = this.el.addManualName.value.trim();
       if (!name) return;
-      const low = clampNote(this.el.addManualLow.value);
-      const high = clampNote(this.el.addManualHigh.value);
+      // The bounds are note names ("C2", "F♯4"), the same reading as the
+      // compass fields in Preferences; a field naming no note keeps the
+      // form open rather than guessing a compass.
+      const low = parseKeyName(this.el.addManualLow.value);
+      const high = parseKeyName(this.el.addManualHigh.value);
+      this.el.addManualLow.classList.toggle("invalid", low == null);
+      this.el.addManualHigh.classList.toggle("invalid", high == null);
+      if (low == null || high == null) return;
       this.organCommand(commands.organManualAdd(name, low, high, this.addPedal ? 1 : 0)).then((ok) => {
         if (!ok) return;
         this.rememberPlacement(name);
@@ -1139,8 +1142,10 @@ export class Editor {
     this.closeAddPanels();
     this.el.addManualForm.classList.remove("hidden");
     this.el.addManualName.value = "";
-    this.el.addManualLow.value = 36;
-    this.el.addManualHigh.value = pedal ? 67 : 96;
+    this.el.addManualLow.value = "C2";
+    this.el.addManualHigh.value = pedal ? "G4" : "C7";
+    this.el.addManualLow.classList.remove("invalid");
+    this.el.addManualHigh.classList.remove("invalid");
     if (this.addAnchor) this.positionPopover(this.el.add, this.addAnchor.x, this.addAnchor.y);
     requestAnimationFrame(() => this.el.addManualName.focus());
   }

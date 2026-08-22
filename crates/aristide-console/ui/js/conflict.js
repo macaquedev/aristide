@@ -8,16 +8,18 @@
 
 import { commands } from "./api.js";
 import { actionLabel, keyGlyph } from "./prefs.js";
+import { noteTriggerText } from "./pitch.js";
 
 /// Mirrors prefs.js's own triggerText, applied to a conflict object
 /// rather than a control row: a computer key reads as the character it
-/// is, a MIDI message as its wire text plus device and channel.
+/// is, a note as its pitch, any other MIDI message as its wire text —
+/// each plus device and channel.
 function triggerText(conflict) {
   if (conflict.trigger.startsWith("key:")) {
     return `key:${keyGlyph(conflict.trigger.slice(4))}`;
   }
   const channel = conflict.channel ? ` ch${conflict.channel}` : "";
-  return `${conflict.trigger} · ${conflict.device}${channel}`;
+  return `${noteTriggerText(conflict.trigger)} · ${conflict.device}${channel}`;
 }
 
 /// An action as prose: the catalogue label for a bare verb, and the

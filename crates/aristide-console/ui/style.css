@@ -666,7 +666,8 @@ input[type="range"]:hover::-webkit-slider-thumb { filter: brightness(1.15); }
 }
 
 .compass-field { display: flex; align-items: center; gap: 6px; }
-.compass-field input[type="number"] { width: 58px; }
+.compass-field input { width: 58px; }
+.compass-field input.invalid { border-color: #b58a2e; }
 .compass-field i { font-style: normal; font-size: 10.5px; color: var(--text-dim); min-width: 26px; }
 
 /* stops grouped under the manual whose division plays them */
@@ -1080,7 +1081,8 @@ input[type="range"]:hover::-webkit-slider-thumb { filter: brightness(1.15); }
   font-size: 10.5px;
   color: var(--text-dim);
 }
-.editor-add-form-row input[type="number"] { width: 52px; }
+.editor-add-form-row input[type="text"] { width: 58px; }
+.editor-add-form-row input.invalid { border-color: #b58a2e; }
 .editor-add-form-actions { display: flex; justify-content: flex-end; gap: 8px; }
 
 .editor-add-browse { display: flex; flex-direction: column; gap: 6px; }
@@ -1429,7 +1431,8 @@ input[type="range"]:hover::-webkit-slider-thumb { filter: brightness(1.15); }
 
 .pane select,
 .keys-legend select,
-.pane input[type="number"] {
+.pane input[type="number"],
+.compass-field input {
   font: 12px var(--sans);
   color: var(--text);
   background: var(--well);
@@ -1440,7 +1443,8 @@ input[type="range"]:hover::-webkit-slider-thumb { filter: brightness(1.15); }
 }
 .pane select:focus,
 .keys-legend select:focus,
-.pane input[type="number"]:focus { outline: none; border-color: var(--accent); }
+.pane input[type="number"]:focus,
+.compass-field input:focus { outline: none; border-color: var(--accent); }
 .pane select,
 .keys-legend select {
   /* WebKit's native select chrome is a light gradient that fights the

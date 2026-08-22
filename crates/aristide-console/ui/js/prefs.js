@@ -8,23 +8,9 @@
 // back on every poll except into a control the user is touching.
 
 import { commands, COMPUTER_KEYBOARD } from "./api.js";
-import { shiftWords } from "./pitch.js";
-
-const NOTE_NAMES = ["C", "C♯", "D", "E♭", "E", "F", "F♯", "G", "A♭", "A", "B♭", "B"];
-
-/// MIDI note number in the naming organists read on a stoplist: middle
-/// C (60) is C4, as every sample set's documentation writes it.
-function keyName(key) {
-  return `${NOTE_NAMES[key % 12]}${Math.floor(key / 12) - 1}`;
-}
+import { keyName, parseKeyName, noteTriggerText, shiftWords } from "./pitch.js";
 
 const TABS = ["organ", "midi", "controls", "tuning", "sound", "appearance"];
-
-/// Clamp to a MIDI note, the same tolerant parse the transpose and shift
-/// fields use: whatever the box holds, not a value that can 400 the server.
-function clampNote(value) {
-  return Math.min(127, Math.max(0, Math.trunc(Number(value) || 0)));
-}
 
 // A page loads at most once; a combined-but-unsaved organ should ask
 // "how should these go together?" exactly once, not every time the poll
@@ -93,16 +79,17 @@ export function keyGlyph(code) {
   return code;
 }
 
-/// The trigger cell reads as prose, not as the wire format: a MIDI
-/// message names its device and channel; a computer key just prints the
-/// character it is, since the device is always the same one.
+/// The trigger cell reads as prose, not as the wire format: a note
+/// spells its pitch, a MIDI message names its device and channel; a
+/// computer key just prints the character it is, since the device is
+/// always the same one.
 function triggerText(control) {
   if (!control || !control.trigger) return "— press Listen —";
   if (control.trigger.startsWith("key:")) {
     return `key:${keyGlyph(control.trigger.slice(4))}`;
   }
   const channel = control.channel ? ` ch${control.channel}` : "";
-  return `${control.trigger} · ${control.device}${channel}`;
+  return `${noteTriggerText(control.trigger)} · ${control.device}${channel}`;
 }
 
 export class Preferences {
@@ -973,10 +960,13 @@ export class Preferences {
     set.textContent = "Set";
     set.title = "Declare this manual's compass";
     set.addEventListener("click", () => {
-      const lo = clampNote(low.input.value);
-      const hi = clampNote(high.input.value);
-      low.input.value = lo;
-      high.input.value = hi;
+      const lo = parseKeyName(low.input.value);
+      const hi = parseKeyName(high.input.value);
+      // A bound that doesn't name a note stays marked by its own field;
+      // nothing is sent until both read as pitches.
+      if (lo == null || hi == null) return;
+      low.input.value = keyName(lo);
+      high.input.value = keyName(hi);
       this.send(commands.organCompass(manual.idx, lo, hi));
     });
     row.append(set);
@@ -993,26 +983,28 @@ export class Preferences {
     return row;
   }
 
-  /// A number field paired with the note name it currently reads as —
-  /// the same C4-is-60 naming as everywhere else in the dialog. Purely
-  /// local until Set is pressed: typing here never sends anything.
+  /// A bound of the compass as a note name — "C2", "F♯4" — never as a
+  /// MIDI number. The echo confirms what a nonstandard spelling ("bb2")
+  /// reads as and flags text that names no note at all. Purely local
+  /// until Set is pressed: typing here never sends anything.
   compassField(value, native) {
     const wrap = document.createElement("span");
     wrap.className = "compass-field";
 
     const input = document.createElement("input");
-    input.type = "number";
-    input.min = 0;
-    input.max = 127;
-    input.step = 1;
-    input.value = value;
-    input.placeholder = native;
-    input.title = `Sample set's own: ${keyName(native)}`;
+    input.type = "text";
+    input.autocomplete = "off";
+    input.spellcheck = false;
+    input.value = keyName(value);
+    input.placeholder = keyName(native);
+    input.title = `Sample set's own: ${keyName(native)} · C4 is middle C`;
 
     const note = document.createElement("i");
-    note.textContent = keyName(clampNote(value));
     input.addEventListener("input", () => {
-      note.textContent = keyName(clampNote(input.value));
+      const parsed = parseKeyName(input.value);
+      input.classList.toggle("invalid", parsed == null);
+      const canonical = parsed == null ? null : keyName(parsed);
+      note.textContent = parsed == null ? "?" : canonical === input.value.trim() ? "" : canonical;
     });
 
     wrap.append(input, note);

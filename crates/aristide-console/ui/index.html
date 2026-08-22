@@ -86,6 +86,8 @@
             A manual can be told to reach further than its sample set's own
             keys; the extra notes are filled in by repitching the nearest
             pipe. <em>Native</em> goes back to what the set declares.
+            Compasses are written as note names, C4 being middle C — a
+            5-octave manual is C2–C7.
           </p>
           <div id="organ-compass" class="organ-compass"></div>
 
@@ -366,8 +368,8 @@
     <form class="editor-add-form hidden" id="editor-add-manual-form">
       <input id="editor-add-manual-name" type="text" placeholder="Name" autocomplete="off" spellcheck="false" />
       <span class="editor-add-form-row">
-        <label>Low <input id="editor-add-manual-low" type="number" min="0" max="127" /></label>
-        <label>High <input id="editor-add-manual-high" type="number" min="0" max="127" /></label>
+        <label>Low <input id="editor-add-manual-low" type="text" autocomplete="off" spellcheck="false" title="A note name — C4 is middle C" /></label>
+        <label>High <input id="editor-add-manual-high" type="text" autocomplete="off" spellcheck="false" title="A note name — C4 is middle C" /></label>
       </span>
       <span class="editor-add-form-actions">
         <button class="ghost" type="submit">Add</button>

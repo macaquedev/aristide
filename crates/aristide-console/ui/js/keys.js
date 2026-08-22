@@ -11,7 +11,7 @@
 // and must stay in step with it.
 
 import { commands, COMPUTER_KEYBOARD } from "./api.js";
-import { shiftWords } from "./pitch.js";
+import { keyName, shiftWords } from "./pitch.js";
 
 /// Physical key codes in semitone order, low to high. Index = semitones
 /// above the row's base C; both rows are one unbroken run, so the mapping
@@ -29,10 +29,7 @@ const UPPER = [
 const LOWER_BASE = 48; // C3, with middle C = C4 = 60
 const UPPER_BASE = 60;
 
-const NAMES = ["C", "C♯", "D", "D♯", "E", "F", "F♯", "G", "G♯", "A", "A♯", "B"];
 const SHARPS = new Set([1, 3, 6, 8, 10]);
-
-const noteName = (midi) => `${NAMES[midi % 12]}${Math.floor(midi / 12) - 1}`;
 
 /// "KeyZ" -> "Z", "Digit2" -> "2", punctuation spelled as its glyph.
 function cap(code) {
@@ -225,7 +222,7 @@ export class PianoKeys {
       const midi = this.noteFor(code);
       key.classList.toggle("sharp", SHARPS.has(OFFSETS.get(code) % 12));
       key.classList.toggle("out", midi === null);
-      note.textContent = midi === null ? "—" : noteName(midi);
+      note.textContent = midi === null ? "—" : keyName(midi);
     }
     this.el.plays.textContent = this.target
       ? `plays ${this.target.name}`
