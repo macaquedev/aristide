@@ -987,27 +987,31 @@ export class Editor {
   // panels at that spot, via `pendingPlace` once the rebuild settles.
 
   wireCanvas() {
-    this.el.canvas.addEventListener("dblclick", (event) => {
-      if (event.target !== this.el.canvas) return; // empty space only
+    // Double-click and right-click on empty space are the same gesture:
+    // the add menu, or — locked — the padlock's nudge. (The webview's
+    // own context menu is suppressed page-wide in main.js, so right-
+    // click is ours to answer.) The empty-organ card floats over the
+    // canvas and its copy says "double-click anywhere" — the card
+    // itself must count too, or the instruction swallows its own
+    // gesture; only its button stays out.
+    const addGesture = (event) => {
+      event.preventDefault();
       if (!(this.unlocked || event.ctrlKey)) {
         this.nudgeUnlock();
         return;
       }
-      event.preventDefault();
       this.openAddMenu(event.clientX, event.clientY);
-    });
-    // The empty-organ card floats over the canvas and its copy says
-    // "double-click anywhere" — so double-clicking the card itself must
-    // count too, or the instruction swallows its own gesture.
-    this.el.emptyCard.addEventListener("dblclick", (event) => {
-      if (event.target.closest("button")) return;
-      if (!(this.unlocked || event.ctrlKey)) {
-        this.nudgeUnlock();
-        return;
-      }
-      event.preventDefault();
-      this.openAddMenu(event.clientX, event.clientY);
-    });
+    };
+    for (const type of ["dblclick", "contextmenu"]) {
+      this.el.canvas.addEventListener(type, (event) => {
+        if (event.target !== this.el.canvas) return; // empty space only
+        addGesture(event);
+      });
+      this.el.emptyCard.addEventListener(type, (event) => {
+        if (event.target.closest("button")) return;
+        addGesture(event);
+      });
+    }
     // Popovers close on a click anywhere outside themselves.
     for (const el of [this.el.add, this.el.divisionMenu]) {
       el.addEventListener("click", (event) => event.stopPropagation());

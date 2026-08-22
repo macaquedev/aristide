@@ -11,6 +11,11 @@ import { wireTheme } from "./theme.js";
 
 wireTheme(document);
 
+// The webview's own context menu (Stop, Reload…) never belongs on an
+// organ console. Right-clicks that mean something are answered where
+// they land (see editor.js's canvas wiring); the rest do nothing.
+window.addEventListener("contextmenu", (event) => event.preventDefault());
+
 const base = await resolveBase();
 let send;
 let snapshot = {}; // the latest state, for menus that ask what is true now

@@ -59,6 +59,10 @@
   <input id="noisevol" type="range" min="0" max="1.5" step="0.05">
 </div>
 <script>
+// A remote for an instrument, not a web page: the browser's own
+// context menu (Stop, Reload…) stays out of the way.
+window.addEventListener('contextmenu', (event) => event.preventDefault());
+
 async function refresh(data) {
   if (!data) data = await (await fetch('/api/state')).json();
 
