@@ -163,6 +163,16 @@ export class Editor {
     this.closeDivisionMenu();
   }
 
+  // A double-click on a locked canvas is someone reaching for the add
+  // gesture — silence would read as "there is no such gesture", so the
+  // padlock answers instead.
+  nudgeUnlock() {
+    this.showLockNote(
+      "The console is locked — click the padlock (Ctrl+E) to edit, " +
+        "or hold Ctrl to reach through it."
+    );
+  }
+
   showLockNote(text) {
     this.el.lockNote.textContent = text;
     this.el.lockNote.classList.remove("hidden");
@@ -970,8 +980,11 @@ export class Editor {
 
   wireCanvas() {
     this.el.canvas.addEventListener("dblclick", (event) => {
-      if (!(this.unlocked || event.ctrlKey)) return;
       if (event.target !== this.el.canvas) return; // empty space only
+      if (!(this.unlocked || event.ctrlKey)) {
+        this.nudgeUnlock();
+        return;
+      }
       event.preventDefault();
       this.openAddMenu(event.clientX, event.clientY);
     });
@@ -980,7 +993,10 @@ export class Editor {
     // count too, or the instruction swallows its own gesture.
     this.el.emptyCard.addEventListener("dblclick", (event) => {
       if (event.target.closest("button")) return;
-      if (!(this.unlocked || event.ctrlKey)) return;
+      if (!(this.unlocked || event.ctrlKey)) {
+        this.nudgeUnlock();
+        return;
+      }
       event.preventDefault();
       this.openAddMenu(event.clientX, event.clientY);
     });
