@@ -1148,13 +1148,10 @@ impl Assembly<'_> {
                     match spans.iter().copied().reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)))
                     {
                         Some((low, high)) => (low.clamp(0, 127) as u8, high.clamp(0, 127) as u8),
-                        None => {
-                            self.warnings.push(format!(
-                                "manual {:?} has no stops — 61-key default compass",
-                                manual.name
-                            ));
-                            (36, 96)
-                        }
+                        // A stopless manual is a legitimate state (a
+                        // division awaiting its first stop), not a
+                        // fault: 61-key default compass, no warning.
+                        None => (36, 96),
                     }
                 }
             };
