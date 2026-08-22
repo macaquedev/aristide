@@ -127,7 +127,9 @@ export class Console {
     title.textContent = snapshot.organ ?? "Untitled organ";
     const note = document.createElement("p");
     note.textContent =
-      "An empty organ — unlock editing, then double-click anywhere to add its first manual.";
+      "An empty organ — unlock editing, then double-click anywhere to add " +
+      "manuals and sample sets. Added sets offer their stops in the " +
+      "Library drawer, ready to drag onto a manual.";
     const open = document.createElement("button");
     open.type = "button";
     open.textContent = "Unlock and build";

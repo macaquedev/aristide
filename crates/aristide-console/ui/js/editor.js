@@ -63,6 +63,7 @@ export class Editor {
       statusText: root.getElementById("editor-status-text"),
       error: root.getElementById("editor-error"),
       canvas: root.getElementById("console-canvas"),
+      emptyCard: root.getElementById("organ-empty-card"),
       drawerTab: root.getElementById("editor-drawer-tab"),
       drawer: root.getElementById("editor-drawer"),
       drawerClose: root.getElementById("editor-drawer-close"),
@@ -971,6 +972,15 @@ export class Editor {
     this.el.canvas.addEventListener("dblclick", (event) => {
       if (!(this.unlocked || event.ctrlKey)) return;
       if (event.target !== this.el.canvas) return; // empty space only
+      event.preventDefault();
+      this.openAddMenu(event.clientX, event.clientY);
+    });
+    // The empty-organ card floats over the canvas and its copy says
+    // "double-click anywhere" — so double-clicking the card itself must
+    // count too, or the instruction swallows its own gesture.
+    this.el.emptyCard.addEventListener("dblclick", (event) => {
+      if (event.target.closest("button")) return;
+      if (!(this.unlocked || event.ctrlKey)) return;
       event.preventDefault();
       this.openAddMenu(event.clientX, event.clientY);
     });
