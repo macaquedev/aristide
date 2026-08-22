@@ -60,8 +60,12 @@
 </div>
 <script>
 // A remote for an instrument, not a web page: the browser's own
-// context menu (Stop, Reload…) stays out of the way.
-window.addEventListener('contextmenu', (event) => event.preventDefault());
+// context menu (Stop, Reload…) stays out of the way — except on
+// fields that take text, where the menu is how paste happens.
+window.addEventListener('contextmenu', (event) => {
+  if (event.target.closest('textarea, input[type=text], input[type=number], input:not([type])')) return;
+  event.preventDefault();
+});
 
 async function refresh(data) {
   if (!data) data = await (await fetch('/api/state')).json();

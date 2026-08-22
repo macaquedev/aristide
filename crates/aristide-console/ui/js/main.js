@@ -13,8 +13,12 @@ wireTheme(document);
 
 // The webview's own context menu (Stop, Reload…) never belongs on an
 // organ console. Right-clicks that mean something are answered where
-// they land (see editor.js's canvas wiring); the rest do nothing.
-window.addEventListener("contextmenu", (event) => event.preventDefault());
+// they land (see editor.js's canvas wiring); the rest do nothing —
+// except on fields that take text, where the menu is how paste happens.
+window.addEventListener("contextmenu", (event) => {
+  if (event.target.closest("textarea, input[type=text], input[type=number], input:not([type])")) return;
+  event.preventDefault();
+});
 
 const base = await resolveBase();
 let send;
