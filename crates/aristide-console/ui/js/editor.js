@@ -791,6 +791,12 @@ export class Editor {
       if (!response.ok) {
         return { ok: false, error: (await response.text()) || `${response.status} ${response.statusText}` };
       }
+      // Any successful edit can change what the sources offer (a new
+      // source, a pull claiming a stop) — the cached offerings are
+      // stale now whether or not the drawer is up to show it. The
+      // division menu reads this cache, so a kept stale [] would keep
+      // insisting there are no sources right after one was added.
+      this.offerings = null;
       if (this.drawerOpen) this.fetchOfferings();
       return { ok: true, error: null };
     } catch (err) {
