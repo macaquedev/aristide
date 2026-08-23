@@ -2585,6 +2585,29 @@ mod tests {
         assert_eq!(blank.status_code().0, 400, "whitespace is not a name");
     }
 
+    /// The whole blank-organ story at the file level: a fresh blank
+    /// file takes a sample set as a source, and the offerings endpoint
+    /// then lists that source's manuals and stops for the drawer.
+    #[test]
+    fn a_blank_organ_offers_an_added_sources_stops() {
+        let demo = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testsets/grandorgue-demo/demo.organ");
+        if !demo.is_file() {
+            eprintln!("skipping: demo set not present");
+            return;
+        }
+        let dir = std::env::temp_dir().join("aristide-blank-offerings-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = crate::config::create_blank_organ(&dir, "Fresh").expect("blank organ");
+
+        let alias = crate::config::append_composite_source(&path, &demo).expect("source added");
+        let body = offerings_json(&path).expect("offerings read");
+        assert!(body.contains(&format!("\"alias\":\"{alias}\"")), "offered: {body}");
+        assert!(body.contains("\"stops\":[{\"name\":"), "stops listed: {body}");
+        assert!(!body.contains("\"error\""), "no source error: {body}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn the_snapshot_offers_the_library_and_forget_removes() {
         let state = tone_state();
