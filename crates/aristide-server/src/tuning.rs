@@ -102,12 +102,26 @@ impl Default for Tuning {
 }
 
 impl Tuning {
-    /// Rate multiplier for a pipe sounding MIDI note `key` (applied on
-    /// top of the pipe's own playback rate).
-    pub fn rate_multiplier(&self, key: u8) -> f32 {
+    /// How far the pitch this tuning wants for MIDI note `key` sits
+    /// from the 12-EDO/A440 ladder the samples were recorded on, in
+    /// cents. This is THE key→pitch conversion (CLAUDE.md's "one
+    /// replaceable place"): the console turns it into which pipe to
+    /// sound (whole semitones) and how far to bend it (the remainder).
+    /// `None` means the key sounds nothing — no temperament says that,
+    /// but a Scala keyboard mapping's unmapped keys will.
+    pub fn deviation_cents(&self, key: u8) -> Option<f64> {
         let class = (key % 12) as usize;
-        let cents = self.temperament.offsets_cents()[class] as f64
-            + 1200.0 * (self.a4_hz / 440.0).log2();
+        Some(
+            self.temperament.offsets_cents()[class] as f64
+                + 1200.0 * (self.a4_hz / 440.0).log2(),
+        )
+    }
+
+    /// Rate multiplier for a pipe sounding MIDI note `key` (applied on
+    /// top of the pipe's own playback rate). The whole deviation as one
+    /// bend — callers that re-anchor to a nearer pipe split it instead.
+    pub fn rate_multiplier(&self, key: u8) -> f32 {
+        let cents = self.deviation_cents(key).unwrap_or(0.0);
         ((cents / 1200.0).exp2()) as f32
     }
 }

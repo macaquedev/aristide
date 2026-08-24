@@ -686,6 +686,25 @@ impl Console {
             else {
                 continue;
             };
+            // The pitch this key wants under the sounding division's
+            // tuning, as a deviation from the recorded 12-EDO ladder.
+            // Whole semitones of it re-anchor the key to a nearer pipe
+            // (a 19-EDO key mid-compass is closer to another pipe than
+            // to its nominal one); only the sub-semitone remainder is
+            // bent, so no pipe is ever pulled more than 50 cents from
+            // how it was recorded. A key the tuning's keyboard mapping
+            // leaves unmapped sounds nothing here. Temperaments deviate
+            // well under a semitone, so for them shift is always 0 and
+            // this is exactly the old behaviour.
+            let Some(deviation) = self
+                .effective_tuning(target)
+                .deviation_cents(midi_key.clamp(0, 127) as u8)
+            else {
+                continue;
+            };
+            let shift = (deviation / 100.0).round() as i16;
+            let bend_cents = deviation - shift as f64 * 100.0;
+            let bend_ratio = ((bend_cents / 1200.0).exp2()) as f32;
             // Negative below the set's own bottom key: the rank ladder
             // is extrapolated in both directions, so keep the sign.
             let key_index = midi_key - self.organ.manuals[target].first_midi_note as i16;
@@ -697,21 +716,30 @@ impl Console {
                     continue;
                 }
                 for range in &stop.ranks {
+                    // Coverage is judged at the played key — a divided
+                    // register is a decision about the keyboard, not
+                    // about where the pitches land on the ladder.
                     if !self.range_covers(range, key_index, target, fill) {
                         continue;
                     }
-                    let Some((pipe, nominal, ratio)) = self.pipe_for(range, key_index, fill)
+                    let Some((pipe, nominal, ratio)) =
+                        self.pipe_for(range, key_index + shift, fill)
                     else {
                         continue;
                     };
                     let Some(spec) = self.specs.get(&(range.rank, pipe)) else {
                         continue;
                     };
+                    // Identity at cent resolution: two keys anchored to
+                    // the same pipe but bent apart are two virtual
+                    // pipes; two keys the scale sends to the same pitch
+                    // are one (an organ pipe speaks once).
+                    let identity = nominal * 100 + bend_cents.round() as i32;
                     voices.push((
                         stop.id,
                         range.rank,
-                        nominal,
-                        self.voiced(*spec, ratio, midi_key, target),
+                        identity,
+                        self.voiced(*spec, ratio * bend_ratio),
                     ));
                 }
             }
@@ -719,20 +747,17 @@ impl Console {
         voices
     }
 
-    /// A pipe's spec as it must sound for one key: the scale's own
-    /// deviation for that key, times the repitching ratio when the pipe
-    /// is standing in for one the rank hasn't got. The scale is the
-    /// *sounding* division's — its pipes, its temperament.
+    /// A pipe's spec as it must sound at one pitch: `ratio` is the
+    /// whole distance from how the pipe was recorded — re-anchoring,
+    /// tuning bend and standing in for a missing pipe all folded into
+    /// one number by the caller.
     ///
     /// Everything downstream of pitch has to move with it. Wind draw and
     /// the pressure→brightness hinge are properties of the *sounding*
     /// pitch, not of the recording, so a pipe pressed into service five
     /// semitones up draws wind like the pipe it is imitating.
-    fn voiced(&self, mut spec: VoiceSpec, ratio: f32, midi_key: i16, manual_index: usize) -> VoiceSpec {
-        spec.rate *= ratio
-            * self
-                .effective_tuning(manual_index)
-                .rate_multiplier(midi_key.clamp(0, 127) as u8);
+    fn voiced(&self, mut spec: VoiceSpec, ratio: f32) -> VoiceSpec {
+        spec.rate *= ratio;
         if ratio != 1.0 {
             let sounding_hz = (spec.nominal_hz * ratio) as f64;
             spec.wind_weight = crate::bank::wind_weight(sounding_hz, spec.percussive);
