@@ -20,6 +20,7 @@ pub mod bank;
 pub mod enclosure;
 pub mod resample;
 pub mod reverb;
+pub mod routing;
 pub mod wind;
 
 use std::sync::Arc;
@@ -27,6 +28,7 @@ use std::sync::Arc;
 use bank::{Sample, SampleBank};
 use enclosure::{Enclosure, EnclosureParams, ENCLOSURE_NONE, MAX_ENCLOSURES};
 use resample::SincTables;
+use routing::{Bus, MAX_BUSES, MAX_CHUNK_FRAMES};
 use rtrb::{Consumer, Producer, RingBuffer};
 use wind::{WindGroup, WindParams, MAX_WIND_GROUPS};
 
@@ -84,6 +86,11 @@ pub enum Command {
     /// (control-side from the pipe's pitch; 0 bypasses the filter).
     /// `enclosure` is the swell box the voice sits inside
     /// ([`ENCLOSURE_NONE`] for unenclosed divisions).
+    /// `bus` is the output bus the voice renders onto (0 = the main
+    /// pair) and `delay_frames` an onset delay: the voice waits that
+    /// many output frames before speaking — per-pipe tracker/speaking
+    /// delay, the Orgelpark trick at its smallest. A voice released
+    /// before it ever spoke dies silently.
     StartVoice {
         handle: u64,
         sample: u32,
@@ -93,6 +100,8 @@ pub enum Command {
         wind_weight: f32,
         brightness: f32,
         enclosure: u8,
+        bus: u8,
+        delay_frames: u32,
     },
     /// Reconfigure one wind group's supply model.
     SetWind { group: u8, params: WindParams },
@@ -129,6 +138,20 @@ pub enum Command {
     /// Silence a voice quickly WITHOUT its release tail (a short fade) —
     /// for retiring control-noise voices silently.
     KillVoice { handle: u64 },
+    /// Configure one output bus's delay node (the first public effects
+    /// node; `mix: 0` bypasses it).
+    SetBusDelay {
+        bus: u8,
+        params: routing::DelayParams,
+    },
+    /// Route one bus onto an output channel pair at a level. Channels
+    /// the device hasn't got fall back to the main pair at render time.
+    SetBusOutput {
+        bus: u8,
+        left: u8,
+        right: u8,
+        gain: f32,
+    },
     /// Start/stop the built-in additive test tone (no-set mode).
     NoteOn { key: u8, freq_hz: f32 },
     NoteOff { key: u8 },
@@ -272,6 +295,13 @@ struct SampledVoice {
     /// Level-matching scale applied to the release tail so it continues
     /// at the voice's current loudness instead of the recording's.
     tail_gain: f32,
+    /// Output bus the voice renders onto (pre-clamped to `MAX_BUSES`).
+    bus: u8,
+    /// Output frames still to wait before the pipe speaks (per-pipe
+    /// onset delay). While pending the voice renders nothing, draws no
+    /// wind, and does not age; released before speaking, it dies
+    /// silently — the pallet never opened.
+    onset: u32,
     /// Wind group index (pre-clamped to `MAX_WIND_GROUPS`).
     group: u8,
     /// How much wind this voice draws while sounding.
@@ -736,6 +766,8 @@ pub struct Engine {
     bank: Arc<SampleBank>,
     sinc: SincTables,
     voices: Box<[Voice]>,
+    /// Output buses (scratch + delay rings preallocated; see routing.rs).
+    buses: Vec<Bus>,
     wind: [WindGroup; MAX_WIND_GROUPS],
     enclosures: [Enclosure; MAX_ENCLOSURES],
     reverb: Option<reverb::Reverb>,
@@ -781,6 +813,7 @@ impl Engine {
             bank,
             sinc: SincTables::new(),
             voices: vec![Voice::Idle; MAX_VOICES].into_boxed_slice(),
+            buses: (0..MAX_BUSES).map(|_| Bus::new(sample_rate)).collect(),
             wind: [WindGroup::default(); MAX_WIND_GROUPS],
             enclosures: [Enclosure::default(); MAX_ENCLOSURES],
             reverb: None,
@@ -802,9 +835,10 @@ impl Engine {
         (engine, EngineHandle { commands: producer })
     }
 
-    /// Render one interleaved buffer, mixing every active voice.
-    /// Stereo material lands in the first two channels (summed to one
-    /// on mono outputs); channel routing proper arrives with M6.
+    /// Render one interleaved buffer, mixing every active voice onto
+    /// its bus and every bus onto its output channels. By default
+    /// everything sits on bus 0 → channels 0/1 (summed to one on mono
+    /// outputs), which renders bit-identically to the pre-bus engine.
     pub fn process(&mut self, buffer: &mut [f32], channels: usize) {
         while let Ok(command) = self.commands.pop() {
             self.apply(command);
@@ -825,7 +859,13 @@ impl Engine {
                 if let Voice::Sampled(sampled) = voice {
                     if self.stop_batch.binary_search(&sampled.handle).is_ok() {
                         let age_ms = (sampled.age_frames as f32 / per_ms) as u32;
-                        if sampled.phase == SamplePhase::Held
+                        if sampled.onset > 0 {
+                            // Released before the onset delay elapsed:
+                            // the pallet never opened, so nothing ever
+                            // sounded and nothing should.
+                            sampled.phase = SamplePhase::FadeOut;
+                            sampled.amplitude = 0.0;
+                        } else if sampled.phase == SamplePhase::Held
                             && sampled.pending_release.is_none()
                         {
                             let delay = (wind::xorshift_unit(&mut sampled.rng)
@@ -842,7 +882,29 @@ impl Engine {
 
         buffer.fill(0.0);
         let channels = channels.max(1);
-        let frames = buffer.len() / channels;
+        let total = buffer.len() / channels;
+        // Render in bounded slices so bus scratch can be sized once at
+        // construction; callbacks bigger than a slice are rare but
+        // legal, and everything inside is stateful and continuous
+        // across the seam.
+        let mut offset = 0;
+        while offset < total {
+            let frames = (total - offset).min(MAX_CHUNK_FRAMES);
+            let range = offset * channels..(offset + frames) * channels;
+            self.render_chunk(&mut buffer[range], channels, frames);
+            offset += frames;
+        }
+
+        // Diagnostic recording tap (drops samples when the ring is
+        // full rather than ever blocking).
+        if let Some(tap) = &mut self.tap {
+            for &value in buffer.iter() {
+                let _ = tap.push(value);
+            }
+        }
+    }
+
+    fn render_chunk(&mut self, buffer: &mut [f32], channels: usize, frames: usize) {
         let master = self.master_gain;
 
         // Polyphony guard: bound the release-tail pileup (fast playing
@@ -890,6 +952,11 @@ impl Engine {
         let mut demand = [0.0f32; MAX_WIND_GROUPS];
         for voice in self.voices.iter() {
             if let Voice::Sampled(sampled) = voice {
+                if sampled.onset > 0 {
+                    // A pipe waiting on its onset delay draws no wind:
+                    // the pallet hasn't opened yet.
+                    continue;
+                }
                 let params = self.wind[sampled.group as usize].params();
                 let attack_frames = params.attack_ms * 0.001 * self.sample_rate;
                 let boost = if (sampled.age_frames as f32) < attack_frames {
@@ -915,6 +982,7 @@ impl Engine {
         let output_sr = self.sample_rate;
         let Engine {
             voices,
+            buses,
             bank,
             sinc,
             wind,
@@ -929,11 +997,16 @@ impl Engine {
             ..
         } = self;
 
+        for bus in buses.iter_mut() {
+            bus.begin_chunk(frames);
+        }
+
         for index in 0..voices.len() {
             let voice = &mut voices[index];
             match voice {
                 Voice::Idle => {}
                 Voice::Tone(tone) => {
+                    let scratch = buses[0].mix_target(frames);
                     for frame in 0..frames {
                         let value = tone.tick(*tone_attack_step, *tone_release_step);
                         if tone.stage == ToneStage::Idle {
@@ -941,15 +1014,30 @@ impl Engine {
                             free_slots.push(index as u16);
                             break;
                         }
-                        mix_frame(
-                            &mut buffer[frame * channels..],
-                            channels,
-                            value * TONE_GAIN * master,
-                            value * TONE_GAIN * master,
-                        );
+                        scratch[frame * 2] += value * TONE_GAIN * master;
+                        scratch[frame * 2 + 1] += value * TONE_GAIN * master;
                     }
                 }
                 Voice::Sampled(sampled) => {
+                    // Onset delay: silent, un-aged, until it elapses —
+                    // then the voice speaks partway into this chunk. A
+                    // voice killed while still waiting never speaks.
+                    let start_frame = if sampled.onset > 0 {
+                        if sampled.phase != SamplePhase::Held {
+                            *voice = Voice::Idle;
+                            free_slots.push(index as u16);
+                            continue;
+                        }
+                        if sampled.onset as usize >= frames {
+                            sampled.onset -= frames as u32;
+                            continue;
+                        }
+                        let start = sampled.onset as usize;
+                        sampled.onset = 0;
+                        start
+                    } else {
+                        0
+                    };
                     let Some(sample) = bank.get(sampled.sample) else {
                         *voice = Voice::Idle;
                         free_slots.push(index as u16);
@@ -1025,7 +1113,9 @@ impl Engine {
                             sampled.rate_target = sampled.rate;
                         }
                     }
-                    sampled.age_frames = sampled.age_frames.saturating_add(frames as u32);
+                    sampled.age_frames = sampled
+                        .age_frames
+                        .saturating_add((frames - start_frame) as u32);
                     // The voice can hand over to a separate release
                     // sample or switch loops mid-block; track the refs
                     // and per-block invariants it reads from.
@@ -1037,7 +1127,8 @@ impl Engine {
                     let mut ctx = sampled.block_context(current, external, rate_scale);
                     ctx.lite = lite;
                     ctx.output_sr = output_sr;
-                    for frame in 0..frames {
+                    let scratch = buses[sampled.bus as usize].mix_target(frames);
+                    for frame in start_frame..frames {
                         if sampled.sample != current_id {
                             match bank.get(sampled.sample) {
                                 Some(switched) => {
@@ -1099,12 +1190,8 @@ impl Engine {
                                     left *= sampled.enc_gain;
                                     right *= sampled.enc_gain;
                                 }
-                                mix_frame(
-                                    &mut buffer[frame * channels..],
-                                    channels,
-                                    left * gain,
-                                    right * gain,
-                                )
+                                scratch[frame * 2] += left * gain;
+                                scratch[frame * 2 + 1] += right * gain;
                             }
                             None => {
                                 *voice = Voice::Idle;
@@ -1115,6 +1202,11 @@ impl Engine {
                     }
                 }
             }
+        }
+
+        // Buses: insert effects, then land each on its output pair.
+        for bus in buses.iter_mut() {
+            bus.finish_chunk(frames, buffer, channels);
         }
 
         // Room: convolution reverb over the summed mix (wet trails dry
@@ -1140,13 +1232,6 @@ impl Engine {
             }
         }
 
-        // Diagnostic recording tap (drops samples when the ring is
-        // full rather than ever blocking).
-        if let Some(tap) = &mut self.tap {
-            for &value in buffer.iter() {
-                let _ = tap.push(value);
-            }
-        }
     }
 
     fn apply(&mut self, command: Command) {
@@ -1160,6 +1245,8 @@ impl Engine {
                 wind_weight,
                 brightness,
                 enclosure,
+                bus,
+                delay_frames,
             } => {
                 if self.bank.get(sample).is_none() || !(rate > 0.0) {
                     return;
@@ -1198,6 +1285,10 @@ impl Engine {
                         amplitude: 1.0,
                         envelope: 0.0,
                         tail_gain: 1.0,
+                        bus: bus.min(MAX_BUSES as u8 - 1),
+                        // Onset delays are bounded only against nonsense
+                        // (30 s covers any musical canon trick).
+                        onset: delay_frames.min((30.0 * self.sample_rate) as u32),
                         group: group.min(MAX_WIND_GROUPS as u8 - 1),
                         wind_weight: wind_weight.max(0.0),
                         age_frames: 0,
@@ -1219,6 +1310,21 @@ impl Engine {
                         phase: SamplePhase::Held,
                         past_loop: false,
                     });
+                }
+            }
+            Command::SetBusDelay { bus, params } => {
+                if let Some(bus) = self.buses.get_mut(bus as usize) {
+                    bus.set_delay(params);
+                }
+            }
+            Command::SetBusOutput {
+                bus,
+                left,
+                right,
+                gain,
+            } => {
+                if let Some(bus) = self.buses.get_mut(bus as usize) {
+                    bus.set_output(left, right, gain);
                 }
             }
             Command::SetWind { group, params } => {
@@ -1428,16 +1534,6 @@ impl Engine {
     }
 }
 
-#[inline]
-fn mix_frame(frame: &mut [f32], channels: usize, left: f32, right: f32) {
-    if channels == 1 {
-        frame[0] += (left + right) * 0.5;
-    } else {
-        frame[0] += left;
-        frame[1] += right;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1470,6 +1566,8 @@ mod tests {
             wind_weight: 0.0,
             brightness: 0.0,
             enclosure: ENCLOSURE_NONE,
+            bus: 0,
+            delay_frames: 0,
         });
         // 200 frames from a 100-frame sample: only survivable by looping.
         let out = render(&mut engine, 200);
@@ -1502,6 +1600,8 @@ mod tests {
             wind_weight: 0.0,
             brightness: 0.0,
             enclosure: ENCLOSURE_NONE,
+            bus: 0,
+            delay_frames: 0,
         });
         render(&mut engine, 10);
         handle.send(Command::StopVoice { handle: 7 });
@@ -1532,6 +1632,8 @@ mod tests {
             wind_weight: 0.0,
             brightness: 0.0,
             enclosure: ENCLOSURE_NONE,
+            bus: 0,
+            delay_frames: 0,
         });
         handle.send(Command::StopVoice { handle: 1 });
         let out = render(&mut engine, 60);
@@ -1572,6 +1674,8 @@ mod tests {
             wind_weight: 0.0,
             brightness: 0.0,
             enclosure: ENCLOSURE_NONE,
+            bus: 0,
+            delay_frames: 0,
         });
         render(&mut engine, 20);
         let before = slope(&render(&mut engine, 20));
@@ -1617,6 +1721,8 @@ mod tests {
             wind_weight: 0.0,
             brightness: 0.0,
             enclosure: ENCLOSURE_NONE,
+            bus: 0,
+            delay_frames: 0,
         });
         render(&mut engine, 20);
         let start = slope(&render(&mut engine, 10));
@@ -1659,6 +1765,8 @@ mod tests {
             wind_weight: 0.0,
             brightness: 0.0,
             enclosure: ENCLOSURE_NONE,
+            bus: 0,
+            delay_frames: 0,
         });
         render(&mut engine, 10);
         handle.send(Command::SetVoiceRate {
@@ -1677,6 +1785,87 @@ mod tests {
             "released voice should end; the glide must not keep it alive"
         );
         engine.assert_slot_invariants();
+    }
+
+    #[test]
+    fn onset_delay_holds_the_pipe_silent_then_speaks() {
+        let (mut engine, mut handle) = Engine::new(100.0, test_bank());
+        engine.set_release_stagger(0.0);
+        handle.send(Command::StartVoice {
+            handle: 1,
+            sample: 0,
+            rate: 1.0,
+            gain: 1.0,
+            group: 0,
+            wind_weight: 0.0,
+            brightness: 0.0,
+            enclosure: ENCLOSURE_NONE,
+            bus: 0,
+            delay_frames: 30,
+        });
+        let out = render(&mut engine, 50);
+        assert!(
+            out[..30 * 2].iter().all(|&v| v == 0.0),
+            "silent through the onset delay"
+        );
+        assert!(
+            out[32 * 2..].iter().any(|&v| v != 0.0),
+            "speaks once the delay elapses"
+        );
+
+        // Released while still waiting: the pallet never opened, so
+        // nothing may ever sound and the slot must come back.
+        let (mut engine, mut handle) = Engine::new(100.0, test_bank());
+        engine.set_release_stagger(0.0);
+        handle.send(Command::StartVoice {
+            handle: 2,
+            sample: 0,
+            rate: 1.0,
+            gain: 1.0,
+            group: 0,
+            wind_weight: 0.0,
+            brightness: 0.0,
+            enclosure: ENCLOSURE_NONE,
+            bus: 0,
+            delay_frames: 200,
+        });
+        render(&mut engine, 50);
+        handle.send(Command::StopVoice { handle: 2 });
+        let out = render(&mut engine, 300);
+        assert!(out.iter().all(|&v| v == 0.0), "never speaks");
+        engine.assert_slot_invariants();
+    }
+
+    #[test]
+    fn voices_route_to_their_buses_output_pairs() {
+        let (mut engine, mut handle) = Engine::new(100.0, test_bank());
+        engine.set_release_stagger(0.0);
+        handle.send(Command::SetBusOutput {
+            bus: 1,
+            left: 2,
+            right: 3,
+            gain: 1.0,
+        });
+        handle.send(Command::StartVoice {
+            handle: 1,
+            sample: 0,
+            rate: 1.0,
+            gain: 1.0,
+            group: 0,
+            wind_weight: 0.0,
+            brightness: 0.0,
+            enclosure: ENCLOSURE_NONE,
+            bus: 1,
+            delay_frames: 0,
+        });
+        let frames = 40;
+        let mut buffer = vec![0.0f32; frames * 4];
+        engine.process(&mut buffer, 4);
+        let channel = |n: usize| buffer.iter().skip(n).step_by(4);
+        assert!(channel(0).all(|&v| v == 0.0), "main pair untouched");
+        assert!(channel(1).all(|&v| v == 0.0));
+        assert!(channel(2).any(|&v| v != 0.0), "routed pair carries it");
+        assert!(channel(3).any(|&v| v != 0.0));
     }
 
     #[test]
@@ -1747,6 +1936,8 @@ mod tests {
             wind_weight: 0.0,
             brightness: 0.0,
             enclosure: ENCLOSURE_NONE,
+            bus: 0,
+            delay_frames: 0,
         });
         let mut buffer = vec![0.0f32; stop_after * 2];
         engine.process(&mut buffer, 2);
@@ -1847,6 +2038,8 @@ mod tests {
                     wind_weight: 1.0,
                     brightness: 0.0,
                     enclosure: ENCLOSURE_NONE,
+            bus: 0,
+            delay_frames: 0,
                 });
             }
             handle.send(Command::StartVoice {
@@ -1858,6 +2051,8 @@ mod tests {
                 wind_weight: 0.0,
                 brightness: 0.0,
                 enclosure: ENCLOSURE_NONE,
+            bus: 0,
+            delay_frames: 0,
             });
             // Settle for ~1.5 s (12+ time constants), then measure.
             let mut buffer = vec![0.0f32; 1024 * 2];
@@ -1915,6 +2110,8 @@ mod tests {
             wind_weight: 0.0,
             brightness: 0.0,
             enclosure: ENCLOSURE_NONE,
+            bus: 0,
+            delay_frames: 0,
         });
         // Let the limiter settle, then inspect a window.
         let mut buffer = vec![0.0f32; 48000 * 2];
@@ -1970,6 +2167,8 @@ mod tests {
             wind_weight: 0.0,
             brightness: 0.0,
             enclosure: ENCLOSURE_NONE,
+            bus: 0,
+            delay_frames: 0,
         });
         let mut buffer = vec![0.0f32; 4800 * 2];
         engine.process(&mut buffer, 2);
@@ -2009,6 +2208,8 @@ mod tests {
             wind_weight: 0.0,
             brightness: 0.0,
             enclosure: ENCLOSURE_NONE,
+            bus: 0,
+            delay_frames: 0,
         });
         // ~100 loop passes.
         let mut buffer = vec![0.0f32; 10000 * 2];
@@ -2107,6 +2308,8 @@ mod tests {
                 wind_weight: 0.0,
                 brightness: 0.0,
                 enclosure: ENCLOSURE_NONE,
+            bus: 0,
+            delay_frames: 0,
             });
             let mut buffer = vec![0.0f32; hold_frames * 2];
             engine.process(&mut buffer, 2);
@@ -2313,6 +2516,8 @@ mod tests {
             wind_weight: 0.0,
             brightness: 0.0,
             enclosure: ENCLOSURE_NONE,
+            bus: 0,
+            delay_frames: 0,
         });
         // Release 1.5 periods in: the ramp is at ~37 % amplitude.
         let mut buffer = vec![0.0f32; (period * 3 / 2) * 2];
@@ -2360,6 +2565,8 @@ mod tests {
                         wind_weight: 1.0,
                         brightness: 0.0,
                         enclosure: ENCLOSURE_NONE,
+            bus: 0,
+            delay_frames: 0,
                     });
                 }
             }
@@ -2372,6 +2579,8 @@ mod tests {
                 wind_weight: 0.0,
                 brightness,
                 enclosure: ENCLOSURE_NONE,
+            bus: 0,
+            delay_frames: 0,
             });
             let mut buffer = vec![0.0f32; 1024 * 2];
             for _ in 0..70 {
@@ -2419,6 +2628,8 @@ mod tests {
                 wind_weight: 1.0,
                 brightness: 0.0,
                 enclosure: ENCLOSURE_NONE,
+            bus: 0,
+            delay_frames: 0,
             });
             // 10 windows of 0.2 s: the wander drifts across them.
             let mut periods = Vec::new();
@@ -2463,6 +2674,8 @@ mod tests {
             wind_weight: 0.0,
             brightness: 0.0,
             enclosure: ENCLOSURE_NONE,
+            bus: 0,
+            delay_frames: 0,
         });
         let out = render(&mut engine, 50);
         let master = DEFAULT_MASTER_GAIN;
@@ -2540,6 +2753,8 @@ mod tests {
             wind_weight: 0.0,
             brightness: 0.0,
             enclosure: 0,
+            bus: 0,
+            delay_frames: 0,
         });
         (engine, handle)
     }
