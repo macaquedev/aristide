@@ -126,6 +126,50 @@ fn respond(
             }
             json(state_json(state))
         }
+        // Live bus control, stateless pass-through to the engine: the
+        // whole delay node re-configures at once (ms required; feedback
+        // 0, mix 1, dry 1 by default), and/or the output pair moves.
+        // The sidecar's [routing] is the durable home; this is the
+        // performance knob.
+        (Method::Post, "/api/bus") => {
+            let Some(bus) = param(query, "bus")
+                .and_then(|v| v.parse::<u8>().ok())
+                .filter(|b| (*b as usize) < aristide_engine::routing::MAX_BUSES)
+            else {
+                return bad_request("bus must be 0-7");
+            };
+            let number = |name: &str, default: f32| {
+                param(query, name)
+                    .and_then(|v| v.parse::<f32>().ok())
+                    .unwrap_or(default)
+            };
+            {
+                let mut state = state.lock().expect("state poisoned");
+                if let Some(ms) = param(query, "ms").and_then(|v| v.parse::<f32>().ok()) {
+                    state.engine.send(Command::SetBusDelay {
+                        bus,
+                        params: aristide_engine::routing::DelayParams {
+                            seconds: (ms / 1000.0).max(0.0),
+                            feedback: number("feedback", 0.0),
+                            mix: number("mix", 1.0),
+                            dry: number("dry", 1.0),
+                        },
+                    });
+                }
+                if let (Some(left), Some(right)) = (
+                    param(query, "left").and_then(|v| v.parse::<u8>().ok()),
+                    param(query, "right").and_then(|v| v.parse::<u8>().ok()),
+                ) {
+                    state.engine.send(Command::SetBusOutput {
+                        bus,
+                        left: left.saturating_sub(1),
+                        right: right.saturating_sub(1),
+                        gain: number("gain", 1.0),
+                    });
+                }
+            }
+            json(state_json(state))
+        }
         (Method::Post, "/api/reverb") => {
             match param(query, "wet").and_then(|v| v.parse::<f32>().ok()) {
                 Some(wet) if (0.0..=2.0).contains(&wet) => {
