@@ -263,7 +263,11 @@ main thread; a failed load reports and leaves the running organ untouched.
   tremulants, wind model. The "better than Hauptwerk" milestone; A/B against GO.
 - **M5 — headless split + GUI**: IPC protocol, native GUI console, multi-window.
 - **M6 — contemporary layer**: Scala/MPE/MIDI2/Lumatone input, effects graph public,
-  multichannel routing, per-pipe delays.
+  multichannel routing, per-pipe delays. ⏳ in progress (opened ahead of M4/M5 by
+  decision 2026-08-24): Scala `.scl`/`.kbm` per-division tuning with nearest-pipe
+  re-anchoring shipped — see docs/progress/2026-08-24-keyboard-kinds-and-scala.md.
+  Still to come: MPE/MIDI2 per-note pitch + live drift (needs a ramped SetVoiceRate
+  engine command), Lumatone input maps, effects graph, multichannel routing.
 - **M7 — HW-unencrypted loader, CLAP wrapper, Windows/macOS CI.**
 
 ## Test rig
