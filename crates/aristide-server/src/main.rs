@@ -319,8 +319,8 @@ impl MidiPort {
             .max_by(f32::total_cmp)
     }
 
-    fn note_lands(&self, channel: u8, key: u8) -> Vec<(usize, u8)> {
-        let mut lands: Vec<(usize, u8)> = self
+    fn note_lands(&self, channel: u8, key: u8) -> Vec<(usize, u16)> {
+        let mut lands: Vec<(usize, u16)> = self
             .routes
             .iter()
             .filter(|route| route.channel.is_none_or(|on| on == channel + 1))
@@ -329,7 +329,7 @@ impl MidiPort {
                 u8::try_from(key as i16 + route.transpose as i16)
                     .ok()
                     .filter(|shifted| *shifted < 128)
-                    .map(|shifted| (route.manual, shifted))
+                    .map(|shifted| (route.manual, u16::from(shifted)))
             })
             .collect();
         lands.sort_unstable();
@@ -485,7 +485,7 @@ pub struct State {
     /// Live notes per (port, channel, incoming note): the (manual, key)
     /// landings each produced, so a later per-channel pitch bend can
     /// find them. Populated only for bend-enabled inputs.
-    pub live_notes: HashMap<(usize, u8, u8), Vec<(usize, u8)>>,
+    pub live_notes: HashMap<(usize, u8, u8), Vec<(usize, u16)>>,
     /// The current bend per (port, channel), in cents — an MPE member's
     /// bend routinely arrives before its note-on, and the note must
     /// start already bent.
@@ -739,7 +739,8 @@ impl State {
                 if !within {
                     continue;
                 }
-                let (starts, retriggered) = console.note_on_manual(keyboard.manual, key);
+                let (starts, retriggered) =
+                    console.note_on_manual(keyboard.manual, u16::from(key));
                 for handle in retriggered {
                     engine.send(Command::StopVoice { handle });
                 }
@@ -747,7 +748,7 @@ impl State {
                     engine.send(start_command(&start));
                 }
             } else {
-                for handle in console.note_off_manual(keyboard.manual, key) {
+                for handle in console.note_off_manual(keyboard.manual, u16::from(key)) {
                     engine.send(Command::StopVoice { handle });
                 }
             }
@@ -3166,7 +3167,7 @@ mod tests {
         Some((state, manual))
     }
 
-    fn held_on(state: &Mutex<State>, manual: usize) -> Vec<u8> {
+    fn held_on(state: &Mutex<State>, manual: usize) -> Vec<u16> {
         let state = state.lock().expect("state poisoned");
         let Control::Organ(console) = &state.control else {
             panic!("organ expected");
@@ -3425,7 +3426,7 @@ mod tests {
         handle_midi(&[0x90, native_high + 5, 100], 0, &state);
         assert_eq!(
             held_on(&state, manual),
-            vec![native_high + 5],
+            vec![u16::from(native_high + 5)],
             "five keys past the set, repitched from its top pipe"
         );
         handle_midi(&[0x80, native_high + 5, 0], 0, &state);

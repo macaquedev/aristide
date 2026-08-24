@@ -80,7 +80,7 @@ pub struct Console {
     /// Identity by nominal position is what lets two keys borrow the
     /// same physical pipe at two pitches simultaneously, while the same
     /// pitch reached by several routes still merges into one voice.
-    sounding: HashMap<(usize, u8), Vec<(StopId, RankId, i32)>>,
+    sounding: HashMap<(usize, u16), Vec<(StopId, RankId, i32)>>,
     /// The most recent voice handle started per pipe — used to expedite
     /// a still-releasing (pallet-staggered) predecessor when the pipe
     /// re-speaks, so a pipe can never overlap itself at full level.
@@ -449,7 +449,7 @@ impl Console {
         for (at, target, ladder_key) in voices {
             let Some(deviation) = self
                 .effective_tuning(target)
-                .deviation_cents(ladder_key.clamp(0, 127) as u8)
+                .deviation_cents(ladder_key.max(0) as u16)
             else {
                 continue;
             };
@@ -474,7 +474,7 @@ impl Console {
     /// tuning drift. Returns `(handle, rate)` updates for the engine.
     /// A pipe shared with other holders bends wholly — one pipe, one
     /// pitch.
-    pub fn bend_key(&mut self, manual_index: usize, key: u8, cents: f64) -> Vec<(u64, f32)> {
+    pub fn bend_key(&mut self, manual_index: usize, key: u16, cents: f64) -> Vec<(u64, f32)> {
         let mut updates = Vec::new();
         let Some(holds) = self.sounding.get(&(manual_index, key)).cloned() else {
             return updates;
@@ -762,7 +762,7 @@ impl Console {
     fn voices_for_key(
         &self,
         manual_index: usize,
-        key: u8,
+        key: u16,
         only: Option<StopId>,
     ) -> Vec<KeyVoice> {
         let Some(origin) = self.organ.manuals.get(manual_index).map(|m| m.id) else {
@@ -808,7 +808,7 @@ impl Console {
             // this is exactly the old behaviour.
             let Some(deviation) = self
                 .effective_tuning(target)
-                .deviation_cents(midi_key.clamp(0, 127) as u8)
+                .deviation_cents(midi_key.max(0) as u16)
             else {
                 continue;
             };
@@ -886,7 +886,7 @@ impl Console {
     /// +6 dB into clipping.
     /// `note_on` addressed by manual index — the coordinate UIs speak
     /// (a clicked on-screen key has no MIDI channel).
-    pub fn note_on_manual(&mut self, manual_index: usize, key: u8) -> (Vec<VoiceStart>, Vec<u64>) {
+    pub fn note_on_manual(&mut self, manual_index: usize, key: u16) -> (Vec<VoiceStart>, Vec<u64>) {
         if manual_index >= self.organ.manuals.len() {
             return (Vec::new(), Vec::new());
         }
@@ -928,7 +928,7 @@ impl Console {
     }
 
     /// `note_off` addressed by manual index (see `note_on_manual`).
-    pub fn note_off_manual(&mut self, manual_index: usize, key: u8) -> Vec<u64> {
+    pub fn note_off_manual(&mut self, manual_index: usize, key: u16) -> Vec<u64> {
         let mut released = Vec::new();
         for (_, rank, pipe) in self
             .sounding
@@ -1047,7 +1047,7 @@ impl Console {
     /// previous pipe voices to expedite (see `note_on_manual`).
     fn start_stop_under_held_keys(&mut self, stop: StopId, starts: &mut Vec<VoiceStart>) -> Vec<u64> {
         let mut expedited = Vec::new();
-        let held_keys: Vec<(usize, u8)> = self.sounding.keys().copied().collect();
+        let held_keys: Vec<(usize, u16)> = self.sounding.keys().copied().collect();
         for (manual_index, key) in held_keys {
             let mut new_entries = Vec::new();
             for voice in self.voices_for_key(manual_index, key, Some(stop)) {
@@ -1228,7 +1228,7 @@ impl Console {
     /// is what makes a coupler change land on held notes instead of
     /// waiting for the next press.
     fn recouple_held_keys(&mut self, stops: &mut Vec<u64>, starts: &mut Vec<VoiceStart>) {
-        let held: Vec<(usize, u8)> = self.sounding.keys().copied().collect();
+        let held: Vec<(usize, u16)> = self.sounding.keys().copied().collect();
         for (manual_index, key) in held {
             // One-shots strike on key press, not on a coupler change —
             // same rule as drawing a stop mid-hold.
@@ -1336,13 +1336,13 @@ impl Console {
     /// Per-manual UI state: index, name, first MIDI note, key count,
     /// and the keys currently held on it (sorted). Held keys are the
     /// player's — the origin manual of each press, not coupled echoes.
-    pub fn manual_states(&self) -> Vec<(usize, &str, u8, u16, Vec<u8>)> {
+    pub fn manual_states(&self) -> Vec<(usize, &str, u8, u16, Vec<u16>)> {
         self.organ
             .manuals
             .iter()
             .enumerate()
             .map(|(index, manual)| {
-                let mut held: Vec<u8> = self
+                let mut held: Vec<u16> = self
                     .sounding
                     .keys()
                     .filter(|&&(m, _)| m == index)

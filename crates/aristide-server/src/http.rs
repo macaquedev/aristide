@@ -918,10 +918,10 @@ fn respond(
         }
         (Method::Post, "/api/note") => {
             let manual = param(query, "manual").and_then(|v| v.parse::<usize>().ok());
-            let key = param(query, "key").and_then(|v| v.parse::<u8>().ok());
+            let key = param(query, "key").and_then(|v| v.parse::<u16>().ok());
             let on = param(query, "on") == Some("1");
             match (manual, key) {
-                (Some(manual), Some(key)) if key < 128 => {
+                (Some(manual), Some(key)) if key < 4096 => {
                     apply_note(state, manual, key, on);
                     json(state_json(state))
                 }
@@ -986,7 +986,7 @@ fn respond(
 
 /// A key press/release from the UI — same path as a MIDI note, but
 /// addressed by manual index rather than channel.
-fn apply_note(state: &Mutex<State>, manual: usize, key: u8, on: bool) {
+fn apply_note(state: &Mutex<State>, manual: usize, key: u16, on: bool) {
     let mut state = state.lock().expect("state poisoned");
     let State {
         engine, control, ..

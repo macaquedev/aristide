@@ -177,14 +177,17 @@ impl Default for Tuning {
 }
 
 impl Tuning {
-    /// How far the pitch this tuning wants for MIDI note `key` sits
+    /// How far the pitch this tuning wants for manual key `key` sits
     /// from the 12-EDO/A440 ladder the samples were recorded on, in
-    /// cents. This is THE key→pitch conversion (CLAUDE.md's "one
-    /// replaceable place"): the console turns it into which pipe to
-    /// sound (whole semitones) and how far to bend it (the remainder).
-    /// `None` means the key sounds nothing — no temperament says that,
-    /// but a Scala keyboard mapping's unmapped keys will.
-    pub fn deviation_cents(&self, key: u8) -> Option<f64> {
+    /// cents. `key` is a manual key coordinate — MIDI-note-numbered on
+    /// a conventional keyboard, but allowed past 127 on a generalized
+    /// one (Lumatone and the like). This is THE key→pitch conversion
+    /// (CLAUDE.md's "one replaceable place"): the console turns it into
+    /// which pipe to sound (whole semitones) and how far to bend it
+    /// (the remainder). `None` means the key sounds nothing — no
+    /// temperament says that, but a Scala keyboard mapping's unmapped
+    /// keys will.
+    pub fn deviation_cents(&self, key: u16) -> Option<f64> {
         if let Some(scale) = &self.scale {
             let hz =
                 aristide_model::scala::key_frequency(&scale.scale, &scale.mapping, key as i32)?;
@@ -216,7 +219,7 @@ impl Tuning {
     /// Rate multiplier for a pipe sounding MIDI note `key` (applied on
     /// top of the pipe's own playback rate). The whole deviation as one
     /// bend — callers that re-anchor to a nearer pipe split it instead.
-    pub fn rate_multiplier(&self, key: u8) -> f32 {
+    pub fn rate_multiplier(&self, key: u16) -> f32 {
         let cents = self.deviation_cents(key).unwrap_or(0.0);
         ((cents / 1200.0).exp2()) as f32
     }
