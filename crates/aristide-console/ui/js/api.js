@@ -93,14 +93,18 @@ export const commands = {
   // wait out `loading` on the next poll to see it land. All 400 with a
   // plain-text reason (including "not saved as a file yet" if the organ
   // has no file for these to write into).
-  organManualAdd: (name, low, high, pedal) =>
+  organManualAdd: (name, low, high, kind) =>
     `/api/organ/manual/add?name=${encodeURIComponent(name)}` +
     (low == null ? "" : `&low=${low}`) +
     (high == null ? "" : `&high=${high}`) +
-    (pedal ? "&pedal=1" : ""),
+    `&kind=${encodeURIComponent(kind)}`,
   organManualRename: (manual, name) =>
     `/api/organ/manual/rename?manual=${manual}&name=${encodeURIComponent(name)}`,
   organManualRemove: (manual) => `/api/organ/manual/remove?manual=${manual}`,
+  // Redeclares an existing manual's kind — structural: the file line
+  // changes and the organ rebuilds, same contract as the family above.
+  organManualKind: (manual, kind) =>
+    `/api/organ/manual/kind?manual=${manual}&kind=${encodeURIComponent(kind)}`,
   // `to` is the index the manual should end up at.
   organManualOrder: (manual, to) => `/api/organ/manual/order?manual=${manual}&to=${to}`,
   // Adds a sample set as a source the organ can pull from, without

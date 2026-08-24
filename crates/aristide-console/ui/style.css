@@ -150,7 +150,9 @@ html, body {
   box-shadow: var(--bevel), 0 12px 32px #000c;
 }
 
-.menu-list hr {
+.menu-list hr,
+.editor-add-menu hr,
+#editor-keyboard-menu hr {
   height: 1px;
   margin: 5px 0;
   border: 0;
@@ -1030,7 +1032,8 @@ input[type="range"]:hover::-webkit-slider-thumb { filter: brightness(1.15); }
 }
 
 .editor-add-menu,
-#editor-division-menu {
+#editor-division-menu,
+#editor-keyboard-menu {
   display: flex;
   flex-direction: column;
   min-width: 150px;
@@ -1084,6 +1087,21 @@ input[type="range"]:hover::-webkit-slider-thumb { filter: brightness(1.15); }
 .editor-add-form-row input[type="text"] { width: 58px; }
 .editor-add-form-row input.invalid { border-color: #b58a2e; }
 .editor-add-form-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* wider than the other add-forms — a temperament label and its select
+   need more room than a bare name field does */
+#editor-tuning-form { width: 270px; }
+
+.editor-tuning-head {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+.editor-tuning-head .rail-label { font-size: 11px; letter-spacing: 0.6px; color: var(--text); }
+.editor-tuning-head .ghost { align-self: flex-end; padding: 3px 8px; font-size: 9px; }
+.editor-add-form select { width: 100%; }
+.editor-add-form .settings-row .rail-label { flex: 0 0 auto; }
 
 .editor-add-browse { display: flex; flex-direction: column; gap: 6px; }
 .editor-add-browse-head { display: flex; align-items: center; gap: 8px; }
@@ -1431,7 +1449,9 @@ input[type="range"]:hover::-webkit-slider-thumb { filter: brightness(1.15); }
 
 .pane select,
 .keys-legend select,
+.editor-add-form select,
 .pane input[type="number"],
+.editor-add-form input[type="number"],
 .compass-field input {
   font: 12px var(--sans);
   color: var(--text);
@@ -1443,10 +1463,13 @@ input[type="range"]:hover::-webkit-slider-thumb { filter: brightness(1.15); }
 }
 .pane select:focus,
 .keys-legend select:focus,
+.editor-add-form select:focus,
 .pane input[type="number"]:focus,
+.editor-add-form input[type="number"]:focus,
 .compass-field input:focus { outline: none; border-color: var(--accent); }
 .pane select,
-.keys-legend select {
+.keys-legend select,
+.editor-add-form select {
   /* WebKit's native select chrome is a light gradient that fights the
      dark skin; draw our own chevron instead. */
   -webkit-appearance: none;
@@ -1458,8 +1481,10 @@ input[type="range"]:hover::-webkit-slider-thumb { filter: brightness(1.15); }
   background-size: 4px 4px;
   background-repeat: no-repeat;
 }
-.pane input[type="number"] { width: 66px; text-align: right; }
-.pane input[type="number"]::-webkit-inner-spin-button { display: none; }
+.pane input[type="number"],
+.editor-add-form input[type="number"] { width: 66px; text-align: right; }
+.pane input[type="number"]::-webkit-inner-spin-button,
+.editor-add-form input[type="number"]::-webkit-inner-spin-button { display: none; }
 .pane input[type="range"] { width: 120px; }
 
 /* the noises switch, and the per-device listen switch */
@@ -1981,6 +2006,32 @@ body.editing .division-add { display: block; }
 .keyboard.pedal .key.natural { background: #caccd0; }
 .keyboard.pedal .key.natural.held { background: var(--accent); }
 .keyboard.pedal .key.sharp { height: 55%; }
+
+/* Terpstra/Lumatone-style hex field: one uniform key shape, no
+   natural/sharp split — every key is the same tone, chromatically. Two
+   interlocked rows (odd keys top, even keys bottom); the column step
+   (3/4 of a hex's width) matches this flat-top hexagon's own corner
+   cut, so neighbors tile edge to edge with no gap or overlap. */
+.keyboard.microtonal { --hex-w: 32px; --hex-h: 30px; }
+.keyboard.microtonal .keys {
+  width: calc((var(--hex-count) - 1) * var(--hex-w) * 0.75 + var(--hex-w));
+  height: calc(var(--hex-h) * 1.5);
+}
+
+.key.hex {
+  width: var(--hex-w);
+  height: var(--hex-h);
+  left: calc(var(--col) * var(--hex-w) * 0.75);
+  clip-path: polygon(25% 0%, 75% 0%, 100% 50%, 75% 100%, 25% 100%, 0% 50%);
+  background: var(--key-white);
+  border: 1px solid #00000030;
+}
+.key.hex-top { top: 0; }
+.key.hex-bottom { top: calc(var(--hex-h) / 2); }
+.key.hex.held { background: var(--accent); }
+
+body[data-density="compact"] .keyboard.microtonal { --hex-w: 27px; --hex-h: 25px; }
+body[data-density="spacious"] .keyboard.microtonal { --hex-w: 37px; --hex-h: 34px; }
 
 /* ---- swell shoes: vertical faders ------------------------------------- */
 

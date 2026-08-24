@@ -177,11 +177,12 @@ export class Console {
     this.panels.clear();
     this.el.canvas.replaceChildren();
 
-    // The model says which manual is the pedal; the name sniff only
-    // covers organs loaded before it did.
-    const pedal = snapshot.manuals.find((m) => m.pedal)
-      ?? snapshot.manuals.find((m) => /p[ée]d/i.test(m.name))
-      ?? snapshot.manuals[0];
+    // The model declares each manual's kind now; a manual predates the
+    // field only on an old snapshot, where the pedal flag and then the
+    // name sniff are the only signals there are.
+    const kindOf = (manual) =>
+      manual.kind ?? (manual.pedal || /p[ée]d/i.test(manual.name) ? "pedal" : "manual");
+    const pedal = snapshot.manuals.find((m) => kindOf(m) === "pedal") ?? snapshot.manuals[0];
     this.pedalName = pedal?.name ?? null;
 
     // Stops grouped by the manual they sit on, in server stop order.
@@ -254,7 +255,7 @@ export class Console {
     // Keyboard panels: one per manual. Positioning does the stacking
     // (highest manual on top, pedal at the bottom), not the DOM order.
     for (const manual of snapshot.manuals) {
-      const kind = manual === pedal ? "pedal" : "manual";
+      const kind = kindOf(manual);
       const body = this.panel(`keyboard:${manual.name}`, `keyboard panel-${kind}`, `${manual.name} · keyboard`);
       body.append(this.keyboard(manual, kind));
     }
@@ -333,22 +334,47 @@ export class Console {
     const keys = document.createElement("div");
     keys.className = "keys";
     const last = manual.first_key + manual.key_count;
-    let naturals = 0;
-    for (let midi = manual.first_key; midi < last; midi++) if (!isSharp(midi)) naturals++;
-    keys.style.setProperty("--naturals", naturals);
 
-    for (let midi = manual.first_key; midi < last; midi++) {
-      const key = document.createElement("div");
-      const sharp = isSharp(midi);
-      key.className = sharp ? "key sharp" : "key natural";
-      key.dataset.midi = midi;
-      const n = naturalsBefore(manual.first_key, midi);
-      key.style.setProperty("--n", sharp ? n - 1 : n);
-      this.wireKey(key, manual.idx, midi);
-      keys.append(key);
+    if (kind === "microtonal") {
+      this.hexKeys(keys, manual, last);
+    } else {
+      let naturals = 0;
+      for (let midi = manual.first_key; midi < last; midi++) if (!isSharp(midi)) naturals++;
+      keys.style.setProperty("--naturals", naturals);
+
+      for (let midi = manual.first_key; midi < last; midi++) {
+        const key = document.createElement("div");
+        const sharp = isSharp(midi);
+        key.className = sharp ? "key sharp" : "key natural";
+        key.dataset.midi = midi;
+        const n = naturalsBefore(manual.first_key, midi);
+        key.style.setProperty("--n", sharp ? n - 1 : n);
+        this.wireKey(key, manual.idx, midi);
+        keys.append(key);
+      }
     }
     board.append(keys);
     return board;
+  }
+
+  /// A Terpstra/Lumatone-style hex-grid key field: no naturals or
+  /// sharps — that split is 12-EDO vocabulary, and this keyboard
+  /// deliberately carries none. Keys run chromatically left to right in
+  /// two interlocked rows (even indices bottom, odd top); the column
+  /// step and the flat-top hex shape (see the CSS) are chosen together
+  /// so consecutive keys tile edge-to-edge with no gap or overlap,
+  /// reading as one continuous diagonal rank.
+  hexKeys(keys, manual, last) {
+    keys.style.setProperty("--hex-count", manual.key_count);
+    let i = 0;
+    for (let midi = manual.first_key; midi < last; midi++, i++) {
+      const key = document.createElement("div");
+      key.className = `key hex ${i % 2 === 0 ? "hex-bottom" : "hex-top"}`;
+      key.dataset.midi = midi;
+      key.style.setProperty("--col", i);
+      this.wireKey(key, manual.idx, midi);
+      keys.append(key);
+    }
   }
 
   wireKey(key, manual, midi) {

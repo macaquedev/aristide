@@ -23,6 +23,15 @@ const SET_FILTER = {
   extensions: ["organ", "Organ_Hauptwerk_xml"],
 };
 
+/// The keyboard context menu's "Change type" radio group, in the order
+/// they're offered — the same vocabulary the add menu and the server's
+/// `kind=` param share.
+const KEYBOARD_KINDS = [
+  ["manual", "Manual"],
+  ["pedal", "Pedalboard"],
+  ["microtonal", "Microtonal keyboard"],
+];
+
 /// Swallows the click a suppressed drag would otherwise leave behind —
 /// a drag that crossed the threshold must not also toggle the drawknob
 /// (or fire whatever else the element's own click listener does).
@@ -52,7 +61,8 @@ export class Editor {
     this.pendingRemove = null; // {kind: "manual"|"enclosure", ...} awaiting confirm
     this.pendingPlace = null; // {name, x, y}: place this manual's panels once it lands
     this.addAnchor = null; // where the add popover was opened, in px
-    this.addPedal = false;
+    this.addKind = "manual"; // "manual" | "pedal" | "microtonal" — the add-manual form's target
+    this.tuningManual = null; // manual idx the tuning popover is open for, or null
     this.addBrowseDir = null;
     this.addBrowseParent = null;
     this.addBrowseEntries = null;
@@ -82,6 +92,7 @@ export class Editor {
       addMenu: root.getElementById("editor-add-menu"),
       addManual: root.getElementById("editor-add-manual"),
       addPedal: root.getElementById("editor-add-pedal"),
+      addMicrotonal: root.getElementById("editor-add-microtonal"),
       addEnc: root.getElementById("editor-add-enc"),
       addSource: root.getElementById("editor-add-source"),
       addManualForm: root.getElementById("editor-add-manual-form"),
@@ -101,12 +112,21 @@ export class Editor {
       addBrowseError: root.getElementById("editor-add-browse-error"),
       addBrowseList: root.getElementById("editor-add-browse-list"),
       divisionMenu: root.getElementById("editor-division-menu"),
+      keyboardMenu: root.getElementById("editor-keyboard-menu"),
+      tuning: root.getElementById("editor-tuning"),
+      tuningTitle: root.getElementById("editor-tuning-title"),
+      tuningReset: root.getElementById("editor-tuning-reset"),
+      tuningTemperament: root.getElementById("editor-tuning-temperament"),
+      tuningA4: root.getElementById("editor-tuning-a4"),
+      tuningTranspose: root.getElementById("editor-tuning-transpose"),
+      tuningClose: root.getElementById("editor-tuning-close"),
     };
 
     this.wireLock();
     this.wireDrawer();
     this.wireRemoveConfirm();
     this.wireAdd();
+    this.wireTuningForm();
     this.wireCanvas();
   }
 
@@ -166,6 +186,8 @@ export class Editor {
     this.closeDrawer();
     this.closeAdd();
     this.closeDivisionMenu();
+    this.closeKeyboardMenu();
+    this.closeTuningForm();
   }
 
   // A double-click on a locked canvas is someone reaching for the add
@@ -235,6 +257,8 @@ export class Editor {
       this.offerings = null;
       if (this.drawerOpen) this.fetchOfferings();
     }
+
+    if (this.tuningManual != null) this.syncTuningForm();
   }
 
   /// Called by Console right after every structural rebuild (see its
@@ -250,6 +274,7 @@ export class Editor {
     this.wireCheekDrags(snapshot);
     this.wireShoeDrags(snapshot);
     this.wireCheekRename();
+    this.wireKeyboardContextMenu();
     this.wirePanelMoves(snapshot);
     this.addDivisionButtons(snapshot);
     this.placePending(snapshot);
@@ -318,6 +343,24 @@ export class Editor {
       cheek.addEventListener("dblclick", (event) => {
         if (!this.unlocked && !event.ctrlKey) return;
         this.startManualRename(idx);
+      });
+    }
+  }
+
+  /// Right-click a keyboard panel — locked, it's the same nudge as any
+  /// other reach at editing; unlocked, it opens the kind/tuning menu
+  /// right there, the same popover idiom as the division "+".
+  wireKeyboardContextMenu() {
+    for (const board of this.root.querySelectorAll(".keyboard[data-manual]")) {
+      const idx = Number(board.dataset.manual);
+      board.addEventListener("contextmenu", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (!this.unlocked) {
+          this.nudgeUnlock();
+          return;
+        }
+        this.openKeyboardMenu(idx, event.clientX, event.clientY);
       });
     }
   }
@@ -558,6 +601,139 @@ export class Editor {
   closeDivisionMenu() {
     this.el.divisionMenu.classList.add("hidden");
     this.el.divisionMenu.replaceChildren();
+  }
+
+  // ---- the keyboard context menu: change a manual's kind or tuning --------
+  //
+  // Right-click a keyboard panel while unlocked: a radio group of the
+  // three kinds (picking a different one is a structural edit, same
+  // contract as the add menu) and a way into the tuning popover below.
+
+  openKeyboardMenu(idx, x, y) {
+    this.closeAdd();
+    this.closeDivisionMenu();
+    this.closeTuningForm();
+    const menu = this.el.keyboardMenu;
+    menu.replaceChildren();
+    this.buildKeyboardMenuItems(menu, idx);
+    menu.classList.remove("hidden");
+    this.positionPopover(menu, x, y);
+  }
+
+  buildKeyboardMenuItems(menu, idx) {
+    const manual = this.lastSnapshot?.manuals.find((m) => m.idx === idx);
+    if (!manual) return;
+    const currentKind = manual.kind ?? (manual.pedal ? "pedal" : "manual");
+
+    const heading = document.createElement("span");
+    heading.className = "menu-heading";
+    heading.textContent = "Change type";
+    menu.append(heading);
+
+    for (const [kind, label] of KEYBOARD_KINDS) {
+      const item = document.createElement("button");
+      item.className = "menu-item radio";
+      item.classList.toggle("checked", kind === currentKind);
+      item.innerHTML = `<span>${label}</span>`;
+      item.addEventListener("click", (event) => {
+        event.stopPropagation();
+        this.closeKeyboardMenu();
+        if (kind !== currentKind) this.organCommand(commands.organManualKind(idx, kind));
+      });
+      menu.append(item);
+    }
+
+    menu.append(document.createElement("hr"));
+
+    const tuning = document.createElement("button");
+    tuning.className = "menu-item";
+    tuning.innerHTML = "<span>Change tuning&hellip;</span>";
+    tuning.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const rect = menu.getBoundingClientRect();
+      this.closeKeyboardMenu();
+      this.openTuningForm(idx, rect.left, rect.top);
+    });
+    menu.append(tuning);
+  }
+
+  closeKeyboardMenu() {
+    this.el.keyboardMenu.classList.add("hidden");
+    this.el.keyboardMenu.replaceChildren();
+  }
+
+  // ---- the tuning popover: this manual's own pitch, apart from the --------
+  // instrument's, applied live field by field — never a rebuild.
+
+  wireTuningForm() {
+    this.el.tuningClose.addEventListener("click", () => this.closeTuningForm());
+
+    this.el.tuningReset.addEventListener("click", () => {
+      if (this.tuningManual == null) return;
+      this.send(commands.tuning({ manual: this.tuningManual, reset: 1 }));
+    });
+
+    this.el.tuningTemperament.addEventListener("change", () => {
+      if (this.tuningManual == null) return;
+      this.send(
+        commands.tuning({ manual: this.tuningManual, temperament: this.el.tuningTemperament.value })
+      );
+      this.el.tuningTemperament.blur();
+    });
+
+    this.el.tuningA4.addEventListener("change", () => {
+      if (this.tuningManual == null) return;
+      const a4 = Math.min(500, Math.max(300, Number(this.el.tuningA4.value) || 440));
+      this.el.tuningA4.value = a4;
+      this.send(commands.tuning({ manual: this.tuningManual, a4 }));
+      this.el.tuningA4.blur();
+    });
+
+    this.el.tuningTranspose.addEventListener("change", () => {
+      if (this.tuningManual == null) return;
+      const transpose = Math.min(12, Math.max(-12, Math.round(Number(this.el.tuningTranspose.value) || 0)));
+      this.el.tuningTranspose.value = transpose;
+      this.send(commands.tuning({ manual: this.tuningManual, transpose }));
+      this.el.tuningTranspose.blur();
+    });
+  }
+
+  openTuningForm(idx, x, y) {
+    this.closeAdd();
+    this.closeDivisionMenu();
+    this.closeKeyboardMenu();
+    this.tuningManual = idx;
+    this.syncTuningForm();
+    this.el.tuning.classList.remove("hidden");
+    this.positionPopover(this.el.tuning, x, y);
+  }
+
+  closeTuningForm() {
+    this.tuningManual = null;
+    this.el.tuning.classList.add("hidden");
+  }
+
+  /// This manual's effective tuning: its own override if the snapshot
+  /// carries one, else whatever the instrument shares. Called on open
+  /// and on every later poll, so a shared value another panel changes
+  /// (or another session's edit) keeps the popover honest.
+  syncTuningForm() {
+    const idx = this.tuningManual;
+    const manual = this.lastSnapshot?.manuals.find((m) => m.idx === idx);
+    if (!manual) {
+      this.closeTuningForm();
+      return;
+    }
+    this.el.tuningTitle.textContent = manual.name;
+    const own = (this.lastSnapshot?.manual_tuning ?? []).find((t) => t.idx === idx);
+    this.el.tuningReset.classList.toggle("hidden", !own);
+    const tuning = own ?? this.lastSnapshot?.tuning;
+    if (!tuning) return;
+    if (this.root.activeElement !== this.el.tuningTemperament) {
+      this.el.tuningTemperament.value = tuning.temperament;
+    }
+    if (this.root.activeElement !== this.el.tuningA4) this.el.tuningA4.value = tuning.a4;
+    if (this.root.activeElement !== this.el.tuningTranspose) this.el.tuningTranspose.value = tuning.transpose;
   }
 
   // ---- drag controller: plain when unlocked, ctrl-drag always -------------
@@ -950,6 +1126,12 @@ export class Editor {
       tag.textContent = "pedal";
       head.append(tag);
     }
+    if (manual.kind === "microtonal") {
+      const tag = document.createElement("span");
+      tag.className = "organ-manual-pedal-tag";
+      tag.textContent = "microtonal";
+      head.append(tag);
+    }
     if (manual.pulled) {
       const tag = document.createElement("span");
       tag.className = "organ-manual-pedal-tag";
@@ -1016,17 +1198,21 @@ export class Editor {
       });
     }
     // Popovers close on a click anywhere outside themselves.
-    for (const el of [this.el.add, this.el.divisionMenu]) {
+    for (const el of [this.el.add, this.el.divisionMenu, this.el.keyboardMenu, this.el.tuning]) {
       el.addEventListener("click", (event) => event.stopPropagation());
     }
     window.addEventListener("click", () => {
       this.closeAdd();
       this.closeDivisionMenu();
+      this.closeKeyboardMenu();
+      this.closeTuningForm();
     });
     window.addEventListener("keydown", (event) => {
       if (event.key !== "Escape") return;
       this.closeAdd();
       this.closeDivisionMenu();
+      this.closeKeyboardMenu();
+      this.closeTuningForm();
     });
   }
 
@@ -1060,8 +1246,9 @@ export class Editor {
   }
 
   wireAdd() {
-    this.el.addManual.addEventListener("click", () => this.openManualForm(false));
-    this.el.addPedal.addEventListener("click", () => this.openManualForm(true));
+    this.el.addManual.addEventListener("click", () => this.openManualForm("manual"));
+    this.el.addPedal.addEventListener("click", () => this.openManualForm("pedal"));
+    this.el.addMicrotonal.addEventListener("click", () => this.openManualForm("microtonal"));
     this.el.addEnc.addEventListener("click", () => this.openEncForm());
     this.el.addSource.addEventListener("click", () => this.openSourceForm());
     this.el.addManualCancel.addEventListener("click", () => this.closeAdd());
@@ -1080,7 +1267,7 @@ export class Editor {
       this.el.addManualLow.classList.toggle("invalid", low == null);
       this.el.addManualHigh.classList.toggle("invalid", high == null);
       if (low == null || high == null) return;
-      this.organCommand(commands.organManualAdd(name, low, high, this.addPedal ? 1 : 0)).then((ok) => {
+      this.organCommand(commands.organManualAdd(name, low, high, this.addKind)).then((ok) => {
         if (!ok) return;
         this.rememberPlacement(name);
         this.closeAdd();
@@ -1143,13 +1330,13 @@ export class Editor {
     this.runQueue(places);
   }
 
-  openManualForm(pedal) {
-    this.addPedal = pedal;
+  openManualForm(kind) {
+    this.addKind = kind;
     this.closeAddPanels();
     this.el.addManualForm.classList.remove("hidden");
     this.el.addManualName.value = "";
     this.el.addManualLow.value = "C2";
-    this.el.addManualHigh.value = pedal ? "G4" : "C7";
+    this.el.addManualHigh.value = kind === "pedal" ? "G4" : "C7";
     this.el.addManualLow.classList.remove("invalid");
     this.el.addManualHigh.classList.remove("invalid");
     if (this.addAnchor) this.positionPopover(this.el.add, this.addAnchor.x, this.addAnchor.y);

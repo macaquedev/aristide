@@ -362,6 +362,7 @@
     <div class="editor-add-menu hidden" id="editor-add-menu">
       <button class="menu-item" id="editor-add-manual"><span>Manual&hellip;</span></button>
       <button class="menu-item" id="editor-add-pedal"><span>Pedalboard&hellip;</span></button>
+      <button class="menu-item" id="editor-add-microtonal"><span>Microtonal keyboard&hellip;</span></button>
       <button class="menu-item" id="editor-add-enc"><span>Swell box&hellip;</span></button>
       <button class="menu-item" id="editor-add-source"><span>Sample set&hellip;</span></button>
     </div>
@@ -407,6 +408,43 @@
        "Add a stop" swaps the menu for a pick-list of what the sources
        still offer. Contents are built by editor.js. -->
   <div class="editor-add hidden" id="editor-division-menu"></div>
+
+  <!-- Right-click on a keyboard panel (edit mode only): change its kind,
+       or open the tuning form below. Contents are built by editor.js. -->
+  <div class="editor-add hidden" id="editor-keyboard-menu"></div>
+
+  <!-- The per-manual tuning popover, opened from the keyboard menu above.
+       Seeded from the snapshot's effective tuning for that manual;
+       applies live, field by field — no rebuild. -->
+  <div class="editor-add hidden" id="editor-tuning">
+    <form class="editor-add-form" id="editor-tuning-form">
+      <span class="editor-tuning-head">
+        <span class="rail-label" id="editor-tuning-title">Tuning</span>
+        <button class="ghost hidden" type="button" id="editor-tuning-reset">Shared tuning</button>
+      </span>
+      <label class="settings-row">
+        <span class="rail-label">Temperament</span>
+        <select id="editor-tuning-temperament">
+          <option value="equal">Equal</option>
+          <option value="werckmeister3">Werckmeister III</option>
+          <option value="kirnberger3">Kirnberger III</option>
+          <option value="meantone4">&frac14;-comma meantone</option>
+          <option value="pythagorean">Pythagorean</option>
+        </select>
+      </label>
+      <label class="settings-row">
+        <span class="rail-label">Pitch a&prime;</span>
+        <span class="stepper"><input id="editor-tuning-a4" type="number" min="300" max="500" step="0.5" /> Hz</span>
+      </label>
+      <label class="settings-row">
+        <span class="rail-label">Transpose</span>
+        <span class="stepper"><input id="editor-tuning-transpose" type="number" min="-12" max="12" step="1" /></span>
+      </label>
+      <span class="editor-add-form-actions">
+        <button class="ghost" type="button" id="editor-tuning-close">Close</button>
+      </span>
+    </form>
+  </div>
 
   <script type="module" src="js/main.js"></script>
 </body>
