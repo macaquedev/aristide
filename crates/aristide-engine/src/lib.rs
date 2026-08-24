@@ -111,6 +111,18 @@ pub enum Command {
     /// Move one enclosure's pedal (0 = closed, 1 = open); the shutter
     /// inertia model slews toward it.
     SetEnclosurePosition { enclosure: u8, position: f32 },
+    /// Glide a sounding voice's playback rate to a new target over
+    /// `glide_ms` (0 = snap at the next block). The slew is geometric —
+    /// constant cents per frame — so a glide reads as linear pitch
+    /// motion. Only Held voices move: a release tail is room decay that
+    /// already left the pipe, the same reason shutter moves never touch
+    /// it. This is the seam MPE/MIDI 2.0 per-note pitch and live tuning
+    /// drift ride on.
+    SetVoiceRate {
+        handle: u64,
+        rate: f32,
+        glide_ms: f32,
+    },
     /// Release the voice started with `handle`. Loop-less (percussive)
     /// voices ignore this and play to their end.
     StopVoice { handle: u64 },
@@ -213,6 +225,13 @@ struct SampledVoice {
     release_position: f64,
     /// Source frames advanced per output frame (before wind modulation).
     rate: f64,
+    /// Where [`Command::SetVoiceRate`] is taking `rate`, and how many
+    /// output frames of geometric slew remain. `glide_frames == 0` ⇔
+    /// settled (`rate == rate_target`); the slew advances per block, so
+    /// within a block pitch is constant — at control rates that is the
+    /// same quantization every MIDI-driven sampler has.
+    rate_target: f64,
+    glide_frames: u32,
     /// Sinc kernel bucket chosen once at [`Command::StartVoice`] from
     /// `rate` ([`SincTables::select`]) and reused for the voice's whole
     /// life: tremulant/release-bend wobble never swings `rate` far
@@ -982,6 +1001,30 @@ impl Engine {
                         sampled.enc_hi_gain = box_state.hi_gain();
                         sampled.enc_coeff = box_state.coeff();
                     }
+                    // A pending rate glide takes one geometric step per
+                    // block (the powf is paid only while gliding). A
+                    // bend can cross a quarter-octave sinc bucket, so
+                    // the kernel is re-picked while in motion — the
+                    // one case the pick-once rule at StartVoice excludes.
+                    if sampled.glide_frames > 0 {
+                        if sampled.phase == SamplePhase::Held {
+                            if sampled.glide_frames as usize <= frames {
+                                sampled.rate = sampled.rate_target;
+                                sampled.glide_frames = 0;
+                            } else {
+                                let fraction = frames as f64 / sampled.glide_frames as f64;
+                                sampled.rate *=
+                                    (sampled.rate_target / sampled.rate).powf(fraction);
+                                sampled.glide_frames -= frames as u32;
+                            }
+                            sampled.kernel = sinc.select(sampled.rate);
+                        } else {
+                            // Released mid-glide: the tail keeps the
+                            // pitch it reached, as it keeps its box.
+                            sampled.glide_frames = 0;
+                            sampled.rate_target = sampled.rate;
+                        }
+                    }
                     sampled.age_frames = sampled.age_frames.saturating_add(frames as u32);
                     // The voice can hand over to a separate release
                     // sample or switch loops mid-block; track the refs
@@ -1140,6 +1183,8 @@ impl Engine {
                         position: 0.0,
                         release_position: 0.0,
                         rate: rate as f64,
+                        rate_target: rate as f64,
+                        glide_frames: 0,
                         kernel: self.sinc.select(rate as f64),
                         gain,
                         fade: 0.0,
@@ -1202,6 +1247,28 @@ impl Engine {
             } => {
                 if let Some(box_state) = self.enclosures.get_mut(enclosure as usize) {
                     box_state.set_target(position);
+                }
+            }
+            Command::SetVoiceRate {
+                handle,
+                rate,
+                glide_ms,
+            } => {
+                if !(rate > 0.0) || !glide_ms.is_finite() {
+                    return;
+                }
+                let glide_frames = (glide_ms.max(0.0) * 0.001 * self.sample_rate) as u32;
+                for voice in self.voices.iter_mut() {
+                    if let Voice::Sampled(sampled) = voice {
+                        if sampled.handle == handle {
+                            sampled.rate_target = rate as f64;
+                            sampled.glide_frames = glide_frames;
+                            if glide_frames == 0 {
+                                sampled.rate = rate as f64;
+                                sampled.kernel = self.sinc.select(sampled.rate);
+                            }
+                        }
+                    }
                 }
             }
             Command::StopVoice { handle } => {
@@ -1471,6 +1538,145 @@ mod tests {
         assert!(out[20] != 0.0, "percussive sample should keep playing");
         let out = render(&mut engine, 20);
         assert!(out.iter().all(|&v| v == 0.0), "and then end on its own");
+    }
+
+    /// A long loop-less linear ramp: output value ≈ cursor position, so
+    /// a block's per-frame output delta measures the playback rate.
+    fn ramp_bank(frames: usize) -> Arc<SampleBank> {
+        let data: Vec<f32> = (0..frames).map(|i| i as f32 / frames as f32).collect();
+        let sample = Sample::new(data, 1, 100.0, None, 0).expect("valid");
+        let mut bank = SampleBank::default();
+        bank.push(sample);
+        Arc::new(bank)
+    }
+
+    /// Mean per-frame slope of the left channel over a block's middle
+    /// (edges avoided: sinc taps clamp near the sample ends).
+    fn slope(block: &[f32]) -> f32 {
+        let frames = block.len() / 2;
+        let first = block[2 * 2];
+        let last = block[(frames - 2) * 2];
+        (last - first) / (frames - 4) as f32
+    }
+
+    #[test]
+    fn set_voice_rate_snaps_when_glide_is_zero() {
+        let (mut engine, mut handle) = Engine::new(100.0, ramp_bank(2000));
+        engine.set_release_stagger(0.0);
+        handle.send(Command::StartVoice {
+            handle: 1,
+            sample: 0,
+            rate: 1.0,
+            gain: 1.0,
+            group: 0,
+            wind_weight: 0.0,
+            brightness: 0.0,
+            enclosure: ENCLOSURE_NONE,
+        });
+        render(&mut engine, 20);
+        let before = slope(&render(&mut engine, 20));
+        handle.send(Command::SetVoiceRate {
+            handle: 1,
+            rate: 2.0,
+            glide_ms: 0.0,
+        });
+        let after = slope(&render(&mut engine, 20));
+        let ratio = after / before;
+        assert!(
+            (ratio - 2.0).abs() < 0.1,
+            "zero-glide rate change should double the cursor speed, got ×{ratio}"
+        );
+        // Nonsense targets are ignored, not applied.
+        handle.send(Command::SetVoiceRate {
+            handle: 1,
+            rate: -1.0,
+            glide_ms: 0.0,
+        });
+        handle.send(Command::SetVoiceRate {
+            handle: 1,
+            rate: f32::NAN,
+            glide_ms: 0.0,
+        });
+        let still = slope(&render(&mut engine, 20));
+        assert!(
+            (still / before - 2.0).abs() < 0.1,
+            "invalid rates must leave the voice untouched"
+        );
+    }
+
+    #[test]
+    fn set_voice_rate_glides_geometrically() {
+        let (mut engine, mut handle) = Engine::new(100.0, ramp_bank(2000));
+        engine.set_release_stagger(0.0);
+        handle.send(Command::StartVoice {
+            handle: 1,
+            sample: 0,
+            rate: 1.0,
+            gain: 1.0,
+            group: 0,
+            wind_weight: 0.0,
+            brightness: 0.0,
+            enclosure: ENCLOSURE_NONE,
+        });
+        render(&mut engine, 20);
+        let start = slope(&render(&mut engine, 10));
+        // 400 ms at sr=100 → 40 frames of glide: four 10-frame blocks,
+        // each a constant 2^(1/4) step (geometric = equal cents).
+        handle.send(Command::SetVoiceRate {
+            handle: 1,
+            rate: 2.0,
+            glide_ms: 400.0,
+        });
+        let mut slopes = Vec::new();
+        for _ in 0..4 {
+            slopes.push(slope(&render(&mut engine, 10)));
+        }
+        let settled = slope(&render(&mut engine, 10));
+        assert!(
+            (settled / start - 2.0).abs() < 0.1,
+            "glide should settle on the target rate"
+        );
+        let quarter = 2.0f32.powf(0.25);
+        for (i, pair) in slopes.windows(2).enumerate() {
+            let step = pair[1] / pair[0];
+            assert!(
+                (step / quarter - 1.0).abs() < 0.08,
+                "block {i}: expected a 2^(1/4) step, got ×{step}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_release_freezes_a_glide_in_flight() {
+        let (mut engine, mut handle) = Engine::new(100.0, test_bank());
+        engine.set_release_stagger(0.0);
+        handle.send(Command::StartVoice {
+            handle: 1,
+            sample: 0,
+            rate: 1.0,
+            gain: 1.0,
+            group: 0,
+            wind_weight: 0.0,
+            brightness: 0.0,
+            enclosure: ENCLOSURE_NONE,
+        });
+        render(&mut engine, 10);
+        handle.send(Command::SetVoiceRate {
+            handle: 1,
+            rate: 4.0,
+            glide_ms: 10_000.0,
+        });
+        render(&mut engine, 10);
+        handle.send(Command::StopVoice { handle: 1 });
+        // Tail (40 frames) + crossfade at the barely-moved rate: the
+        // voice must play out and end cleanly, glide abandoned.
+        render(&mut engine, 60);
+        let out = render(&mut engine, 100);
+        assert!(
+            out[100..].iter().all(|&v| v == 0.0),
+            "released voice should end; the glide must not keep it alive"
+        );
+        engine.assert_slot_invariants();
     }
 
     #[test]
