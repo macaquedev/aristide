@@ -270,6 +270,14 @@ pub struct Input {
     /// ignores them; MPE members conventionally use 48.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bend: Option<f32>,
+    /// Lumatone key-mapping file (`.ltn`) for a generalized keyboard:
+    /// the map decides which (channel, note) pairs this input plays and
+    /// which manual key each addresses, in place of the channel/compass
+    /// fields above. Resolved against the organ file's directory; a map
+    /// that fails to load warns and leaves the input deaf, never
+    /// bricking the organ.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub map: Option<String>,
 }
 
 fn is_zero(value: &i8) -> bool {
@@ -683,6 +691,7 @@ pub fn organ_config_from_file(midi: &aristide_formats::instrument::MidiDef) -> O
             high: input.high,
             transpose: input.transpose,
             bend: input.bend,
+            map: input.map.clone(),
         });
     }
     organ.controls = midi
@@ -739,6 +748,9 @@ pub fn write_composite_midi(path: &Path, organ: Option<&OrganConfig>) -> Result<
                 }
                 if let Some(bend) = input.bend {
                     table["bend"] = toml_edit::value(bend as f64);
+                }
+                if let Some(map) = &input.map {
+                    table["map"] = toml_edit::value(map.as_str());
                 }
                 inputs.push(table);
             }
@@ -1584,6 +1596,7 @@ mod tests {
             high: None,
             transpose: 0,
             bend: None,
+            map: None,
         }
     }
 
@@ -1611,6 +1624,7 @@ mod tests {
                 high: Some(96),
                 transpose: -12,
                 bend: None,
+                map: None,
             }],
         );
         organ.controls.push(Control {

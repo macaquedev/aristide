@@ -268,7 +268,7 @@ pub enum Subject {
 
 /// One assignment as the MIDI callback sees it: already resolved to a
 /// manual index and a key range, so no names are touched per message.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct Route {
     /// MIDI channel 1-16; `None` accepts any.
     pub channel: Option<u8>,
@@ -281,6 +281,15 @@ pub struct Route {
     /// Pitch-bend range in semitones; `None` = this keyboard's bends
     /// are ignored (see [`config::Input::bend`]).
     pub bend: Option<f32>,
+    /// Lumatone key map for a generalized keyboard. When present, the
+    /// map replaces the channel/compass fields: it alone decides which
+    /// (channel, note) pairs play and which manual key each addresses.
+    /// Keys land in extended-note numbering — the map's Nth used
+    /// channel contributes keys N×128..N×128+127 — so a layout that
+    /// continues note numbers across channels (the Lumatone Editor's
+    /// convention for >128-key layouts) reads as one contiguous pitch
+    /// ladder for the tuning layer.
+    pub map: Option<std::sync::Arc<aristide_model::lumatone::LumatoneMap>>,
 }
 
 /// One MIDI input as the console sees it, with the assignments that
@@ -323,9 +332,21 @@ impl MidiPort {
         let mut lands: Vec<(usize, u16)> = self
             .routes
             .iter()
-            .filter(|route| route.channel.is_none_or(|on| on == channel + 1))
-            .filter(|route| (route.keys.0..=route.keys.1).contains(&key))
             .filter_map(|route| {
+                if let Some(map) = &route.map {
+                    // A mapped keyboard: the map is the whole story —
+                    // membership, channel handling, and the landing key
+                    // in extended-note numbering.
+                    map.key_for(channel, key)?;
+                    let rank = map.channels().position(|used| used == channel)? as i32;
+                    let extended = rank * 128 + key as i32 + route.transpose as i32;
+                    return u16::try_from(extended).ok().map(|key| (route.manual, key));
+                }
+                if !route.channel.is_none_or(|on| on == channel + 1)
+                    || !(route.keys.0..=route.keys.1).contains(&key)
+                {
+                    return None;
+                }
                 u8::try_from(key as i16 + route.transpose as i16)
                     .ok()
                     .filter(|shifted| *shifted < 128)
@@ -335,6 +356,26 @@ impl MidiPort {
         lands.sort_unstable();
         lands.dedup();
         lands
+    }
+
+    /// The extended-note span a mapped route can land on (before its
+    /// transpose): what compass widening uses in place of the learned
+    /// `keys` range.
+    fn map_reach(map: &aristide_model::lumatone::LumatoneMap) -> Option<(u16, u16)> {
+        let mut low = u16::MAX;
+        let mut high = 0u16;
+        let mut any = false;
+        for (rank, channel) in map.channels().enumerate() {
+            for note in 0..128u16 {
+                if map.key_for(channel, note as u8).is_some() {
+                    let extended = rank as u16 * 128 + note;
+                    low = low.min(extended);
+                    high = high.max(extended);
+                    any = true;
+                }
+            }
+        }
+        any.then_some((low, high))
     }
 
     fn matching(&self, channel: u8, key: Option<u8>) -> Vec<usize> {
@@ -490,6 +531,9 @@ pub struct State {
     /// bend routinely arrives before its note-on, and the note must
     /// start already bent.
     pub channel_bend: HashMap<(usize, u8), f64>,
+    /// Lumatone maps by the path the config spelled, loaded once;
+    /// `None` records a failed load so it isn't retried every rescan.
+    pub ltn_cache: HashMap<String, Option<std::sync::Arc<aristide_model::lumatone::LumatoneMap>>>,
     /// Wind groups the tremulant acts on (from the sidecar; empty when
     /// no set is loaded).
     pub trem_groups: Vec<u8>,
@@ -608,12 +652,57 @@ impl State {
     fn resolve_routes(&mut self) {
         self.resolve_bindings();
         let assignments = self.saved_assignments();
+        // Lumatone maps load once per path, against the organ file's
+        // directory like scale files. A file that fails to load warns
+        // and leaves its input deaf — never bricking the organ.
+        let base = self
+            .composite_path
+            .as_deref()
+            .and_then(std::path::Path::parent)
+            .map(std::path::Path::to_path_buf);
+        for (_, inputs) in &assignments {
+            for input in inputs {
+                let Some(path) = &input.map else { continue };
+                if self.ltn_cache.contains_key(path) {
+                    continue;
+                }
+                let file = std::path::Path::new(path);
+                let resolved = match (file.is_relative(), &base) {
+                    (true, Some(base)) => base.join(file),
+                    _ => file.to_path_buf(),
+                };
+                let loaded = std::fs::read_to_string(&resolved)
+                    .map_err(|err| format!("{}: {err}", resolved.display()))
+                    .and_then(|text| aristide_model::lumatone::LumatoneMap::parse(&text));
+                let entry = match loaded {
+                    Ok(map) => {
+                        for warning in &map.warnings {
+                            tracing::warn!("lumatone map {path}: {warning}");
+                        }
+                        tracing::info!(
+                            "lumatone map {path}: {} keys over {} channels",
+                            map.key_count(),
+                            map.channels().count()
+                        );
+                        Some(std::sync::Arc::new(map))
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            "lumatone map {path} not loaded: {err} — the input stays silent"
+                        );
+                        None
+                    }
+                };
+                self.ltn_cache.insert(path.clone(), entry);
+            }
+        }
         let native: Vec<(u8, u8)> = self
             .native_compass()
             .iter()
             .enumerate()
             .map(|(manual, own)| self.compass_override(manual).unwrap_or(*own))
             .collect();
+        let ltn_cache = &self.ltn_cache;
         for port in &mut self.midi_ports {
             port.routes = assignments
                 .iter()
@@ -629,6 +718,10 @@ impl State {
                             keys: input.compass().unwrap_or(native[*manual]),
                             transpose: input.transpose,
                             bend: input.bend,
+                            map: input
+                                .map
+                                .as_ref()
+                                .and_then(|path| ltn_cache.get(path).cloned().flatten()),
                         })
                 })
                 .collect();
@@ -641,13 +734,29 @@ impl State {
         // keyboard silent.
         // A declared compass is the floor of the union: a narrow
         // learned keyboard must not shrink the manual below it.
-        let mut widened: Vec<Option<(u8, u8)>> = (0..native.len())
-            .map(|manual| self.compass_override(manual))
+        let mut widened: Vec<Option<(i16, i16)>> = (0..native.len())
+            .map(|manual| {
+                self.compass_override(manual)
+                    .map(|(low, high)| (low as i16, high as i16))
+            })
             .collect();
         for port in &self.midi_ports {
             for route in &port.routes {
-                let shift = |key: u8| (key as i16 + route.transpose as i16).clamp(0, 127) as u8;
-                let reach = (shift(route.keys.0), shift(route.keys.1));
+                // A mapped keyboard reaches the map's extended-note
+                // span; a plain one its (learned) MIDI compass.
+                let reach: (i16, i16) = if let Some(map) = &route.map {
+                    let Some((low, high)) = MidiPort::map_reach(map) else {
+                        continue;
+                    };
+                    let shift = |key: u16| {
+                        (key as i32 + route.transpose as i32).clamp(0, i16::MAX as i32) as i16
+                    };
+                    (shift(low), shift(high))
+                } else {
+                    let shift =
+                        |key: u8| (key as i16 + route.transpose as i16).clamp(0, 127);
+                    (shift(route.keys.0), shift(route.keys.1))
+                };
                 let slot = &mut widened[route.manual];
                 *slot = Some(match *slot {
                     Some((low, high)) => (low.min(reach.0), high.max(reach.1)),
@@ -679,7 +788,7 @@ impl State {
         if let Control::Organ(console) = &mut self.control {
             for (manual, compass) in widened.into_iter().enumerate() {
                 match compass {
-                    Some((low, high)) => console.set_compass(manual, low as i16, high as i16),
+                    Some((low, high)) => console.set_compass(manual, low, high),
                     None => console.reset_compass(manual),
                 }
             }
@@ -1343,6 +1452,7 @@ impl State {
                     high: None,
                     transpose: 0,
                     bend: None,
+                    map: None,
                 });
                 learn.started = Instant::now();
                 self.learn = Some(learn);
@@ -2085,6 +2195,7 @@ fn main() -> Result<()> {
         keyboard: Vec::new(),
         live_notes: HashMap::new(),
         channel_bend: HashMap::new(),
+        ltn_cache: HashMap::new(),
         trem_groups: Vec::new(),
         trem_engaged: false,
         master_gain: args.master_gain.unwrap_or(0.178),
@@ -3228,6 +3339,7 @@ mod tests {
         let state = Arc::new(Mutex::new(State {
             engine,
             control: Control::Organ(console),
+            ltn_cache: HashMap::new(),
             midi_ports: vec![MidiPort {
                 name: "Test Keyboard".into(),
                 routes: Vec::new(),
@@ -3297,6 +3409,7 @@ mod tests {
                 high,
                 transpose: 0,
                 bend: None,
+                map: None,
             },
         );
     }
@@ -3316,6 +3429,7 @@ mod tests {
                 high: None,
                 transpose: 0,
                 bend: None,
+                map: None,
             },
         )
     }
@@ -3344,6 +3458,47 @@ mod tests {
         assert!(held_on(&state, manual).is_empty(), "and releases it again");
     }
 
+    /// A Lumatone map replaces channel/compass routing outright: only
+    /// mapped (channel, note) pairs play, and each lands in extended-
+    /// note numbering — the map's Nth used channel owns keys N×128 up.
+    #[test]
+    fn a_lumatone_map_routes_by_channel_and_note() {
+        let ltn = "[Board0]\n\
+                   Key_0=60\nChan_0=1\n\
+                   Key_1=62\nChan_1=1\n\
+                   Key_2=4\nChan_2=2\n\
+                   Key_3=70\nChan_3=1\nKTyp_3=2\n";
+        let map = aristide_model::lumatone::LumatoneMap::parse(ltn).expect("parses");
+        let port = MidiPort {
+            name: "Lumatone".into(),
+            routes: vec![Route {
+                channel: None,
+                manual: 1,
+                keys: (0, 127),
+                transpose: 0,
+                bend: None,
+                map: Some(std::sync::Arc::new(map)),
+            }],
+            bindings: Vec::new(),
+        };
+        assert_eq!(port.note_lands(0, 60), vec![(1, 60)]);
+        assert_eq!(port.note_lands(0, 62), vec![(1, 62)]);
+        assert_eq!(
+            port.note_lands(1, 4),
+            vec![(1, 132)],
+            "the second used channel continues 128 keys up"
+        );
+        assert!(port.note_lands(0, 61).is_empty(), "unmapped pair");
+        assert!(port.note_lands(0, 70).is_empty(), "a CC key is not a note");
+        assert!(port.note_lands(2, 60).is_empty(), "unused channel");
+        let map = port.routes[0].map.as_ref().expect("map");
+        assert_eq!(
+            MidiPort::map_reach(map),
+            Some((60, 132)),
+            "compass widening sees the extended span"
+        );
+    }
+
     /// MPE per-note pitch: a member channel's bend reaches the notes
     /// that channel is holding — and only on inputs that declared a
     /// bend range, because organ consoles ignore bend wheels.
@@ -3364,6 +3519,7 @@ mod tests {
                     high: None,
                     transpose: 0,
                     bend: Some(48.0),
+                    map: None,
                 },
             );
         }
@@ -3405,6 +3561,7 @@ mod tests {
                     high: None,
                     transpose: 0,
                     bend: None,
+                    map: None,
                 },
             );
         }
@@ -3486,6 +3643,7 @@ mod tests {
                 high: Some(96),
                 transpose: 0,
                 bend: None,
+                map: None,
             }],
             "port, channel and compass all come from the playing"
         );
@@ -3746,6 +3904,7 @@ mod tests {
                     high: None,
                     transpose: 0,
                     bend: None,
+                    map: None,
                 },
             ));
             assert!(
@@ -3791,6 +3950,7 @@ mod tests {
                     high: None,
                     transpose: 12,
                     bend: None,
+                    map: None,
                 },
             ));
             assert!(
@@ -3828,6 +3988,7 @@ mod tests {
                     high: None,
                     transpose: 0,
                     bend: None,
+                    map: None,
                 },
             ));
             assert!(state.pending.is_some());
@@ -3950,6 +4111,7 @@ mod tests {
             high: None,
             transpose: 0,
             bend: None,
+            map: None,
         };
         state
             .midi_config

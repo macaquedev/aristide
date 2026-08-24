@@ -286,6 +286,9 @@ pub struct InputDef {
     /// members conventionally 48).
     #[serde(default)]
     pub bend: Option<f32>,
+    /// Lumatone `.ltn` key-mapping path for a generalized keyboard.
+    #[serde(default)]
+    pub map: Option<String>,
 }
 
 /// One control binding: this message, from this device, does this.

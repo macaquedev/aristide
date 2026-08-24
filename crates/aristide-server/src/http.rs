@@ -720,6 +720,16 @@ fn respond(
                             .get(slot)
                             .and_then(|input| input.bend),
                     };
+                    // A Lumatone .ltn key map, resolved at route time;
+                    // "off" clears it. Absent, rebinding keeps it.
+                    let map = match param(query, "map").map(unescape) {
+                        Some(path) if path.is_empty() || path == "off" => None,
+                        Some(path) => Some(path),
+                        None => state
+                            .manual_inputs(manual)
+                            .get(slot)
+                            .and_then(|input| input.map.clone()),
+                    };
                     state.learn = None;
                     if !state.propose_input(
                         manual,
@@ -731,6 +741,7 @@ fn respond(
                             high,
                             transpose,
                             bend,
+                            map,
                         },
                     ) {
                         return bad_request("no such manual");
@@ -1258,8 +1269,12 @@ fn state_json_locked(state: &State) -> String {
                 let bend = input
                     .bend
                     .map_or_else(|| "null".to_string(), |bend| format!("{bend}"));
+                let map = input
+                    .map
+                    .as_deref()
+                    .map_or_else(|| "null".to_string(), json_string);
                 out.push_str(&format!(
-                    "{{\"slot\":{slot},\"device\":{},\"channel\":{},\"connected\":{connected},\"low\":{},\"high\":{},\"transpose\":{},\"bend\":{bend}}}",
+                    "{{\"slot\":{slot},\"device\":{},\"channel\":{},\"connected\":{connected},\"low\":{},\"high\":{},\"transpose\":{},\"bend\":{bend},\"map\":{map}}}",
                     json_string(&input.device),
                     number(input.channel),
                     number(input.low),
@@ -1752,6 +1767,7 @@ mod tests {
             keyboard: Vec::new(),
             live_notes: std::collections::HashMap::new(),
             channel_bend: std::collections::HashMap::new(),
+            ltn_cache: std::collections::HashMap::new(),
             trem_groups: vec![0, 1],
             trem_engaged: false,
             master_gain: 0.178,
@@ -2005,7 +2021,7 @@ mod tests {
         let body = state_json(&state);
         assert!(
             body.contains(
-                "{\"slot\":0,\"device\":\"Test Keyboard\",\"channel\":4,\"connected\":false,\"low\":null,\"high\":null,\"transpose\":0,\"bend\":null}"
+                "{\"slot\":0,\"device\":\"Test Keyboard\",\"channel\":4,\"connected\":false,\"low\":null,\"high\":null,\"transpose\":0,\"bend\":null,\"map\":null}"
             ),
             "assigned by name, honest that it isn't plugged in, and no \
              compass measured yet: {body}"
@@ -2633,6 +2649,7 @@ mod tests {
             keyboard: Vec::new(),
             live_notes: std::collections::HashMap::new(),
             channel_bend: std::collections::HashMap::new(),
+            ltn_cache: std::collections::HashMap::new(),
             trem_groups: Vec::new(),
             trem_engaged: false,
             master_gain: 0.178,
@@ -2785,6 +2802,7 @@ mod tests {
                     high: None,
                     transpose: 0,
                     bend: None,
+                    map: None,
                 },
             );
         }
