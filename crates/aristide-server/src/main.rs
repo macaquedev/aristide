@@ -1437,6 +1437,17 @@ impl State {
     /// Tune one division apart from the instrument, or with `None`
     /// return it to the shared tuning — live from the next note, and
     /// in the organ's file when it declares the manual.
+    /// A live tuning as the organ file spells it.
+    fn tuning_fields_of(tuning: &tuning::Tuning) -> config::ManualTuningFields {
+        config::ManualTuningFields {
+            temperament: tuning.temperament.name().to_string(),
+            a4_hz: tuning.a4_hz,
+            transpose: tuning.transpose,
+            scale: tuning.scale.as_ref().map(|scale| scale.scl.clone()),
+            keymap: tuning.scale.as_ref().and_then(|scale| scale.kbm.clone()),
+        }
+    }
+
     pub fn tune_manual(&mut self, manual: usize, tuning: Option<tuning::Tuning>) -> bool {
         let names = self.manual_names();
         if manual >= names.len() {
@@ -1445,10 +1456,9 @@ impl State {
         let Control::Organ(console) = &mut self.control else {
             return false;
         };
+        let fields = tuning.as_ref().map(Self::tuning_fields_of);
         console.set_manual_tuning(manual, tuning);
         if let Some(path) = self.composite_path.clone() {
-            let fields =
-                tuning.map(|t| (t.temperament.name().to_string(), t.a4_hz, t.transpose));
             match config::write_composite_manual_tuning(&path, &names[manual], fields) {
                 Ok(true) => {}
                 Ok(false) => tracing::warn!(
@@ -1483,8 +1493,8 @@ impl State {
                 let tuning = match &self.control {
                     Control::Organ(console) => console.manual_tuning(manual),
                     Control::Tone => None,
-                }
-                .map(|t| (t.temperament.name().to_string(), t.a4_hz, t.transpose));
+                };
+                let tuning = tuning.as_ref().map(Self::tuning_fields_of);
                 config::SavedManual {
                     name: name.clone(),
                     kind: match &self.control {

@@ -363,7 +363,7 @@ impl Console {
     }
 
     pub fn tuning(&self) -> Tuning {
-        self.tuning
+        self.tuning.clone()
     }
 
     /// Give one division a tuning of its own, or with `None` return it
@@ -380,19 +380,18 @@ impl Console {
     }
 
     pub fn manual_tuning(&self, manual_index: usize) -> Option<Tuning> {
-        self.manual_tuning.get(manual_index).copied().flatten()
+        self.manual_tuning.get(manual_index).cloned().flatten()
     }
 
     /// The tuning a division actually plays under: its own, else the
     /// console's. Couplers make this physical — a coupled copy sounds
     /// the destination's pipes, and pipes are tuned where they stand,
     /// so the copy speaks in the destination's temperament.
-    fn effective_tuning(&self, manual_index: usize) -> Tuning {
+    fn effective_tuning(&self, manual_index: usize) -> &Tuning {
         self.manual_tuning
             .get(manual_index)
-            .copied()
-            .flatten()
-            .unwrap_or(self.tuning)
+            .and_then(|tuning| tuning.as_ref())
+            .unwrap_or(&self.tuning)
     }
 
     /// Expand one played key through the engaged couplers' routes into
@@ -2088,6 +2087,7 @@ mod tests {
         // Meantone C sits +10.265 cents above equal (a-referenced).
         console.set_tuning(crate::tuning::Tuning {
             temperament: crate::tuning::Temperament::Meantone4,
+            scale: None,
             a4_hz: 440.0,
             transpose: 0,
         });
@@ -2103,6 +2103,7 @@ mod tests {
         // offset, and the sounding pipe index shifts).
         console.set_tuning(crate::tuning::Tuning {
             temperament: crate::tuning::Temperament::Equal,
+            scale: None,
             a4_hz: 440.0,
             transpose: 2,
         });
@@ -2126,6 +2127,7 @@ mod tests {
             1,
             Some(crate::tuning::Tuning {
                 temperament: crate::tuning::Temperament::Meantone4,
+                scale: None,
                 a4_hz: 440.0,
                 transpose: 0,
             }),
@@ -2148,6 +2150,7 @@ mod tests {
             0,
             Some(crate::tuning::Tuning {
                 temperament: crate::tuning::Temperament::Equal,
+                scale: None,
                 a4_hz: 440.0,
                 transpose: 2,
             }),
@@ -2157,6 +2160,93 @@ mod tests {
         // Back on the shared tuning, the Great answers again.
         console.set_manual_tuning(0, None);
         assert_eq!(console.note_on_manual(0, 96).0.len(), 1);
+    }
+
+    /// A Scala scale re-anchors keys to the nearest recorded pipe: a
+    /// 19-EDO key mid-ladder is closer to another pipe than to its
+    /// own, and it sounds that one, bent under half a semitone. The
+    /// anchor key and every whole period above it come out exactly
+    /// unbent — the octave is a real pipe.
+    #[test]
+    fn a_scala_scale_reanchors_keys_to_near_pipes() {
+        let mut scl = String::from("! 19edo.scl\n19-EDO\n19\n");
+        for degree in 1..=19 {
+            scl.push_str(&format!("{:.6}\n", degree as f64 * 1200.0 / 19.0));
+        }
+        let scale = aristide_model::scala::Scale::parse(&scl).expect("parses");
+        let tuning = crate::tuning::Tuning {
+            temperament: crate::tuning::Temperament::Equal,
+            scale: Some(std::sync::Arc::new(crate::tuning::ScaleTuning {
+                scl: "19edo.scl".into(),
+                kbm: None,
+                scale,
+                mapping: aristide_model::scala::KeyboardMapping::linear(440.0),
+            })),
+            a4_hz: 440.0,
+            transpose: 0,
+        };
+        let mut console = coupled_console();
+        console.set_manual_tuning(0, Some(tuning));
+
+        // The anchor: a′ is a′, the nominal pipe untouched.
+        let (starts, _) = console.note_on_manual(0, 69);
+        assert_eq!(starts.len(), 1);
+        assert!((starts[0].spec.rate - 1.0).abs() < 1e-6, "a' unbent: {}", starts[0].spec.rate);
+        console.note_off_manual(0, 69);
+
+        // Five 19-EDO steps up = 315.79¢, where the ladder has 500¢:
+        // re-anchored two pipes down, bent +15.79¢.
+        let (starts, _) = console.note_on_manual(0, 74);
+        assert_eq!(starts.len(), 1);
+        let expected = ((5.0 * 1200.0 / 19.0 - 300.0) / 1200.0f32).exp2();
+        assert!(
+            (starts[0].spec.rate - expected).abs() < 1e-4,
+            "bend under half a semitone: {} vs {expected}",
+            starts[0].spec.rate
+        );
+        console.note_off_manual(0, 74);
+
+        // Nineteen steps = one octave exactly: key 88 sounds the pipe
+        // seven below its own, unbent.
+        let (starts, _) = console.note_on_manual(0, 88);
+        assert_eq!(starts.len(), 1);
+        assert!(
+            (starts[0].spec.rate - 1.0).abs() < 1e-6,
+            "the octave is a real pipe: {}",
+            starts[0].spec.rate
+        );
+        console.note_off_manual(0, 88);
+
+        // The Swell follows the shared tuning, untouched by all this.
+        let (starts, _) = console.note_on_manual(1, 74);
+        assert_eq!(starts.len(), 1);
+        assert!((starts[0].spec.rate - 1.0).abs() < 1e-6);
+    }
+
+    /// A keyboard mapping's unmapped keys (`x` entries) sound nothing:
+    /// silence is what the mapping says, not a defect to heal over.
+    #[test]
+    fn unmapped_scala_keys_are_silent() {
+        let scl = "! whole.scl\nWhole tones\n6\n200.0\n400.0\n600.0\n800.0\n1000.0\n1200.0\n";
+        let kbm = "! every other key\n2\n0\n127\n60\n60\n261.625565\n6\n0\nx\n";
+        let scale = aristide_model::scala::Scale::parse(scl).expect("scl parses");
+        let mapping = aristide_model::scala::KeyboardMapping::parse(kbm).expect("kbm parses");
+        let tuning = crate::tuning::Tuning {
+            temperament: crate::tuning::Temperament::Equal,
+            scale: Some(std::sync::Arc::new(crate::tuning::ScaleTuning {
+                scl: "whole.scl".into(),
+                kbm: Some("every-other.kbm".into()),
+                scale,
+                mapping,
+            })),
+            a4_hz: 440.0,
+            transpose: 0,
+        };
+        let mut console = coupled_console();
+        console.set_manual_tuning(0, Some(tuning));
+        assert_eq!(console.note_on_manual(0, 60).0.len(), 1, "mapped key sounds");
+        console.note_off_manual(0, 60);
+        assert!(console.note_on_manual(0, 61).0.is_empty(), "unmapped key is silent");
     }
 
     /// Moving a stop re-homes it mid-hold: the key holding its new

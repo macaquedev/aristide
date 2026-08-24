@@ -149,11 +149,21 @@ fn respond(
                 // effectively plays now); `reset=1` returns it to the
                 // shared tuning. Without, it tunes the instrument.
                 let manual = param(query, "manual").and_then(|v| v.parse::<usize>().ok());
-                let patched = |mut tuning: crate::tuning::Tuning| {
+                // Scale files load now, against the organ's own
+                // directory, so a bad path answers this request instead
+                // of warning into the void.
+                let scale_base = state
+                    .composite_path
+                    .as_deref()
+                    .and_then(std::path::Path::parent)
+                    .map(std::path::Path::to_path_buf);
+                let patched = |mut tuning: crate::tuning::Tuning| -> Result<_, String> {
                     if let Some(t) =
                         param(query, "temperament").and_then(crate::tuning::Temperament::parse)
                     {
                         tuning.temperament = t;
+                        // Naming a temperament is leaving the scale.
+                        tuning.scale = None;
                     }
                     if let Some(a4) = param(query, "a4").and_then(|v| v.parse::<f64>().ok()) {
                         tuning.a4_hz = a4.clamp(300.0, 500.0);
@@ -162,7 +172,23 @@ fn respond(
                     {
                         tuning.transpose = t.clamp(-12, 12);
                     }
-                    tuning
+                    match param(query, "scale").map(unescape) {
+                        Some(scl) if scl.is_empty() || scl == "off" => tuning.scale = None,
+                        Some(scl) => {
+                            let kbm = param(query, "keymap").map(unescape);
+                            let scale = crate::tuning::ScaleTuning::load(
+                                &scl,
+                                kbm.as_deref().filter(|kbm| !kbm.is_empty()),
+                                tuning.a4_hz,
+                                scale_base.as_deref(),
+                            )?;
+                            tuning.scale = Some(std::sync::Arc::new(scale));
+                        }
+                        None => {}
+                    }
+                    // An a′ change re-anchors a linear-mapped scale.
+                    tuning.refresh_scale_reference();
+                    Ok(tuning)
                 };
                 match manual {
                     Some(manual) => {
@@ -174,14 +200,19 @@ fn respond(
                             Control::Tone => None,
                         };
                         if let Some(current) = current {
-                            let tuning = (!reset).then(|| patched(current));
+                            let tuning = match (!reset).then(|| patched(current)).transpose() {
+                                Ok(tuning) => tuning,
+                                Err(err) => return bad_request(&err),
+                            };
                             state.tune_manual(manual, tuning);
                         }
                     }
                     None => {
                         if let Control::Organ(console) = &mut state.control {
-                            let tuning = patched(console.tuning());
-                            console.set_tuning(tuning);
+                            match patched(console.tuning()) {
+                                Ok(tuning) => console.set_tuning(tuning),
+                                Err(err) => return bad_request(&err),
+                            }
                         }
                     }
                 }
@@ -1103,24 +1134,37 @@ fn state_json_locked(state: &State) -> String {
     }
     out.push(']');
     if let Control::Organ(console) = &state.control {
-        let tuning = console.tuning();
-        out.push_str(&format!(
-            ",\"tuning\":{{\"temperament\":{},\"a4\":{},\"transpose\":{}}}",
-            json_string(tuning.temperament.name()),
-            tuning.a4_hz,
-            tuning.transpose
-        ));
+        // A tuning as its JSON object; a scale rides along when one
+        // stands in for the temperament, named for the popover.
+        let tuning_json = |tuning: &crate::tuning::Tuning| {
+            let scale = match &tuning.scale {
+                Some(scale) => format!(
+                    ",\"scale\":{{\"scl\":{},\"kbm\":{},\"name\":{},\"notes\":{}}}",
+                    json_string(&scale.scl),
+                    scale
+                        .kbm
+                        .as_deref()
+                        .map(json_string)
+                        .unwrap_or_else(|| "null".to_string()),
+                    json_string(scale.name()),
+                    scale.scale.len()
+                ),
+                None => String::new(),
+            };
+            format!(
+                "\"temperament\":{},\"a4\":{},\"transpose\":{}{scale}",
+                json_string(tuning.temperament.name()),
+                tuning.a4_hz,
+                tuning.transpose
+            )
+        };
+        out.push_str(&format!(",\"tuning\":{{{}}}", tuning_json(&console.tuning())));
         // Divisions tuned apart from the instrument, by manual index —
         // absent manuals follow the shared tuning above.
         let own: Vec<String> = (0..console.manual_states().len())
             .filter_map(|manual| {
                 console.manual_tuning(manual).map(|tuning| {
-                    format!(
-                        "{{\"idx\":{manual},\"temperament\":{},\"a4\":{},\"transpose\":{}}}",
-                        json_string(tuning.temperament.name()),
-                        tuning.a4_hz,
-                        tuning.transpose
-                    )
+                    format!("{{\"idx\":{manual},{}}}", tuning_json(&tuning))
                 })
             })
             .collect();
@@ -1782,7 +1826,14 @@ mod tests {
         let saved = aristide_formats::instrument::load(&path).expect("reloads");
         assert_eq!(
             saved.manual_tuning,
-            [(1, Some("meantone4".into()), Some(415.0), Some(0))]
+            [aristide_formats::instrument::ManualTuningDef {
+                manual: 1,
+                temperament: Some("meantone4".into()),
+                a4_hz: Some(415.0),
+                transpose: Some(0),
+                scale: None,
+                keymap: None,
+            }]
         );
         assert_eq!(saved.sidecar.couplers.drop.len(), 1);
         // Ids renumber on reload; the stop's name is its identity here.

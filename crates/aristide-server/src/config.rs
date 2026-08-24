@@ -761,14 +761,26 @@ pub fn write_composite_midi(path: &Path, organ: Option<&OrganConfig>) -> Result<
     std::fs::rename(&temporary, path).map_err(|err| format!("{}: {err}", path.display()))
 }
 
+/// A manual's own tuning as the file spells it: temperament name,
+/// a4 Hz, transpose, and optionally a Scala scale (.scl path and .kbm
+/// path) standing in for the temperament.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ManualTuningFields {
+    pub temperament: String,
+    pub a4_hz: f64,
+    pub transpose: i8,
+    pub scale: Option<String>,
+    pub keymap: Option<String>,
+}
+
 /// One manual as `save_composite` writes it: name, compass, and any
-/// tuning of its own as (temperament name, a4 Hz, transpose).
+/// tuning of its own.
 pub struct SavedManual {
     pub name: String,
     pub kind: aristide_model::ManualKind,
     pub low: u8,
     pub high: u8,
-    pub tuning: Option<(String, f64, i8)>,
+    pub tuning: Option<ManualTuningFields>,
 }
 
 /// Write a combined instrument as a composite organ file: sources by
@@ -808,10 +820,8 @@ pub fn save_composite(
         }
         table["low"] = toml_edit::value(manual.low as i64);
         table["high"] = toml_edit::value(manual.high as i64);
-        if let Some((temperament, a4, transpose)) = &manual.tuning {
-            table["temperament"] = toml_edit::value(temperament.as_str());
-            table["a4_hz"] = toml_edit::value(*a4);
-            table["transpose"] = toml_edit::value(*transpose as i64);
+        if let Some(tuning) = &manual.tuning {
+            write_manual_tuning_fields(&mut table, tuning);
         }
         manual_tables.push(table);
     }
@@ -883,20 +893,39 @@ pub fn write_composite_compass(
 pub fn write_composite_manual_tuning(
     path: &Path,
     manual: &str,
-    tuning: Option<(String, f64, i8)>,
+    tuning: Option<ManualTuningFields>,
 ) -> Result<bool, String> {
     edit_composite_manual(path, manual, |table| match &tuning {
-        Some((temperament, a4, transpose)) => {
-            table["temperament"] = toml_edit::value(temperament.as_str());
-            table["a4_hz"] = toml_edit::value(*a4);
-            table["transpose"] = toml_edit::value(*transpose as i64);
+        Some(fields) => {
+            write_manual_tuning_fields(table, fields);
         }
         None => {
-            table.remove("temperament");
-            table.remove("a4_hz");
-            table.remove("transpose");
+            for field in ["temperament", "a4_hz", "transpose", "scale", "keymap"] {
+                table.remove(field);
+            }
         }
     })
+}
+
+/// The tuning lines of one `[[manual]]` table. A scale replaces the
+/// temperament line (a Scala scale IS the temperament); absent fields
+/// are removed so the file never says two things at once.
+fn write_manual_tuning_fields(table: &mut toml_edit::Table, fields: &ManualTuningFields) {
+    if fields.scale.is_some() {
+        table.remove("temperament");
+    } else {
+        table["temperament"] = toml_edit::value(fields.temperament.as_str());
+    }
+    table["a4_hz"] = toml_edit::value(fields.a4_hz);
+    table["transpose"] = toml_edit::value(fields.transpose as i64);
+    for (key, value) in [("scale", &fields.scale), ("keymap", &fields.keymap)] {
+        match value {
+            Some(value) => table[key] = toml_edit::value(value.as_str()),
+            None => {
+                table.remove(key);
+            }
+        }
+    }
 }
 
 /// Change one declared manual's kind in a composite file. The default
@@ -2053,6 +2082,34 @@ mod tests {
         );
         assert_eq!(def(&path).manuals[0].kind, None);
         assert!(!write_composite_manual_kind(&path, "Ghost", ManualKind::Pedal).expect("ghost"));
+
+        // A scale replaces the temperament line (a Scala scale IS the
+        // temperament); naming a temperament again drops the scale,
+        // and None clears the whole tuning.
+        let tuned = |temperament: &str, scale: Option<&str>| ManualTuningFields {
+            temperament: temperament.into(),
+            a4_hz: 432.0,
+            transpose: 0,
+            scale: scale.map(str::to_string),
+            keymap: None,
+        };
+        assert!(
+            write_composite_manual_tuning(&path, "Grand orgue", Some(tuned("equal", Some("19edo.scl"))))
+                .expect("tuning")
+        );
+        let parsed = def(&path);
+        assert_eq!(parsed.manuals[0].scale.as_deref(), Some("19edo.scl"));
+        assert_eq!(parsed.manuals[0].temperament, None, "a scale IS the temperament");
+        assert_eq!(parsed.manuals[0].a4_hz, Some(432.0));
+        assert!(
+            write_composite_manual_tuning(&path, "Grand orgue", Some(tuned("meantone4", None)))
+                .expect("tuning")
+        );
+        let parsed = def(&path);
+        assert_eq!(parsed.manuals[0].scale, None);
+        assert_eq!(parsed.manuals[0].temperament.as_deref(), Some("meantone4"));
+        assert!(write_composite_manual_tuning(&path, "Grand orgue", None).expect("tuning"));
+        assert_eq!(def(&path).manuals[0].a4_hz, None);
 
         // Rename follows the name everywhere the file says it.
         assert!(rename_composite_manual(&path, "Grand orgue", "Hauptwerk").expect("renames"));

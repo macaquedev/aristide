@@ -185,6 +185,12 @@ pub struct ManualDef {
     pub temperament: Option<String>,
     pub a4_hz: Option<f64>,
     pub transpose: Option<i8>,
+    /// A Scala `.scl` file (path, resolved against the organ file's
+    /// directory) standing in for the temperament on this manual.
+    pub scale: Option<String>,
+    /// Its `.kbm` keyboard mapping; omitted, keys map linearly onto
+    /// successive degrees with a′ anchored at `a4_hz`.
+    pub keymap: Option<String>,
 }
 
 /// Move one stop between manuals, after all pulls: the stop named on
@@ -365,10 +371,18 @@ impl Definition {
     }
 }
 
-/// One declared manual's own tuning: (manual index, temperament name,
-/// a4 Hz, transpose), each `None` meaning "follow the instrument-wide
-/// `[tuning]`".
-pub type ManualTuningDef = (usize, Option<String>, Option<f64>, Option<i8>);
+/// One declared manual's own tuning, no further parsed than names —
+/// resolving temperaments and reading scale files is the server's
+/// business. Each `None` means "follow the instrument-wide `[tuning]`".
+#[derive(Debug, Clone, PartialEq)]
+pub struct ManualTuningDef {
+    pub manual: usize,
+    pub temperament: Option<String>,
+    pub a4_hz: Option<f64>,
+    pub transpose: Option<i8>,
+    pub scale: Option<String>,
+    pub keymap: Option<String>,
+}
 
 #[derive(Debug)]
 pub struct Assembled {
@@ -706,15 +720,18 @@ pub fn assemble(
         .iter()
         .enumerate()
         .filter(|(_, manual)| {
-            manual.temperament.is_some() || manual.a4_hz.is_some() || manual.transpose.is_some()
+            manual.temperament.is_some()
+                || manual.a4_hz.is_some()
+                || manual.transpose.is_some()
+                || manual.scale.is_some()
         })
-        .map(|(index, manual)| {
-            (
-                index,
-                manual.temperament.clone(),
-                manual.a4_hz,
-                manual.transpose,
-            )
+        .map(|(index, manual)| ManualTuningDef {
+            manual: index,
+            temperament: manual.temperament.clone(),
+            a4_hz: manual.a4_hz,
+            transpose: manual.transpose,
+            scale: manual.scale.clone(),
+            keymap: manual.keymap.clone(),
         })
         .collect();
     let mut organ = assembly.finish(def.name.clone());
@@ -1362,6 +1379,8 @@ mod tests {
             temperament: None,
             a4_hz: None,
             transpose: None,
+            scale: None,
+            keymap: None,
         }
     }
 
@@ -1789,7 +1808,14 @@ drop = ["Swell to Great"]
         let built = assemble(&definition, &sources, Vec::new()).expect("assembles");
         assert_eq!(
             built.manual_tuning,
-            [(1, Some("meantone".to_string()), Some(415.0), None)]
+            [ManualTuningDef {
+                manual: 1,
+                temperament: Some("meantone".to_string()),
+                a4_hz: Some(415.0),
+                transpose: None,
+                scale: None,
+                keymap: None,
+            }]
         );
         assert_eq!(built.sidecar.couplers.drop, ["Swell to Great"]);
     }

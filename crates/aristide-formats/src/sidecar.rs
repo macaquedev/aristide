@@ -390,6 +390,14 @@ pub struct TuningConfig {
     /// Semitones added to incoming keys (a transposer).
     #[serde(default)]
     pub transpose: i8,
+    /// A Scala `.scl` file standing in for the temperament, resolved
+    /// against the organ file's directory.
+    #[serde(default)]
+    pub scale: Option<String>,
+    /// Its `.kbm` keyboard mapping; omitted, keys map linearly with a′
+    /// anchored at `a4_hz`.
+    #[serde(default)]
+    pub keymap: Option<String>,
 }
 
 fn default_temperament() -> String {
@@ -406,6 +414,8 @@ impl Default for TuningConfig {
             temperament: default_temperament(),
             a4_hz: default_a4_hz(),
             transpose: 0,
+            scale: None,
+            keymap: None,
         }
     }
 }

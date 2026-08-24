@@ -79,12 +79,86 @@ impl Temperament {
     }
 }
 
-/// The live tuning state: temperament + concert pitch + transposition.
-#[derive(Debug, Clone, Copy)]
+/// A Scala scale with its keyboard mapping, loaded and ready — one
+/// division's whole key→pitch table. Shared by `Arc`: tunings are
+/// cloned on every key press's landing walk, and the table itself
+/// never changes once built (a new scale is a new `Arc`).
+#[derive(Debug, Clone)]
+pub struct ScaleTuning {
+    /// The `.scl` path as the organ file spelled it (kept verbatim so
+    /// edits round-trip; resolved against the organ file's directory).
+    pub scl: String,
+    /// The `.kbm` path, or `None` for the linear default mapping
+    /// (chromatic degrees, a′ anchored at the tuning's `a4_hz`).
+    pub kbm: Option<String>,
+    pub scale: aristide_model::scala::Scale,
+    pub mapping: aristide_model::scala::KeyboardMapping,
+}
+
+impl ScaleTuning {
+    /// Read and parse a scale (and optionally its keyboard mapping)
+    /// from disk, `base`-relative for relative paths. `a4_hz` anchors
+    /// the linear default mapping when no `.kbm` is given; an explicit
+    /// mapping carries its own reference and ignores it.
+    pub fn load(
+        scl: &str,
+        kbm: Option<&str>,
+        a4_hz: f64,
+        base: Option<&std::path::Path>,
+    ) -> Result<ScaleTuning, String> {
+        let resolve = |path: &str| -> std::path::PathBuf {
+            let path = std::path::Path::new(path);
+            match (path.is_relative(), base) {
+                (true, Some(base)) => base.join(path),
+                _ => path.to_path_buf(),
+            }
+        };
+        let read = |path: &str| -> Result<String, String> {
+            let resolved = resolve(path);
+            std::fs::read_to_string(&resolved)
+                .map_err(|err| format!("{}: {err}", resolved.display()))
+        };
+        let scale = aristide_model::scala::Scale::parse(&read(scl)?)
+            .map_err(|err| format!("{scl}: {err}"))?;
+        let mapping = match kbm {
+            Some(kbm) => aristide_model::scala::KeyboardMapping::parse(&read(kbm)?)
+                .map_err(|err| format!("{kbm}: {err}"))?,
+            None => aristide_model::scala::KeyboardMapping::linear(a4_hz),
+        };
+        Ok(ScaleTuning {
+            scl: scl.to_string(),
+            kbm: kbm.map(str::to_string),
+            scale,
+            mapping,
+        })
+    }
+
+    /// A short human name: the scale's description line, else the file
+    /// stem.
+    pub fn name(&self) -> &str {
+        let description = self.scale.description.trim();
+        if !description.is_empty() {
+            return description;
+        }
+        std::path::Path::new(&self.scl)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or(&self.scl)
+    }
+}
+
+/// The live tuning state: temperament + concert pitch + transposition,
+/// or a Scala scale standing in for the temperament.
+#[derive(Debug, Clone)]
 pub struct Tuning {
     pub temperament: Temperament,
+    /// When present, the scale supplies every key's pitch and the
+    /// temperament above is dormant — a Scala scale IS a temperament,
+    /// just one with its own degree count and period.
+    pub scale: Option<std::sync::Arc<ScaleTuning>>,
     /// Frequency of a′ in Hz (440 = modern concert pitch; 415 baroque,
-    /// 465 chorton, …).
+    /// 465 chorton, …). Under a scale with its own `.kbm` the mapping's
+    /// reference frequency governs instead.
     pub a4_hz: f64,
     /// Semitones added to incoming keys before routing — a transposer
     /// selects different pipes, like the real console gadget.
@@ -95,6 +169,7 @@ impl Default for Tuning {
     fn default() -> Self {
         Tuning {
             temperament: Temperament::Equal,
+            scale: None,
             a4_hz: 440.0,
             transpose: 0,
         }
@@ -110,11 +185,32 @@ impl Tuning {
     /// `None` means the key sounds nothing — no temperament says that,
     /// but a Scala keyboard mapping's unmapped keys will.
     pub fn deviation_cents(&self, key: u8) -> Option<f64> {
+        if let Some(scale) = &self.scale {
+            let hz =
+                aristide_model::scala::key_frequency(&scale.scale, &scale.mapping, key as i32)?;
+            // Distance from the 12-EDO/A440 pitch this key's nominal
+            // pipe was recorded at.
+            let ladder_hz = 440.0 * (((key as f64) - 69.0) / 12.0).exp2();
+            return Some(1200.0 * (hz / ladder_hz).log2());
+        }
         let class = (key % 12) as usize;
         Some(
             self.temperament.offsets_cents()[class] as f64
                 + 1200.0 * (self.a4_hz / 440.0).log2(),
         )
+    }
+
+    /// Keep the linear default mapping anchored to `a4_hz` after an a′
+    /// change — an explicit `.kbm` owns its own reference and stays.
+    pub fn refresh_scale_reference(&mut self) {
+        if let Some(scale) = &self.scale
+            && scale.kbm.is_none()
+            && scale.mapping.reference_hz != self.a4_hz
+        {
+            let mut refreshed = (**scale).clone();
+            refreshed.mapping = aristide_model::scala::KeyboardMapping::linear(self.a4_hz);
+            self.scale = Some(std::sync::Arc::new(refreshed));
+        }
     }
 
     /// Rate multiplier for a pipe sounding MIDI note `key` (applied on

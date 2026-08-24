@@ -498,16 +498,34 @@ pub fn prepare(
             );
             tuning::Temperament::Equal
         });
-    let live_tuning = tuning::Tuning {
+    // Scale files resolve against the organ's own directory: the file
+    // that names them. A scale that fails to load warns and leaves the
+    // temperament standing — a missing .scl must not brick the organ.
+    let scale_base = first_path.parent().map(std::path::Path::to_path_buf);
+    let load_scale = |scl: &str, kbm: Option<&str>, a4_hz: f64| {
+        match tuning::ScaleTuning::load(scl, kbm, a4_hz, scale_base.as_deref()) {
+            Ok(scale) => Some(std::sync::Arc::new(scale)),
+            Err(err) => {
+                tracing::warn!("tuning scale not loaded: {err} — keeping the temperament");
+                None
+            }
+        }
+    };
+    let mut live_tuning = tuning::Tuning {
         temperament,
+        scale: None,
         a4_hz: sidecar.tuning.a4_hz.clamp(300.0, 500.0),
         transpose: sidecar.tuning.transpose.clamp(-12, 12),
     };
-    console.set_tuning(live_tuning);
+    if let Some(scl) = &sidecar.tuning.scale {
+        live_tuning.scale = load_scale(scl, sidecar.tuning.keymap.as_deref(), live_tuning.a4_hz);
+    }
+    console.set_tuning(live_tuning.clone());
     // Divisions the definition tunes apart from the rest: missing
     // fields follow the instrument-wide tuning.
-    for (manual, temperament, a4, transpose) in &manual_tuning_defs {
-        let temperament = temperament
+    for def in &manual_tuning_defs {
+        let temperament = def
+            .temperament
             .as_deref()
             .map(|name| {
                 tuning::Temperament::parse(name).unwrap_or_else(|| {
@@ -519,18 +537,26 @@ pub fn prepare(
                 })
             })
             .unwrap_or(live_tuning.temperament);
-        let own = tuning::Tuning {
+        let mut own = tuning::Tuning {
             temperament,
-            a4_hz: a4.unwrap_or(live_tuning.a4_hz).clamp(300.0, 500.0),
-            transpose: transpose.unwrap_or(live_tuning.transpose).clamp(-12, 12),
+            scale: None,
+            a4_hz: def.a4_hz.unwrap_or(live_tuning.a4_hz).clamp(300.0, 500.0),
+            transpose: def.transpose.unwrap_or(live_tuning.transpose).clamp(-12, 12),
         };
+        if let Some(scl) = &def.scale {
+            own.scale = load_scale(scl, def.keymap.as_deref(), own.a4_hz);
+        }
         tracing::info!(
-            "tuning: manual {manual} plays {} @ a'={} Hz, transpose {:+}",
-            own.temperament.name(),
+            "tuning: manual {} plays {} @ a'={} Hz, transpose {:+}",
+            def.manual,
+            own.scale
+                .as_ref()
+                .map(|scale| scale.name())
+                .unwrap_or(own.temperament.name()),
             own.a4_hz,
             own.transpose
         );
-        console.set_manual_tuning(*manual, Some(own));
+        console.set_manual_tuning(def.manual, Some(own));
     }
     console.set_coupler_repitch(sidecar.couplers.repitch);
     // Couplers this instrument takes off its console — they stay
