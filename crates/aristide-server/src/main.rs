@@ -6,6 +6,7 @@ mod http;
 mod load;
 mod tuning;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -277,6 +278,9 @@ pub struct Route {
     pub keys: (u8, u8),
     /// Semitones this keyboard is currently shifted by.
     pub transpose: i8,
+    /// Pitch-bend range in semitones; `None` = this keyboard's bends
+    /// are ignored (see [`config::Input::bend`]).
+    pub bend: Option<f32>,
 }
 
 /// One MIDI input as the console sees it, with the assignments that
@@ -303,6 +307,18 @@ impl MidiPort {
     /// exist — and each route applies its own shift, since two manuals
     /// on one device may sit at different octaves. A shift that pushes
     /// a key off the MIDI range drops that landing alone.
+    /// The widest bend range any of this port's routes grants notes on
+    /// `channel`, if any grants one at all. Per channel because that is
+    /// how MPE addresses notes; per port because the range is a fact
+    /// about the controller.
+    fn bend_range(&self, channel: u8) -> Option<f32> {
+        self.routes
+            .iter()
+            .filter(|route| route.channel.is_none_or(|on| on == channel + 1))
+            .filter_map(|route| route.bend)
+            .max_by(f32::total_cmp)
+    }
+
     fn note_lands(&self, channel: u8, key: u8) -> Vec<(usize, u8)> {
         let mut lands: Vec<(usize, u8)> = self
             .routes
@@ -466,6 +482,14 @@ pub struct State {
     /// config — and like any device it may drive more than one manual,
     /// once the player has confirmed that is what they meant.
     pub keyboard: Vec<KeyboardInput>,
+    /// Live notes per (port, channel, incoming note): the (manual, key)
+    /// landings each produced, so a later per-channel pitch bend can
+    /// find them. Populated only for bend-enabled inputs.
+    pub live_notes: HashMap<(usize, u8, u8), Vec<(usize, u8)>>,
+    /// The current bend per (port, channel), in cents — an MPE member's
+    /// bend routinely arrives before its note-on, and the note must
+    /// start already bent.
+    pub channel_bend: HashMap<(usize, u8), f64>,
     /// Wind groups the tremulant acts on (from the sidecar; empty when
     /// no set is loaded).
     pub trem_groups: Vec<u8>,
@@ -604,6 +628,7 @@ impl State {
                             // to be exactly the organ's own compass.
                             keys: input.compass().unwrap_or(native[*manual]),
                             transpose: input.transpose,
+                            bend: input.bend,
                         })
                 })
                 .collect();
@@ -1316,6 +1341,7 @@ impl State {
                     low: Some(key),
                     high: None,
                     transpose: 0,
+                    bend: None,
                 });
                 learn.started = Instant::now();
                 self.learn = Some(learn);
@@ -2056,6 +2082,8 @@ fn main() -> Result<()> {
         pending: None,
         key_bindings: Vec::new(),
         keyboard: Vec::new(),
+        live_notes: HashMap::new(),
+        channel_bend: HashMap::new(),
         trem_groups: Vec::new(),
         trem_engaged: false,
         master_gain: args.master_gain.unwrap_or(0.178),
@@ -2809,6 +2837,11 @@ fn connect_all_midi_inputs(
     connections
 }
 
+/// Glide for one pitch-bend step: about the interval between an MPE
+/// controller's bend messages, so a stream of them reads as one
+/// continuous motion instead of a staircase.
+const BEND_GLIDE_MS: f32 = 12.0;
+
 fn handle_midi(message: &[u8], port: usize, state: &Mutex<State>) {
     let &[status, data1, data2] = message else {
         return;
@@ -2874,12 +2907,17 @@ fn handle_midi(message: &[u8], port: usize, state: &Mutex<State>) {
         (_, true) => (source.note_lands(channel, data1), Vec::new()),
         (_, false) => (Vec::new(), source.targets(channel)),
     };
+    let bend_range = source.bend_range(channel);
     let key = data1;
     if matches!(state.control, Control::Organ(_)) && lands.is_empty() && targets.is_empty() {
         return;
     }
     let State {
-        engine, control, ..
+        engine,
+        control,
+        live_notes,
+        channel_bend,
+        ..
     } = &mut *state;
 
     let mut send = |command: Command| {
@@ -2901,7 +2939,7 @@ fn handle_midi(message: &[u8], port: usize, state: &Mutex<State>) {
                 freq_hz: midi_note_to_hz(key),
             }),
             Control::Organ(console) => {
-                for (manual, key) in lands {
+                for &(manual, key) in &lands {
                     let (starts, retriggered) = console.note_on_manual(manual, key);
                     for handle in retriggered {
                         send(Command::StopVoice { handle });
@@ -2919,11 +2957,33 @@ fn handle_midi(message: &[u8], port: usize, state: &Mutex<State>) {
                         });
                     }
                 }
+                if bend_range.is_some() {
+                    // A note on an already-bent MPE channel starts at
+                    // the bend, not at centre — the retune snaps (the
+                    // voice is a frame old, nothing to glide from).
+                    let cents = channel_bend
+                        .get(&(port, channel))
+                        .copied()
+                        .unwrap_or(0.0);
+                    if cents != 0.0 {
+                        for &(manual, key) in &lands {
+                            for (handle, rate) in console.bend_key(manual, key, cents) {
+                                send(Command::SetVoiceRate {
+                                    handle,
+                                    rate,
+                                    glide_ms: 0.0,
+                                });
+                            }
+                        }
+                    }
+                    live_notes.insert((port, channel, data1), lands);
+                }
             }
         },
         (0x80, key, _) | (0x90, key, 0) => match control {
             Control::Tone => send(Command::NoteOff { key }),
             Control::Organ(console) => {
+                live_notes.remove(&(port, channel, data1));
                 for (manual, key) in lands {
                     for handle in console.note_off_manual(manual, key) {
                         send(Command::StopVoice { handle });
@@ -2931,10 +2991,36 @@ fn handle_midi(message: &[u8], port: usize, state: &Mutex<State>) {
                 }
             }
         },
+        // Per-channel pitch bend: MPE's per-note pitch, since a member
+        // channel holds one note. 14-bit centre 8192; the input's bend
+        // range says what full deflection means. Inputs with no range
+        // configured ignore bends entirely, as organ consoles do.
+        (0xE0, lsb, msb) => {
+            if let (Control::Organ(console), Some(range)) = (control, bend_range) {
+                let value = (lsb as i32) | ((msb as i32) << 7);
+                let cents = (value - 8192) as f64 / 8192.0 * range as f64 * 100.0;
+                channel_bend.insert((port, channel), cents);
+                for (_, landings) in live_notes
+                    .iter()
+                    .filter(|((p, c, _), _)| *p == port && *c == channel)
+                {
+                    for &(manual, key) in landings {
+                        for (handle, rate) in console.bend_key(manual, key, cents) {
+                            send(Command::SetVoiceRate {
+                                handle,
+                                rate,
+                                glide_ms: BEND_GLIDE_MS,
+                            });
+                        }
+                    }
+                }
+            }
+        }
         (0xB0, 120..=123, _) => {
             if let Control::Organ(console) = control {
                 console.all_off();
             }
+            live_notes.clear();
             send(Command::AllNotesOff);
         }
         // Expression pedal: drive the swell boxes of whatever manuals
@@ -3058,6 +3144,8 @@ mod tests {
             pending: None,
             key_bindings: Vec::new(),
             keyboard: Vec::new(),
+            live_notes: HashMap::new(),
+            channel_bend: HashMap::new(),
             trem_groups: Vec::new(),
             trem_engaged: false,
             master_gain: 0.178,
@@ -3110,6 +3198,7 @@ mod tests {
                 low,
                 high,
                 transpose: 0,
+                bend: None,
             },
         );
     }
@@ -3128,6 +3217,7 @@ mod tests {
                 low: None,
                 high: None,
                 transpose: 0,
+                bend: None,
             },
         )
     }
@@ -3154,6 +3244,77 @@ mod tests {
         assert_eq!(held_on(&state, manual), vec![60], "any channel plays it");
         handle_midi(&[0x80, 60, 0], 0, &state);
         assert!(held_on(&state, manual).is_empty(), "and releases it again");
+    }
+
+    /// MPE per-note pitch: a member channel's bend reaches the notes
+    /// that channel is holding — and only on inputs that declared a
+    /// bend range, because organ consoles ignore bend wheels.
+    #[test]
+    fn pitch_bend_follows_the_notes_of_its_channel() {
+        let Some((state, manual)) = demo_state("Gamba 8'") else {
+            return;
+        };
+        {
+            let mut locked = state.lock().expect("state poisoned");
+            locked.set_input(
+                manual,
+                0,
+                config::Input {
+                    device: "Test Keyboard".into(),
+                    channel: None,
+                    low: None,
+                    high: None,
+                    transpose: 0,
+                    bend: Some(48.0),
+                },
+            );
+        }
+        handle_midi(&[0x90, 60, 100], 0, &state);
+        handle_midi(&[0xE0, 0x7F, 0x7F], 0, &state); // full deflection up
+        {
+            let locked = state.lock().expect("state poisoned");
+            let cents = locked.channel_bend[&(0, 0)];
+            let expected = (16383.0 - 8192.0) / 8192.0 * 4800.0;
+            assert!(
+                (cents - expected).abs() < 1e-6,
+                "48-semitone range at full deflection: {cents} vs {expected}"
+            );
+            assert_eq!(
+                locked.live_notes[&(0, 0, 60)],
+                vec![(manual, 60)],
+                "the bend knows which landings its channel holds"
+            );
+        }
+        // The bend outlives the note (MPE sends it before the next
+        // note-on too), but the note's tracking ends with the note.
+        handle_midi(&[0x80, 60, 0], 0, &state);
+        {
+            let locked = state.lock().expect("state poisoned");
+            assert!(locked.live_notes.is_empty());
+            assert!(locked.channel_bend.contains_key(&(0, 0)));
+        }
+        // An input with no bend range stays deaf to the wheel.
+        {
+            let mut locked = state.lock().expect("state poisoned");
+            locked.channel_bend.clear();
+            locked.set_input(
+                manual,
+                0,
+                config::Input {
+                    device: "Test Keyboard".into(),
+                    channel: None,
+                    low: None,
+                    high: None,
+                    transpose: 0,
+                    bend: None,
+                },
+            );
+        }
+        handle_midi(&[0x90, 60, 100], 0, &state);
+        handle_midi(&[0xE0, 0x7F, 0x7F], 0, &state);
+        let locked = state.lock().expect("state poisoned");
+        assert!(locked.channel_bend.is_empty(), "no range, no bend");
+        assert!(locked.live_notes.is_empty(), "and no tracking");
     }
 
     /// One DIN cable, several manuals: the channel is what tells them
@@ -3226,6 +3387,7 @@ mod tests {
                 low: Some(55),
                 high: Some(96),
                 transpose: 0,
+                bend: None,
             }],
             "port, channel and compass all come from the playing"
         );
@@ -3485,6 +3647,7 @@ mod tests {
                     low: None,
                     high: None,
                     transpose: 0,
+                    bend: None,
                 },
             ));
             assert!(
@@ -3529,6 +3692,7 @@ mod tests {
                     low: None,
                     high: None,
                     transpose: 12,
+                    bend: None,
                 },
             ));
             assert!(
@@ -3565,6 +3729,7 @@ mod tests {
                     low: None,
                     high: None,
                     transpose: 0,
+                    bend: None,
                 },
             ));
             assert!(state.pending.is_some());
@@ -3686,6 +3851,7 @@ mod tests {
             low: None,
             high: None,
             transpose: 0,
+            bend: None,
         };
         state
             .midi_config

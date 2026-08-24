@@ -704,6 +704,22 @@ fn respond(
                             .get(slot)
                             .map_or(0, |input| input.transpose),
                     };
+                    // Pitch-bend range in semitones; "off" (or 0)
+                    // disables. Absent, rebinding keeps what the slot
+                    // already had — like transpose.
+                    let bend = match param(query, "bend") {
+                        Some("off") => None,
+                        Some(value) => match value.parse::<f32>() {
+                            Ok(semitones) if (0.0..=96.0).contains(&semitones) => {
+                                (semitones > 0.0).then_some(semitones)
+                            }
+                            _ => return bad_request("bend must be 0-96 semitones"),
+                        },
+                        None => state
+                            .manual_inputs(manual)
+                            .get(slot)
+                            .and_then(|input| input.bend),
+                    };
                     state.learn = None;
                     if !state.propose_input(
                         manual,
@@ -714,6 +730,7 @@ fn respond(
                             low,
                             high,
                             transpose,
+                            bend,
                         },
                     ) {
                         return bad_request("no such manual");
@@ -1236,8 +1253,11 @@ fn state_json_locked(state: &State) -> String {
                 let number = |value: Option<u8>| {
                     value.map_or_else(|| "null".to_string(), |v| v.to_string())
                 };
+                let bend = input
+                    .bend
+                    .map_or_else(|| "null".to_string(), |bend| format!("{bend}"));
                 out.push_str(&format!(
-                    "{{\"slot\":{slot},\"device\":{},\"channel\":{},\"connected\":{connected},\"low\":{},\"high\":{},\"transpose\":{}}}",
+                    "{{\"slot\":{slot},\"device\":{},\"channel\":{},\"connected\":{connected},\"low\":{},\"high\":{},\"transpose\":{},\"bend\":{bend}}}",
                     json_string(&input.device),
                     number(input.channel),
                     number(input.low),
@@ -1728,6 +1748,8 @@ mod tests {
             pending: None,
             key_bindings: Vec::new(),
             keyboard: Vec::new(),
+            live_notes: std::collections::HashMap::new(),
+            channel_bend: std::collections::HashMap::new(),
             trem_groups: vec![0, 1],
             trem_engaged: false,
             master_gain: 0.178,
@@ -1981,7 +2003,7 @@ mod tests {
         let body = state_json(&state);
         assert!(
             body.contains(
-                "{\"slot\":0,\"device\":\"Test Keyboard\",\"channel\":4,\"connected\":false,\"low\":null,\"high\":null,\"transpose\":0}"
+                "{\"slot\":0,\"device\":\"Test Keyboard\",\"channel\":4,\"connected\":false,\"low\":null,\"high\":null,\"transpose\":0,\"bend\":null}"
             ),
             "assigned by name, honest that it isn't plugged in, and no \
              compass measured yet: {body}"
@@ -2607,6 +2629,8 @@ mod tests {
             pending: None,
             key_bindings: Vec::new(),
             keyboard: Vec::new(),
+            live_notes: std::collections::HashMap::new(),
+            channel_bend: std::collections::HashMap::new(),
             trem_groups: Vec::new(),
             trem_engaged: false,
             master_gain: 0.178,
@@ -2758,6 +2782,7 @@ mod tests {
                     low: None,
                     high: None,
                     transpose: 0,
+                    bend: None,
                 },
             );
         }

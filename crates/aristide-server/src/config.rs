@@ -233,7 +233,7 @@ pub struct Control {
 }
 
 /// One source of notes for one manual.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Input {
     /// MIDI port name, as the OS reports it. Kept even while the device
     /// is unplugged — a config that forgets a keyboard because it was
@@ -262,6 +262,14 @@ pub struct Input {
     /// hardware in front of the player, not about the division.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub transpose: i8,
+    /// Pitch-bend range in semitones: how far this keyboard's bend
+    /// messages reach at full deflection, applied per channel to the
+    /// notes that channel is holding (which is what makes an MPE
+    /// controller's per-note bends work — each member channel carries
+    /// one note). Absent = bends are ignored, as an organ console
+    /// ignores them; MPE members conventionally use 48.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bend: Option<f32>,
 }
 
 fn is_zero(value: &i8) -> bool {
@@ -674,6 +682,7 @@ pub fn organ_config_from_file(midi: &aristide_formats::instrument::MidiDef) -> O
             low: input.low,
             high: input.high,
             transpose: input.transpose,
+            bend: input.bend,
         });
     }
     organ.controls = midi
@@ -727,6 +736,9 @@ pub fn write_composite_midi(path: &Path, organ: Option<&OrganConfig>) -> Result<
                 }
                 if input.transpose != 0 {
                     table["transpose"] = toml_edit::value(input.transpose as i64);
+                }
+                if let Some(bend) = input.bend {
+                    table["bend"] = toml_edit::value(bend as f64);
                 }
                 inputs.push(table);
             }
@@ -1571,6 +1583,7 @@ mod tests {
             low: None,
             high: None,
             transpose: 0,
+            bend: None,
         }
     }
 
@@ -1597,6 +1610,7 @@ mod tests {
                 low: Some(36),
                 high: Some(96),
                 transpose: -12,
+                bend: None,
             }],
         );
         organ.controls.push(Control {

@@ -278,6 +278,10 @@ pub struct InputDef {
     pub high: Option<u8>,
     #[serde(default)]
     pub transpose: i8,
+    /// Pitch-bend range in semitones (absent = bends ignored; MPE
+    /// members conventionally 48).
+    #[serde(default)]
+    pub bend: Option<f32>,
 }
 
 /// One control binding: this message, from this device, does this.
