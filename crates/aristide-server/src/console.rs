@@ -93,7 +93,7 @@ pub struct Console {
     /// sums the identical recording coherently (+6 dB), and on release
     /// the phase aligner makes both tails coherent too: the release
     /// comes out LOUDER than the chord (the octave-coupled F-major pop).
-    speaking: HashMap<(RankId, i32), (u64, u32)>,
+    speaking: HashMap<(RankId, i32), Speaking>,
     /// Engine output rate; frequency-derived voice parameters have to be
     /// recomputed against it when a pipe is repitched.
     device_rate: f32,
@@ -106,6 +106,48 @@ pub struct Console {
     /// silent, which is the locked compass rule with the player's
     /// hardware supplying the number.
     compass: Vec<(i16, i16)>,
+}
+
+/// One speaking pipe's voice, with the pitch bookkeeping live retuning
+/// rides on: `rate` is the playback rate the voice last had before any
+/// performance bend, `deviation` the exact cents its pitch was priced
+/// at (the tuning's `deviation_cents` for its key when it started or
+/// last drifted), and `bend` the per-note performance bend (MPE)
+/// currently on top. Rate updates are exact cent deltas against
+/// `deviation`, so a drifting tuning never cares which physical pipe
+/// the voice actually plays.
+#[derive(Debug, Clone, Copy)]
+struct Speaking {
+    handle: u64,
+    holders: u32,
+    rate: f32,
+    deviation: f64,
+    bend: f64,
+    /// Where the pitch was priced: sounding manual index + the (post-
+    /// transpose) MIDI key on it. Live retuning re-prices exactly this
+    /// coordinate, so a later transpose change — which reroutes future
+    /// presses — never moves a held pipe.
+    target: usize,
+    ladder_key: i16,
+}
+
+impl Speaking {
+    /// The rate the engine should run: base rate with the bend on top.
+    fn bent_rate(&self) -> f32 {
+        self.rate * ((self.bend / 1200.0).exp2()) as f32
+    }
+}
+
+/// One voice a key press demands, fully priced (see `voices_for_key`).
+#[derive(Debug, Clone, Copy)]
+struct KeyVoice {
+    stop: StopId,
+    rank: RankId,
+    identity: i32,
+    deviation: f64,
+    target: usize,
+    ladder_key: i16,
+    spec: VoiceSpec,
 }
 
 impl Console {
@@ -367,8 +409,9 @@ impl Console {
     }
 
     /// Give one division a tuning of its own, or with `None` return it
-    /// to the console's. Applies from the next note on; held voices
-    /// keep the pitch they started at, like pipes mid-speech.
+    /// to the console's. Applies from the next note on; callers that
+    /// want held voices to follow call `retune_held` after and forward
+    /// the updates as ramped SetVoiceRate commands.
     pub fn set_manual_tuning(&mut self, manual_index: usize, tuning: Option<Tuning>) {
         if manual_index >= self.organ.manuals.len() {
             return;
@@ -381,6 +424,72 @@ impl Console {
 
     pub fn manual_tuning(&self, manual_index: usize) -> Option<Tuning> {
         self.manual_tuning.get(manual_index).cloned().flatten()
+    }
+
+    /// Re-price every held voice under the current tunings and return
+    /// `(handle, rate)` for those that moved — the live-drift seam: a
+    /// tuning change lands on sounding pipes as a glide instead of
+    /// waiting for the next press. Each voice is re-priced at the
+    /// coordinate it was priced at when it started (its sounding
+    /// manual and post-transpose key), so a transpose change — which
+    /// reroutes future presses to other pipes — never moves a held
+    /// one. The voice keeps the sample it started with (a pipe mid-
+    /// speech is not re-recorded): the new rate is the exact cent
+    /// delta applied to the old, and which physical pipe sounds is
+    /// irrelevant. A key the new tuning unmaps keeps sounding as it
+    /// was (note-off still finds it); a pipe several keys share
+    /// follows the holder that started it.
+    pub fn retune_held(&mut self) -> Vec<(u64, f32)> {
+        let voices: Vec<((RankId, i32), usize, i16)> = self
+            .speaking
+            .iter()
+            .map(|(&at, voice)| (at, voice.target, voice.ladder_key))
+            .collect();
+        let mut updates = Vec::new();
+        for (at, target, ladder_key) in voices {
+            let Some(deviation) = self
+                .effective_tuning(target)
+                .deviation_cents(ladder_key.clamp(0, 127) as u8)
+            else {
+                continue;
+            };
+            let Some(voice) = self.speaking.get_mut(&at) else {
+                continue;
+            };
+            let delta = deviation - voice.deviation;
+            if delta.abs() < 1e-3 {
+                continue;
+            }
+            voice.rate *= ((delta / 1200.0).exp2()) as f32;
+            voice.deviation = deviation;
+            updates.push((voice.handle, voice.bent_rate()));
+        }
+        updates
+    }
+
+    /// Apply a per-note performance bend to everything a held key is
+    /// sounding — the MPE/MIDI 2.0 per-note pitch seam. `cents` is
+    /// absolute (each message replaces the last; 0 clears), applied on
+    /// top of whatever the tuning gave the voice, and it survives a
+    /// tuning drift. Returns `(handle, rate)` updates for the engine.
+    /// A pipe shared with other holders bends wholly — one pipe, one
+    /// pitch.
+    pub fn bend_key(&mut self, manual_index: usize, key: u8, cents: f64) -> Vec<(u64, f32)> {
+        let mut updates = Vec::new();
+        let Some(holds) = self.sounding.get(&(manual_index, key)).cloned() else {
+            return updates;
+        };
+        for (_, rank, pipe) in holds {
+            let Some(voice) = self.speaking.get_mut(&(rank, pipe)) else {
+                continue;
+            };
+            if (voice.bend - cents).abs() < 1e-3 {
+                continue;
+            }
+            voice.bend = cents;
+            updates.push((voice.handle, voice.bent_rate()));
+        }
+        updates
     }
 
     /// The tuning a division actually plays under: its own, else the
@@ -645,15 +754,17 @@ impl Console {
     ///
     /// `only` restricts the walk to one stop (drawing it mid-hold).
     ///
-    /// The `i32` in each entry is the voice's identity for refcounting:
+    /// Each entry's `identity` is the voice's identity for refcounting:
     /// the nominal pipe index of `pipe_for`, not the physical pipe that
-    /// happens to sound it.
+    /// happens to sound it. `cents` is the exact pitch target on the
+    /// nominal-cents ladder (identity is this, rounded) — what live
+    /// retuning diffs against.
     fn voices_for_key(
         &self,
         manual_index: usize,
         key: u8,
         only: Option<StopId>,
-    ) -> Vec<(StopId, RankId, i32, VoiceSpec)> {
+    ) -> Vec<KeyVoice> {
         let Some(origin) = self.organ.manuals.get(manual_index).map(|m| m.id) else {
             return Vec::new();
         };
@@ -734,12 +845,15 @@ impl Console {
                     // pipes; two keys the scale sends to the same pitch
                     // are one (an organ pipe speaks once).
                     let identity = nominal * 100 + bend_cents.round() as i32;
-                    voices.push((
-                        stop.id,
-                        range.rank,
+                    voices.push(KeyVoice {
+                        stop: stop.id,
+                        rank: range.rank,
                         identity,
-                        self.voiced(*spec, ratio * bend_ratio),
-                    ));
+                        deviation,
+                        target,
+                        ladder_key: midi_key,
+                        spec: self.voiced(*spec, ratio * bend_ratio),
+                    });
                 }
             }
         }
@@ -788,16 +902,19 @@ impl Console {
         }
         let mut starts = Vec::new();
         let mut held = Vec::new();
-        for (stop, rank, pipe, spec) in self.voices_for_key(manual_index, key, None) {
-            if spec.percussive {
+        for voice in self.voices_for_key(manual_index, key, None) {
+            if voice.spec.percussive {
                 // One-shots (noises) aren't refcounted.
                 let handle = self.next_handle;
                 self.next_handle += 1;
-                starts.push(VoiceStart { handle, spec });
+                starts.push(VoiceStart {
+                    handle,
+                    spec: voice.spec,
+                });
                 continue;
             }
-            held.push((stop, rank, pipe));
-            self.hold_pipe(rank, pipe, spec, &mut starts, &mut retriggered);
+            held.push((voice.stop, voice.rank, voice.identity));
+            self.hold_pipe(&voice, &mut starts, &mut retriggered);
         }
         // Track the key even when no stops are drawn: the UI lights it,
         // note-off clears it, and drawing a stop mid-hold must find it
@@ -831,22 +948,35 @@ impl Console {
     /// (pallet-staggered) predecessor so it never overlaps itself.
     fn hold_pipe(
         &mut self,
-        rank: RankId,
-        pipe: i32,
-        spec: VoiceSpec,
+        voice: &KeyVoice,
         starts: &mut Vec<VoiceStart>,
         expedited: &mut Vec<u64>,
     ) {
-        match self.speaking.get_mut(&(rank, pipe)) {
-            Some((_, holders)) => *holders += 1,
+        let at = (voice.rank, voice.identity);
+        match self.speaking.get_mut(&at) {
+            Some(speaking) => speaking.holders += 1,
             None => {
                 let handle = self.next_handle;
                 self.next_handle += 1;
-                self.speaking.insert((rank, pipe), (handle, 1));
-                if let Some(previous) = self.last_pipe_voice.insert((rank, pipe), handle) {
+                self.speaking.insert(
+                    at,
+                    Speaking {
+                        handle,
+                        holders: 1,
+                        rate: voice.spec.rate,
+                        deviation: voice.deviation,
+                        bend: 0.0,
+                        target: voice.target,
+                        ladder_key: voice.ladder_key,
+                    },
+                );
+                if let Some(previous) = self.last_pipe_voice.insert(at, handle) {
                     expedited.push(previous);
                 }
-                starts.push(VoiceStart { handle, spec });
+                starts.push(VoiceStart {
+                    handle,
+                    spec: voice.spec,
+                });
             }
         }
     }
@@ -854,10 +984,10 @@ impl Console {
     /// One holder lets go of a pipe; the voice stops only when the
     /// last holder does.
     fn release_pipe(&mut self, rank: RankId, pipe: i32) -> Option<u64> {
-        let (handle, holders) = self.speaking.get_mut(&(rank, pipe))?;
-        *holders -= 1;
-        if *holders == 0 {
-            let handle = *handle;
+        let voice = self.speaking.get_mut(&(rank, pipe))?;
+        voice.holders -= 1;
+        if voice.holders == 0 {
+            let handle = voice.handle;
             self.speaking.remove(&(rank, pipe));
             Some(handle)
         } else {
@@ -920,14 +1050,14 @@ impl Console {
         let held_keys: Vec<(usize, u8)> = self.sounding.keys().copied().collect();
         for (manual_index, key) in held_keys {
             let mut new_entries = Vec::new();
-            for (stop, rank, pipe, spec) in self.voices_for_key(manual_index, key, Some(stop)) {
+            for voice in self.voices_for_key(manual_index, key, Some(stop)) {
                 // One-shots strike on key press, not on drawing the
                 // stop mid-hold.
-                if spec.percussive {
+                if voice.spec.percussive {
                     continue;
                 }
-                new_entries.push((stop, rank, pipe));
-                self.hold_pipe(rank, pipe, spec, starts, &mut expedited);
+                new_entries.push((voice.stop, voice.rank, voice.identity));
+                self.hold_pipe(&voice, starts, &mut expedited);
             }
             if !new_entries.is_empty() {
                 self.sounding
@@ -1102,10 +1232,10 @@ impl Console {
         for (manual_index, key) in held {
             // One-shots strike on key press, not on a coupler change —
             // same rule as drawing a stop mid-hold.
-            let desired: Vec<(StopId, RankId, i32, VoiceSpec)> = self
+            let desired: Vec<KeyVoice> = self
                 .voices_for_key(manual_index, key, None)
                 .into_iter()
-                .filter(|(_, _, _, spec)| !spec.percussive)
+                .filter(|voice| !voice.spec.percussive)
                 .collect();
             let mut remaining = self
                 .sounding
@@ -1113,24 +1243,25 @@ impl Console {
                 .unwrap_or_default();
             let mut entries = Vec::with_capacity(desired.len());
             let mut to_start = Vec::new();
-            for (stop, rank, pipe, spec) in desired {
+            for voice in desired {
                 // Each sounding entry holds one refcount, so match
                 // multiset-style: a demand already held is kept, not
                 // restarted.
-                match remaining.iter().position(|&e| e == (stop, rank, pipe)) {
+                let entry = (voice.stop, voice.rank, voice.identity);
+                match remaining.iter().position(|&e| e == entry) {
                     Some(at) => {
                         remaining.swap_remove(at);
-                        entries.push((stop, rank, pipe));
+                        entries.push(entry);
                     }
-                    None => to_start.push((stop, rank, pipe, spec)),
+                    None => to_start.push(voice),
                 }
             }
             for &(_, rank, pipe) in &remaining {
                 stops.extend(self.release_pipe(rank, pipe));
             }
-            for (stop, rank, pipe, spec) in to_start {
-                entries.push((stop, rank, pipe));
-                self.hold_pipe(rank, pipe, spec, starts, stops);
+            for voice in to_start {
+                entries.push((voice.stop, voice.rank, voice.identity));
+                self.hold_pipe(&voice, starts, stops);
             }
             self.sounding.insert((manual_index, key), entries);
         }
@@ -2221,6 +2352,118 @@ mod tests {
         let (starts, _) = console.note_on_manual(1, 74);
         assert_eq!(starts.len(), 1);
         assert!((starts[0].spec.rate - 1.0).abs() < 1e-6);
+    }
+
+    /// A tuning change lands on held voices: retune_held returns each
+    /// sounding voice's handle with its rate moved by the exact cent
+    /// delta, and a second call reports nothing left to move.
+    #[test]
+    fn a_tuning_change_drifts_held_voices() {
+        let mut console = test_console();
+        let (starts, _) = console.note_on_manual(0, 60);
+        assert_eq!(starts.len(), 2, "both drawn stops sound");
+        let mut tuning = console.tuning();
+        tuning.a4_hz = 415.0;
+        console.set_tuning(tuning);
+        let updates = console.retune_held();
+        assert_eq!(updates.len(), starts.len(), "every held voice drifts");
+        let drop = (415.0f64 / 440.0) as f32;
+        for (handle, rate) in &updates {
+            let start = starts
+                .iter()
+                .find(|s| s.handle == *handle)
+                .expect("update names a started voice");
+            assert!(
+                (rate / (start.spec.rate * drop) - 1.0).abs() < 1e-4,
+                "handle {handle}: rate {rate} vs {} × 415/440",
+                start.spec.rate
+            );
+        }
+        assert!(console.retune_held().is_empty(), "already settled");
+        // Transpose changes reroute future presses, not held pipes.
+        let mut tuning = console.tuning();
+        tuning.transpose = 2;
+        console.set_tuning(tuning);
+        assert!(console.retune_held().is_empty(), "transposer leaves held notes");
+    }
+
+    /// Drifting onto a Scala scale re-prices a held key against the
+    /// pitch the scale wants — on the voice's own pipe, however far
+    /// that now is: a pipe mid-speech glides, it is not re-recorded.
+    #[test]
+    fn a_scale_change_drifts_a_held_key_to_its_scale_pitch() {
+        let mut scl = String::from("! 19edo.scl\n19-EDO\n19\n");
+        for degree in 1..=19 {
+            scl.push_str(&format!("{:.6}\n", degree as f64 * 1200.0 / 19.0));
+        }
+        let scale = aristide_model::scala::Scale::parse(&scl).expect("parses");
+        let tuning = crate::tuning::Tuning {
+            temperament: crate::tuning::Temperament::Equal,
+            scale: Some(std::sync::Arc::new(crate::tuning::ScaleTuning {
+                scl: "19edo.scl".into(),
+                kbm: None,
+                scale,
+                mapping: aristide_model::scala::KeyboardMapping::linear(440.0),
+            })),
+            a4_hz: 440.0,
+            transpose: 0,
+        };
+        let mut console = coupled_console();
+        let (starts, _) = console.note_on_manual(0, 74);
+        assert_eq!(starts.len(), 1);
+        assert!((starts[0].spec.rate - 1.0).abs() < 1e-6);
+        console.set_manual_tuning(0, Some(tuning));
+        let updates = console.retune_held();
+        assert_eq!(updates.len(), 1);
+        // Five 19-EDO steps above a′ = 315.79¢ where the key's own
+        // pipe sits at 500¢: the held voice bends down the difference.
+        let expected = ((5.0 * 1200.0 / 19.0 - 500.0) / 1200.0f32).exp2();
+        assert!(
+            (updates[0].1 - expected).abs() < 1e-4,
+            "drift to the scale pitch on the old pipe: {} vs {expected}",
+            updates[0].1
+        );
+        // The anchor key holds still under the same change.
+        console.set_manual_tuning(0, None);
+        console.note_off_manual(0, 74);
+    }
+
+    /// Per-note bends ride on top of the tuning: absolute, replaced by
+    /// each message, cleared by zero, and preserved across a drift.
+    #[test]
+    fn per_note_bends_stack_with_tuning_drift() {
+        let mut console = coupled_console();
+        let (starts, _) = console.note_on_manual(0, 60);
+        assert_eq!(starts.len(), 1);
+        let base = starts[0].spec.rate;
+        let handle = starts[0].handle;
+
+        let up = console.bend_key(0, 60, 25.0);
+        assert_eq!(up, vec![(handle, base * (25.0f64 / 1200.0).exp2() as f32)]);
+        assert!(console.bend_key(0, 60, 25.0).is_empty(), "no-op repeat");
+
+        // A drift under the bend: both apply.
+        let mut tuning = console.tuning();
+        tuning.a4_hz = 415.0;
+        console.set_tuning(tuning);
+        let updates = console.retune_held();
+        assert_eq!(updates.len(), 1);
+        let expected =
+            base * (415.0f64 / 440.0) as f32 * (25.0f64 / 1200.0).exp2() as f32;
+        assert!(
+            (updates[0].1 - expected).abs() < 1e-4,
+            "bend survives the drift: {} vs {expected}",
+            updates[0].1
+        );
+
+        let cleared = console.bend_key(0, 60, 0.0);
+        assert_eq!(cleared.len(), 1);
+        assert!(
+            (cleared[0].1 - base * (415.0f64 / 440.0) as f32).abs() < 1e-4,
+            "zero bend returns to the tuning's pitch"
+        );
+        console.note_off_manual(0, 60);
+        assert!(console.bend_key(0, 60, 10.0).is_empty(), "nothing held");
     }
 
     /// A keyboard mapping's unmapped keys (`x` entries) sound nothing:

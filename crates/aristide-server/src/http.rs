@@ -216,6 +216,24 @@ fn respond(
                         }
                     }
                 }
+                // Live drift: the change lands on sounding voices as a
+                // glide (`glide` in ms — 150 is a discreet slide, tens
+                // of seconds a performed drift), not just future notes.
+                let glide_ms = param(query, "glide")
+                    .and_then(|v| v.parse::<f32>().ok())
+                    .unwrap_or(150.0)
+                    .clamp(0.0, 60_000.0);
+                let retuned = match &mut state.control {
+                    Control::Organ(console) => console.retune_held(),
+                    Control::Tone => Vec::new(),
+                };
+                for (handle, rate) in retuned {
+                    state.engine.send(Command::SetVoiceRate {
+                        handle,
+                        rate,
+                        glide_ms,
+                    });
+                }
             }
             json(state_json(state))
         }
