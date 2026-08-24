@@ -35,6 +35,10 @@ pub struct PreparedInstrument {
     /// The organ file's `[console.layout]` — empty unless it is a
     /// composite loaded alone, same condition as `composite` above.
     pub layout: std::collections::BTreeMap<String, instrument::PanelPos>,
+    /// Bus setups from the sidecar's `[routing]`, ready to send to the
+    /// engine (bus 0, the main pair, is never listed). The per-stop
+    /// half of the plan is already installed in the console.
+    pub buses: Vec<BusSetup>,
     /// Everything this load skipped or ignored (dangling references
     /// healed over, sidecar lines that didn't resolve) — surfaced to
     /// the console, because "loaded, but emptier than the file says"
@@ -175,6 +179,16 @@ fn load_impulse_response(
 /// the console. `stops` are CLI registration patterns; empty means each
 /// source's sidecar default. `progress` is told what is happening, for
 /// a UI that is watching the load.
+/// One configured output bus, engine-ready.
+pub struct BusSetup {
+    /// Engine bus index (1-based; 0 is the untouched main bus).
+    pub bus: u8,
+    /// 0-based interface channel pair; `None` keeps the main pair.
+    pub output: Option<(u8, u8)>,
+    pub gain: f32,
+    pub delay: Option<aristide_engine::routing::DelayParams>,
+}
+
 pub fn prepare(
     paths: &[PathBuf],
     stops: &[String],
@@ -583,6 +597,96 @@ pub fn prepare(
         sidecar.noises.enabled,
         sidecar.noises.volume.clamp(0.0, 2.0) as f32,
     );
+    // Audio routing: stops onto buses, speaking delays — resolved by
+    // the same name-pattern rules couplers use. A pattern that matches
+    // nothing warns to the console; it never fails the load.
+    let mut buses = Vec::new();
+    {
+        let stop_ids: Vec<(aristide_model::StopId, String, usize)> = console
+            .stop_states()
+            .iter()
+            .map(|(id, name, _, manual, _)| (*id, name.to_string(), *manual))
+            .collect();
+        let stop_names: Vec<&str> = stop_ids.iter().map(|(_, name, _)| name.as_str()).collect();
+        let manual_names: Vec<String> = console
+            .manual_states()
+            .iter()
+            .map(|(_, name, _, _, _)| name.to_string())
+            .collect();
+        let manual_names: Vec<&str> = manual_names.iter().map(String::as_str).collect();
+        let mut plan: std::collections::HashMap<aristide_model::StopId, (u8, u32)> =
+            std::collections::HashMap::new();
+        for (index, def) in sidecar.routing.buses.iter().enumerate() {
+            if index + 1 >= aristide_engine::routing::MAX_BUSES {
+                load_warnings.push(format!(
+                    "routing: at most {} buses; {:?} and beyond ignored",
+                    aristide_engine::routing::MAX_BUSES - 1,
+                    def.name
+                ));
+                break;
+            }
+            let bus = (index + 1) as u8;
+            let mut members: Vec<aristide_model::StopId> = Vec::new();
+            for pattern in &def.stops {
+                let matched = aristide_formats::sidecar::match_names(&stop_names, pattern);
+                if matched.is_empty() {
+                    load_warnings.push(format!("routing: stop {pattern:?} matches nothing"));
+                }
+                members.extend(matched.iter().map(|&at| stop_ids[at].0));
+            }
+            for pattern in &def.manuals {
+                let matched = aristide_formats::sidecar::match_names(&manual_names, pattern);
+                if matched.is_empty() {
+                    load_warnings.push(format!("routing: manual {pattern:?} matches nothing"));
+                }
+                members.extend(
+                    stop_ids
+                        .iter()
+                        .filter(|(_, _, manual)| matched.contains(manual))
+                        .map(|(id, _, _)| *id),
+                );
+            }
+            for id in members {
+                let entry = plan.entry(id).or_insert((bus, 0));
+                if entry.0 != bus && entry.0 != 0 {
+                    load_warnings
+                        .push("routing: a stop matched two buses; keeping the first".to_string());
+                } else {
+                    entry.0 = bus;
+                }
+            }
+            buses.push(BusSetup {
+                bus,
+                output: def
+                    .output
+                    .map(|[left, right]| (left.saturating_sub(1), right.saturating_sub(1))),
+                gain: 10f32.powf((def.gain_db.clamp(-60.0, 20.0) as f32) / 20.0),
+                delay: def.delay.as_ref().map(|delay| {
+                    aristide_engine::routing::DelayParams {
+                        seconds: (delay.ms.clamp(0.0, 60_000.0) / 1000.0) as f32,
+                        feedback: delay.feedback as f32,
+                        mix: delay.mix as f32,
+                        dry: delay.dry as f32,
+                    }
+                }),
+            });
+        }
+        for rule in &sidecar.voicing.delays {
+            let frames = (rule.ms.clamp(0.0, 30_000.0) / 1000.0 * sample_rate as f64) as u32;
+            for pattern in &rule.stops {
+                let matched = aristide_formats::sidecar::match_names(&stop_names, pattern);
+                if matched.is_empty() {
+                    load_warnings.push(format!("voicing.delay: {pattern:?} matches nothing"));
+                }
+                for at in matched {
+                    plan.entry(stop_ids[at].0).or_insert((0, 0)).1 = frames;
+                }
+            }
+        }
+        if !plan.is_empty() {
+            console.set_stop_routing(plan);
+        }
+    }
     tracing::info!(
         "tuning: {} @ a'={} Hz, transpose {:+}",
         live_tuning.temperament.name(),
@@ -602,6 +706,7 @@ pub fn prepare(
         suggested_channels: suggested,
         setup,
         layout: console_layout,
+        buses,
         warnings: load_warnings,
     })
 }

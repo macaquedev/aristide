@@ -100,6 +100,10 @@ pub struct Console {
     /// Whether a coupled voice may be repitched from a neighbouring
     /// pipe. False, and deliberately so: see `voices_for_key`.
     couplers_repitch: bool,
+    /// Per stop: output bus and onset delay (frames), from the
+    /// sidecar's `[routing]`/`[voicing]` — stamped onto each voice's
+    /// spec as it is priced. Stops not named route to bus 0, delay 0.
+    stop_routing: HashMap<StopId, (u8, u32)>,
     /// Per manual: the inclusive MIDI note range that manual answers to.
     /// Starts as the sample set's own compass and is widened to the
     /// player's keyboard (see `set_compass`) — a key outside it is
@@ -190,6 +194,7 @@ impl Console {
             next_handle: 0,
             sounding: HashMap::new(),
             speaking: HashMap::new(),
+            stop_routing: HashMap::new(),
             last_pipe_voice: HashMap::new(),
         };
         console.classify_noises();
@@ -424,6 +429,12 @@ impl Console {
 
     pub fn manual_tuning(&self, manual_index: usize) -> Option<Tuning> {
         self.manual_tuning.get(manual_index).cloned().flatten()
+    }
+
+    /// Install the per-stop routing/voicing table (bus index, onset
+    /// delay in frames). Applies from the next voice started.
+    pub fn set_stop_routing(&mut self, routing: HashMap<StopId, (u8, u32)>) {
+        self.stop_routing = routing;
     }
 
     /// Re-price every held voice under the current tunings and return
@@ -840,6 +851,14 @@ impl Console {
                     let Some(spec) = self.specs.get(&(range.rank, pipe)) else {
                         continue;
                     };
+                    // Routing is a property of the STOP (its speakers,
+                    // its speaking delay), stamped here so borrowed
+                    // pipes travel with the stop that sounds them.
+                    let mut spec = *spec;
+                    if let Some(&(bus, delay_frames)) = self.stop_routing.get(&stop.id) {
+                        spec.bus = bus;
+                        spec.delay_frames = delay_frames;
+                    }
                     // Identity at cent resolution: two keys anchored to
                     // the same pipe but bent apart are two virtual
                     // pipes; two keys the scale sends to the same pitch
@@ -852,7 +871,7 @@ impl Console {
                         deviation,
                         target,
                         ladder_key: midi_key,
-                        spec: self.voiced(*spec, ratio * bend_ratio),
+                        spec: self.voiced(spec, ratio * bend_ratio),
                     });
                 }
             }
@@ -1547,6 +1566,8 @@ mod tests {
                         brightness: 0.02,
                         nominal_hz: 440.0,
                         enclosure: aristide_engine::enclosure::ENCLOSURE_NONE,
+                        bus: 0,
+                        delay_frames: 0,
                     },
                 );
             }
@@ -1764,6 +1785,8 @@ mod tests {
                     brightness: 0.02,
                     nominal_hz: 440.0,
                     enclosure: aristide_engine::enclosure::ENCLOSURE_NONE,
+                    bus: 0,
+                    delay_frames: 0,
                 },
             );
         }
@@ -1904,6 +1927,30 @@ mod tests {
         );
     }
 
+    /// Routing is a property of the stop: once installed, every voice
+    /// the stop sounds carries its bus and speaking delay.
+    #[test]
+    fn stop_routing_stamps_bus_and_delay_on_voices() {
+        let mut console = test_console();
+        let (starts, _) = console.note_on_manual(0, 60);
+        assert!(starts.iter().all(|s| s.spec.bus == 0));
+        assert!(starts.iter().all(|s| s.spec.delay_frames == 0));
+        console.note_off_manual(0, 60);
+
+        let routed = console.stop_states()[0].0;
+        console.set_stop_routing([(routed, (3u8, 480u32))].into_iter().collect());
+        let (starts, _) = console.note_on_manual(0, 60);
+        assert_eq!(starts.len(), 2);
+        let stamped: Vec<(u8, u32)> = starts
+            .iter()
+            .map(|s| (s.spec.bus, s.spec.delay_frames))
+            .collect();
+        assert!(
+            stamped.contains(&(3, 480)) && stamped.contains(&(0, 0)),
+            "only the routed stop moves: {stamped:?}"
+        );
+    }
+
     #[test]
     fn drawing_a_stop_starts_pipes_under_held_keys() {
         let mut console = test_console();
@@ -2028,6 +2075,8 @@ mod tests {
                         brightness: 0.0,
                         nominal_hz: 440.0,
                         enclosure: aristide_engine::enclosure::ENCLOSURE_NONE,
+                        bus: 0,
+                        delay_frames: 0,
                     },
                 );
             }

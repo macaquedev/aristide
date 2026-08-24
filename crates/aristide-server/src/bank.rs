@@ -39,6 +39,12 @@ pub struct VoiceSpec {
     /// membership; [`aristide_engine::enclosure::ENCLOSURE_NONE`] for
     /// unenclosed divisions).
     pub enclosure: u8,
+    /// Output bus (0 = the main pair). Specs are built per pipe with
+    /// the defaults; the console stamps these per stop from the
+    /// sidecar's `[routing]`/`[voicing]` before a voice starts.
+    pub bus: u8,
+    /// Onset (speaking) delay in output frames.
+    pub delay_frames: u32,
 }
 
 pub struct LoadedBank {
@@ -160,6 +166,8 @@ pub fn build(organ: &Organ, device_rate: f32) -> Result<LoadedBank> {
                         info.percussive,
                     ),
                     enclosure,
+                    bus: 0,
+                    delay_frames: 0,
                 },
             );
         }
@@ -505,6 +513,8 @@ mod tests {
                                     wind_weight: st.spec.wind_weight,
                                     brightness: st.spec.brightness,
                                     enclosure: st.spec.enclosure,
+                        bus: st.spec.bus,
+                        delay_frames: st.spec.delay_frames,
                                 });
                             }
                         }
@@ -672,6 +682,8 @@ mod tests {
                                     wind_weight: st.spec.wind_weight,
                                     brightness: st.spec.brightness,
                                     enclosure: st.spec.enclosure,
+                        bus: st.spec.bus,
+                        delay_frames: st.spec.delay_frames,
                                 });
                             }
                         }
@@ -933,6 +945,8 @@ mod tests {
                         wind_weight: start.spec.wind_weight,
                         brightness: start.spec.brightness,
                         enclosure: start.spec.enclosure,
+                        bus: start.spec.bus,
+                        delay_frames: start.spec.delay_frames,
                     });
                 }
             }
@@ -1036,6 +1050,8 @@ mod tests {
                             wind_weight: start.spec.wind_weight,
                             brightness: start.spec.brightness,
                         enclosure: start.spec.enclosure,
+                        bus: start.spec.bus,
+                        delay_frames: start.spec.delay_frames,
                         });
                     }
                 } else {
@@ -1138,6 +1154,8 @@ mod tests {
                         wind_weight: start.spec.wind_weight,
                         brightness: start.spec.brightness,
                         enclosure: start.spec.enclosure,
+                        bus: start.spec.bus,
+                        delay_frames: start.spec.delay_frames,
                     });
                 }
                 // Stagger key events across blocks like real playing.
@@ -1227,6 +1245,8 @@ mod tests {
                     wind_weight: start.spec.wind_weight,
                     brightness: start.spec.brightness,
                         enclosure: start.spec.enclosure,
+                        bus: start.spec.bus,
+                        delay_frames: start.spec.delay_frames,
                 });
             }
         }
@@ -1306,6 +1326,8 @@ mod tests {
                 wind_weight: start.spec.wind_weight,
                 brightness: start.spec.brightness,
                         enclosure: start.spec.enclosure,
+                        bus: start.spec.bus,
+                        delay_frames: start.spec.delay_frames,
             }));
         }
         let mut buffer = vec![0.0f32; 4800 * 2];
@@ -1452,6 +1474,8 @@ mod tests {
                         wind_weight: start.spec.wind_weight,
                         brightness: start.spec.brightness,
                         enclosure: start.spec.enclosure,
+                        bus: start.spec.bus,
+                        delay_frames: start.spec.delay_frames,
                     }));
                 }
                 let mut buffer = vec![0.0f32; 4800 * 2];
@@ -1619,6 +1643,8 @@ mod tests {
                             wind_weight: start.spec.wind_weight,
                             brightness: start.spec.brightness,
                         enclosure: start.spec.enclosure,
+                        bus: start.spec.bus,
+                        delay_frames: start.spec.delay_frames,
                         }));
                     }
                 } else {
@@ -1816,6 +1842,8 @@ mod tests {
                             wind_weight: start.spec.wind_weight,
                             brightness: start.spec.brightness,
                             enclosure: start.spec.enclosure,
+                        bus: start.spec.bus,
+                        delay_frames: start.spec.delay_frames,
                         }));
                     }
                 } else {
@@ -1908,6 +1936,8 @@ mod tests {
                     wind_weight: st.spec.wind_weight,
                     brightness: st.spec.brightness,
                     enclosure: st.spec.enclosure,
+                        bus: st.spec.bus,
+                        delay_frames: st.spec.delay_frames,
                 });
             }
             let block = 512usize;
@@ -2044,6 +2074,8 @@ mod tests {
                                 wind_weight: st.spec.wind_weight,
                                 brightness: st.spec.brightness,
                         enclosure: st.spec.enclosure,
+                        bus: st.spec.bus,
+                        delay_frames: st.spec.delay_frames,
                             });
                         }
                     } else {
@@ -2178,6 +2210,8 @@ mod tests {
                                 wind_weight: st.spec.wind_weight,
                                 brightness: st.spec.brightness,
                         enclosure: st.spec.enclosure,
+                        bus: st.spec.bus,
+                        delay_frames: st.spec.delay_frames,
                             });
                         }
                     } else {
@@ -2338,6 +2372,8 @@ mod tests {
                                 wind_weight: st.spec.wind_weight,
                                 brightness: st.spec.brightness,
                                 enclosure: st.spec.enclosure,
+                        bus: st.spec.bus,
+                        delay_frames: st.spec.delay_frames,
                             });
                         }
                     }
@@ -2447,6 +2483,8 @@ mod tests {
                             wind_weight: st.spec.wind_weight,
                             brightness: st.spec.brightness,
                         enclosure: st.spec.enclosure,
+                        bus: st.spec.bus,
+                        delay_frames: st.spec.delay_frames,
                         });
                     }
                 } else {
@@ -2509,6 +2547,8 @@ mod tests {
                             wind_weight: st.spec.wind_weight,
                             brightness: st.spec.brightness,
                         enclosure: st.spec.enclosure,
+                        bus: st.spec.bus,
+                        delay_frames: st.spec.delay_frames,
                         });
                     }
                 }
@@ -2620,6 +2660,8 @@ mod tests {
                         wind_weight: st.spec.wind_weight,
                         brightness: st.spec.brightness,
                         enclosure: st.spec.enclosure,
+                        bus: st.spec.bus,
+                        delay_frames: st.spec.delay_frames,
                     });
                 }
             }

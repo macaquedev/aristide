@@ -1036,6 +1036,8 @@ fn send_start(engine: &mut aristide_engine::EngineHandle, noise: Option<crate::c
             wind_weight: start.spec.wind_weight,
             brightness: start.spec.brightness,
             enclosure: start.spec.enclosure,
+            bus: start.spec.bus,
+            delay_frames: start.spec.delay_frames,
         });
     }
 }

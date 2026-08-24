@@ -2206,6 +2206,46 @@ struct AudioOutput {
 }
 
 impl AudioOutput {
+    /// Widen the stream to at least `wanted` channels for a routed
+    /// organ, keeping the sample rate (the bank was decoded against
+    /// it). No such layout is a warning, not an error: the engine
+    /// folds unreachable output pairs back onto the main pair.
+    fn ensure_channels(&mut self, wanted: usize) {
+        if wanted <= self.channels {
+            return;
+        }
+        let rate = self.config.sample_rate.0;
+        let found = self
+            .device
+            .supported_output_configs()
+            .ok()
+            .and_then(|configs| {
+                configs
+                    .filter(|range| range.sample_format() == cpal::SampleFormat::F32)
+                    .filter(|range| range.channels() as usize >= wanted)
+                    .filter(|range| {
+                        (range.min_sample_rate().0..=range.max_sample_rate().0).contains(&rate)
+                    })
+                    .min_by_key(|range| range.channels())
+                    .map(|range| range.with_sample_rate(cpal::SampleRate(rate)))
+            });
+        match found {
+            Some(config) => {
+                let config: cpal::StreamConfig = config.into();
+                tracing::info!(
+                    "audio: widening the stream to {} channels for routing",
+                    config.channels
+                );
+                self.channels = config.channels as usize;
+                self.config = config;
+            }
+            None => tracing::warn!(
+                "audio: routing wants {wanted} channels but the device offers no such \
+                 f32 layout at {rate} Hz — routed buses fold to the main pair"
+            ),
+        }
+    }
+
     /// Replace the running engine (and its stream) with a fresh one on
     /// `bank`. Falls back to the backend's default buffer size if the
     /// requested one is refused.
@@ -2435,8 +2475,23 @@ fn perform_load(
         suggested_channels,
         setup,
         layout,
+        buses,
         warnings,
     } = load::prepare(&request.paths, &request.stops, audio.sample_rate, &progress)?;
+
+    // Routed buses may want interface channels past the stereo pair;
+    // try to reopen the device wide enough BEFORE the stream starts.
+    // A device that can't (or a bus with no explicit output) is fine —
+    // the engine folds unreachable pairs back onto the main output.
+    let wanted_channels = buses
+        .iter()
+        .filter_map(|setup| setup.output)
+        .map(|(left, right)| left.max(right) as usize + 1)
+        .max()
+        .unwrap_or(0);
+    if wanted_channels > 0 {
+        audio.ensure_channels(wanted_channels);
+    }
 
     // Fault every sample page in NOW; doing it lazily means page faults
     // inside the audio callback on each pipe's first note.
@@ -2471,6 +2526,44 @@ fn perform_load(
     handle.send(Command::SetMasterGain {
         linear: master_gain,
     });
+    for setup in &buses {
+        if let Some((left, right)) = setup.output {
+            tracing::info!(
+                "routing: bus {} → channels {}/{} at ×{:.2}",
+                setup.bus,
+                left + 1,
+                right + 1,
+                setup.gain
+            );
+            handle.send(Command::SetBusOutput {
+                bus: setup.bus,
+                left,
+                right,
+                gain: setup.gain,
+            });
+        } else if setup.gain != 1.0 {
+            handle.send(Command::SetBusOutput {
+                bus: setup.bus,
+                left: 0,
+                right: 1,
+                gain: setup.gain,
+            });
+        }
+        if let Some(params) = setup.delay {
+            tracing::info!(
+                "routing: bus {} delay {:.0} ms (mix {:.2}, dry {:.2}, feedback {:.2})",
+                setup.bus,
+                params.seconds * 1000.0,
+                params.mix,
+                params.dry,
+                params.feedback
+            );
+            handle.send(Command::SetBusDelay {
+                bus: setup.bus,
+                params,
+            });
+        }
+    }
     if let Some(params) = wind {
         tracing::info!(
             "wind: {:.2}% pressure sag @ {:.1} Hz, ζ={:.2}{}",
@@ -2955,6 +3048,8 @@ fn handle_midi(message: &[u8], port: usize, state: &Mutex<State>) {
                             wind_weight: start.spec.wind_weight,
                             brightness: start.spec.brightness,
                             enclosure: start.spec.enclosure,
+                            bus: start.spec.bus,
+                            delay_frames: start.spec.delay_frames,
                         });
                     }
                 }
@@ -3088,6 +3183,8 @@ fn start_command(start: &console::VoiceStart) -> Command {
         wind_weight: start.spec.wind_weight,
         brightness: start.spec.brightness,
         enclosure: start.spec.enclosure,
+        bus: start.spec.bus,
+        delay_frames: start.spec.delay_frames,
     }
 }
 
