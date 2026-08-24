@@ -46,6 +46,95 @@ pub struct Sidecar {
     pub enclosures: EnclosuresConfig,
     #[serde(default)]
     pub couplers: CouplersConfig,
+    #[serde(default)]
+    pub routing: RoutingConfig,
+    #[serde(default)]
+    pub voicing: VoicingConfig,
+}
+
+/// Audio routing: which stops render onto which output bus, where each
+/// bus lands on the interface, and the bus's insert effects. Everything
+/// not named stays on the main bus (the first output pair) — a stereo
+/// rig never writes this table.
+///
+/// ```toml
+/// [[routing.bus]]
+/// name = "chamade"
+/// stops = ["Trompette en chamade*"]
+/// output = [3, 4]          # 1-based interface channels
+/// gain_db = -3.0
+/// [routing.bus.delay]      # optional insert: displace or echo
+/// ms = 120
+/// mix = 1.0
+/// dry = 0.0                # dry 0 = the division moves in time
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoutingConfig {
+    #[serde(default, rename = "bus")]
+    pub buses: Vec<BusDef>,
+}
+
+/// One routed bus: name patterns pick its members (stops directly, or
+/// every stop of named manuals), `output` the 1-based interface channel
+/// pair it lands on (omit for the main pair).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BusDef {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub stops: Vec<String>,
+    #[serde(default)]
+    pub manuals: Vec<String>,
+    pub output: Option<[u8; 2]>,
+    #[serde(default)]
+    pub gain_db: f64,
+    pub delay: Option<BusDelayDef>,
+}
+
+/// A bus's delay insert. `mix` is the wet level, `dry` the undelayed
+/// level (1 = echo on top; 0 = the sound itself arrives late), and
+/// `feedback` recirculates for repeating echoes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BusDelayDef {
+    pub ms: f64,
+    #[serde(default)]
+    pub feedback: f64,
+    #[serde(default = "one")]
+    pub mix: f64,
+    #[serde(default = "one")]
+    pub dry: f64,
+}
+
+fn one() -> f64 {
+    1.0
+}
+
+/// Per-pipe voicing adjustments. First resident: speaking delays.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VoicingConfig {
+    /// Onset (tracker/speaking) delays by stop pattern: every pipe the
+    /// stop sounds waits `ms` before speaking — long mechanical runs,
+    /// distant chests, or a canon trick per division.
+    ///
+    /// ```toml
+    /// [[voicing.delay]]
+    /// stops = ["Montre*"]
+    /// ms = 12.5
+    /// ```
+    #[serde(default, rename = "delay")]
+    pub delays: Vec<OnsetDelayDef>,
+}
+
+/// One onset-delay rule.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OnsetDelayDef {
+    pub stops: Vec<String>,
+    pub ms: f64,
 }
 
 /// How couplers behave at the edges of a division, and any couplers the
@@ -573,6 +662,40 @@ pub fn match_names(names: &[&str], pattern: &str) -> Vec<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn routing_and_voicing_tables_parse() {
+        let text = r#"
+[[routing.bus]]
+name = "chamade"
+stops = ["Trompette*"]
+output = [3, 4]
+gain_db = -3.0
+[routing.bus.delay]
+ms = 120
+mix = 1.0
+dry = 0.0
+[[voicing.delay]]
+stops = ["Montre*"]
+ms = 12.5
+"#;
+        let sidecar: Sidecar = toml::from_str(text).expect("parses");
+        assert_eq!(sidecar.routing.buses.len(), 1);
+        let bus = &sidecar.routing.buses[0];
+        assert_eq!(bus.output, Some([3, 4]));
+        assert_eq!(bus.gain_db, -3.0);
+        let delay = bus.delay.as_ref().expect("delay configured");
+        assert_eq!(delay.ms, 120.0);
+        assert_eq!(delay.feedback, 0.0, "defaults to no feedback");
+        assert_eq!(delay.mix, 1.0);
+        assert_eq!(delay.dry, 0.0, "a displaced division kills its dry");
+        assert_eq!(sidecar.voicing.delays.len(), 1);
+        assert_eq!(sidecar.voicing.delays[0].ms, 12.5);
+        // Absent tables cost nothing.
+        let empty: Sidecar = toml::from_str("").expect("parses");
+        assert!(empty.routing.buses.is_empty());
+        assert!(empty.voicing.delays.is_empty());
+    }
 
     #[test]
     fn parses_a_full_sidecar() {

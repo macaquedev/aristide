@@ -124,6 +124,10 @@ pub struct Definition {
     pub enclosures: sidecar::EnclosuresConfig,
     #[serde(default)]
     pub couplers: sidecar::CouplersConfig,
+    #[serde(default)]
+    pub routing: sidecar::RoutingConfig,
+    #[serde(default)]
+    pub voicing: sidecar::VoicingConfig,
     /// Where the console's movable panels sit on the canvas — purely
     /// cosmetic, never read by anything that assembles the instrument.
     #[serde(default)]
@@ -342,6 +346,8 @@ impl Definition {
             noises: self.noises.clone(),
             enclosures: self.enclosures.clone(),
             couplers: self.couplers.clone(),
+            routing: self.routing.clone(),
+            voicing: self.voicing.clone(),
         }
     }
 
