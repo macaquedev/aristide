@@ -10,7 +10,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use aristide_model::{
-    AttackSample, Coupler, CouplerRoute, CouplerTarget, Manual, ManualId, Organ, Pipe, PipeRef,
+    AttackSample, Coupler, CouplerRoute, CouplerTarget, Manual, ManualId, ManualKind, Organ,
+    Pipe, PipeRef,
     PipeSource, Rank, RankId, RankRange, ReleaseSample, SampleLoop, Stop, StopId,
 };
 use thiserror::Error;
@@ -367,7 +368,11 @@ impl Builder<'_> {
                 name: section.string("Name")?.to_string(),
                 first_midi_note: first_midi_note as u8,
                 key_count: accessible_keys as u16,
-                pedal: manual_index == 0,
+                kind: if manual_index == 0 {
+                    ManualKind::Pedal
+                } else {
+                    ManualKind::Manual
+                },
             });
             // MIDI note of logical key 1 (see notes §2) — the pitch origin
             // that old-style stops derive their rank numbering from.

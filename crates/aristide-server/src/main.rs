@@ -1487,9 +1487,9 @@ impl State {
                 .map(|t| (t.temperament.name().to_string(), t.a4_hz, t.transpose));
                 config::SavedManual {
                     name: name.clone(),
-                    pedal: match &self.control {
-                        Control::Organ(console) => console.manual_pedal(manual),
-                        Control::Tone => false,
+                    kind: match &self.control {
+                        Control::Organ(console) => console.manual_kind(manual),
+                        Control::Tone => Default::default(),
                     },
                     low,
                     high,
@@ -1611,7 +1611,13 @@ impl State {
         });
     }
 
-    pub fn add_manual(&mut self, name: &str, low: u8, high: u8, pedal: bool) -> Result<(), String> {
+    pub fn add_manual(
+        &mut self,
+        name: &str,
+        low: u8,
+        high: u8,
+        kind: aristide_model::ManualKind,
+    ) -> Result<(), String> {
         if self
             .manual_names()
             .iter()
@@ -1620,7 +1626,30 @@ impl State {
             return Err(format!("this organ already has a manual named {:?}", name.trim()));
         }
         let path = self.organ_file()?;
-        config::append_composite_manual(&path, name, low, high, pedal)?;
+        config::append_composite_manual(&path, name, low, high, kind)?;
+        self.reload_organ_file(path);
+        Ok(())
+    }
+
+    /// Redeclare a manual's kind — pedalboard, hand keyboard or a
+    /// generalized (microtonal) key field. Structural: the console
+    /// redraws the keyboard, so the file line is followed by a reload.
+    pub fn set_manual_kind(
+        &mut self,
+        manual: usize,
+        kind: aristide_model::ManualKind,
+    ) -> Result<(), String> {
+        let names = self.manual_names();
+        let Some(name) = names.get(manual) else {
+            return Err("no such manual".into());
+        };
+        let path = self.organ_file()?;
+        if !config::write_composite_manual_kind(&path, name, kind)? {
+            return Err(format!(
+                "{} has no [[manual]] named {name:?} — it wasn't declared by this file",
+                path.display()
+            ));
+        }
         self.reload_organ_file(path);
         Ok(())
     }

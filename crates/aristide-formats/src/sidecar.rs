@@ -610,7 +610,7 @@ default = ["Bourdon 16'", "Montre 8'", "Prestant 4'", "Plein jeu III"]
             name: name.into(),
             first_midi_note: 36,
             key_count: 61,
-                    pedal: false,
+                    kind: Default::default(),
         };
         aristide_model::Organ {
             manuals: vec![manual(1, "Grand Orgue"), manual(2, "Récit")],

@@ -59,8 +59,8 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use aristide_model::{
-    Coupler, Enclosure, Manual, ManualId, Organ, PipeSource, Rank, RankId, RankRange, Stop,
-    StopId, Windchest,
+    Coupler, Enclosure, Manual, ManualId, ManualKind, Organ, PipeSource, Rank, RankId, RankRange,
+    Stop, StopId, Windchest,
 };
 
 use crate::sidecar::{self, KeySpec, Sidecar};
@@ -175,8 +175,10 @@ impl SourceDef {
 #[serde(deny_unknown_fields)]
 pub struct ManualDef {
     pub name: String,
-    /// `"pedal"` marks the pedalboard; anything else (or nothing) is a
-    /// hand keyboard. Consoles render the pedal at the bottom.
+    /// The keyboard's kind — `"pedal"`, `"manual"` (the default) or
+    /// `"microtonal"` (a Terpstra-style hex key field). Consoles
+    /// render the pedal at the bottom. An unrecognized kind warns and
+    /// falls back to a hand keyboard: a typo must not brick the organ.
     pub kind: Option<String>,
     pub low: Option<KeySpec>,
     pub high: Option<KeySpec>,
@@ -498,11 +500,18 @@ pub fn assemble(
     };
     for manual in &def.manuals {
         let compass = declared_compass(manual)?;
-        let pedal = manual
-            .kind
-            .as_deref()
-            .is_some_and(|kind| kind.eq_ignore_ascii_case("pedal"));
-        assembly.create_manual(manual.name.clone(), compass, pedal);
+        let kind = match manual.kind.as_deref() {
+            None => ManualKind::Manual,
+            Some(text) => ManualKind::parse(text).unwrap_or_else(|| {
+                assembly.warnings.push(format!(
+                    "manual {:?}: unknown kind {text:?} — treating it as a hand keyboard \
+                     (kinds: manual, pedal, microtonal)",
+                    manual.name
+                ));
+                ManualKind::Manual
+            }),
+        };
+        assembly.create_manual(manual.name.clone(), compass, kind);
     }
     if !def.declares() {
         // Nothing declared: every source contributes everything —
@@ -866,7 +875,7 @@ impl Assembly<'_> {
             .ok_or_else(|| invalid(format!("{alias:?} is not a [sources] alias")))
     }
 
-    fn create_manual(&mut self, name: String, declared: Option<(u8, u8)>, pedal: bool) -> usize {
+    fn create_manual(&mut self, name: String, declared: Option<(u8, u8)>, kind: ManualKind) -> usize {
         let index = self.manuals.len();
         self.manuals.push(Manual {
             id: ManualId(index as u32),
@@ -874,7 +883,7 @@ impl Assembly<'_> {
             // Placeholders; `finish` settles every compass at once.
             first_midi_note: 36,
             key_count: 61,
-            pedal,
+            kind,
         });
         self.declared.push(declared);
         index
@@ -918,7 +927,7 @@ impl Assembly<'_> {
                 let low = source_manual.first_midi_note;
                 let high =
                     (low as i32 + source_manual.key_count as i32 - 1).clamp(0, 127) as u8;
-                self.create_manual(name, Some((low, high)), source_manual.pedal)
+                self.create_manual(name, Some((low, high)), source_manual.kind)
             }
         };
         self.division_map[source_idx].insert(source_manual.id, target);
@@ -1257,14 +1266,14 @@ mod tests {
                     name: "Great".into(),
                     first_midi_note: 36,
                     key_count: 61,
-                    pedal: false,
+                    kind: Default::default(),
                 },
                 Manual {
                     id: ManualId(1),
                     name: "Swell".into(),
                     first_midi_note: 36,
                     key_count: 61,
-                    pedal: false,
+                    kind: Default::default(),
                 },
             ],
             stops: vec![
@@ -1372,11 +1381,37 @@ mod tests {
         let built = assemble(&definition, &[], Vec::new()).expect("assembles");
         let organ = &built.organ;
         assert_eq!(organ.manuals.len(), 2);
-        assert!(organ.manuals[0].pedal);
-        assert!(!organ.manuals[1].pedal);
+        assert!(organ.manuals[0].pedal());
+        assert!(!organ.manuals[1].pedal());
         assert_eq!(organ.manuals[1].first_midi_note, 36);
         assert_eq!(organ.manuals[1].key_count, 61);
         assert!(organ.stops.is_empty());
+    }
+
+    /// Kinds are declared vocabulary, not deduction: `"microtonal"`
+    /// comes through as-is (case aside), and a typo warns and falls
+    /// back to a hand keyboard instead of failing the load.
+    #[test]
+    fn manual_kinds_parse_and_typos_warn() {
+        let mut definition = def("Kinds");
+        definition.manuals = vec![
+            ManualDef {
+                kind: Some("Microtonal".into()),
+                ..manual("Bosanquet", Some(36), Some(96))
+            },
+            ManualDef {
+                kind: Some("pedals".into()),
+                ..manual("Oops", Some(36), Some(67))
+            },
+        ];
+        let built = assemble(&definition, &[], Vec::new()).expect("assembles");
+        assert_eq!(built.organ.manuals[0].kind, ManualKind::Microtonal);
+        assert_eq!(built.organ.manuals[1].kind, ManualKind::Manual);
+        assert!(
+            built.warnings.iter().any(|warning| warning.contains("unknown kind")),
+            "the typo is reported: {:?}",
+            built.warnings
+        );
     }
 
     /// Declaring a manual makes the file explicit: sources contribute

@@ -1216,7 +1216,12 @@ impl Console {
     /// Whether a manual is the pedalboard, straight from the model —
     /// UIs render it at the bottom and stop guessing from the name.
     pub fn manual_pedal(&self, manual: usize) -> bool {
-        self.organ.manuals.get(manual).is_some_and(|m| m.pedal)
+        self.organ.manuals.get(manual).is_some_and(|m| m.pedal())
+    }
+
+    /// A manual's declared kind — what geometry the console draws.
+    pub fn manual_kind(&self, manual: usize) -> aristide_model::ManualKind {
+        self.organ.manuals.get(manual).map(|m| m.kind).unwrap_or_default()
     }
 
     /// Which enclosures a stop's own pipes sit in (indices into the
@@ -1326,7 +1331,7 @@ mod tests {
                 name: "Great".into(),
                 first_midi_note: 36,
                 key_count: 61,
-                    pedal: false,
+                    kind: Default::default(),
             }],
             stops: vec![
                 Stop {
@@ -1538,14 +1543,14 @@ mod tests {
                     name: "Pedal".into(),
                     first_midi_note: 36,
                     key_count: 32,
-                    pedal: false,
+                    kind: Default::default(),
                 },
                 Manual {
                     id: ManualId(2),
                     name: "Swell".into(),
                     first_midi_note: 36,
                     key_count: 61,
-                    pedal: false,
+                    kind: Default::default(),
                 },
             ],
             stops: vec![
@@ -1809,7 +1814,7 @@ mod tests {
             name: name.into(),
             first_midi_note: 36,
             key_count: 61,
-                    pedal: false,
+                    kind: Default::default(),
         };
         let stop = |id: u32, manual: u32, rank: u32| Stop {
             id: StopId(id),

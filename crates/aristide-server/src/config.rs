@@ -471,8 +471,8 @@ pub fn create_wrapper_organ(
     for manual in &organ.manuals {
         let mut table = toml_edit::Table::new();
         table["name"] = toml_edit::value(manual.name.as_str());
-        if manual.pedal {
-            table["kind"] = toml_edit::value("pedal");
+        if manual.kind != aristide_model::ManualKind::Manual {
+            table["kind"] = toml_edit::value(manual.kind.as_str());
         }
         table["low"] = toml_edit::value(manual.first_midi_note as i64);
         table["high"] = toml_edit::value(
@@ -765,7 +765,7 @@ pub fn write_composite_midi(path: &Path, organ: Option<&OrganConfig>) -> Result<
 /// tuning of its own as (temperament name, a4 Hz, transpose).
 pub struct SavedManual {
     pub name: String,
-    pub pedal: bool,
+    pub kind: aristide_model::ManualKind,
     pub low: u8,
     pub high: u8,
     pub tuning: Option<(String, f64, i8)>,
@@ -803,8 +803,8 @@ pub fn save_composite(
     for manual in manuals {
         let mut table = toml_edit::Table::new();
         table["name"] = toml_edit::value(manual.name.as_str());
-        if manual.pedal {
-            table["kind"] = toml_edit::value("pedal");
+        if manual.kind != aristide_model::ManualKind::Manual {
+            table["kind"] = toml_edit::value(manual.kind.as_str());
         }
         table["low"] = toml_edit::value(manual.low as i64);
         table["high"] = toml_edit::value(manual.high as i64);
@@ -895,6 +895,24 @@ pub fn write_composite_manual_tuning(
             table.remove("temperament");
             table.remove("a4_hz");
             table.remove("transpose");
+        }
+    })
+}
+
+/// Change one declared manual's kind in a composite file. The default
+/// kind is expressed by absence, so the file reads as it always has:
+/// a plain hand keyboard carries no `kind` line. `Ok(false)` when the
+/// file declares no such manual.
+pub fn write_composite_manual_kind(
+    path: &Path,
+    manual: &str,
+    kind: aristide_model::ManualKind,
+) -> Result<bool, String> {
+    edit_composite_manual(path, manual, |table| {
+        if kind == aristide_model::ManualKind::Manual {
+            table.remove("kind");
+        } else {
+            table["kind"] = toml_edit::value(kind.as_str());
         }
     })
 }
@@ -1045,13 +1063,13 @@ fn tables_mut<'a>(
 
 /// Declare a new manual in a composite file. The compass is written
 /// out (a declared manual with nothing pulled yet has no other way to
-/// have one), `kind = "pedal"` marks the pedalboard.
+/// have one); a non-default kind is written as `kind = "..."`.
 pub fn append_composite_manual(
     path: &Path,
     name: &str,
     low: u8,
     high: u8,
-    pedal: bool,
+    kind: aristide_model::ManualKind,
 ) -> Result<(), String> {
     let name = name.trim();
     if name.is_empty() {
@@ -1074,8 +1092,8 @@ pub fn append_composite_manual(
     };
     let mut table = toml_edit::Table::new();
     table["name"] = toml_edit::value(name);
-    if pedal {
-        table["kind"] = toml_edit::value("pedal");
+    if kind != aristide_model::ManualKind::Manual {
+        table["kind"] = toml_edit::value(kind.as_str());
     }
     table["low"] = toml_edit::value(low as i64);
     table["high"] = toml_edit::value(high as i64);
@@ -1589,14 +1607,14 @@ mod tests {
                     name: "Pedal".into(),
                     first_midi_note: 36,
                     key_count: 32,
-                    pedal: true,
+                    kind: aristide_model::ManualKind::Pedal,
                 },
                 Manual {
                     id: ManualId(1),
                     name: "Great".into(),
                     first_midi_note: 36,
                     key_count: 61,
-                    pedal: false,
+                    kind: Default::default(),
                 },
             ],
             stops: vec![
@@ -1985,10 +2003,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let path = create_blank_organ(&dir, "Atelier").expect("creates");
 
-        append_composite_manual(&path, "Grand orgue", 36, 96, false).expect("manual");
-        append_composite_manual(&path, "Pédale", 36, 67, true).expect("pedal");
+        use aristide_model::ManualKind;
+        append_composite_manual(&path, "Grand orgue", 36, 96, ManualKind::Manual)
+            .expect("manual");
+        append_composite_manual(&path, "Pédale", 36, 67, ManualKind::Pedal).expect("pedal");
         assert!(
-            append_composite_manual(&path, "grand ORGUE", 36, 96, false).is_err(),
+            append_composite_manual(&path, "grand ORGUE", 36, 96, ManualKind::Manual).is_err(),
             "duplicate names refused"
         );
 
@@ -2020,6 +2040,19 @@ mod tests {
         assert_eq!(parsed.stops.len(), 1);
         assert_eq!(parsed.stops[0].manual.as_deref(), Some("Great"));
         assert_eq!(parsed.divisions.len(), 1);
+
+        // A kind edit rewrites the kind line; the default kind is
+        // expressed by absence, so a hand keyboard carries no line.
+        assert!(
+            write_composite_manual_kind(&path, "Grand orgue", ManualKind::Microtonal)
+                .expect("kind")
+        );
+        assert_eq!(def(&path).manuals[0].kind.as_deref(), Some("microtonal"));
+        assert!(
+            write_composite_manual_kind(&path, "Grand orgue", ManualKind::Manual).expect("kind")
+        );
+        assert_eq!(def(&path).manuals[0].kind, None);
+        assert!(!write_composite_manual_kind(&path, "Ghost", ManualKind::Pedal).expect("ghost"));
 
         // Rename follows the name everywhere the file says it.
         assert!(rename_composite_manual(&path, "Grand orgue", "Hauptwerk").expect("renames"));

@@ -265,7 +265,18 @@ fn respond(
             let Some(name) = param(query, "name").map(unescape) else {
                 return bad_request("missing name");
             };
-            let pedal = param(query, "pedal").is_some_and(|v| v != "0");
+            // `kind` names the keyboard type; `pedal=1` stays as the
+            // older spelling of `kind=pedal`.
+            let kind = match param(query, "kind") {
+                Some(text) => match aristide_model::ManualKind::parse(text) {
+                    Some(kind) => kind,
+                    None => return bad_request("kind must be manual, pedal or microtonal"),
+                },
+                None if param(query, "pedal").is_some_and(|v| v != "0") => {
+                    aristide_model::ManualKind::Pedal
+                }
+                None => aristide_model::ManualKind::Manual,
+            };
             let low = match param(query, "low").map(|v| v.parse::<u8>()) {
                 Some(Ok(low)) if low < 128 => low,
                 None => 36,
@@ -274,7 +285,7 @@ fn respond(
             let high = match param(query, "high").map(|v| v.parse::<u8>()) {
                 Some(Ok(high)) if high < 128 => high,
                 None => {
-                    if pedal {
+                    if kind == aristide_model::ManualKind::Pedal {
                         67
                     } else {
                         96
@@ -289,9 +300,25 @@ fn respond(
             if state.loading.is_some() || state.pending_load.is_some() {
                 return bad_request("an organ is already loading");
             }
-            match state.add_manual(&name, low, high, pedal) {
+            match state.add_manual(&name, low, high, kind) {
                 Ok(()) => json(state_json_locked(&state)),
                 Err(err) => bad_request(&err),
+            }
+        }
+        (Method::Post, "/api/organ/manual/kind") => {
+            let mut state = state.lock().expect("state poisoned");
+            if state.loading.is_some() || state.pending_load.is_some() {
+                return bad_request("an organ is already loading");
+            }
+            match (
+                param(query, "manual").and_then(|v| v.parse::<usize>().ok()),
+                param(query, "kind").and_then(aristide_model::ManualKind::parse),
+            ) {
+                (Some(manual), Some(kind)) => match state.set_manual_kind(manual, kind) {
+                    Ok(()) => json(state_json_locked(&state)),
+                    Err(err) => bad_request(&err),
+                },
+                _ => bad_request("missing manual/kind (manual, pedal or microtonal)"),
             }
         }
         (Method::Post, "/api/organ/manual/rename") => {
@@ -1027,9 +1054,10 @@ fn state_json_locked(state: &State) -> String {
             first = false;
             let held: Vec<String> = held.iter().map(|k| k.to_string()).collect();
             out.push_str(&format!(
-                "{{\"idx\":{idx},\"name\":{},\"first_key\":{first_key},\"key_count\":{key_count},\"pedal\":{},\"held\":[{}]}}",
+                "{{\"idx\":{idx},\"name\":{},\"first_key\":{first_key},\"key_count\":{key_count},\"pedal\":{},\"kind\":\"{}\",\"held\":[{}]}}",
                 json_string(name),
                 console.manual_pedal(idx),
+                console.manual_kind(idx).as_str(),
                 held.join(",")
             ));
         }
@@ -1557,7 +1585,7 @@ fn offerings_json(path: &std::path::Path) -> Result<String, String> {
                     out.push_str(&format!(
                         "{{\"name\":{},\"pedal\":{},\"pulled\":{whole},\"stops\":[",
                         json_string(&manual.name),
-                        manual.pedal
+                        manual.pedal()
                     ));
                     let mut first_stop = true;
                     for stop in organ.stops.iter().filter(|stop| stop.manual == manual.id) {

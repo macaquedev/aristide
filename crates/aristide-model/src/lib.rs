@@ -17,6 +17,48 @@ pub struct StopId(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RankId(pub u32);
 
+/// What sort of keyboard a manual is. Declared, never deduced: loaders
+/// set it from the format (GO's `Manual000` is the pedal), composites
+/// declare it (`kind = "..."`). The kind is a console fact — how the
+/// keyboard is drawn and where it sits — not a sounding one: pitch
+/// still comes from the tuning/key-mapping layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ManualKind {
+    /// A hand keyboard with conventional piano geometry.
+    #[default]
+    Manual,
+    /// Played by the feet: renders as the pedalboard, at the bottom of
+    /// the console.
+    Pedal,
+    /// A generalized keyboard (Terpstra/Lumatone style): a hex-grid
+    /// key field rather than naturals and sharps. Key numbers are
+    /// still the manual's contiguous key range; what each key sounds
+    /// is the key→pitch mapping layer's business.
+    Microtonal,
+}
+
+impl ManualKind {
+    /// The `kind = "..."` vocabulary of composite files, lowercase.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ManualKind::Manual => "manual",
+            ManualKind::Pedal => "pedal",
+            ManualKind::Microtonal => "microtonal",
+        }
+    }
+
+    /// Parse the composite-file vocabulary, case-insensitively.
+    /// `None` for anything unrecognized — callers choose whether that
+    /// warns or errors.
+    pub fn parse(text: &str) -> Option<Self> {
+        let text = text.trim();
+        [ManualKind::Manual, ManualKind::Pedal, ManualKind::Microtonal]
+            .into_iter()
+            .find(|kind| kind.as_str().eq_ignore_ascii_case(text))
+    }
+}
+
 /// A keyboard (or pedalboard). "Manual" is used inclusively, as GO does.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manual {
@@ -26,11 +68,14 @@ pub struct Manual {
     /// mapping; the input-mapping layer may override arbitrarily).
     pub first_midi_note: u8,
     pub key_count: u16,
-    /// Played by the feet: renders as the pedalboard, at the bottom of
-    /// the console. Loaders set it from the format (GO's `Manual000`);
-    /// composites declare it (`kind = "pedal"`).
     #[serde(default)]
-    pub pedal: bool,
+    pub kind: ManualKind,
+}
+
+impl Manual {
+    pub fn pedal(&self) -> bool {
+        self.kind == ManualKind::Pedal
+    }
 }
 
 /// A sustain loop within a sample, in frames.
