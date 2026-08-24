@@ -544,6 +544,25 @@ input[type="range"]:hover::-webkit-slider-thumb { filter: brightness(1.15); }
 .manual-input.listening .input-device { border-color: var(--accent); }
 .manual-input.missing .input-device { border-style: dashed; color: var(--text-dim); }
 
+/* MPE pitch-bend range: its own line under the input row, which is
+   already edge to edge (device, channel, shift, Listen and remove sum
+   to exactly its width — no spare column for one more control without
+   squeezing the device name down to nothing). Styled like the compass
+   note beside it. */
+.input-bend-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-left: 2px;
+}
+.input-bend-label {
+  font-size: 10.5px;
+  letter-spacing: 0.2px;
+  color: var(--text-dim);
+}
+.input-bend { width: 92px; }
+.input-bend-custom { width: 54px; }
+
 .input-compass {
   font-size: 10.5px;
   letter-spacing: 0.2px;

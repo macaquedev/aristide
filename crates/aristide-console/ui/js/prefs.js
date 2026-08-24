@@ -410,7 +410,94 @@ export class Preferences {
         midi.learning.step === "high" ? "now the highest key…" : "play the lowest key…";
       row.append(hint);
     }
-    return row;
+    const fragment = document.createDocumentFragment();
+    fragment.append(row, this.bendRow(manual, slot, input));
+    return fragment;
+  }
+
+  /// The bend row: this manual/slot's MPE pitch-bend range, in semitones.
+  /// The input row itself is already edge-to-edge (device, channel,
+  /// shift, Listen, remove all sum to exactly its width — there's no
+  /// spare column for one more control without squeezing the device
+  /// name down to nothing), so bend gets its own compact line beneath
+  /// it, styled like the compass note that already lives there. Off
+  /// (null) is the organ's default — bend messages are ignored; 48 is
+  /// the MPE convention; anything else types into the field "Custom…"
+  /// reveals, the same reveal-on-select the tuning popover's scale
+  /// picker uses.
+  bendRow(manual, slot, input) {
+    const BEND_PRESETS = [2, 12, 48];
+    const line = document.createElement("div");
+    line.className = "input-bend-row";
+
+    const label = document.createElement("span");
+    label.className = "input-bend-label";
+    label.textContent = "Bend";
+
+    const bend = document.createElement("select");
+    bend.className = "input-bend";
+    bend.append(this.option("off", "off"));
+    for (const semitones of BEND_PRESETS) {
+      bend.append(this.option(String(semitones), semitones === 48 ? "48 (MPE)" : String(semitones)));
+    }
+    bend.append(this.option("custom", "Custom…"));
+    bend.disabled = !input;
+    bend.title = "Pitch-bend range this input sends, in semitones (MPE); off ignores bend messages";
+
+    const custom = document.createElement("input");
+    custom.type = "number";
+    custom.className = "input-bend-custom";
+    custom.min = 1;
+    custom.max = 96;
+    custom.step = 1;
+    custom.title = "Custom pitch-bend range, in semitones";
+    custom.setAttribute("aria-label", "Custom pitch-bend range in semitones");
+    custom.disabled = !input;
+
+    const unit = document.createElement("span");
+    unit.className = "input-bend-label";
+    unit.textContent = "semitones";
+
+    const currentBend = input ? (input.bend ?? null) : null;
+    if (currentBend == null) {
+      bend.value = "off";
+    } else if (BEND_PRESETS.includes(currentBend)) {
+      bend.value = String(currentBend);
+    } else {
+      bend.value = "custom";
+      custom.value = currentBend;
+    }
+    custom.classList.toggle("hidden", bend.value !== "custom");
+    unit.classList.toggle("hidden", bend.value !== "custom");
+
+    const sendBend = (value) =>
+      this.send(
+        commands.midiBind(
+          manual, slot, input.device, input.channel ?? "any", null, null,
+          input.transpose ?? 0, value
+        )
+      );
+    bend.addEventListener("change", () => {
+      const showCustom = bend.value === "custom";
+      custom.classList.toggle("hidden", !showCustom);
+      unit.classList.toggle("hidden", !showCustom);
+      if (showCustom) {
+        custom.value = BEND_PRESETS.includes(currentBend) || currentBend == null ? 24 : currentBend;
+        custom.focus();
+        // Wait for the custom field itself before sending anything.
+      } else {
+        sendBend(bend.value);
+      }
+    });
+    custom.addEventListener("change", () => {
+      const semitones = Math.min(96, Math.max(1, Math.trunc(Number(custom.value) || 0)));
+      custom.value = semitones;
+      sendBend(semitones);
+      custom.blur(); // hand the field back to the snapshot
+    });
+
+    line.append(label, bend, custom, unit);
+    return line;
   }
 
   /// What this input's keys will actually sound, shift included. The
