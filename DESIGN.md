@@ -228,8 +228,11 @@ member stops actually sound, splitting a windchest shared with outsiders,
 while borrowed pipes stand with their own rank and stay outside), the organ's
 whole structure (manuals declared/renamed/reordered/removed, sources added,
 stops pulled and unpulled — the pane's editor, each edit a line in the file
-followed by a reload), and per-manual tuning
-(`[[manual]] temperament/a4_hz/transpose`) —
+followed by a reload), each keyboard's declared kind
+(`[[manual]] kind = manual/pedal/microtonal` — never deduced; "microtonal"
+draws a Terpstra-style hex key field, a console fact whose *pitch* still
+comes from the tuning layer until M6's Scala/key-mapping work), and
+per-manual tuning (`[[manual]] temperament/a4_hz/transpose`) —
 a 415 meantone Positif against a 440 equal Great is one instrument. Tuning is
 physical: a coupled copy sounds the destination division's pipes, so it speaks
 that division's temperament; a division's transpose moves only its own
