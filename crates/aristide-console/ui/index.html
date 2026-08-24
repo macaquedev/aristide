@@ -415,14 +415,35 @@
 
   <!-- The per-manual tuning popover, opened from the keyboard menu above.
        Seeded from the snapshot's effective tuning for that manual;
-       applies live, field by field — no rebuild. -->
+       applies live, field by field — no rebuild. A Scala scale, when
+       active, supersedes the temperament; picking one swaps a file
+       browser in over the form fields, the same idiom as the
+       add-source browse below (filtered client-side to .scl/.kbm). -->
   <div class="editor-add hidden" id="editor-tuning">
     <form class="editor-add-form" id="editor-tuning-form">
       <span class="editor-tuning-head">
         <span class="rail-label" id="editor-tuning-title">Tuning</span>
         <button class="ghost hidden" type="button" id="editor-tuning-reset">Shared tuning</button>
       </span>
-      <label class="settings-row">
+      <div class="settings-row">
+        <span class="rail-label">Scale</span>
+        <span class="tuning-scale-value">
+          <button class="ghost hidden" type="button" id="editor-tuning-scale-pick">Scala scale&hellip;</button>
+          <span class="tuning-scale-active hidden" id="editor-tuning-scale-active">
+            <span class="tuning-scale-name" id="editor-tuning-scale-name"></span>
+            <button class="ghost" type="button" id="editor-tuning-scale-clear" title="Use temperament">&times;</button>
+          </span>
+        </span>
+      </div>
+      <div class="settings-row hidden" id="editor-tuning-keymap-row">
+        <span class="rail-label">Keymap</span>
+        <span class="tuning-scale-value">
+          <span class="tuning-scale-name" id="editor-tuning-keymap-name"></span>
+          <button class="ghost" type="button" id="editor-tuning-keymap-pick">Browse&hellip;</button>
+          <button class="ghost hidden" type="button" id="editor-tuning-keymap-clear" title="Back to linear">&times;</button>
+        </span>
+      </div>
+      <label class="settings-row" id="editor-tuning-temperament-row">
         <span class="rail-label">Temperament</span>
         <select id="editor-tuning-temperament">
           <option value="equal">Equal</option>
@@ -440,10 +461,25 @@
         <span class="rail-label">Transpose</span>
         <span class="stepper"><input id="editor-tuning-transpose" type="number" min="-12" max="12" step="1" /></span>
       </label>
+      <p class="organ-edit-error hidden" id="editor-tuning-error"></p>
       <span class="editor-add-form-actions">
         <button class="ghost" type="button" id="editor-tuning-close">Close</button>
       </span>
     </form>
+    <div class="editor-add-form editor-add-browse hidden" id="editor-tuning-browse">
+      <span class="editor-tuning-head">
+        <span class="rail-label" id="editor-tuning-browse-title">Choose a scale</span>
+      </span>
+      <div class="editor-add-browse-head">
+        <button class="ghost" id="editor-tuning-browse-up">&uarr; Up</button>
+        <span id="editor-tuning-browse-dir" class="picker-dir"></span>
+      </div>
+      <p class="organ-edit-error hidden" id="editor-tuning-browse-error"></p>
+      <div id="editor-tuning-browse-list" class="picker-browse-list"></div>
+      <span class="editor-add-form-actions">
+        <button class="ghost" type="button" id="editor-tuning-browse-cancel">Cancel</button>
+      </span>
+    </div>
   </div>
 
   <script type="module" src="js/main.js"></script>

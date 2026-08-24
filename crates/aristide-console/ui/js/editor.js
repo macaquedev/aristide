@@ -63,6 +63,11 @@ export class Editor {
     this.addAnchor = null; // where the add popover was opened, in px
     this.addKind = "manual"; // "manual" | "pedal" | "microtonal" — the add-manual form's target
     this.tuningManual = null; // manual idx the tuning popover is open for, or null
+    this.tuningBrowseKind = null; // "scale" | "keymap" | null — the tuning form's own file browser
+    this.tuningBrowseDir = null;
+    this.tuningBrowseParent = null;
+    this.tuningBrowseEntries = null;
+    this.tuningBrowseError = null;
     this.addBrowseDir = null;
     this.addBrowseParent = null;
     this.addBrowseEntries = null;
@@ -114,12 +119,30 @@ export class Editor {
       divisionMenu: root.getElementById("editor-division-menu"),
       keyboardMenu: root.getElementById("editor-keyboard-menu"),
       tuning: root.getElementById("editor-tuning"),
+      tuningForm: root.getElementById("editor-tuning-form"),
       tuningTitle: root.getElementById("editor-tuning-title"),
       tuningReset: root.getElementById("editor-tuning-reset"),
+      tuningScalePick: root.getElementById("editor-tuning-scale-pick"),
+      tuningScaleActive: root.getElementById("editor-tuning-scale-active"),
+      tuningScaleName: root.getElementById("editor-tuning-scale-name"),
+      tuningScaleClear: root.getElementById("editor-tuning-scale-clear"),
+      tuningKeymapRow: root.getElementById("editor-tuning-keymap-row"),
+      tuningKeymapName: root.getElementById("editor-tuning-keymap-name"),
+      tuningKeymapPick: root.getElementById("editor-tuning-keymap-pick"),
+      tuningKeymapClear: root.getElementById("editor-tuning-keymap-clear"),
+      tuningTemperamentRow: root.getElementById("editor-tuning-temperament-row"),
       tuningTemperament: root.getElementById("editor-tuning-temperament"),
       tuningA4: root.getElementById("editor-tuning-a4"),
       tuningTranspose: root.getElementById("editor-tuning-transpose"),
+      tuningError: root.getElementById("editor-tuning-error"),
       tuningClose: root.getElementById("editor-tuning-close"),
+      tuningBrowse: root.getElementById("editor-tuning-browse"),
+      tuningBrowseTitle: root.getElementById("editor-tuning-browse-title"),
+      tuningBrowseUp: root.getElementById("editor-tuning-browse-up"),
+      tuningBrowseDir: root.getElementById("editor-tuning-browse-dir"),
+      tuningBrowseError: root.getElementById("editor-tuning-browse-error"),
+      tuningBrowseList: root.getElementById("editor-tuning-browse-list"),
+      tuningBrowseCancel: root.getElementById("editor-tuning-browse-cancel"),
     };
 
     this.wireLock();
@@ -663,21 +686,29 @@ export class Editor {
   }
 
   // ---- the tuning popover: this manual's own pitch, apart from the --------
-  // instrument's, applied live field by field — never a rebuild.
+  // instrument's, applied live field by field — never a rebuild. A
+  // Scala scale (and its optional keymap) is just another field on the
+  // same /api/tuning contract; picking one supersedes the temperament.
+  //
+  // Every field goes through `tuningCommand` rather than the plain
+  // `send()` the rest of the console uses: a scale path can 400 (a bad
+  // file, an unparseable one), and that reason needs to land in this
+  // popover, not the app-wide status strip — see `showTuningError`.
 
   wireTuningForm() {
     this.el.tuningClose.addEventListener("click", () => this.closeTuningForm());
 
     this.el.tuningReset.addEventListener("click", () => {
       if (this.tuningManual == null) return;
-      this.send(commands.tuning({ manual: this.tuningManual, reset: 1 }));
+      this.tuningCommand({ manual: this.tuningManual, reset: 1 });
     });
 
     this.el.tuningTemperament.addEventListener("change", () => {
       if (this.tuningManual == null) return;
-      this.send(
-        commands.tuning({ manual: this.tuningManual, temperament: this.el.tuningTemperament.value })
-      );
+      // Naming a temperament here is allowed even with a scale active —
+      // the server reads it as leaving the scale (http.rs's /api/tuning
+      // arm clears `tuning.scale` whenever `temperament` is given).
+      this.tuningCommand({ manual: this.tuningManual, temperament: this.el.tuningTemperament.value });
       this.el.tuningTemperament.blur();
     });
 
@@ -685,7 +716,7 @@ export class Editor {
       if (this.tuningManual == null) return;
       const a4 = Math.min(500, Math.max(300, Number(this.el.tuningA4.value) || 440));
       this.el.tuningA4.value = a4;
-      this.send(commands.tuning({ manual: this.tuningManual, a4 }));
+      this.tuningCommand({ manual: this.tuningManual, a4 });
       this.el.tuningA4.blur();
     });
 
@@ -693,9 +724,31 @@ export class Editor {
       if (this.tuningManual == null) return;
       const transpose = Math.min(12, Math.max(-12, Math.round(Number(this.el.tuningTranspose.value) || 0)));
       this.el.tuningTranspose.value = transpose;
-      this.send(commands.tuning({ manual: this.tuningManual, transpose }));
+      this.tuningCommand({ manual: this.tuningManual, transpose });
       this.el.tuningTranspose.blur();
     });
+
+    this.el.tuningScalePick.addEventListener("click", () => this.openTuningBrowse("scale"));
+    this.el.tuningScaleClear.addEventListener("click", () => {
+      if (this.tuningManual == null) return;
+      this.tuningCommand({ manual: this.tuningManual, scale: "off" });
+    });
+
+    this.el.tuningKeymapPick.addEventListener("click", () => this.openTuningBrowse("keymap"));
+    this.el.tuningKeymapClear.addEventListener("click", () => {
+      if (this.tuningManual == null) return;
+      const scl = this.currentScalePath();
+      if (!scl) return;
+      // An empty `keymap` param is indistinguishable, server-side, from
+      // an omitted one (http.rs filters both to "no keymap") — sending
+      // it explicitly just documents the intent here.
+      this.tuningCommand({ manual: this.tuningManual, scale: scl, keymap: "" });
+    });
+
+    this.el.tuningBrowseUp.addEventListener("click", () => {
+      if (this.tuningBrowseParent) this.tuningBrowse(this.tuningBrowseParent);
+    });
+    this.el.tuningBrowseCancel.addEventListener("click", () => this.closeTuningBrowse());
   }
 
   openTuningForm(idx, x, y) {
@@ -703,6 +756,8 @@ export class Editor {
     this.closeDivisionMenu();
     this.closeKeyboardMenu();
     this.tuningManual = idx;
+    this.hideTuningError();
+    this.closeTuningBrowse();
     this.syncTuningForm();
     this.el.tuning.classList.remove("hidden");
     this.positionPopover(this.el.tuning, x, y);
@@ -711,12 +766,16 @@ export class Editor {
   closeTuningForm() {
     this.tuningManual = null;
     this.el.tuning.classList.add("hidden");
+    this.hideTuningError();
+    this.closeTuningBrowse();
   }
 
   /// This manual's effective tuning: its own override if the snapshot
   /// carries one, else whatever the instrument shares. Called on open
   /// and on every later poll, so a shared value another panel changes
-  /// (or another session's edit) keeps the popover honest.
+  /// (or another session's edit) keeps the popover honest. Never touches
+  /// the file-browser sub-view (see `openTuningBrowse`/`closeTuningBrowse`)
+  /// — a poll landing mid-navigation must not yank it shut.
   syncTuningForm() {
     const idx = this.tuningManual;
     const manual = this.lastSnapshot?.manuals.find((m) => m.idx === idx);
@@ -734,6 +793,162 @@ export class Editor {
     }
     if (this.root.activeElement !== this.el.tuningA4) this.el.tuningA4.value = tuning.a4;
     if (this.root.activeElement !== this.el.tuningTranspose) this.el.tuningTranspose.value = tuning.transpose;
+
+    const scale = tuning.scale ?? null;
+    this.el.tuningScalePick.classList.toggle("hidden", !!scale);
+    this.el.tuningScaleActive.classList.toggle("hidden", !scale);
+    if (scale) {
+      this.el.tuningScaleName.textContent = `${scale.name} · ${scale.notes} notes`;
+      this.el.tuningScaleName.title = scale.scl;
+    }
+
+    this.el.tuningKeymapRow.classList.toggle("hidden", !scale);
+    if (scale) {
+      if (scale.kbm) {
+        this.el.tuningKeymapName.textContent = scale.kbm.split("/").pop();
+        this.el.tuningKeymapName.title = scale.kbm;
+        this.el.tuningKeymapClear.classList.remove("hidden");
+      } else {
+        this.el.tuningKeymapName.textContent = "linear";
+        this.el.tuningKeymapName.title = "";
+        this.el.tuningKeymapClear.classList.add("hidden");
+      }
+    }
+
+    // The scale IS the temperament while one is active — the select
+    // stays live (choosing from it is a valid way back out) but reads
+    // as superseded rather than in effect.
+    this.el.tuningTemperamentRow.classList.toggle("tuning-dimmed", !!scale);
+    this.el.tuningTemperament.title = scale
+      ? "A scale is active — picking a temperament here leaves it"
+      : "";
+  }
+
+  /// The manual's effective scale path right now, or null with none —
+  /// what a keymap pick or clear re-sends alongside, since /api/tuning
+  /// takes the scale and its keymap together (see http.rs).
+  currentScalePath() {
+    const idx = this.tuningManual;
+    if (!this.lastSnapshot?.manuals.some((m) => m.idx === idx)) return null;
+    const own = (this.lastSnapshot?.manual_tuning ?? []).find((t) => t.idx === idx);
+    const tuning = own ?? this.lastSnapshot?.tuning;
+    return tuning?.scale?.scl ?? null;
+  }
+
+  /// Sends a tuning field update directly (not through the app-wide
+  /// `send()`), so a 400's reason can land in this popover instead of
+  /// the global status strip — the same local-fetch idiom
+  /// `organCommandResult` uses for structural edits.
+  async tuningCommand(fields) {
+    this.hideTuningError();
+    try {
+      const response = await fetch(this.base + commands.tuning(fields), { method: "POST" });
+      if (!response.ok) {
+        this.showTuningError((await response.text()) || `${response.status} ${response.statusText}`);
+        return false;
+      }
+      return true;
+    } catch (err) {
+      this.showTuningError(String(err));
+      return false;
+    }
+  }
+
+  showTuningError(text) {
+    this.el.tuningError.textContent = text;
+    this.el.tuningError.classList.remove("hidden");
+  }
+
+  hideTuningError() {
+    this.el.tuningError.classList.add("hidden");
+    this.el.tuningError.textContent = "";
+  }
+
+  // ---- the tuning popover's own file browser: picks a .scl or .kbm --------
+  // path, the same /api/browse idiom as the add-source browse, filtered
+  // client-side to the relevant extension (directories stay navigable).
+
+  openTuningBrowse(kind) {
+    this.tuningBrowseKind = kind;
+    this.tuningBrowseDir = null;
+    this.tuningBrowseParent = null;
+    this.tuningBrowseEntries = null;
+    this.tuningBrowseError = null;
+    this.el.tuningBrowseTitle.textContent = kind === "keymap" ? "Choose a keymap" : "Choose a scale";
+    this.el.tuningForm.classList.add("hidden");
+    this.el.tuningBrowse.classList.remove("hidden");
+    this.tuningBrowse();
+  }
+
+  closeTuningBrowse() {
+    this.tuningBrowseKind = null;
+    this.el.tuningBrowse.classList.add("hidden");
+    this.el.tuningForm.classList.remove("hidden");
+  }
+
+  async tuningBrowse(dir) {
+    try {
+      const query = dir ? `/api/browse?dir=${encodeURIComponent(dir)}` : "/api/browse";
+      const response = await fetch(this.base + query);
+      if (!response.ok) {
+        this.tuningBrowseError = (await response.text()) || `${response.status} ${response.statusText}`;
+        this.renderTuningBrowse();
+        return;
+      }
+      const data = await response.json();
+      this.tuningBrowseDir = data.dir;
+      this.tuningBrowseParent = data.parent;
+      this.tuningBrowseEntries = data.entries;
+      this.tuningBrowseError = null;
+      this.renderTuningBrowse();
+    } catch (err) {
+      this.tuningBrowseError = String(err);
+      this.renderTuningBrowse();
+    }
+  }
+
+  renderTuningBrowse() {
+    this.el.tuningBrowseDir.textContent = this.tuningBrowseDir ?? "";
+    this.el.tuningBrowseDir.title = this.tuningBrowseDir ?? "";
+    this.el.tuningBrowseUp.disabled = !this.tuningBrowseParent;
+    this.el.tuningBrowseError.classList.toggle("hidden", !this.tuningBrowseError);
+    this.el.tuningBrowseError.textContent = this.tuningBrowseError ?? "";
+    this.el.tuningBrowseList.replaceChildren();
+    if (this.tuningBrowseError) return;
+    const ext = this.tuningBrowseKind === "keymap" ? ".kbm" : ".scl";
+    const entries = (this.tuningBrowseEntries ?? []).filter(
+      (entry) => entry.dir || entry.name.toLowerCase().endsWith(ext)
+    );
+    if (!entries.length) {
+      this.el.tuningBrowseList.append(this.emptyNote("Nothing here."));
+      return;
+    }
+    for (const entry of entries) {
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = entry.dir ? "picker-row picker-browse-dir" : "picker-row";
+      row.title = entry.path;
+      row.addEventListener("click", () => {
+        if (entry.dir) this.tuningBrowse(entry.path);
+        else this.pickTuningFile(entry.path);
+      });
+      const name = document.createElement("span");
+      name.className = "picker-row-name";
+      name.textContent = entry.name;
+      row.append(name);
+      this.el.tuningBrowseList.append(row);
+    }
+  }
+
+  async pickTuningFile(path) {
+    if (this.tuningManual == null) return;
+    const fields =
+      this.tuningBrowseKind === "keymap"
+        ? { manual: this.tuningManual, scale: this.currentScalePath(), keymap: path }
+        : { manual: this.tuningManual, scale: path };
+    if (fields.scale == null) return;
+    const ok = await this.tuningCommand(fields);
+    if (ok) this.closeTuningBrowse();
   }
 
   // ---- drag controller: plain when unlocked, ctrl-drag always -------------
@@ -1420,7 +1635,12 @@ export class Editor {
     this.el.addBrowseError.textContent = this.addBrowseError ?? "";
     this.el.addBrowseList.replaceChildren();
     if (this.addBrowseError) return;
-    const entries = this.addBrowseEntries ?? [];
+    // The server also lists Scala tuning files now; this browser means
+    // loadable sets and organs.
+    const loadable = /\.(organ|toml|organ_hauptwerk_xml)$/i;
+    const entries = (this.addBrowseEntries ?? []).filter(
+      (entry) => entry.dir || loadable.test(entry.name)
+    );
     if (!entries.length) {
       this.el.addBrowseList.append(this.emptyNote("Nothing here."));
       return;

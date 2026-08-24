@@ -1517,9 +1517,13 @@ fn browse_json(dir: &std::path::Path) -> Result<String, String> {
             dirs.push(name);
         } else {
             let lower = name.to_lowercase();
+            // Loadable organs plus Scala tuning files; each picker
+            // filters client-side to the extensions it means.
             if lower.ends_with(".organ")
                 || lower.ends_with(".toml")
                 || lower.ends_with(".organ_hauptwerk_xml")
+                || lower.ends_with(".scl")
+                || lower.ends_with(".kbm")
             {
                 files.push(name);
             }
@@ -2919,6 +2923,8 @@ mod tests {
             "set.organ",
             "combo.toml",
             "hw.Organ_Hauptwerk_xml",
+            "19edo.scl",
+            "white.kbm",
             "readme.txt",
             ".hidden.organ",
         ] {
@@ -2929,6 +2935,8 @@ mod tests {
         assert!(body.contains("set.organ"), "sample set listed");
         assert!(body.contains("combo.toml"), "composite listed");
         assert!(body.contains("hw.Organ_Hauptwerk_xml"), "Hauptwerk listed");
+        assert!(body.contains("19edo.scl"), "Scala scale listed");
+        assert!(body.contains("white.kbm"), "keyboard mapping listed");
         assert!(!body.contains("readme.txt"), "other files are noise");
         assert!(!body.contains(".hidden.organ"), "dotfiles skipped");
         assert!(

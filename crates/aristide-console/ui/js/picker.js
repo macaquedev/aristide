@@ -364,7 +364,13 @@ export class Picker {
 
     this.el.browseList.replaceChildren();
     if (this.browseError) return;
-    const entries = this.browseEntries ?? [];
+    // The server lists every file a console picker might mean (organs
+    // AND Scala tuning files); this picker means organs.
+    const loadable = (name) =>
+      ORGAN_FILTER.extensions.some((ext) => name.toLowerCase().endsWith(`.${ext.toLowerCase()}`));
+    const entries = (this.browseEntries ?? []).filter(
+      (entry) => entry.dir || loadable(entry.name)
+    );
     if (!entries.length) {
       this.el.browseList.append(this.emptyNote("Nothing here."));
       return;

@@ -148,4 +148,22 @@ export function applyHarnessHooks({ prefs, editor }) {
       }, 200);
     }, 400);
   }
+
+  // Same as kbdTuning, one step further in: the tuning popover's own
+  // Scala-scale file browser, open — for a screenshot of real .scl rows.
+  const kbdTuningScaleParam = params.get("kbdTuningScale"); // a manual name or idx
+  if (kbdTuningScaleParam != null) {
+    setTimeout(() => {
+      editor.unlock();
+      const board = findKeyboardBoard(kbdTuningScaleParam);
+      if (board) rightClick(board);
+      setTimeout(() => {
+        const items = [...document.querySelectorAll("#editor-keyboard-menu .menu-item")];
+        items[items.length - 1]?.click();
+        setTimeout(() => {
+          document.getElementById("editor-tuning-scale-pick")?.click();
+        }, 200);
+      }, 200);
+    }, 400);
+  }
 }

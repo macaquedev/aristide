@@ -1108,6 +1108,43 @@ input[type="range"]:hover::-webkit-slider-thumb { filter: brightness(1.15); }
 .editor-add-browse-head .ghost { padding: 3px 8px; font-size: 9px; }
 .editor-add-browse .picker-browse-list { max-height: 130px; }
 
+/* the scale/keymap browser reuses the add-source browse chrome but at
+   the tuning form's own width, so swapping it in doesn't resize the
+   popover */
+#editor-tuning-browse { width: 270px; }
+
+/* a scale's name (or a keymap's), and the controls beside it, right-
+   aligned against the row's label like the temperament/a4/transpose
+   fields above it */
+.tuning-scale-value {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: 0;
+}
+.tuning-scale-active { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.tuning-scale-name {
+  max-width: 150px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 11px;
+  color: var(--text);
+}
+.tuning-scale-value .ghost { padding: 3px 8px; font-size: 9px; }
+#editor-tuning-scale-clear,
+#editor-tuning-keymap-clear {
+  padding: 1px 6px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+/* the temperament is superseded, not gone, while a scale is active —
+   picking one still works (and leaves the scale), so this only dims
+   rather than disabling */
+.tuning-dimmed { opacity: 0.55; }
+
 /* an empty organ says what to do next */
 .organ-hint {
   margin: 4px 0;
