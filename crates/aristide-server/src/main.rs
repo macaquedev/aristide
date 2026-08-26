@@ -1,4 +1,5 @@
 mod bank;
+mod cache;
 mod config;
 mod console;
 mod control;
@@ -3486,7 +3487,7 @@ mod tests {
             .position(|m| m.id == target.manual)
             .expect("its manual exists");
         let drawn = vec![target.id];
-        let loaded = bank::build(&organ, 48000.0).expect("bank builds");
+        let loaded = bank::build(&organ, 48000.0, 16, None).expect("bank builds");
         let console = Console::new(organ, loaded.specs, drawn, 48_000.0);
         let (_engine, engine) = Engine::new(48000.0, Arc::new(loaded.bank));
         let state = Arc::new(Mutex::new(State {

@@ -115,6 +115,8 @@ pub struct Definition {
     #[serde(default)]
     pub tremulant: Option<sidecar::Tremulant>,
     #[serde(default)]
+    pub samples: sidecar::SamplesConfig,
+    #[serde(default)]
     pub tuning: sidecar::TuningConfig,
     #[serde(default)]
     pub reverb: sidecar::ReverbConfig,
@@ -344,6 +346,7 @@ impl Definition {
             registration: self.registration.clone(),
             wind: self.wind.clone(),
             tremulant: self.tremulant.clone(),
+            samples: self.samples.clone(),
             tuning: self.tuning.clone(),
             reverb: self.reverb.clone(),
             noises: self.noises.clone(),

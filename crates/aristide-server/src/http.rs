@@ -1792,7 +1792,7 @@ mod tests {
         let organ = aristide_formats::grandorgue::load(&path)
             .expect("demo set loads")
             .organ;
-        let loaded = crate::bank::build(&organ, 48000.0).expect("bank builds");
+        let loaded = crate::bank::build(&organ, 48000.0, 16, None).expect("bank builds");
         let console = crate::console::Console::new(organ, loaded.specs, Vec::new(), 48000.0);
         let (_engine, handle) =
             aristide_engine::Engine::new(48000.0, std::sync::Arc::new(loaded.bank));

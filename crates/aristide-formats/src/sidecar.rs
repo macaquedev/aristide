@@ -40,6 +40,8 @@ pub struct Sidecar {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tremulant: Option<Tremulant>,
     #[serde(default)]
+    pub samples: SamplesConfig,
+    #[serde(default)]
     pub tuning: TuningConfig,
     #[serde(default)]
     pub reverb: ReverbConfig,
@@ -515,6 +517,37 @@ impl Default for TuningConfig {
             transpose: 0,
             scale: None,
             keymap: None,
+        }
+    }
+}
+
+/// How decoded audio stays resident in RAM.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SamplesConfig {
+    /// Resident sample resolution: 16 (default — half the RAM of f32,
+    /// −96 dB floor, below organ recordings' own room noise and what
+    /// GO/HW effectively play from) or 32 (bit-exact f32, for A/B).
+    /// Analysis (loop periods, phase maps, tail measurement) always
+    /// runs at full decode precision before quantization.
+    #[serde(default = "default_sample_bits")]
+    pub bits: u32,
+    /// Persist decoded samples + analysis next to the user config so
+    /// unchanged files skip decode on the next load. Costs disk about
+    /// the size of the resident bank.
+    #[serde(default = "default_true")]
+    pub cache: bool,
+}
+
+fn default_sample_bits() -> u32 {
+    16
+}
+
+impl Default for SamplesConfig {
+    fn default() -> Self {
+        SamplesConfig {
+            bits: default_sample_bits(),
+            cache: true,
         }
     }
 }

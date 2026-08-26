@@ -402,6 +402,13 @@ pub fn organs_dir() -> Option<PathBuf> {
     Some(default_path()?.parent()?.join("organs"))
 }
 
+/// Where decoded-sample caches live: `cache/` next to `midi.toml`.
+/// One file per (source set, residency) combination; safe to delete
+/// wholesale — the next load simply decodes.
+pub fn cache_dir() -> Option<PathBuf> {
+    Some(default_path()?.parent()?.join("cache"))
+}
+
 /// Create a composite file holding nothing but `name` — an organ with
 /// no manuals and no stops yet, ready to load and grow. The filename
 /// is a slug of the name, uniquified so creating "Chapel" twice yields

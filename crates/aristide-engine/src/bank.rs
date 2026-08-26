@@ -43,12 +43,56 @@ impl ReleaseAlignment {
     }
 }
 
+/// Dequantization scale for 16-bit resident audio.
+pub const I16_SCALE: f32 = 1.0 / 32768.0;
+
+/// Decoded audio at the resolution the instrument keeps resident.
+/// 16-bit halves RAM against f32 with a −96 dB floor — below organ
+/// recordings' own room noise, and effectively what GO and HW play
+/// from by default; f32 keeps the decode bit-exact for A/B.
+#[derive(Debug, Clone)]
+pub enum SampleData {
+    F32(Vec<f32>),
+    I16(Vec<i16>),
+}
+
+impl SampleData {
+    #[inline]
+    pub fn len(&self) -> usize {
+        match self {
+            SampleData::F32(data) => data.len(),
+            SampleData::I16(data) => data.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// One interleaved value as f32, whatever the resident format.
+    #[inline]
+    pub fn get(&self, index: usize) -> f32 {
+        match self {
+            SampleData::F32(data) => data[index],
+            SampleData::I16(data) => f32::from(data[index]) * I16_SCALE,
+        }
+    }
+
+    /// Resident bytes of audio.
+    pub fn bytes(&self) -> usize {
+        match self {
+            SampleData::F32(data) => data.len() * size_of::<f32>(),
+            SampleData::I16(data) => data.len() * size_of::<i16>(),
+        }
+    }
+}
+
 /// One decoded audio file: attack, sustain loop, and (optionally) an
 /// embedded release tail after the loop.
 #[derive(Debug, Clone)]
 pub struct Sample {
     /// Interleaved samples, normalized to `[-1.0, 1.0]`.
-    data: Vec<f32>,
+    data: SampleData,
     channels: u16,
     sample_rate_hz: f32,
     /// Sustain loop as a half-open frame range; `None` = one-shot
@@ -158,7 +202,7 @@ impl Sample {
             return Err(format!("bad sample rate {sample_rate_hz}"));
         }
         let mut sample = Sample {
-            data,
+            data: SampleData::F32(data),
             channels,
             sample_rate_hz,
             sustain_loop,
@@ -195,7 +239,7 @@ impl Sample {
         let mut re = 0.0f64;
         let mut im = 0.0f64;
         for i in 0..window {
-            let x = self.data[(start + i) as usize * ch] as f64;
+            let x = self.data.get((start + i) as usize * ch) as f64;
             let angle = core::f64::consts::TAU * i as f64 / period;
             re += x * angle.cos();
             im += x * angle.sin();
@@ -221,7 +265,7 @@ impl Sample {
         let base_lag = cycles as f64 * nominal;
         let half_span = (nominal / 2.0).ceil() as i64;
 
-        let sample_at = |frame: u64| self.data[frame as usize * ch];
+        let sample_at = |frame: u64| self.data.get(frame as usize * ch);
         let score = |lag: i64| -> f64 {
             let mut dot = 0.0f64;
             let mut energy_a = 0.0f64;
@@ -272,9 +316,9 @@ impl Sample {
         for frame in start..start + window {
             let base = frame as usize * ch;
             let value = if ch == 1 {
-                self.data[base].abs()
+                self.data.get(base).abs()
             } else {
-                (self.data[base].abs() + self.data[base + 1].abs()) * 0.5
+                (self.data.get(base).abs() + self.data.get(base + 1).abs()) * 0.5
             };
             sum += value as f64;
         }
@@ -583,10 +627,198 @@ impl Sample {
         self.release_crossfade_ms
     }
 
-    /// Raw interleaved data + channel count, for the sinc reader.
+    /// Write this sample for the server's load cache: every field the
+    /// decode-and-analysis phase produced, so a cache hit skips both.
+    /// Attached releases are deliberately NOT written — caching happens
+    /// pre-attach (bank indices are an assembly fact, and re-attaching
+    /// is cheap). Little-endian, guarded by the cache's own version tag.
+    pub fn write_cache(&self, out: &mut impl std::io::Write) -> std::io::Result<()> {
+        fn put_opt_u64(out: &mut impl std::io::Write, v: Option<u64>) -> std::io::Result<()> {
+            match v {
+                Some(v) => {
+                    out.write_all(&[1])?;
+                    out.write_all(&v.to_le_bytes())
+                }
+                None => out.write_all(&[0]),
+            }
+        }
+        out.write_all(&self.channels.to_le_bytes())?;
+        out.write_all(&self.sample_rate_hz.to_le_bytes())?;
+        put_opt_u64(out, self.sustain_loop.map(|(s, _)| s))?;
+        put_opt_u64(out, self.sustain_loop.map(|(_, e)| e))?;
+        out.write_all(&(self.extra_loops.len() as u64).to_le_bytes())?;
+        for &(start, end) in &self.extra_loops {
+            out.write_all(&start.to_le_bytes())?;
+            out.write_all(&end.to_le_bytes())?;
+        }
+        out.write_all(&self.release_start.to_le_bytes())?;
+        match &self.release_alignment {
+            Some(alignment) => {
+                out.write_all(&[1])?;
+                out.write_all(&alignment.period.to_le_bytes())?;
+                out.write_all(&(alignment.offsets.len() as u64).to_le_bytes())?;
+                for &offset in &alignment.offsets {
+                    out.write_all(&offset.to_le_bytes())?;
+                }
+            }
+            None => out.write_all(&[0])?,
+        }
+        match self.measured_period {
+            Some(period) => {
+                out.write_all(&[1])?;
+                out.write_all(&period.to_le_bytes())?;
+            }
+            None => out.write_all(&[0])?,
+        }
+        out.write_all(&self.tail_reference_level.to_le_bytes())?;
+        out.write_all(&self.tail_decay_db_per_s.to_le_bytes())?;
+        out.write_all(&self.tail_eof_level_db.to_le_bytes())?;
+        out.write_all(&self.attack_start.to_le_bytes())?;
+        out.write_all(&self.release_crossfade_ms.to_le_bytes())?;
+        match &self.data {
+            SampleData::F32(data) => {
+                out.write_all(&[0])?;
+                out.write_all(&(data.len() as u64).to_le_bytes())?;
+                // SAFETY: f32 is plain-old-data; byte view for bulk
+                // I/O on the little-endian platforms we build for.
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4)
+                };
+                out.write_all(bytes)?;
+            }
+            SampleData::I16(data) => {
+                out.write_all(&[1])?;
+                out.write_all(&(data.len() as u64).to_le_bytes())?;
+                // SAFETY: as above, i16 POD byte view.
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 2)
+                };
+                out.write_all(bytes)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Rebuild a sample [`Sample::write_cache`] wrote. Any structural
+    /// surprise is an error — the caller treats it as a cache miss.
+    pub fn read_cache(input: &mut impl std::io::Read) -> std::io::Result<Sample> {
+        use std::io::{Error, ErrorKind, Read};
+        fn get<const N: usize>(input: &mut impl Read) -> std::io::Result<[u8; N]> {
+            let mut bytes = [0u8; N];
+            input.read_exact(&mut bytes)?;
+            Ok(bytes)
+        }
+        fn get_u64(input: &mut impl Read) -> std::io::Result<u64> {
+            Ok(u64::from_le_bytes(get::<8>(input)?))
+        }
+        fn get_len(input: &mut impl Read, cap: u64) -> std::io::Result<usize> {
+            let len = get_u64(input)?;
+            if len > cap {
+                return Err(Error::new(ErrorKind::InvalidData, "cache length absurd"));
+            }
+            Ok(len as usize)
+        }
+        fn get_opt_u64(input: &mut impl Read) -> std::io::Result<Option<u64>> {
+            Ok(match get::<1>(input)?[0] {
+                0 => None,
+                _ => Some(get_u64(input)?),
+            })
+        }
+        let channels = u16::from_le_bytes(get::<2>(input)?);
+        let sample_rate_hz = f32::from_le_bytes(get::<4>(input)?);
+        let sustain_loop = match (get_opt_u64(input)?, get_opt_u64(input)?) {
+            (Some(start), Some(end)) => Some((start, end)),
+            _ => None,
+        };
+        let extra_count = get_len(input, 1 << 16)?;
+        let mut extra_loops = Vec::with_capacity(extra_count);
+        for _ in 0..extra_count {
+            extra_loops.push((get_u64(input)?, get_u64(input)?));
+        }
+        let release_start = get_u64(input)?;
+        let release_alignment = match get::<1>(input)?[0] {
+            0 => None,
+            _ => {
+                let period = f64::from_le_bytes(get::<8>(input)?);
+                let count = get_len(input, 1 << 16)?;
+                let mut offsets = Vec::with_capacity(count);
+                for _ in 0..count {
+                    offsets.push(u32::from_le_bytes(get::<4>(input)?));
+                }
+                Some(ReleaseAlignment { period, offsets })
+            }
+        };
+        let measured_period = match get::<1>(input)?[0] {
+            0 => None,
+            _ => Some(f64::from_le_bytes(get::<8>(input)?)),
+        };
+        let tail_reference_level = f32::from_le_bytes(get::<4>(input)?);
+        let tail_decay_db_per_s = f32::from_le_bytes(get::<4>(input)?);
+        let tail_eof_level_db = f32::from_le_bytes(get::<4>(input)?);
+        let attack_start = get_u64(input)?;
+        let release_crossfade_ms = u16::from_le_bytes(get::<2>(input)?);
+        let tag = get::<1>(input)?[0];
+        let len = get_len(input, 1 << 33)?;
+        let data = match tag {
+            0 => {
+                let mut data = vec![0f32; len];
+                // SAFETY: POD byte view, as in write_cache.
+                let bytes = unsafe {
+                    std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut u8, len * 4)
+                };
+                input.read_exact(bytes)?;
+                SampleData::F32(data)
+            }
+            1 => {
+                let mut data = vec![0i16; len];
+                // SAFETY: POD byte view, as in write_cache.
+                let bytes = unsafe {
+                    std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut u8, len * 2)
+                };
+                input.read_exact(bytes)?;
+                SampleData::I16(data)
+            }
+            _ => return Err(Error::new(ErrorKind::InvalidData, "unknown data tag")),
+        };
+        if channels == 0 || data.len() % channels as usize != 0 {
+            return Err(Error::new(ErrorKind::InvalidData, "cache shape invalid"));
+        }
+        Ok(Sample {
+            data,
+            channels,
+            sample_rate_hz,
+            sustain_loop,
+            extra_loops,
+            release_start,
+            release_alignment,
+            measured_period,
+            releases: Vec::new(),
+            tail_reference_level,
+            tail_decay_db_per_s,
+            tail_eof_level_db,
+            attack_start,
+            release_crossfade_ms,
+        })
+    }
+
+    /// Resident interleaved data + channel count, for the sinc reader.
     #[inline]
-    pub(crate) fn raw(&self) -> (&[f32], u16) {
+    pub(crate) fn raw(&self) -> (&SampleData, u16) {
         (&self.data, self.channels)
+    }
+
+    /// Re-quantize the resident audio to 16 bits (see [`SampleData`]).
+    /// Call after analysis (period refinement, tail measurement, phase
+    /// maps) so those keep the full decode precision; playback then
+    /// dequantizes per read.
+    pub fn quantize_i16(&mut self) {
+        if let SampleData::F32(data) = &self.data {
+            self.data = SampleData::I16(
+                data.iter()
+                    .map(|&value| (value * 32768.0).round().clamp(-32768.0, 32767.0) as i16)
+                    .collect(),
+            );
+        }
     }
 
     /// Linearly interpolated stereo read at a fractional frame position.
@@ -601,11 +833,12 @@ impl Sample {
         let ch = self.channels as usize;
         let a = index as usize * ch;
         let b = next as usize * ch;
-        let left = self.data[a] + (self.data[b] - self.data[a]) * fraction;
+        let at = |i: usize| self.data.get(i);
+        let left = at(a) + (at(b) - at(a)) * fraction;
         if ch == 1 {
             (left, left)
         } else {
-            let right = self.data[a + 1] + (self.data[b + 1] - self.data[a + 1]) * fraction;
+            let right = at(a + 1) + (at(b + 1) - at(a + 1)) * fraction;
             (left, right)
         }
     }
@@ -643,9 +876,18 @@ impl SampleBank {
     pub fn pre_fault(&self) -> f32 {
         let mut checksum = 0.0f32;
         for sample in &self.samples {
-            // One touch per 4 KiB page (1024 f32s).
-            for value in sample.data.iter().step_by(1024) {
-                checksum += *value;
+            // One touch per 4 KiB page.
+            match &sample.data {
+                SampleData::F32(data) => {
+                    for value in data.iter().step_by(1024) {
+                        checksum += *value;
+                    }
+                }
+                SampleData::I16(data) => {
+                    for value in data.iter().step_by(2048) {
+                        checksum += f32::from(*value) * I16_SCALE;
+                    }
+                }
             }
         }
         checksum
@@ -653,9 +895,6 @@ impl SampleBank {
 
     /// Total decoded audio held, in bytes.
     pub fn resident_bytes(&self) -> usize {
-        self.samples
-            .iter()
-            .map(|s| s.data.len() * size_of::<f32>())
-            .sum()
+        self.samples.iter().map(|s| s.data.bytes()).sum()
     }
 }

@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::Instant;
 
 use anyhow::Result;
 use aristide_engine::bank::{Sample, SampleBank};
@@ -80,7 +81,17 @@ pub struct LoadedBank {
     pub skipped: Vec<String>,
 }
 
-pub fn build(organ: &Organ, device_rate: f32) -> Result<LoadedBank> {
+/// `sample_bits`: resident audio resolution — 16 (default, half the
+/// RAM) or anything else = f32. Quantization happens after each file's
+/// analysis so periods, phase maps and tail measurements keep the full
+/// decode precision.
+pub fn build(
+    organ: &Organ,
+    device_rate: f32,
+    sample_bits: u32,
+    cache_path: Option<&std::path::Path>,
+) -> Result<LoadedBank> {
+    let quantize = sample_bits == 16;
     let mut bank = SampleBank::default();
     let mut specs: HashMap<(RankId, u16), VoiceSpec> = HashMap::new();
     let mut attack_options: HashMap<(RankId, u16), Vec<AttackOption>> = HashMap::new();
@@ -111,6 +122,256 @@ pub fn build(organ: &Organ, device_rate: f32) -> Result<LoadedBank> {
         chest_enclosures.insert(chest.number, index);
     }
 
+    // Every unique file decodes — and runs its expensive analysis:
+    // period refinement, phase maps, tail measurement — on a worker
+    // pool. Decode is embarrassingly parallel per file and dominated
+    // load time single-threaded; assembly below stays sequential.
+    enum Job<'a> {
+        Attack {
+            path: &'a PathBuf,
+            attack: &'a aristide_model::AttackSample,
+            nominal_hz: f64,
+        },
+        Release {
+            path: &'a PathBuf,
+            release: &'a aristide_model::ReleaseSample,
+        },
+    }
+    enum Outcome {
+        Attack(Result<(Sample, DecodedInfo), String>),
+        Release(Result<Sample, String>),
+    }
+    let mut jobs: Vec<Job> = Vec::new();
+    {
+        let mut seen_attacks = std::collections::HashSet::new();
+        let mut seen_releases = std::collections::HashSet::new();
+        for rank in &organ.ranks {
+            for pipe in &rank.pipes {
+                let PipeSource::Sampled { attacks, releases } = &pipe.source else {
+                    continue;
+                };
+                for attack in attacks {
+                    if seen_attacks.insert(&attack.path) {
+                        jobs.push(Job::Attack {
+                            path: &attack.path,
+                            attack,
+                            // Shared files share the pitch: the first
+                            // referencing pipe aligns the release
+                            // splice, exactly as the sequential decode
+                            // did.
+                            nominal_hz: pipe.nominal_frequency_hz,
+                        });
+                    }
+                }
+                for release in releases {
+                    if seen_releases.insert(&release.path) {
+                        jobs.push(Job::Release {
+                            path: &release.path,
+                            release,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    // The load cache (§3b): entries whose file stamp and decode inputs
+    // still match skip decode+analysis entirely; the rest decode below
+    // and the cache is rewritten with the union.
+    let mut stored: HashMap<PathBuf, crate::cache::Entry> = match cache_path {
+        Some(path) => match crate::cache::read(path) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
+            Err(err) => {
+                tracing::info!("sample cache unreadable ({err}); rebuilding it");
+                HashMap::new()
+            }
+        },
+        None => HashMap::new(),
+    };
+    let total_jobs = jobs.len();
+    let mut hits: Vec<(PathBuf, crate::cache::Entry)> = Vec::new();
+    let mut misses: Vec<Job> = Vec::new();
+    // path → (meta hash, mtime, size) for entries a fresh decode earns.
+    let mut miss_stamps: HashMap<PathBuf, (u64, u64, u64)> = HashMap::new();
+    for job in jobs {
+        let (path, description, is_attack) = match &job {
+            Job::Attack {
+                path,
+                attack,
+                nominal_hz,
+            } => (
+                (*path).clone(),
+                format!(
+                    "a|{}|{}|{quantize}",
+                    serde_json::to_string(attack).unwrap_or_default(),
+                    nominal_hz.to_bits()
+                ),
+                true,
+            ),
+            Job::Release { path, release } => (
+                (*path).clone(),
+                format!(
+                    "r|{}|{quantize}",
+                    serde_json::to_string(release).unwrap_or_default()
+                ),
+                false,
+            ),
+        };
+        let meta = crate::cache::meta_hash(&description);
+        let stamp = crate::cache::stamp(&organ.base_path.join(&path));
+        match (stored.remove(&path), stamp) {
+            (Some(entry), Some((mtime, size)))
+                if entry.meta_hash == meta
+                    && entry.mtime_ns == mtime
+                    && entry.size == size
+                    && entry.info.is_some() == is_attack =>
+            {
+                hits.push((path, entry));
+            }
+            (_, stamp) => {
+                if let Some((mtime, size)) = stamp {
+                    miss_stamps.insert(path, (meta, mtime, size));
+                }
+                misses.push(job);
+            }
+        }
+    }
+    let any_misses = !misses.is_empty();
+
+    let queue = std::sync::Mutex::new(misses);
+    let results = std::sync::Mutex::new(Vec::new());
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| loop {
+                let job = queue.lock().expect("job queue").pop();
+                let Some(job) = job else { break };
+                let outcome = match job {
+                    Job::Attack {
+                        path,
+                        attack,
+                        nominal_hz,
+                    } => {
+                        let absolute = organ.base_path.join(path);
+                        let result = decode(&absolute, attack).map(|(mut sample, info)| {
+                            // Phase-align the release splice to the
+                            // pipe's fundamental.
+                            sample.align_release(nominal_hz as f32);
+                            if quantize {
+                                sample.quantize_i16();
+                            }
+                            (sample, info)
+                        });
+                        (path.clone(), Outcome::Attack(result))
+                    }
+                    Job::Release { path, release } => {
+                        let absolute = organ.base_path.join(path);
+                        let result = decode_release(&absolute, release).map(|mut sample| {
+                            // Level/phase analysis at attach reads
+                            // through the resident format; a −96 dB
+                            // floor moves neither.
+                            if quantize {
+                                sample.quantize_i16();
+                            }
+                            sample
+                        });
+                        (path.clone(), Outcome::Release(result))
+                    }
+                };
+                results.lock().expect("results").push(outcome);
+            });
+        }
+    });
+    if !hits.is_empty() {
+        tracing::info!("sample cache: {} of {total_jobs} files hot", hits.len());
+    }
+
+    // Fresh results feed assembly; failures stay uncached and report
+    // at assembly as always.
+    let mut predecoded: HashMap<PathBuf, Result<(Sample, DecodedInfo), String>> = HashMap::new();
+    let mut prereleased: HashMap<PathBuf, Result<Sample, String>> = HashMap::new();
+    for (path, outcome) in results.into_inner().expect("results") {
+        match outcome {
+            Outcome::Attack(result) => {
+                predecoded.insert(path, result);
+            }
+            Outcome::Release(result) => {
+                prereleased.insert(path, result);
+            }
+        }
+    }
+    // Rewrite the cache — surviving hits plus fresh successes, all
+    // borrowed in place: no sample is ever cloned to be cached.
+    if let Some(path) = cache_path.filter(|_| any_misses) {
+        let started = Instant::now();
+        let mut refs: Vec<(&PathBuf, crate::cache::EntryRef)> = Vec::new();
+        for (hit_path, entry) in &hits {
+            refs.push((
+                hit_path,
+                crate::cache::EntryRef {
+                    meta_hash: entry.meta_hash,
+                    mtime_ns: entry.mtime_ns,
+                    size: entry.size,
+                    sample: &entry.sample,
+                    info: entry.info,
+                },
+            ));
+        }
+        for (fresh_path, result) in &predecoded {
+            if let (Ok((sample, info)), Some(&(meta_hash, mtime_ns, size))) =
+                (result, miss_stamps.get(fresh_path))
+            {
+                refs.push((
+                    fresh_path,
+                    crate::cache::EntryRef {
+                        meta_hash,
+                        mtime_ns,
+                        size,
+                        sample,
+                        info: Some(*info),
+                    },
+                ));
+            }
+        }
+        for (fresh_path, result) in &prereleased {
+            if let (Ok(sample), Some(&(meta_hash, mtime_ns, size))) =
+                (result, miss_stamps.get(fresh_path))
+            {
+                refs.push((
+                    fresh_path,
+                    crate::cache::EntryRef {
+                        meta_hash,
+                        mtime_ns,
+                        size,
+                        sample,
+                        info: None,
+                    },
+                ));
+            }
+        }
+        let count = refs.len();
+        match crate::cache::write(path, refs.into_iter(), count) {
+            Ok(()) => tracing::info!(
+                "sample cache written: {count} entries in {:.1?}",
+                started.elapsed()
+            ),
+            Err(err) => tracing::warn!("sample cache not written: {err}"),
+        }
+    }
+    // Cache hits feed assembly like fresh decodes, moved — not cloned.
+    for (path, entry) in hits {
+        match entry.info {
+            Some(info) => {
+                predecoded.insert(path, Ok((entry.sample, info)));
+            }
+            None => {
+                prereleased.insert(path, Ok(entry.sample));
+            }
+        }
+    }
+
     for rank in &organ.ranks {
         let enclosure = chest_enclosures
             .get(&rank.windchest)
@@ -133,13 +394,9 @@ pub fn build(organ: &Organ, device_rate: f32) -> Result<LoadedBank> {
             // pitch decision), the rest join the selection table.
             let mut variants: Vec<(usize, DecodedInfo)> = Vec::new();
             for (attack_index, attack) in attacks.iter().enumerate() {
-                let absolute = organ.base_path.join(&attack.path);
                 let entry = decoded.entry(attack.path.clone()).or_insert_with(|| {
-                    match decode(&absolute, attack) {
-                        Ok((mut sample, info)) => {
-                            // Phase-align the release splice to this pipe's
-                            // fundamental (shared files share the pitch).
-                            sample.align_release(pipe.nominal_frequency_hz as f32);
+                    match predecoded.remove(&attack.path) {
+                        Some(Ok((mut sample, info))) => {
                             // Separate recorded releases become their own
                             // one-shot bank entries, attached with hold-time
                             // bounds, trem state, and cross-file phase maps
@@ -149,16 +406,18 @@ pub fn build(organ: &Organ, device_rate: f32) -> Result<LoadedBank> {
                                 let release_index = *release_cache
                                     .entry(release.path.clone())
                                     .or_insert_with(|| {
-                                        let path = organ.base_path.join(&release.path);
-                                        match decode_release(&path, release) {
-                                            Ok(release_sample) => Some(bank.push(release_sample)),
-                                            Err(reason) => {
+                                        match prereleased.remove(&release.path) {
+                                            Some(Ok(release_sample)) => {
+                                                Some(bank.push(release_sample))
+                                            }
+                                            Some(Err(reason)) => {
                                                 skipped.push(format!(
                                                     "{}: {reason}",
                                                     release.path.display()
                                                 ));
                                                 None
                                             }
+                                            None => None,
                                         }
                                     });
                                 if let Some(index) = release_index {
@@ -176,10 +435,11 @@ pub fn build(organ: &Organ, device_rate: f32) -> Result<LoadedBank> {
                             let index = bank.push(sample);
                             Some(DecodedInfo { index, ..info })
                         }
-                        Err(reason) => {
+                        Some(Err(reason)) => {
                             skipped.push(format!("{}: {reason}", attack.path.display()));
                             None
                         }
+                        None => None,
                     }
                 });
                 if let Some(info) = *entry {
@@ -397,15 +657,15 @@ fn ladder_hz(midi: f64) -> f64 {
 }
 
 #[derive(Clone, Copy)]
-struct DecodedInfo {
-    index: u32,
-    sample_rate: f64,
-    percussive: bool,
+pub(crate) struct DecodedInfo {
+    pub(crate) index: u32,
+    pub(crate) sample_rate: f64,
+    pub(crate) percussive: bool,
     /// The file's own claim of what pitch it holds: `smpl`-chunk unity
     /// note (0 = "not set", as GO reads it) plus its fraction in cents
     /// above that note.
-    unity_note: Option<u8>,
-    unity_fraction_cents: f64,
+    pub(crate) unity_note: Option<u8>,
+    pub(crate) unity_fraction_cents: f64,
 }
 
 /// Decode one attack file into an engine [`Sample`].
@@ -768,7 +1028,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let loaded = build(&organ, 44_100.0).expect("builds");
+        let loaded = build(&organ, 44_100.0, 16, None).expect("builds");
         assert_eq!(loaded.bank.len(), 3, "two attacks + one release decoded");
         let key = (aristide_model::RankId(1), 0u16);
         let options = loaded.attack_options.get(&key).expect("selection table");
@@ -787,6 +1047,96 @@ mod tests {
         }
     }
 
+    /// Not a test: `cargo test --release -p aristide-server bench_demo_cache -- --ignored --nocapture`
+    #[test]
+    #[ignore = "manual timing: demo set cold vs warm cache"]
+    fn bench_demo_cache() {
+        let Some(path) = demo_organ() else {
+            eprintln!("skipping: demo set not present");
+            return;
+        };
+        let organ = aristide_formats::grandorgue::load(&path).expect("loads").organ;
+        let cache_dir = std::env::temp_dir().join("aristide-cache-bench");
+        let _ = std::fs::remove_dir_all(&cache_dir);
+        let cache = cache_dir.join("demo.samples");
+        for label in ["cold", "warm", "warm2"] {
+            let started = std::time::Instant::now();
+            let loaded = build(&organ, 48_000.0, 16, Some(&cache)).expect("builds");
+            println!(
+                "{label}: {:?} for {} samples, {:.1} MiB resident",
+                started.elapsed(),
+                loaded.bank.len(),
+                loaded.bank.resident_bytes() as f64 / (1024.0 * 1024.0)
+            );
+        }
+        let _ = std::fs::remove_dir_all(&cache_dir);
+    }
+
+    /// The load cache: a warm load must come from the cache (proven by
+    /// corrupting the source file while faking its stamp), and a
+    /// changed stamp must invalidate the entry.
+    #[test]
+    fn sample_cache_hits_and_invalidates() {
+        let organ = pitch_test_organ("cache", &[("a.wav", 60, 60.0, 0.0, None)]);
+        let wav = organ.base_path.join("a.wav");
+        let cache_dir = std::env::temp_dir().join("aristide-cache-test");
+        let _ = std::fs::remove_dir_all(&cache_dir);
+        let cache = cache_dir.join("test.samples");
+
+        let cold = build(&organ, 44_100.0, 16, Some(&cache)).expect("cold build");
+        assert!(cache.is_file(), "cache file written");
+        assert!(cold.skipped.is_empty(), "{:?}", cold.skipped);
+
+        // Corrupt the source but restore its stamp: only the cache can
+        // now produce a playable sample.
+        let stamp = std::fs::metadata(&wav).expect("stat").modified().expect("mtime");
+        let size = std::fs::metadata(&wav).expect("stat").len();
+        std::fs::write(&wav, vec![0u8; size as usize]).expect("corrupt");
+        let file = std::fs::File::options()
+            .write(true)
+            .open(&wav)
+            .expect("reopen");
+        file.set_modified(stamp).expect("restore mtime");
+        drop(file);
+
+        let warm = build(&organ, 44_100.0, 16, Some(&cache)).expect("warm build");
+        assert!(warm.skipped.is_empty(), "cache must serve: {:?}", warm.skipped);
+        assert_eq!(cold.bank.resident_bytes(), warm.bank.resident_bytes());
+        assert_eq!(cold.bank.pre_fault(), warm.bank.pre_fault(), "identical audio");
+
+        // Move the stamp: the entry must invalidate, and the corrupted
+        // file now fails to decode — honestly reported, not served
+        // stale.
+        let file = std::fs::File::options().write(true).open(&wav).expect("reopen");
+        file.set_modified(std::time::SystemTime::now()).expect("bump mtime");
+        drop(file);
+        let stale = build(&organ, 44_100.0, 16, Some(&cache)).expect("stale build");
+        assert!(
+            !stale.skipped.is_empty(),
+            "a changed file must be re-decoded, not served from cache"
+        );
+        let _ = std::fs::remove_dir_all(&cache_dir);
+    }
+
+    /// The default 16-bit residency halves sample RAM against f32 and
+    /// changes nothing else the pitch pipeline computes.
+    #[test]
+    fn sixteen_bit_residency_halves_ram() {
+        let organ = pitch_test_organ("bits", &[("a.wav", 60, 60.0, 0.0, None)]);
+        let compact = build(&organ, 44_100.0, 16, None).expect("builds");
+        let full = build(&organ, 44_100.0, 32, None).expect("builds");
+        assert_eq!(
+            compact.bank.resident_bytes() * 2,
+            full.bank.resident_bytes(),
+            "i16 must be exactly half of f32"
+        );
+        assert_eq!(
+            format!("{:?}", compact.specs[&(aristide_model::RankId(1), 0u16)]),
+            format!("{:?}", full.specs[&(aristide_model::RankId(1), 0u16)]),
+            "residency must not touch the playback spec"
+        );
+    }
+
     /// ODF `AcceptsRetuning=N`: the pipe plays as voiced no matter how
     /// far its metadata says it sits from the slot.
     #[test]
@@ -795,7 +1145,7 @@ mod tests {
         let mut organ =
             pitch_test_organ("no-retune", &[("borrowed.wav", 60, 57.0, 0.0, None)]);
         organ.ranks[0].pipes[0].accepts_retuning = false;
-        let loaded = build(&organ, 44_100.0).expect("builds");
+        let loaded = build(&organ, 44_100.0, 16, None).expect("builds");
         assert!(
             rate_cents(&loaded, 0).abs() < 1.0,
             "declared AcceptsRetuning=N must play as voiced: {} cents",
@@ -849,7 +1199,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let loaded = build(&organ, 44_100.0).expect("builds");
+        let loaded = build(&organ, 44_100.0, 16, None).expect("builds");
         let spec = loaded.specs[&(aristide_model::RankId(1), 0u16)];
         let sample = loaded.bank.get(spec.sample).expect("attack sample");
         assert_eq!(sample.attack_start(), 32);
@@ -902,7 +1252,7 @@ mod tests {
             ..Default::default()
         };
         let seam_step = |crossfade_ms: u16| -> f32 {
-            let loaded = build(&organ_with(crossfade_ms), 44_100.0).expect("builds");
+            let loaded = build(&organ_with(crossfade_ms), 44_100.0, 16, None).expect("builds");
             let spec = loaded.specs[&(aristide_model::RankId(1), 0u16)];
             let sample = loaded.bank.get(spec.sample).expect("sample");
             let (start, end) = sample.sustain_loop().expect("loop");
@@ -951,7 +1301,7 @@ mod tests {
                 ("junk.wav", 127, 30.0, 0.0, None),
             ],
         );
-        let loaded = build(&organ, 44_100.0).expect("bank builds");
+        let loaded = build(&organ, 44_100.0, 16, None).expect("bank builds");
         assert!((rate_cents(&loaded, 0) - -300.0).abs() < 1.0, "auto retune");
         assert!((rate_cents(&loaded, 1) - 30.0).abs() < 1.0, "voicing kept");
         assert!((rate_cents(&loaded, 2) - 1200.0).abs() < 1.0, "ODF key retune");
@@ -981,7 +1331,7 @@ mod tests {
                 ("c.wav", 60, 65.0, 0.0, None),
             ],
         );
-        let loaded = build(&organ, 44_100.0).expect("bank builds");
+        let loaded = build(&organ, 44_100.0, 16, None).expect("bank builds");
         for pipe in 0..3 {
             assert!(
                 rate_cents(&loaded, pipe).abs() < 1.0,
@@ -1011,7 +1361,7 @@ mod tests {
             return;
         };
         let organ = aristide_formats::grandorgue::load(&path).expect("loads").organ;
-        let loaded = build(&organ, 44_100.0).expect("bank builds");
+        let loaded = build(&organ, 44_100.0, 16, None).expect("bank builds");
         assert!(
             !loaded
                 .skipped
@@ -1056,7 +1406,7 @@ mod tests {
         assert_eq!(chest(2).enclosures, vec![1]);
         assert_eq!(chest(3).enclosures, vec![0]);
 
-        let loaded = build(&organ, 44_100.0).expect("bank builds");
+        let loaded = build(&organ, 44_100.0, 16, None).expect("bank builds");
         let spec_for = |pattern: &str| {
             let stop = organ
                 .stops
@@ -1099,7 +1449,7 @@ mod tests {
             return;
         };
         let load = || aristide_formats::grandorgue::load(&path).expect("loads").organ;
-        let single = build(&load(), 44_100.0).expect("bank builds");
+        let single = build(&load(), 44_100.0, 16, None).expect("bank builds");
         let implicit = aristide_formats::instrument::Definition {
             name: "Twice".into(),
             ..Default::default()
@@ -1109,7 +1459,7 @@ mod tests {
             .expect("assembles")
             .organ;
         assert_eq!(organ.stops.len(), load().stops.len() * 2);
-        let loaded = build(&organ, 44_100.0).expect("merged bank builds");
+        let loaded = build(&organ, 44_100.0, 16, None).expect("merged bank builds");
         assert_eq!(loaded.specs.len(), single.specs.len() * 2);
         assert_eq!(loaded.bank.len(), single.bank.len());
         // Both copies carry a Hautbois; the first sits in its own
@@ -1137,7 +1487,7 @@ mod tests {
         let Some(path) = demo_organ() else { return };
         let organ = aristide_formats::grandorgue::load(&path).expect("loads").organ;
         let device_rate = 44_100.0f32;
-        let loaded = build(&organ, device_rate).expect("bank builds");
+        let loaded = build(&organ, device_rate, 16, None).expect("bank builds");
         let sr = device_rate as usize;
         let recit = organ.manuals[2].id;
         let drawn: Vec<_> = organ
@@ -1298,7 +1648,7 @@ mod tests {
         let Some(path) = demo_organ() else { return };
         let organ = aristide_formats::grandorgue::load(&path).expect("loads").organ;
         let device_rate = 44_100.0f32;
-        let loaded = build(&organ, device_rate).expect("bank builds");
+        let loaded = build(&organ, device_rate, 16, None).expect("bank builds");
         let sr = device_rate as usize;
         let pick = |manual: usize, patterns: &[&str]| -> Vec<aristide_model::StopId> {
             let id = organ.manuals[manual].id;
@@ -1584,7 +1934,7 @@ mod tests {
         let organ = aristide_formats::grandorgue::load(&path)
             .expect("demo set loads")
             .organ;
-        let loaded = build(&organ, 48000.0).expect("bank builds");
+        let loaded = build(&organ, 48000.0, 16, None).expect("bank builds");
         // Full plein jeu on the Great.
         let manual_id = organ.manuals[1].id;
         let drawn: Vec<_> = organ
@@ -1688,7 +2038,7 @@ mod tests {
         let organ = aristide_formats::grandorgue::load(&path)
             .expect("demo set loads")
             .organ;
-        let loaded = build(&organ, 48000.0).expect("bank builds");
+        let loaded = build(&organ, 48000.0, 16, None).expect("bank builds");
         let great = organ.manuals[1].id;
         let swell = organ.manuals[2].id;
         let drawn: Vec<_> = organ
@@ -1797,7 +2147,7 @@ mod tests {
         let organ = aristide_formats::grandorgue::load(&path)
             .expect("demo set loads")
             .organ;
-        let loaded = build(&organ, 48000.0).expect("bank builds");
+        let loaded = build(&organ, 48000.0, 16, None).expect("bank builds");
         let great = organ.manuals[1].id;
         let swell = organ.manuals[2].id;
         let drawn: Vec<_> = organ
@@ -1907,7 +2257,7 @@ mod tests {
         let organ = aristide_formats::grandorgue::load(&path)
             .expect("demo set loads")
             .organ;
-        let loaded = build(&organ, 48000.0).expect("bank builds");
+        let loaded = build(&organ, 48000.0, 16, None).expect("bank builds");
         let manual_id = organ.manuals[1].id;
         let drawn: Vec<_> = organ
             .stops
@@ -1983,7 +2333,7 @@ mod tests {
         let organ = aristide_formats::grandorgue::load(&path)
             .expect("demo set loads")
             .organ;
-        let loaded = build(&organ, 48000.0).expect("bank builds");
+        let loaded = build(&organ, 48000.0, 16, None).expect("bank builds");
         assert!(loaded.skipped.is_empty(), "skipped: {:?}", loaded.skipped);
         // Every sampled and borrowed pipe got a playback spec.
         assert_eq!(loaded.specs.len(), 853 + 497, "spec count");
@@ -2123,7 +2473,7 @@ mod tests {
             return;
         };
         let organ = aristide_formats::grandorgue::load(&path).expect("loads").organ;
-        let loaded = build(&organ, 48_000.0).expect("bank builds");
+        let loaded = build(&organ, 48_000.0, 16, None).expect("bank builds");
         let bank = std::sync::Arc::new(loaded.bank);
         let mut failures = Vec::new();
         let mut probed = 0;
@@ -2219,7 +2569,7 @@ mod tests {
             .expect("demo set loads")
             .organ;
         let device_rate = 44_100.0f32;
-        let loaded = build(&organ, device_rate).expect("bank builds");
+        let loaded = build(&organ, device_rate, 16, None).expect("bank builds");
         let great = organ.manuals[1].id;
         let swell = organ.manuals[2].id;
         let drawn: Vec<_> = organ
@@ -2444,7 +2794,7 @@ mod tests {
             .expect("demo set loads")
             .organ;
         let device_rate = 44_100.0f32;
-        let loaded = build(&organ, device_rate).expect("bank builds");
+        let loaded = build(&organ, device_rate, 16, None).expect("bank builds");
         // Full organ, as "*" draws it — every stop (Console
         // itself retires the noise stops from the drawn list).
         let drawn: Vec<_> = organ.stops.iter().map(|s| s.id).collect();
@@ -2592,7 +2942,7 @@ mod tests {
         let organ = aristide_formats::grandorgue::load(&path).expect("loads").organ;
         let device_rate = 44_100.0f32;
         let sr = device_rate as usize;
-        let loaded = build(&organ, device_rate).expect("bank builds");
+        let loaded = build(&organ, device_rate, 16, None).expect("bank builds");
         let bank = std::sync::Arc::new(loaded.bank.clone());
         let great = organ.manuals[1].id;
         let montre = organ
@@ -2707,7 +3057,7 @@ mod tests {
         let Some(path) = demo_organ() else { return };
         let organ = aristide_formats::grandorgue::load(&path).expect("loads").organ;
         let device_rate = 44_100.0f32;
-        let loaded = build(&organ, device_rate).expect("bank builds");
+        let loaded = build(&organ, device_rate, 16, None).expect("bank builds");
         let great = organ.manuals[1].id;
         let swell = organ.manuals[2].id;
         let drawn: Vec<_> = organ
@@ -2831,7 +3181,7 @@ mod tests {
         let Some(path) = demo_organ() else { return };
         let organ = aristide_formats::grandorgue::load(&path).expect("loads").organ;
         let device_rate = 44_100.0f32;
-        let loaded = build(&organ, device_rate).expect("bank builds");
+        let loaded = build(&organ, device_rate, 16, None).expect("bank builds");
         let sr = device_rate as usize;
         for (pattern, out) in [("plein", "/tmp/mixture_staccato.wav"), ("octavin", "/tmp/octavin_staccato.wav")] {
             let stop = organ
@@ -2949,7 +3299,7 @@ mod tests {
         let Some(path) = demo_organ() else { return };
         let organ = aristide_formats::grandorgue::load(&path).expect("loads").organ;
         let device_rate = 44_100.0f32;
-        let loaded = build(&organ, device_rate).expect("bank builds");
+        let loaded = build(&organ, device_rate, 16, None).expect("bank builds");
         for (pattern, tag) in [("flute harm", "flharm"), ("plein jeu iii", "plein")] {
             let stop = organ
                 .stops
@@ -3008,7 +3358,7 @@ mod tests {
         let Some(path) = demo_organ() else { return };
         let organ = aristide_formats::grandorgue::load(&path).expect("loads").organ;
         let device_rate = 44_100.0f32;
-        let loaded = build(&organ, device_rate).expect("bank builds");
+        let loaded = build(&organ, device_rate, 16, None).expect("bank builds");
         let sr = device_rate as usize;
         for (pattern, tag) in [("flute harm", "flharm"), ("plein jeu iii", "plein")] {
             let stop = organ
@@ -3092,7 +3442,7 @@ mod tests {
         let Some(path) = demo_organ() else { return };
         let organ = aristide_formats::grandorgue::load(&path).expect("loads").organ;
         let device_rate = 44_100.0f32;
-        let loaded = build(&organ, device_rate).expect("bank builds");
+        let loaded = build(&organ, device_rate, 16, None).expect("bank builds");
         let names: Vec<&str> = organ.stops.iter().map(|s| s.name.as_str()).collect();
         let mut drawn: Vec<aristide_model::StopId> = Vec::new();
         for pattern in ["bourdon 16", "montre", "prestant", "plein jeu"] {
@@ -3200,7 +3550,7 @@ mod tests {
         let Some(path) = demo_organ() else { return };
         let organ = aristide_formats::grandorgue::load(&path).expect("loads").organ;
         let device_rate = 44_100.0f32;
-        let loaded = build(&organ, device_rate).expect("bank builds");
+        let loaded = build(&organ, device_rate, 16, None).expect("bank builds");
         let great = organ.manuals[1].id;
         let montre = organ
             .stops

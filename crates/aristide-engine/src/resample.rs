@@ -34,6 +34,10 @@ const BASE_TAPS: usize = 16;
 /// phase-quantization error sits far below any kernel's own floor.
 pub const PHASES: usize = 512;
 
+/// Stack window for dequantizing 16-bit residents on the fast path:
+/// the widest kernel (4× bucket, 64 taps) at stereo.
+const MAX_WINDOW: usize = 64 * 2;
+
 /// Base cutoff as a fraction of Nyquist: headroom for mild upward
 /// transposition (temperament stretch, detune) before aliasing. Bucket
 /// kernels shrink this further, in proportion to their rate.
@@ -200,51 +204,51 @@ impl SincTables {
         let first_tap_frame = base as i64 - left_taps as i64;
 
         // Fast path: the whole window is in-bounds and doesn't straddle
-        // the loop seam — one contiguous dot product.
+        // the loop seam — one contiguous dot product. 16-bit residents
+        // dequantize the window into a stack buffer first (one branch
+        // per output frame, and half the memory traffic pays for the
+        // conversion), then run the identical SIMD/scalar dot.
         let seam_safe = match loop_wrap {
             Some((_, end)) => first_tap_frame + taps as i64 <= end as i64,
             None => true,
         };
         if seam_safe && first_tap_frame >= 0 && first_tap_frame + (taps as i64) <= frames {
             let start = first_tap_frame as usize * channels;
-            let window = &data[start..start + taps * channels];
-            // The dominant per-sample cost of the whole engine: SIMD on
-            // x86_64 (SSE2 is baseline), scalar elsewhere.
-            #[cfg(target_arch = "x86_64")]
-            unsafe {
-                // Mono only: measured on the stress suite, the 256-bit
-                // stereo path was ~10% SLOWER than SSE2 here (shuffle
-                // overhead + downclocking); mono's clean 8-wide FMAs do
-                // win.
-                if self.use_avx2 && channels == 1 {
-                    let value = dot_blended_mono_avx2(row0, row1, row_mix, window);
-                    return (value, value);
-                }
-                return if channels == 1 {
-                    let value = dot_blended_mono_sse2(row0, row1, row_mix, window);
-                    (value, value)
-                } else {
-                    dot_blended_stereo_sse2(row0, row1, row_mix, window)
-                };
-            }
-            #[cfg(not(target_arch = "x86_64"))]
-            {
-                let mut left = 0.0f32;
-                let mut right = 0.0f32;
-                if channels == 1 {
-                    for tap in 0..taps {
-                        let coefficient = row0[tap] + (row1[tap] - row0[tap]) * row_mix;
-                        left += coefficient * window[tap];
+            let count = taps * channels;
+            return match data {
+                crate::bank::SampleData::F32(all) => self.dot_window(
+                    row0,
+                    row1,
+                    row_mix,
+                    channels,
+                    &all[start..start + count],
+                ),
+                crate::bank::SampleData::I16(all) => {
+                    let window = &all[start..start + count];
+                    #[cfg(target_arch = "x86_64")]
+                    unsafe {
+                        if self.use_avx2 && channels == 1 {
+                            let value = dot_blended_mono_avx2_i16(row0, row1, row_mix, window);
+                            return (value, value);
+                        }
+                        if channels == 1 {
+                            let value = dot_blended_mono_sse2_i16(row0, row1, row_mix, window);
+                            (value, value)
+                        } else {
+                            dot_blended_stereo_sse2_i16(row0, row1, row_mix, window)
+                        }
                     }
-                    return (left, left);
+                    #[cfg(not(target_arch = "x86_64"))]
+                    {
+                        debug_assert!(count <= MAX_WINDOW);
+                        let mut converted = [0.0f32; MAX_WINDOW];
+                        for (out, value) in converted[..count].iter_mut().zip(window) {
+                            *out = f32::from(*value) * crate::bank::I16_SCALE;
+                        }
+                        self.dot_window(row0, row1, row_mix, channels, &converted[..count])
+                    }
                 }
-                for tap in 0..taps {
-                    let coefficient = row0[tap] + (row1[tap] - row0[tap]) * row_mix;
-                    left += coefficient * window[tap * channels];
-                    right += coefficient * window[tap * channels + 1];
-                }
-                return (left, right);
-            }
+            };
         }
 
         // Slow path (window touches an edge or the loop seam): map each
@@ -262,14 +266,64 @@ impl SincTables {
             }
             let frame = frame.clamp(0, frames - 1) as usize;
             let coefficient = row0[tap] + (row1[tap] - row0[tap]) * row_mix;
-            left += coefficient * data[frame * channels];
+            left += coefficient * data.get(frame * channels);
             if channels > 1 {
-                right += coefficient * data[frame * channels + 1];
+                right += coefficient * data.get(frame * channels + 1);
             }
         }
         if channels == 1 {
             (left, left)
         } else {
+            (left, right)
+        }
+    }
+
+    /// The blended-row dot product over one contiguous window — the
+    /// dominant per-sample cost of the whole engine: SIMD on x86_64
+    /// (SSE2 is baseline), scalar elsewhere.
+    #[inline]
+    fn dot_window(
+        &self,
+        row0: &[f32],
+        row1: &[f32],
+        row_mix: f32,
+        channels: usize,
+        window: &[f32],
+    ) -> (f32, f32) {
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            // Mono only: measured on the stress suite, the 256-bit
+            // stereo path was ~10% SLOWER than SSE2 here (shuffle
+            // overhead + downclocking); mono's clean 8-wide FMAs do
+            // win.
+            if self.use_avx2 && channels == 1 {
+                let value = dot_blended_mono_avx2(row0, row1, row_mix, window);
+                return (value, value);
+            }
+            if channels == 1 {
+                let value = dot_blended_mono_sse2(row0, row1, row_mix, window);
+                (value, value)
+            } else {
+                dot_blended_stereo_sse2(row0, row1, row_mix, window)
+            }
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            let taps = row0.len();
+            let mut left = 0.0f32;
+            let mut right = 0.0f32;
+            if channels == 1 {
+                for tap in 0..taps {
+                    let coefficient = row0[tap] + (row1[tap] - row0[tap]) * row_mix;
+                    left += coefficient * window[tap];
+                }
+                return (left, left);
+            }
+            for tap in 0..taps {
+                let coefficient = row0[tap] + (row1[tap] - row0[tap]) * row_mix;
+                left += coefficient * window[tap * channels];
+                right += coefficient * window[tap * channels + 1];
+            }
             (left, right)
         }
     }
@@ -334,6 +388,101 @@ unsafe fn dot_blended_stereo_sse2(
             acc_right = _mm_add_ps(acc_right, _mm_mul_ps(c, right));
         }
         (horizontal_sum(acc_left), horizontal_sum(acc_right))
+    }
+}
+
+/// Mono i16 SSE2: 8 taps per iteration — one 128-bit load holds eight
+/// samples, sign-extended in-register (self-unpack + arithmetic shift)
+/// and converted to f32; the dequant scale folds into the final sum,
+/// so 16-bit residency costs one extra convert per 4 taps instead of a
+/// scalar pre-pass.
+/// Safety: caller guarantees `window.len() >= row0.len()` and that
+/// `row0.len()` is a multiple of 8 (every kernel is).
+#[cfg(target_arch = "x86_64")]
+#[inline]
+unsafe fn dot_blended_mono_sse2_i16(row0: &[f32], row1: &[f32], mix: f32, window: &[i16]) -> f32 {
+    use core::arch::x86_64::*;
+    unsafe {
+        let mix4 = _mm_set1_ps(mix);
+        let mut acc = _mm_setzero_ps();
+        for chunk in 0..row0.len() / 8 {
+            let offset = chunk * 8;
+            let q = _mm_loadu_si128(window.as_ptr().add(offset) as *const __m128i);
+            let lo = _mm_cvtepi32_ps(_mm_srai_epi32(_mm_unpacklo_epi16(q, q), 16));
+            let hi = _mm_cvtepi32_ps(_mm_srai_epi32(_mm_unpackhi_epi16(q, q), 16));
+            let c0a = _mm_loadu_ps(row0.as_ptr().add(offset));
+            let c1a = _mm_loadu_ps(row1.as_ptr().add(offset));
+            let ca = _mm_add_ps(c0a, _mm_mul_ps(_mm_sub_ps(c1a, c0a), mix4));
+            let c0b = _mm_loadu_ps(row0.as_ptr().add(offset + 4));
+            let c1b = _mm_loadu_ps(row1.as_ptr().add(offset + 4));
+            let cb = _mm_add_ps(c0b, _mm_mul_ps(_mm_sub_ps(c1b, c0b), mix4));
+            acc = _mm_add_ps(acc, _mm_mul_ps(ca, lo));
+            acc = _mm_add_ps(acc, _mm_mul_ps(cb, hi));
+        }
+        horizontal_sum(acc) * crate::bank::I16_SCALE
+    }
+}
+
+/// Stereo i16 SSE2: 4 taps (8 interleaved samples) per iteration, the
+/// same deinterleaving shuffles as the f32 kernel after an in-register
+/// convert.
+/// Safety: caller guarantees `window.len() >= row0.len() * 2` and that
+/// `row0.len()` is a multiple of 4.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+unsafe fn dot_blended_stereo_sse2_i16(
+    row0: &[f32],
+    row1: &[f32],
+    mix: f32,
+    window: &[i16],
+) -> (f32, f32) {
+    use core::arch::x86_64::*;
+    unsafe {
+        let mix4 = _mm_set1_ps(mix);
+        let mut acc_left = _mm_setzero_ps();
+        let mut acc_right = _mm_setzero_ps();
+        for chunk in 0..row0.len() / 4 {
+            let offset = chunk * 4;
+            let c0 = _mm_loadu_ps(row0.as_ptr().add(offset));
+            let c1 = _mm_loadu_ps(row1.as_ptr().add(offset));
+            let c = _mm_add_ps(c0, _mm_mul_ps(_mm_sub_ps(c1, c0), mix4));
+            // L0 R0 L1 R1 L2 R2 L3 R3 as i16 → two f32 quads → L/R.
+            let q = _mm_loadu_si128(window.as_ptr().add(offset * 2) as *const __m128i);
+            let w01 = _mm_cvtepi32_ps(_mm_srai_epi32(_mm_unpacklo_epi16(q, q), 16));
+            let w23 = _mm_cvtepi32_ps(_mm_srai_epi32(_mm_unpackhi_epi16(q, q), 16));
+            let left = _mm_shuffle_ps(w01, w23, 0b10_00_10_00);
+            let right = _mm_shuffle_ps(w01, w23, 0b11_01_11_01);
+            acc_left = _mm_add_ps(acc_left, _mm_mul_ps(c, left));
+            acc_right = _mm_add_ps(acc_right, _mm_mul_ps(c, right));
+        }
+        (
+            horizontal_sum(acc_left) * crate::bank::I16_SCALE,
+            horizontal_sum(acc_right) * crate::bank::I16_SCALE,
+        )
+    }
+}
+
+/// Mono i16 AVX2+FMA: 8 taps per fused block via `vpmovsxwd` + convert.
+/// Safety: as [`dot_blended_mono_avx2`], window in i16.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn dot_blended_mono_avx2_i16(row0: &[f32], row1: &[f32], mix: f32, window: &[i16]) -> f32 {
+    use core::arch::x86_64::*;
+    unsafe {
+        let mix8 = _mm256_set1_ps(mix);
+        let mut acc = _mm256_setzero_ps();
+        for chunk in 0..row0.len() / 8 {
+            let offset = chunk * 8;
+            let c0 = _mm256_loadu_ps(row0.as_ptr().add(offset));
+            let c1 = _mm256_loadu_ps(row1.as_ptr().add(offset));
+            let c = _mm256_fmadd_ps(_mm256_sub_ps(c1, c0), mix8, c0);
+            let q = _mm_loadu_si128(window.as_ptr().add(offset) as *const __m128i);
+            let w = _mm256_cvtepi32_ps(_mm256_cvtepi16_epi32(q));
+            acc = _mm256_fmadd_ps(c, w, acc);
+        }
+        let low = _mm256_castps256_ps128(acc);
+        let high = _mm256_extractf128_ps(acc, 1);
+        horizontal_sum(_mm_add_ps(low, high)) * crate::bank::I16_SCALE
     }
 }
 
@@ -455,6 +604,39 @@ mod tests {
 
     fn snr_db(signal_power: f64, error_power: f64) -> f64 {
         10.0 * (signal_power / error_power.max(1e-30)).log10()
+    }
+
+    /// 16-bit residents read through the same sinc path within
+    /// quantization noise of the f32 original — fast path, seam-wrap
+    /// slow path, and edges alike.
+    #[test]
+    fn i16_residents_match_f32_within_quantization_noise() {
+        let tables = SincTables::new();
+        let omega = std::f64::consts::TAU * 0.13;
+        let frames = 4096usize;
+        let data: Vec<f32> = (0..frames)
+            .map(|n| (0.8 * (omega * n as f64).sin()) as f32)
+            .collect();
+        let f32_sample = Sample::new(data.clone(), 1, 48000.0, Some((256, 3840)), 0)
+            .expect("valid");
+        let mut i16_sample = Sample::new(data, 1, 48000.0, Some((256, 3840)), 0)
+            .expect("valid");
+        i16_sample.quantize_i16();
+        for kernel in [0usize, tables.kernels.len() - 1] {
+            for step in 0..400 {
+                // Sweep across the loop seam and the sample edges so
+                // both read paths run.
+                let position = step as f64 * 9.7 + 3.3;
+                for wrap in [None, Some((256u64, 3840u64))] {
+                    let (a, _) = tables.read(kernel, &f32_sample, position, wrap);
+                    let (b, _) = tables.read(kernel, &i16_sample, position, wrap);
+                    assert!(
+                        (a - b).abs() < 2e-3,
+                        "kernel {kernel} position {position}: f32 {a} vs i16 {b}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -791,5 +973,49 @@ mod tests {
         let real = s1 - s2 * omega.cos();
         let imag = s2 * omega.sin();
         (real * real + imag * imag) / (n * n)
+    }
+}
+
+#[cfg(test)]
+mod bench {
+    use super::*;
+    use crate::bank::Sample;
+
+    /// Not a test: `cargo test --release -p aristide-engine bench_read -- --ignored --nocapture`
+    #[test]
+    #[ignore = "manual micro-benchmark"]
+    fn bench_read_f32_vs_i16() {
+        let tables = SincTables::new();
+        let frames = 1 << 20;
+        let data: Vec<f32> = (0..frames)
+            .map(|n| (0.5 * (n as f64 * 0.13).sin()) as f32)
+            .collect();
+        for channels in [1u16, 2u16] {
+            let raw: Vec<f32> = if channels == 2 {
+                data.iter().flat_map(|&v| [v, v]).collect()
+            } else {
+                data.clone()
+            };
+            let f32_sample = Sample::new(raw.clone(), channels, 48000.0, None, 0).unwrap();
+            let mut i16_sample = Sample::new(raw, channels, 48000.0, None, 0).unwrap();
+            i16_sample.quantize_i16();
+            for (label, sample) in [("f32", &f32_sample), ("i16", &i16_sample)] {
+                let started = std::time::Instant::now();
+                let mut acc = 0.0f32;
+                let mut position = 100.0f64;
+                for _ in 0..3_000_000u32 {
+                    let (l, _) = tables.read(0, sample, position, None);
+                    acc += l;
+                    position += 0.918_762_5;
+                    if position > (frames - 64) as f64 {
+                        position = 100.0;
+                    }
+                }
+                println!(
+                    "{label} ch{channels}: {:?} for 3M reads (acc {acc})",
+                    started.elapsed()
+                );
+            }
+        }
     }
 }

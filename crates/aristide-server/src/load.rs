@@ -414,7 +414,38 @@ pub fn prepare(
 
     progress(format!("decoding samples for {}…", organ.name));
     let started = Instant::now();
-    let loaded = bank::build(&organ, sample_rate)?;
+    let sample_bits = match sidecar.samples.bits {
+        16 | 32 => sidecar.samples.bits,
+        other => {
+            tracing::warn!("[samples] bits = {other} is not 16 or 32; using 16");
+            16
+        }
+    };
+    // One cache file per (source paths, residency) combination, under
+    // the user config; no config dir (or `[samples] cache = false`)
+    // means no cache and nothing else changes.
+    let cache_path = if sidecar.samples.cache {
+        crate::config::cache_dir().map(|dir| {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::hash::DefaultHasher::new();
+            let mut keys: Vec<String> = paths
+                .iter()
+                .map(|p| {
+                    p.canonicalize()
+                        .unwrap_or_else(|_| p.clone())
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect();
+            keys.sort();
+            keys.hash(&mut hasher);
+            sample_bits.hash(&mut hasher);
+            dir.join(format!("{:016x}.samples", hasher.finish()))
+        })
+    } else {
+        None
+    };
+    let loaded = bank::build(&organ, sample_rate, sample_bits, cache_path.as_deref())?;
     tracing::info!(
         "samples: {} files, {:.1} MiB resident, {} skipped, in {:.1?}",
         loaded.bank.len(),
