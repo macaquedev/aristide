@@ -35,7 +35,9 @@ const BASE_TAPS: usize = 16;
 pub const PHASES: usize = 512;
 
 /// Stack window for dequantizing 16-bit residents on the fast path:
-/// the widest kernel (4× bucket, 64 taps) at stereo.
+/// the widest kernel (4× bucket, 64 taps) at stereo. Only the scalar
+/// fallback needs it; x86_64 dequantizes in the SIMD path.
+#[cfg(not(target_arch = "x86_64"))]
 const MAX_WINDOW: usize = 64 * 2;
 
 /// Base cutoff as a fraction of Nyquist: headroom for mild upward
