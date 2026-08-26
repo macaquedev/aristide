@@ -1,0 +1,479 @@
+# Gap analysis: Aristide vs GrandOrgue and Hauptwerk
+
+Written 2026-08-12 by the analysis agent (thread "engine gap analysis vs GO/HW").
+**Re-verified and rewritten 2026-08-26** against the code at `616c03f` — much of the
+original has since been implemented (enclosures, pitch reconciliation, routing/buses,
+velocity, Bass/Melody couplers, tail freezing). Section numbers are kept from the
+original for continuity; each now states its current status up front.
+Scope: ways Aristide's audio engine is **worse** than GrandOrgue and/or Hauptwerk,
+each with what GO/HW actually do, what Aristide does today (with code refs into
+this repo), how audible/important the gap is, and hints for whoever fixes it.
+
+Ground truth sources:
+- GO: the actual source (github.com/GrandOrgue/grandorgue, master as of 2026-08);
+  class/file names cited below are real. See also `docs/go-critique.md`.
+- HW: official Milan Digital Audio PDFs — Hauptwerk V Features Data Sheet,
+  User Guide v5.0.1, Hauptwerk 9.0.1 Release Notice (cumulative v5→v9),
+  HW4 datasheet — plus Sonus Paradisi / Piotr Grabowski producer docs.
+  Items that rest only on forum/search snippets are flagged.
+- Aristide: full read of `crates/aristide-engine/*`, `crates/aristide-server/*`,
+  `crates/aristide-formats/*`, `crates/aristide-model/*` at current main.
+
+Related repo research (don't duplicate, extend): `docs/research/release-modeling.md`,
+`docs/research/vpo-rendering-techniques.md`, `docs/research/hauptwerk-wind-model.md`,
+`docs/go-odf-notes.md`.
+
+Suggested overall priority (2026-08-26 revision): **§2+§4 → §3 → §8+§9 → §7 → §6/§1
+residue**, then the rest. The original top items (§1 enclosures, §6 pitch, §5
+routing) have largely landed; what's left of "sets don't sound right" is
+tremulants + multi-attack (§2/§4), the memory wall (§3) is the "can't load my
+set" blocker, and combinations (§7) block serious playing use.
+
+---
+
+## 1. Swell boxes / enclosures — ✅ LARGELY DONE (was: missing entirely)
+
+**GO:** `[Enclosure]` ODF sections; each windchest holds enclosure pointers;
+`GOEnclosure::GetAttenuation() = (MIDIValue*(100-AmpMinimumLevel) + 127*AmpMinimumLevel)/12700`
+(linear amplitude in the MIDI value between `AmpMinimumLevel`% and 100%),
+multiplied into the windchest volume once per buffer. No filtering — pure gain.
+
+**HW:** frequency-dependent shutter *filters* per enclosed pipe, shutter inertia
+modeled, releases unaffected by shutter movement after key-off, pressure rise
+inside a closed box modeled, per-pipe voicable swell amplitude/harmonics mod
+depths. (HW V Features Data Sheet p12; UG5 p213.)
+
+**Aristide now:** implemented end to end, and closer to HW than GO in kind:
+- Loader reads `NumberOfEnclosures`/`[EnclosureNNN]` (`Name`, `AmpMinimumLevel`,
+  `MIDIInputNumber`, `Displayed`) and windchest→enclosure membership
+  (`grandorgue.rs::build`); model has `Enclosure`/`Windchest.enclosures`.
+- Engine box model (`aristide-engine/src/enclosure.rs`): broadband gain floor
+  (from `AmpMinimumLevel`) **plus a one-pole high-shelf** whose corner slides as
+  the box closes, dB-linear taper law, critically-damped second-order shutter
+  inertia (`full_sweep_s`). This beats GO's pure gain and approximates HW's
+  shutter filtering.
+- Release tails freeze their enclosure state at key-off (`lib.rs::process`
+  refreshes box factors only while `Held`) — HW's correct rule.
+- Control: sidecar `[enclosures] cc` (default CC11) → `Console::expression_manual`
+  (moves every box a manual's stops sit in); generic `Action::Enclosure(name)`
+  bindings for any MIDI trigger/computer key; `POST /api/enclosure`; console UI.
+- User-defined boxes: `[[enclosure]]` sidecar tables let a user enclose arbitrary
+  stops of a set that declares none (`config.rs`, `/api/organ/enclosure/*`).
+- `--safe`/lite mode keeps the broadband gain and skips only the shelf filter.
+
+**Remaining gaps (small):**
+- The box character (shelf depth, corners, taper, inertia) is one sidecar-wide
+  `EnclosuresConfig` — only `floor_db` is per-box (from the ODF). Per-box
+  overrides are earmarked for the voicing layer (`sidecar.rs` comment).
+- ODF `MIDIInputNumber` is parsed but never consumed — per-enclosure independent
+  CC assignment from the ODF isn't wired (bindings cover it manually).
+- A chest in multiple enclosures uses only the first, with a warning
+  (`server/bank.rs::chest_enclosures`). GO composes all of them.
+- No per-pipe filter/gain depths (HW voicing territory). `MAX_ENCLOSURES = 16`.
+
+---
+
+## 2. ODF tremulants unsupported; tremmed samples can't play (worse than GO and HW) — ⚠ STILL OPEN, now top priority
+
+**GO:** two tremulant types (`GOTremulantType`): synth and wave.
+- Synth (`GOSoundProviderSynthedTrem`): 16-bit sine control signal, applied as a
+  block-rate *amplitude-only* scalar on the windchest (no FM). Weak — ours is
+  better in kind.
+- Wave trems: attacks/releases marked `IsTremulant=1` in the ODF. Engaging the
+  tremulant calls `GOWindchest::UpdateTremulant` → each sounding pipe
+  crossfades into its tremmed attack (`SwitchToAnotherAttack`, default 184 ms
+  key-scaled fade, phase-aligned via `InitAlignedStream`), and releases are
+  selected with matching tremulant state (`ReleaseSelector.m_WaveTremulantStateFor`).
+- Releases are moved to a "detached release" task so tremulants stop modulating
+  them after key-off.
+
+**HW:** modeled tremulant uses **per-pipe waveforms measured from real tremmed
+recordings**, modulating pitch, amplitude AND harmonic content per pipe, all
+phase-synchronized, with continuous subtle depth randomization; rate voicable
+per tremulant. Sets may alternatively ship real tremmed ranks that play directly.
+(DS5 p12/p15; UG5 p215.)
+
+**Aristide (unchanged since 2026-08-12):** `[Tremulant]` sections are still not
+parsed (no `NumberOfTremulants` handling in `grandorgue.rs::build`); `IsTremulant`
+appears nowhere in the code; the synth tremulant
+(`aristide-engine/src/wind.rs::TremulantParams`) is genuinely good in kind
+(pressure-based → FM+AM+brightness together, rate/depth wander) but is wired
+only via the sidecar `[tremulant]` table (one instance: rate/depth/chests) and
+toggled via an `Action::Tremulant` binding; depth is uniform per chest.
+
+One adjacent improvement landed: GO's detached-release behavior (old §12a) is
+now ours too — wind/trem factors freeze per voice at release.
+
+**Impact:** high. Sets with tremmed ranks (very common; Grabowski ships them as
+separate ranks, ~30% extra RAM) lose their best tremulant; sets defining synth
+trems in the ODF get no tremulant at all without hand-written sidecar config.
+
+**Fix hints:** parse `[Tremulant]` (type, period/start/stop rates, amp depth,
+windchest membership) → map GOSynthTrem onto our wind-group tremulant
+(convert period/depth to `TremulantParams`); implement wave-trem sample switching
+on top of the §4 multi-attack machinery (voice sample-switch mid-block already
+exists — `SampledVoice.sample` switch path in `lib.rs::process`); select releases
+by trem state.
+
+---
+
+## 3. Memory & load scalability (worse than GO and HW) — ⚠ STILL OPEN, unchanged
+
+**GO:** per-pipe/organ `BitsPerSample` 8/12/16/20/24; optional lossless delta
+compression in RAM (`encode = val - (prev + (prev-last)/2)`, 8/16-bit packing,
+skipped when it doesn't shrink); zlib disk cache of the fully decoded/analyzed
+set keyed by load-parameter hash (instant reloads, `GOCache*`); `GOMemoryPool`
+with mmap-backed cache and a page-touch task; multi-threaded loading
+(`LoadConcurrency`); per-rank options: mono downmix, first-loop-only,
+first-release-only, attack-load policy.
+
+**HW:** all-RAM (explicitly rejects streaming), but 16/20/24-bit load resolutions
+(20/24 stored 32-bit-aligned; 20-bit is the documented sweet spot), **lossless
+compression on by default** (disabling costs 40–60% more RAM, "no effect on
+audio"), per-rank disable of multiple attacks/loops/releases, release truncation
+at load, rank enable/disable. (UG5 p76; DS5 p14.)
+
+**Aristide (re-verified 2026-08-26, nothing changed):** every sample fully
+decoded to interleaved **f32** and kept resident
+(`aristide-engine/src/bank.rs::Sample.data: Vec<f32>`; `SampleBank::resident_bytes`).
+No bit-depth option, no compression, no cache (full re-decode + re-analysis —
+period refinement, tail measurement — every launch), no streaming, no
+partial-load options, and decoding is **single-threaded** (`server/bank.rs::build`
+loops sequentially; no rayon/thread pool in the workspace).
+
+**Impact:** hard scalability wall. 16-bit compressed HW set of 8 GB ≈ 30+ GB here
+(f32 = 2× 16-bit, plus no compression ≈ another 1.5–2×). Big free sets (Friesach
+full ~ tens of GB in HW terms) simply won't fit. Load time also scales badly.
+
+**Fix hints (independent sub-tasks):** (a) i16 storage + dequant at read (the
+sinc reader touches samples in exactly one place — `SincTable::read` /
+`Sample::raw`); (b) GO-style load cache: serialize decoded data + analysis
+results keyed by a content hash; (c) parallel decode (embarrassingly parallel
+over files); (d) per-rank mono/loop/release load options; (e) streaming is the
+big one, design already sketched in DESIGN.md/bank.rs comments.
+
+---
+
+## 4. Multi-attack samples parsed, then ignored — ⚠ MOSTLY OPEN (velocity gain landed)
+
+**GO:** `GetAttack(velocity, releasedDurationMs)` — attack selection by
+`AttackVelocity` (min velocity) and `MaxTimeSinceLastRelease` (fast-repetition
+re-attack: a pipe restruck shortly after speaking gets a different, shorter
+attack). Random tie-breaking among equal candidates. Plus
+`MinVelocityVolume`/`MaxVelocityVolume` gain ramp.
+
+**HW:** multiple attack/sustain samples per pipe selected "to model tracker-action
+response, randomly to reduce repetition, re-attack after recent stop"; layered
+samples with per-layer selection (separately controllable chiff layer);
+velocity→tracker-action model modifying attack harmonic content/pitch/amplitude.
+(UG5 p76; DS5 p15.)
+
+**Aristide now:**
+- **Velocity gain is done** (`589691a`): the loader reads per-rank
+  `MinVelocityVolume`/`MaxVelocityVolume` (`grandorgue.rs`, →
+  `model::VelocityVolume::gain`), and `Console::note_on_manual` prices every
+  voice through the ramp — including voices started late by a stop drawn
+  mid-hold or a coupler recouple, which reuse the held press's velocity.
+  Old §12c is closed.
+- **Attack selection is still first-only**: `server/bank.rs::build` uses
+  `attacks.first()`; every keypress plays the identical attack transient.
+  No `AttackVelocity`, no `MaxTimeSinceLastRelease`, no random tie-break.
+
+**Impact:** clearly audible on repetition — trills/repeated notes machine-gun the
+speech transient. Our loop randomization + per-voice flow noise decorrelate the
+sustain, not the attack.
+
+**Fix hints:** extend `VoiceSpec` to a small attack table; selection control-side
+in `console.rs::note_on_manual` (it already tracks per-key handles and
+velocities; add last-release timestamps per pipe). Random pick among eligible
+attacks = the cheap 80%. Tremmed attacks (§2) ride the same mechanism
+(`IsTremulant` becomes a selector dimension, GO's `GOBool3` semantics in
+`go-odf-notes.md`).
+
+---
+
+## 5. Output routing — ✅ LARGELY DONE (was: stereo only); single-device + ODF AudioGroup remain
+
+**GO:** engine mixes per audio *group* (stereo pairs), then a per-device-channel
+dB matrix (−120…+40 dB) routes any group L/R to any channel of **multiple
+simultaneous devices** (RtAudio/PortAudio/JACK). Pipes assigned to groups via
+per-pipe/rank `AudioGroup`. Built-in multi-channel WAV recorder + downmix recorder.
+
+**HW:** up to 1024 primary buses → 8 intermediate → 8 master buses per preset,
+arbitrary inter-bus routing, any bus to any device channels; per-rank
+bus-allocation algorithms to spread pipes over speakers; **4 output perspectives**
+with per-pipe mix levels = per-pipe surround positioning; per-bus convolution
+instances. (DS5 p4; RN9 pp56–58.)
+
+**Aristide now (M6, 2026-08-24):** 8 stereo buses (`aristide-engine/src/routing.rs`,
+bus 0 = main pair). Each bus: gain, output channel pair, and a delay insert
+(`ms`/`feedback`/`mix`/`dry`) with a ~100 ms slewed read head (live time changes
+bend tape-style). Assignment via sidecar `[[routing.bus]]` (stop/manual name
+patterns → `output = [L, R]` 1-based); per-pipe onset delays via
+`[[voicing.delay]]` (a delayed pipe is silent and windless until onset; released
+early, it never speaks). The cpal stream widens to the channels routing asks for
+when the device offers an f32 layout at the same rate; otherwise routed buses
+fold to the main pair with a warning — wrong, never silent (mono devices fold
+L+R). `POST /api/bus` is the live knob. Default path is bit-identical to the
+pre-bus engine.
+
+**Remaining gaps:**
+- **One audio device** (`default_output_device()` only) — GO drives several at
+  once. Multi-device is a named M6 deferral.
+- **GO's ODF `AudioGroup` key is never read** — a GO set's authored speaker
+  groups are silently ignored; only a hand-written sidecar recreates them.
+  Cheap win: translate `AudioGroup` → bus assignments at load.
+- No multi-perspective/surround handling (buses are fixed stereo pairs; no
+  per-pipe perspective mixes). No bus→channel dB *matrix*, no per-bus IR.
+- Bus inserts are delay-only; the full node graph is deferred to overlap M4.
+- **NEW BUG (found 2026-08-26): `--record` writes a corrupt WAV on widened
+  streams.** The engine tap is post-routing and channel-count-agnostic (good),
+  but `spawn_recorder` (`main.rs`) hardcodes a stereo 16-bit header. Once
+  `ensure_channels` widens the device beyond 2, the recorder keeps writing
+  N-channel interleaved frames under a 2-channel header — a mislabeled file.
+  Fix: thread the channel count into the recorder at spawn and on every
+  stream rebuild (rewrite header or start a new segment).
+
+---
+
+## 6. Pitch metadata pipeline — ✅ MOSTLY DONE (was: silent wrong-pitch risk)
+
+**GO:** expected pitch = key MIDI note adjusted by `HarmonicNumber` (default 8 =
+unison 8′); sample pitch = embedded `smpl` chunk `MIDIUnityNote` +
+`MIDIPitchFraction`, overridable by ODF `MIDIKeyNumber`/`MIDIPitchFraction`;
+auto-tuning correction retunes the difference, gated by `IgnorePitch` and
+switched per-temperament (`isOriginalBased`); plus `PitchTuning` and
+`PitchCorrection` cents through the organ→windchest→rank→pipe inheritance chain.
+~100+ built-in temperaments; "original temperament" mode bypasses auto-retune.
+See `go-odf-notes.md` §"two pitch paths" (updated 2026-08-26).
+
+**HW:** many historical temperaments switchable instantly; "original recorded
+tuning" mode; global pitch adjustable. Per-pipe tuning voicable. (DS5 p12.)
+
+**Aristide now (commits `9b353cf`/`bf99cb3`):** real pitch reconciliation in
+`server/bank.rs`. The loader reads `HarmonicNumber` (rank + pipe),
+`MIDIKeyNumber`, `MIDIPitchFraction`, and chained `PitchTuning` +
+`PitchCorrection`; the wav/wavpack readers surface `smpl` unity note/fraction.
+Resolution mirrors GO: explicit ODF key wins over the file's smpl data. Rather
+than GO's per-temperament path switch, Aristide compares the recorded-path cents
+(`PitchTuning`) with the declared-pitch path (nominal-vs-recorded +
+`PitchCorrection`) and retunes when they disagree by more than 50 cents
+(`RETUNE_TOLERANCE_CENTS`), discarding auto figures past ±1800 cents as junk —
+plus a junk-metadata guard: a rank whose files all stamp the *same* smpl unity
+note across different nominal pitches has its smpl data distrusted (editor
+default, not a measurement). Repitched/borrowed/extended pipes ride the same
+math. The "silent wrong-octave" bug class is closed.
+
+**Remaining gaps:**
+- `IgnorePitch` and per-rank `AcceptsRetuning` are not implemented — no per-rank
+  opt-out of the auto-retune heuristic.
+- The tolerance heuristic is deliberately not GO's exact temperament-conditional
+  dispatch; divergence is documented in `go-odf-notes.md`. Watch for sets where
+  a <50-cent metadata error should have been corrected.
+- **Named temperaments: still 5** (`server/tuning.rs::Temperament::ALL`) vs GO's
+  100+. In practice Scala support (M6) unlocks arbitrary tuning: `.scl`/`.kbm`
+  parsing (`model/scala.rs`), applied per manual with nearest-pipe re-anchoring
+  (whole semitones move which pipe sounds; only the residual bends —
+  `console.rs`). A GO-parity named-temperament list is now just table work,
+  lower priority since any Scala archive file loads.
+
+---
+
+## 7. Voicing tools & combination action — ⚠ MOSTLY OPEN (bindings/MIDI-learn landed)
+
+**GO:** per-pipe hierarchical config editable live in the UI and persisted per
+organ (.cmb): Amplitude, Gain dB, ManualTuning, TrackerDelay, ReleaseTail ms,
+ToneBalance tilt, AudioGroup, per-pipe load options. Full combination system
+(generals, divisionals, sequencer, crescendo).
+
+**HW:** per-pipe voicing screens: tuning, amplitude+stereo balance, brightness,
+trem/wind/swell mod depths per target with polarity, per-perspective mix +
+parametric EQ + release truncation. Combination system, crescendo, floating
+divisions, MIDI learn on everything. (UG5 pp213–215.)
+
+**Aristide now:**
+- **Control/bindings are no longer a gap:** a generic `Trigger`↔`Action` system
+  (`server/control.rs`) binds any MIDI message or computer key to transpose,
+  stops, couplers, tremulant, cancel, enclosures — with genuine **MIDI learn**
+  (`/api/midi/bind`, `/api/control/bind`, learn state machines in `main.rs`),
+  persisted per organ. The Tauri console (panel canvas) edits all of it.
+- **Voicing sidecar exists but covers one parameter:** `[[voicing.delay]]`
+  (per-stop-pattern onset delay, load-time only). No per-pipe/per-rank gain,
+  cents, or brightness voicing yet — even though all three exist as per-voice
+  engine parameters (`gain`, `rate`, `brightness_a`), so the engine side is free.
+- **Combinations:** only a general **cancel** piston (`Action::Cancel`,
+  `/api/cancel`). No recallable registrations — no generals/divisionals,
+  no sequencer, no crescendo.
+
+**Impact:** usability. No way to fix one honking pipe or balance a division;
+no hands-free registration changes. Blocks serious use even when the sound is
+right.
+
+**Fix hints:** extend the voicing sidecar schema (per-pipe/pattern gain/cents/
+brightness → the existing engine params), HTTP endpoints + console editor after;
+combination action is pure control-side state (drawn-stop sets keyed to piston
+numbers, triggered through the existing binding vocabulary — the plumbing is
+already there).
+
+---
+
+## 8. Release handling: producer intent ignored — ⚠ STILL OPEN, unchanged
+
+Aristide's release *model* (phase-aligned splice, level match, staccato charge,
+repitch decay compensation, release bend — `lib.rs::release`,
+`docs/research/release-modeling.md`) is ahead of GO. The gaps around it are
+unchanged since 2026-08-12:
+
+- **ODF `ReleaseCrossfadeLength` ignored** (GO: 0–3000 ms per release; we always
+  use our pitch-scaled ~9-period fade). Usually ours is fine or better; sets
+  where the producer tuned it are overridden without recourse.
+- **Attack-level `AttackStart`/`CuePoint`/`ReleaseEnd` markers unparsed**
+  (`grandorgue.rs::read_attack` reads only loops; releases add `MaxKeyPressTime`).
+  We trust wav cue chunks only (`server/bank.rs::decode` uses the last cue past
+  loop end, else loop end). Sets that define boundaries in the ODF splice from
+  the wrong frame.
+- **No release truncation.** HW: load-time truncation with frequency-shaped
+  decays for the "wet set → short tails → convolution" dry workflow, PLUS
+  real-time per-perspective tail truncation; GO: per-pipe `ReleaseTail` ms
+  voicing. We have a convolver (`reverb.rs`) but no way to dry the source
+  material. (Note: `fb7b7ad` fixed hot-EOF tails settling to silence — a
+  correctness fix, not truncation.)
+
+**Fix hints:** parse the three ODF keys (small); truncation = start a shaped fade
+`ReleaseTail` ms into Tail phase (the per-sample `tail_decay` gain machinery is
+already there — a per-voice fade trigger is nearly free); frequency-dependent
+shaping can reuse the measured `tail_decay_db_per_s` + pipe f0.
+
+---
+
+## 9. `LoopCrossfadeLength` unsupported (worse than GO) — ⚠ STILL OPEN, unchanged
+
+**GO:** bakes raised-cosine loop crossfades into the end-segment at load when the
+ODF asks (0–3000 ms, `DoCrossfade`, GOSoundAudioSection.cpp; loops too short are
+dropped with a warning). Sets with imperfect loop points depend on this.
+
+**Aristide:** loops are butt-joined; the sinc reader wraps kernel taps across the
+seam (`resample.rs::read` slow path) which fixes *interpolation* clicks only. A
+bad loop point still thumps every pass. (Butt loops are the right default —
+Appleton 2019, 3 dB noise-dip argument in `vpo-rendering-techniques.md` §2.2 —
+but only when the producer's loops are good.)
+
+**Fix:** honor the key at decode time in `server/bank.rs::decode` — pre-render
+the crossfade into the sample data like GO. Contained, low-risk.
+
+---
+
+## 10. Wind model narrower than HW's (HW-only gap; we beat GO here) — ⚠ unchanged
+
+**HW:** fluid-dynamics wind *system* model since v2: producer-defined
+bellows/reservoirs/trunks per division, air pressure/flow computed per pipe,
+**every pipe interacts with every other through the shared supply**, turbulence
+randomization, regulator table oscillation; per-pipe voicable wind mod depths.
+(DS5 p7/p15; UG5 p150; RN9 pp28–29; `docs/research/hauptwerk-wind-model.md`.)
+
+**GO:** none at all (`GOWindchest` is a routing group with a static volume).
+
+**Aristide:** per-chest independent 2nd-order regulator (`wind.rs`), demand =
+heuristic 1/f `wind_weight` (`server/bank.rs::wind_weight`), pressure →
+pitch/gain/brightness exponents, per-voice flow noise, pallet-gulp attack boost.
+Since 2026-08-12: released voices freeze their wind factors AND stop drawing
+demand (chest pressure recovers while tails ring) — physically right. Still:
+**no inter-chest coupling** (no shared blower/trunk sag across divisions),
+**no per-organ wind topology** (sidecar scalar defaults only — GO ODFs carry no
+wind data to import, so this needs sidecar schema), demand is a guess.
+
+**Impact:** moderate — the audible core (sag, wobble, trem) exists; what's
+missing is inter-division interaction and per-organ fidelity. Fine for now;
+document as future sidecar work.
+
+---
+
+## 11. Modulation-depth realism vs HW (HW-only gap) — ⚠ unchanged
+
+HW: per-pipe measured tremulant waveforms, per-pipe depths with polarity,
+harmonic-content leg through real per-voice filters, constant depth
+randomization. Reality (spectrogram studies): each harmonic has its own AM
+depth/phase. Aristide: one sine per chest, uniform depth, brightness = single
+1-pole tilt hinged at the 2nd harmonic (`brightness_coefficient`,
+`server/bank.rs`). Ours breathes convincingly but can't match analyzed per-pipe
+modulation. Long-term path (already in `vpo-rendering-techniques.md` §3):
+offline AM/FM separation (DAFx-10) of producers' tremmed samples → per-pipe
+depth tables feeding the existing wind-trem machinery.
+
+---
+
+## 12. Smaller correctness/robustness items
+
+a. ~~Trem/wind modulates release tails.~~ ✅ **Fixed** (`608e802`): wind factors
+   (`wind_rate`/`wind_gain`/`wind_treble`) refresh only while `Held` and freeze
+   at release, matching the swell-box rule; released voices also stop drawing
+   wind demand. Regression test `released_pipes_stop_drawing_wind`.
+b. **Pool exhaustion steals a sounding tail with no fade** — ⚠ still true.
+   `allocate_slot` fallback overwrites a Tail/FadeOut voice instantly (click
+   under extreme load). GO drops the *new* note instead; HW sheds "least
+   conspicuous" tails early (we do too — `TAIL_VOICE_BUDGET` — but the
+   last-resort steal is a hard cut). Ceiling `MAX_VOICES = 2048` vs HW's 32k —
+   fine in practice, note only.
+c. ~~Velocity ignored.~~ ✅ **Fixed for gain** (`589691a`): GO's
+   `MinVelocityVolume`/`MaxVelocityVolume` ramp, applied per voice including
+   late-started voices (stop drawn mid-hold, recouple). Velocity-based *attack
+   selection* waits on §4.
+d. ~~Bass/Melody couplers skipped.~~ ✅ **Fixed** (`616c03f`): `CouplerType`
+   parses to `CouplerScope::{AllKeys, Bass, Melody}`; only the lowest/highest
+   held key in range couples, re-judged on every note on/off (a note-off can
+   start a voice on the next-extreme key). Rides the flexible-route coupler
+   model (`7ef91be`): a coupler = named routes, each with source manual, key
+   range, `unison_off`, scope, optional target manual + shift; user-defined via
+   sidecar `[[couplers.define]]`.
+e. **Single audio device via cpal default** — ⚠ still true (named M6 deferral);
+   GO drives multiple devices via RtAudio/PortAudio/JACK simultaneously.
+f. **GO-format sets only** — ⚠ still true. The browse UI now *lists*
+   `.organ_hauptwerk_xml` files (`beb4e98`) but no loader exists — selecting
+   one does nothing. HW-unencrypted loader (per DESIGN.md legal boundary) is M7.
+g. **GO synth trem ramps** with ODF start/stop rates; ours is a fixed sidecar
+   `ramp_seconds` (0.7 s default, `wind.rs::TremulantParams`) — ⚠ still true.
+   Cosmetic once §2 lands (no ODF trem attributes are parsed at all yet).
+h. **NEW: `--record` header lies on widened streams** — see §5. Stereo 16-bit
+   header hardcoded in `spawn_recorder` while the tap delivers N-channel frames
+   after `ensure_channels` widens the device.
+
+---
+
+## Where Aristide is already ahead (context, don't "fix")
+
+Re-verified 2026-08-26 — all still accurate, list grown:
+
+- Resampler: 16-tap Kaiser β=9, 512 interpolated phases, ~90 dB SNR, live
+  per-voice rate — vs GO's 8-tap Lanczos, 8192 uninterpolated phases, rate
+  frozen at note start. Now also *ramped* rate (M6 glides) — GO can't bend a
+  sounding pipe at all.
+- Release model: quadrature phase alignment + level match + staccato
+  room-charge + repitch decay compensation + release pitch-bend — beyond GO's
+  2×32 amplitude/slope LUT and plausibly beyond HW.
+- Swell boxes: gain + sliding high-shelf + shutter inertia + frozen tails —
+  beats GO's pure gain taper, approaches HW's shutter filters.
+- Wind model exists at all (GO: none) and the trem does FM+AM+brightness
+  (GO synth trem: block-rate AM only).
+- Contemporary layer (M6): Scala per-manual tuning with nearest-pipe
+  re-anchoring, live tuning drift on held voices, MPE per-note pitch, Lumatone
+  `.ltn` maps, per-pipe onset delays, bus delays — none of which GO or HW have.
+- RT-clean callback (GO waits on condvars/mutexes inside the audio callback).
+- Partitioned convolution reverb with clean bit-exact-dry bypass.
+- Multi-loop random selection ≈ GO parity (`PickEndSegment` equivalent).
+- Master limiter (GO hard-clamps at ±1.0).
+
+## Worker split suggestion (2026-08-26 revision)
+
+| Work package | Sections | Independent? |
+|---|---|---|
+| Tremulants + multi-attack (ODF trems, IsTremulant, attack selection, trem-state releases) | §2 + §4 | one package, now top priority |
+| Memory (i16 + load cache + parallel decode; streaming later) | §3 | yes |
+| Release ODF keys + truncation | §8 | yes (small) |
+| Loop crossfade baking | §9 | yes (small) |
+| Voicing sidecar (gain/cents/brightness) + combination action | §7 | control-side only |
+| ODF `AudioGroup` → buses; multi-device; record-header fix | §5 residue + §12h | yes |
+| Pitch residue (`IgnorePitch`/`AcceptsRetuning`, temperament table) | §6 residue | yes (small) |
+| Correctness nits | §12b | small, anytime |
+
+Status ledger: §1 ✅, §5 ✅ (residue), §6 ✅ (residue), §12a/c/d ✅;
+§2, §3, §4, §7, §8, §9, §10, §11, §12b/e/f/g/h ⚠ open.
