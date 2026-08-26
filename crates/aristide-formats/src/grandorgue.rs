@@ -10,7 +10,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use aristide_model::{
-    AttackSample, Coupler, CouplerRoute, CouplerTarget, Manual, ManualId, ManualKind, Organ,
+    AttackSample, Coupler, CouplerRoute, CouplerScope, CouplerTarget, Manual, ManualId, ManualKind,
+    Organ,
     Pipe, PipeRef,
     PipeSource, Rank, RankId, RankRange, ReleaseSample, SampleLoop, Stop, StopId,
 };
@@ -419,19 +420,26 @@ impl Builder<'_> {
                             low_key: None,
                             high_key: None,
                             unison_off: true,
+                            scope: CouplerScope::AllKeys,
                             target: None,
                         }],
                     });
                     continue;
                 }
                 let kind = coupler_section.get("CouplerType").unwrap_or("Normal");
-                if !kind.eq_ignore_ascii_case("Normal") {
-                    self.warn(format!(
-                        "[{}]: {kind} couplers not yet supported, skipped",
-                        coupler_section.name
-                    ));
-                    continue;
-                }
+                let scope = if kind.eq_ignore_ascii_case("Bass") {
+                    CouplerScope::Bass
+                } else if kind.eq_ignore_ascii_case("Melody") {
+                    CouplerScope::Melody
+                } else {
+                    if !kind.eq_ignore_ascii_case("Normal") {
+                        self.warn(format!(
+                            "[{}]: unknown CouplerType {kind:?}, treated as Normal",
+                            coupler_section.name
+                        ));
+                    }
+                    CouplerScope::AllKeys
+                };
                 // GO restricts a coupler to source notes in
                 // [FirstMIDINoteNumber, FirstMIDINoteNumber+NumberOfKeys);
                 // the defaults (0, 127) cover any keyboard, so only a
@@ -446,6 +454,7 @@ impl Builder<'_> {
                         low_key: (first > 0).then_some(first.clamp(0, 127) as u8),
                         high_key: (last < 127).then_some(last.clamp(0, 127) as u8),
                         unison_off: false,
+                        scope,
                         target: Some(CouplerTarget {
                             manual: ManualId(coupler_section.int("DestinationManual")? as u32),
                             key_shift: coupler_section.int("DestinationKeyshift")? as i16,
@@ -947,6 +956,61 @@ Pipe002=037-Cis.wav
         // Derived first MIDI note should equal the manual's first note.
         assert!((organ.ranks[0].pipes[0].nominal_frequency_hz - midi_to_hz(36.0)).abs() < 1e-9);
         assert_eq!(organ.stops[0].ranks[0].key_count, 2);
+    }
+
+    #[test]
+    fn bass_and_melody_couplers_load_with_their_scope() {
+        let text = "\
+[Organ]
+ChurchName=Coupled
+HasPedals=N
+NumberOfManuals=2
+NumberOfWindchestGroups=1
+
+[WindchestGroup001]
+Name=W
+
+[Manual001]
+Name=Great
+NumberOfLogicalKeys=3
+FirstAccessibleKeyLogicalKeyNumber=1
+FirstAccessibleKeyMIDINoteNumber=60
+NumberOfAccessibleKeys=3
+NumberOfStops=0
+NumberOfCouplers=2
+Coupler001=1
+Coupler002=2
+
+[Manual002]
+Name=Swell
+NumberOfLogicalKeys=3
+FirstAccessibleKeyLogicalKeyNumber=1
+FirstAccessibleKeyMIDINoteNumber=60
+NumberOfAccessibleKeys=3
+NumberOfStops=0
+
+[Coupler001]
+Name=Bass
+UnisonOff=N
+DestinationManual=2
+DestinationKeyshift=0
+CouplerType=BASS
+
+[Coupler002]
+Name=Melody
+UnisonOff=N
+DestinationManual=2
+DestinationKeyshift=0
+CouplerType=Melody
+";
+        let result = parse_str(text);
+        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+        let couplers = &result.organ.couplers;
+        assert_eq!(couplers.len(), 2);
+        assert_eq!(couplers[0].routes[0].scope, CouplerScope::Bass);
+        assert_eq!(couplers[1].routes[0].scope, CouplerScope::Melody);
+        let target = couplers[0].routes[0].target.as_ref().expect("routed");
+        assert_eq!(target.manual, ManualId(2));
     }
 
     /// The extended-compass mapping, key by key. A stop whose pipes

@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use aristide_model::{ManualId, Organ, RankId, RankRange, StopId};
+use aristide_model::{CouplerRoute, CouplerScope, ManualId, Organ, RankId, RankRange, StopId};
 
 use crate::bank::VoiceSpec;
 use crate::tuning::Tuning;
@@ -539,7 +539,10 @@ impl Console {
                 continue;
             };
             for route in &coupler.routes {
-                if route.from_manual != manual || !route.covers(midi_key) {
+                if route.from_manual != manual
+                    || !route.covers(midi_key)
+                    || !self.route_hears(manual, midi_key, route)
+                {
                     continue;
                 }
                 unison_off |= route.unison_off;
@@ -584,6 +587,51 @@ impl Console {
                 .filter(|c| unison_off || (c.manual, c.midi_key) != (manual, midi_key)),
         );
         landings
+    }
+
+    /// Whether a route fires for this key right now. A classic route
+    /// always does (its range is already checked); a Bass/Melody route
+    /// hears only the extreme of the keys currently held on its manual.
+    /// That extreme moves as keys go down and up, which is why key
+    /// changes on such a manual re-judge every held key (see
+    /// `note_on_manual` / `note_off_manual`).
+    fn route_hears(&self, manual: ManualId, midi_key: i16, route: &CouplerRoute) -> bool {
+        route.scope == CouplerScope::AllKeys || self.extreme_held(manual, route) == Some(midi_key)
+    }
+
+    /// The lowest/highest currently-held key on `manual` among those
+    /// the route's range covers, in the transposed coordinates `couple`
+    /// judges keys in. "Held" is `held_velocity`, which gains a key
+    /// before its voices are derived and loses it before its release —
+    /// so a press sees itself, and a release doesn't.
+    fn extreme_held(&self, manual: ManualId, route: &CouplerRoute) -> Option<i16> {
+        let index = self.organ.manuals.iter().position(|m| m.id == manual)?;
+        let transpose = self.effective_tuning(index).transpose as i16;
+        let held = self
+            .held_velocity
+            .keys()
+            .filter(|&&(at, _)| at == index)
+            .map(|&(_, key)| key as i16 + transpose)
+            .filter(|&key| route.covers(key));
+        match route.scope {
+            CouplerScope::AllKeys => None,
+            CouplerScope::Bass => held.min(),
+            CouplerScope::Melody => held.max(),
+        }
+    }
+
+    /// Whether any engaged coupler follows held-key extremes on this
+    /// manual — if one does, a key change can move coupling on *other*
+    /// keys than the one that changed.
+    fn tracks_extremes(&self, manual_index: usize) -> bool {
+        let Some(id) = self.organ.manuals.get(manual_index).map(|m| m.id) else {
+            return false;
+        };
+        self.engaged_couplers
+            .iter()
+            .filter_map(|&engaged| self.organ.couplers.get(engaged))
+            .flat_map(|coupler| &coupler.routes)
+            .any(|route| route.scope != CouplerScope::AllKeys && route.from_manual == id)
     }
 
     /// The inclusive MIDI range a manual answers to, and the widening
@@ -954,6 +1002,11 @@ impl Console {
         // note-off clears it, and drawing a stop mid-hold must find it
         // to start pipes under it.
         self.sounding.insert((manual_index, key), held);
+        // A Bass/Melody coupler may have just changed which key is the
+        // extreme, moving coupled pipes off a key that stays held.
+        if self.tracks_extremes(manual_index) {
+            self.recouple_held_keys(&mut retriggered, &mut starts);
+        }
         // Expedites can duplicate handles already queued by the
         // retrigger drain; the engine tolerates it but keep it clean.
         retriggered.sort_unstable();
@@ -962,7 +1015,10 @@ impl Console {
     }
 
     /// `note_off` addressed by manual index (see `note_on_manual`).
-    pub fn note_off_manual(&mut self, manual_index: usize, key: u16) -> Vec<u64> {
+    /// Returns (handles to stop, voices to start) — a note-off can
+    /// *start* sound when a Bass/Melody coupler hands its coupled note
+    /// to the next-extreme key still held.
+    pub fn note_off_manual(&mut self, manual_index: usize, key: u16) -> (Vec<u64>, Vec<VoiceStart>) {
         self.held_velocity.remove(&(manual_index, key));
         let mut released = Vec::new();
         for (_, rank, pipe) in self
@@ -974,7 +1030,13 @@ impl Console {
                 released.push(handle);
             }
         }
-        released
+        let mut starts = Vec::new();
+        if self.tracks_extremes(manual_index) {
+            self.recouple_held_keys(&mut released, &mut starts);
+            released.sort_unstable();
+            released.dedup();
+        }
+        (released, starts)
     }
 
     /// One more holder demands a pipe. A pipe speaks ONCE no matter how
@@ -1271,11 +1333,21 @@ impl Console {
     fn recouple_held_keys(&mut self, stops: &mut Vec<u64>, starts: &mut Vec<VoiceStart>) {
         let held: Vec<(usize, u16)> = self.sounding.keys().copied().collect();
         for (manual_index, key) in held {
-            // One-shots strike on key press, not on a coupler change —
-            // same rule as drawing a stop mid-hold.
+            // Voices started here price at the press they join, like
+            // drawing a stop mid-hold; one-shots strike on key press
+            // only, not on a coupler change.
+            let velocity = self
+                .held_velocity
+                .get(&(manual_index, key))
+                .copied()
+                .unwrap_or(127);
             let desired: Vec<KeyVoice> = self
                 .voices_for_key(manual_index, key, None)
                 .into_iter()
+                .map(|mut voice| {
+                    voice.spec.gain *= voice.spec.velocity.gain(velocity);
+                    voice
+                })
                 .filter(|voice| !voice.spec.percussive)
                 .collect();
             let mut remaining = self
@@ -1659,13 +1731,13 @@ mod tests {
         }
 
         // Each key releases its own voices, not the other's.
-        let released = console.note_off_manual(0, 101);
+        let released = console.note_off_manual(0, 101).0;
         assert_eq!(
             released,
             first.iter().map(|s| s.handle).collect::<Vec<_>>(),
             "the first key's voices stop while the second still holds"
         );
-        let released = console.note_off_manual(0, 100);
+        let released = console.note_off_manual(0, 100).0;
         assert_eq!(released, second.iter().map(|s| s.handle).collect::<Vec<_>>());
     }
 
@@ -2003,7 +2075,7 @@ mod tests {
         let mut console = test_console();
         let (starts, _) = console.note_on_manual(0, 60, 127);
         assert_eq!(starts.len(), 2);
-        let stops = console.note_off_manual(0, 60);
+        let stops = console.note_off_manual(0, 60).0;
         assert_eq!(stops.len(), 2);
         assert_eq!(
             stops,
@@ -2064,7 +2136,7 @@ mod tests {
         assert_eq!(released, vec![first]);
 
         // Releasing the key stops the remaining pipe and clears the light.
-        assert_eq!(console.note_off_manual(0, 60), vec![second]);
+        assert_eq!(console.note_off_manual(0, 60).0, vec![second]);
         assert!(console.manual_states()[0].4.is_empty());
     }
 
@@ -2081,7 +2153,7 @@ mod tests {
         assert_eq!(starts.len(), 1);
         assert_eq!(starts[0].spec.sample, 1, "rank 2's sample expected");
         let handle = starts[0].handle;
-        assert_eq!(console.note_off_manual(0, 60), vec![handle]);
+        assert_eq!(console.note_off_manual(0, 60).0, vec![handle]);
     }
 
     #[test]
@@ -2089,7 +2161,7 @@ mod tests {
         let mut console = test_console();
         assert!(console.note_on_manual(0, 20, 127).0.is_empty());
         assert!(console.note_on_manual(0, 120, 127).0.is_empty());
-        assert!(console.note_off_manual(0, 20).is_empty());
+        assert!(console.note_off_manual(0, 20).0.is_empty());
     }
 
     /// Two manuals with one stop each, plus II/I unison, 16' I (self,
@@ -2184,6 +2256,7 @@ mod tests {
                 low_key: Some(48),
                 high_key: None,
                 unison_off: false,
+                scope: Default::default(),
                 target: Some(aristide_model::CouplerTarget {
                     manual: ManualId(2),
                     key_shift: -5,
@@ -2230,6 +2303,7 @@ mod tests {
                     low_key: Some(split),
                     high_key: None,
                     unison_off: false,
+                    scope: Default::default(),
                     target: target(None),
                 },
                 aristide_model::CouplerRoute {
@@ -2237,6 +2311,7 @@ mod tests {
                     low_key: None,
                     high_key: Some(split - 1),
                     unison_off: true,
+                    scope: Default::default(),
                     target: target(Some(true)),
                 },
             ],
@@ -2285,7 +2360,7 @@ mod tests {
         assert_eq!(stopped, vec![swell_voice]);
 
         // The key still sounds its own pipe, and note-off finds it.
-        assert_eq!(console.note_off_manual(0, 60).len(), 1);
+        assert_eq!(console.note_off_manual(0, 60).0.len(), 1);
     }
 
     /// A pure unison-off coupler (GO's `UnisonOff=Y`): the manual's own
@@ -2301,6 +2376,7 @@ mod tests {
                 low_key: None,
                 high_key: None,
                 unison_off: true,
+                scope: Default::default(),
                 target: None,
             }],
         });
@@ -2319,7 +2395,119 @@ mod tests {
         let (stopped, starts) = console.set_coupler(index, false);
         assert_eq!(stopped, vec![direct]);
         assert_eq!(starts.len(), 1);
-        assert_eq!(console.note_off_manual(0, 60).len(), 1);
+        assert_eq!(console.note_off_manual(0, 60).0.len(), 1);
+    }
+
+    /// A Bass coupler (GO `CouplerType=Bass`): an automatic pedal —
+    /// only the lowest currently-held key is coupled, and the coupled
+    /// note follows that extreme as keys come and go.
+    #[test]
+    fn a_bass_coupler_follows_the_lowest_held_key() {
+        let mut console = coupled_console();
+        console.organ.couplers.push(aristide_model::Coupler {
+            name: "Bass I/II".into(),
+            routes: vec![aristide_model::CouplerRoute {
+                from_manual: ManualId(1),
+                low_key: None,
+                high_key: None,
+                unison_off: false,
+                scope: aristide_model::CouplerScope::Bass,
+                target: Some(aristide_model::CouplerTarget {
+                    manual: ManualId(2),
+                    key_shift: 0,
+                    repitch: None,
+                }),
+            }],
+        });
+        let index = console.organ.couplers.len() - 1;
+        console.set_coupler(index, true);
+
+        // The first key is trivially the bass: it doubles onto II.
+        let (starts, stopped) = console.note_on_manual(0, 60, 127);
+        assert!(stopped.is_empty());
+        assert_eq!(starts.len(), 2, "the key and its coupled bass");
+        let coupled_c = starts
+            .iter()
+            .find(|s| s.spec.sample == 1)
+            .expect("II speaks")
+            .handle;
+
+        // A higher key adds no coupling: C4 stays the bass.
+        let (starts, stopped) = console.note_on_manual(0, 64, 127);
+        assert!(stopped.is_empty());
+        assert_eq!(starts.len(), 1, "E4 sounds only itself");
+
+        // A lower key takes the bass with it: the coupled note moves.
+        let (starts, stopped) = console.note_on_manual(0, 55, 127);
+        assert_eq!(stopped, vec![coupled_c], "the old bass copy lets go");
+        assert_eq!(starts.len(), 2, "G3 and the bass at its new home");
+        let coupled_g = starts
+            .iter()
+            .find(|s| s.spec.sample == 1)
+            .expect("II speaks")
+            .handle;
+
+        // Releasing the bass key hands the coupled note back up to C4:
+        // a note-off that *starts* a voice.
+        let (stopped, starts) = console.note_off_manual(0, 55);
+        assert!(stopped.contains(&coupled_g));
+        assert_eq!(starts.len(), 1);
+        assert_eq!(starts[0].spec.sample, 1, "the bass re-speaks under C4");
+
+        // Once every key is up, nothing is left sounding.
+        console.note_off_manual(0, 64);
+        let (stopped, starts) = console.note_off_manual(0, 60);
+        assert!(starts.is_empty());
+        assert_eq!(stopped.len(), 2, "C4's own pipe and its coupled bass");
+        assert!(console.speaking.is_empty());
+    }
+
+    /// A Melody coupler mirrors the Bass one at the top of the chord,
+    /// and engaged mid-hold it lands on the current top note only.
+    #[test]
+    fn a_melody_coupler_follows_the_highest_held_key() {
+        let mut console = coupled_console();
+        console.organ.couplers.push(aristide_model::Coupler {
+            name: "Melody I/II".into(),
+            routes: vec![aristide_model::CouplerRoute {
+                from_manual: ManualId(1),
+                low_key: None,
+                high_key: None,
+                unison_off: false,
+                scope: aristide_model::CouplerScope::Melody,
+                target: Some(aristide_model::CouplerTarget {
+                    manual: ManualId(2),
+                    key_shift: 0,
+                    repitch: None,
+                }),
+            }],
+        });
+        let index = console.organ.couplers.len() - 1;
+
+        // A chord held before the coupler is engaged.
+        console.note_on_manual(0, 60, 127);
+        console.note_on_manual(0, 67, 127);
+
+        // Engaging mid-hold couples exactly the top note.
+        let (stopped, starts) = console.set_coupler(index, true);
+        assert!(stopped.is_empty());
+        assert_eq!(starts.len(), 1, "one coupled copy: the melody");
+        assert_eq!(starts[0].spec.sample, 1, "rank 2's sample");
+        let coupled_g = starts[0].handle;
+
+        // A higher key takes the melody over.
+        let (starts, stopped) = console.note_on_manual(0, 72, 127);
+        assert_eq!(stopped, vec![coupled_g]);
+        assert_eq!(starts.len(), 2, "C5 and the melody moved onto it");
+
+        // Releasing it hands the melody back to G4.
+        let (_, starts) = console.note_off_manual(0, 72);
+        assert_eq!(starts.len(), 1);
+        assert_eq!(starts[0].spec.sample, 1, "the melody re-speaks under G4");
+
+        console.note_off_manual(0, 67);
+        console.note_off_manual(0, 60);
+        assert!(console.speaking.is_empty());
     }
 
     #[test]
@@ -2331,7 +2519,7 @@ mod tests {
 
         console.set_coupler(0, true); // II/I
         assert_eq!(console.note_on_manual(0, 60, 127).0.len(), 2, "unison coupler adds II");
-        assert_eq!(console.note_off_manual(0, 60).len(), 2, "note-off kills both");
+        assert_eq!(console.note_off_manual(0, 60).0.len(), 2, "note-off kills both");
 
         console.set_coupler(1, true); // 16' I (self, −12)
         // Great C + Swell C (II/I) + Great C−12 (16' I). Coupled notes
@@ -2640,7 +2828,7 @@ mod tests {
         assert!(stopped.is_empty(), "nothing sounded on the Swell");
         assert_eq!(starts.len(), 1, "the moved stop speaks under the held key");
         assert!(console.note_on_manual(1, 62, 127).0.is_empty(), "the Swell gave it up");
-        assert_eq!(console.note_off_manual(0, 60).len(), 2);
+        assert_eq!(console.note_off_manual(0, 60).0.len(), 2);
         assert_eq!(console.stop_states()[1].3, 0, "stop 2 reports the Great");
     }
 
@@ -2687,15 +2875,15 @@ mod tests {
         );
 
         // Releasing 72 must NOT stop the shared pipe (60 still holds it).
-        let stopped = console.note_off_manual(0, 72);
+        let stopped = console.note_off_manual(0, 72).0;
         assert_eq!(stopped.len(), 1, "only 72's unshared pipe stops");
         // Releasing 60 stops the shared pipe and 60's own coupled pipe.
-        let stopped = console.note_off_manual(0, 60);
+        let stopped = console.note_off_manual(0, 60).0;
         assert_eq!(stopped.len(), 2, "shared pipe + 48-pipe stop last");
 
         // Every started voice eventually stopped exactly once.
-        assert!(console.note_off_manual(0, 60).is_empty());
-        assert!(console.note_off_manual(0, 72).is_empty());
+        assert!(console.note_off_manual(0, 60).0.is_empty());
+        assert!(console.note_off_manual(0, 72).0.is_empty());
     }
 
     #[test]
@@ -2714,7 +2902,7 @@ mod tests {
             .map(|s| s.handle)
             .max()
             .expect("voices started");
-        let released = console.note_off_manual(0, 72);
+        let released = console.note_off_manual(0, 72).0;
         assert_eq!(released.len(), 2);
 
         // Immediately press 60 → its direct pipe IS 72's coupled pipe.
@@ -2756,11 +2944,11 @@ mod tests {
         assert_eq!(retriggered, first_handles, "old voices released");
 
         // Note-off stops only the live (second) voices.
-        let stopped = console.note_off_manual(0, 60);
+        let stopped = console.note_off_manual(0, 60).0;
         assert_eq!(
             stopped,
             second.iter().map(|s| s.handle).collect::<Vec<_>>()
         );
-        assert!(console.note_off_manual(0, 60).is_empty());
+        assert!(console.note_off_manual(0, 60).0.is_empty());
     }
 }

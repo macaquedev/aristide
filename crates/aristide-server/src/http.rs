@@ -1056,8 +1056,13 @@ fn apply_note(state: &Mutex<State>, manual: usize, key: u16, on: bool) {
                 send_start(engine, Some(start));
             }
         } else {
-            for handle in console.note_off_manual(manual, key) {
+            let (stopped, starts) = console.note_off_manual(manual, key);
+            for handle in stopped {
                 engine.send(Command::StopVoice { handle });
+            }
+            // A Bass/Melody coupler retargeting onto another held key.
+            for start in starts {
+                send_start(engine, Some(start));
             }
         }
     }

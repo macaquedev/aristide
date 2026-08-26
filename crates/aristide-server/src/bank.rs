@@ -870,7 +870,7 @@ mod tests {
                             }
                         }
                         Event::Note(key, false) => {
-                            for h in console.note_off_manual(2, key.into()) {
+                            for h in console.note_off_manual(2, key.into()).0 {
                                 handle.send(aristide_engine::Command::StopVoice { handle: h });
                             }
                         }
@@ -1039,7 +1039,7 @@ mod tests {
                             }
                         }
                         Event::Note(channel, key, false) => {
-                            for h in console.note_off_manual(manual_of(channel), key.into()) {
+                            for h in console.note_off_manual(manual_of(channel), key.into()).0 {
                                 handle.send(aristide_engine::Command::StopVoice { handle: h });
                             }
                         }
@@ -1279,7 +1279,7 @@ mod tests {
             if b % 8 == 0 {
                 // toggle a rotating pair of keys
                 let key = keys[(b / 8) % keys.len()];
-                for handle_id in console.note_off_manual(manual_index, key.into()) {
+                for handle_id in console.note_off_manual(manual_index, key.into()).0 {
                     handle.send(aristide_engine::Command::StopVoice { handle: handle_id });
                 }
                 let (starts, retriggered) = console.note_on_manual(manual_index, key.into(), 127);
@@ -1406,7 +1406,7 @@ mod tests {
                         });
                     }
                 } else {
-                    for h in console.note_off_manual(manual_index, key.into()) {
+                    for h in console.note_off_manual(manual_index, key.into()).0 {
                         handle.send(aristide_engine::Command::StopVoice { handle: h });
                     }
                 }
@@ -1517,7 +1517,7 @@ mod tests {
             }
             // Release in a different order than pressed (legato-ish).
             for &key in chord.iter().rev() {
-                for h in console.note_off_manual(manual_index, key.into()) {
+                for h in console.note_off_manual(manual_index, key.into()).0 {
                     handle.send(aristide_engine::Command::StopVoice { handle: h });
                 }
                 engine.process(&mut buffer, 2);
@@ -1607,7 +1607,7 @@ mod tests {
             engine.process(&mut buffer, 2);
         }
         for &key in &keys {
-            for handle_id in console.note_off_manual(manual_index, key.into()) {
+            for handle_id in console.note_off_manual(manual_index, key.into()).0 {
                 handle.send(aristide_engine::Command::StopVoice { handle: handle_id });
             }
         }
@@ -1687,7 +1687,7 @@ mod tests {
         assert!(energy > 0.0, "the organ should make sound");
 
         // Release: voices splice to their tails and eventually go quiet.
-        for handle_id in console.note_off_manual(manual_index, 60) {
+        for handle_id in console.note_off_manual(manual_index, 60).0 {
             handle.send(aristide_engine::Command::StopVoice { handle: handle_id });
         }
         // Long releases: give it a generous 30 s of rendering.
@@ -1999,7 +1999,7 @@ mod tests {
                         }));
                     }
                 } else {
-                    for h in console.note_off_manual(manual_index, key.into()) {
+                    for h in console.note_off_manual(manual_index, key.into()).0 {
                         assert!(handle.send(aristide_engine::Command::StopVoice { handle: h }));
                     }
                 }
@@ -2198,7 +2198,7 @@ mod tests {
                         }));
                     }
                 } else {
-                    for h in console.note_off_manual(manual_index, key.into()) {
+                    for h in console.note_off_manual(manual_index, key.into()).0 {
                         assert!(handle.send(aristide_engine::Command::StopVoice { handle: h }));
                     }
                 }
@@ -2300,7 +2300,7 @@ mod tests {
             while frame < hold + 5 * sr {
                 if !released && frame >= hold {
                     released = true;
-                    for h in console.note_off_manual(manual_index, key.into()) {
+                    for h in console.note_off_manual(manual_index, key.into()).0 {
                         handle.send(aristide_engine::Command::StopVoice { handle: h });
                     }
                 }
@@ -2430,7 +2430,7 @@ mod tests {
                             });
                         }
                     } else {
-                        for h in console.note_off_manual(manual_index, key.into()) {
+                        for h in console.note_off_manual(manual_index, key.into()).0 {
                             handle.send(aristide_engine::Command::StopVoice { handle: h });
                         }
                     }
@@ -2566,7 +2566,7 @@ mod tests {
                             });
                         }
                     } else {
-                        for h in console.note_off_manual(manual, key.into()) {
+                        for h in console.note_off_manual(manual, key.into()).0 {
                             handle.send(aristide_engine::Command::StopVoice { handle: h });
                         }
                     }
@@ -2596,7 +2596,7 @@ mod tests {
                         smp.tail_decay_db_per_s() * (st.spec.rate - 1.0)
                     );
                 }
-                for h in probe_console.note_off_manual(manual, key.into()) { let _ = h; }
+                for h in probe_console.note_off_manual(manual, key.into()).0 { let _ = h; }
             }
         }
     }
@@ -2653,7 +2653,7 @@ mod tests {
                 write_wav_f32(&path, &out, 2, smp.sample_rate_hz() as u32);
                 println!("wrote {path}");
             }
-            for h in console.note_off_manual(manual, 67) {
+            for h in console.note_off_manual(manual, 67).0 {
                 let _ = h;
             }
         }
@@ -2729,7 +2729,7 @@ mod tests {
                         }
                     }
                     if frame <= off_at && off_at < frame + block {
-                        for h in console.note_off_manual(manual, key.into()) {
+                        for h in console.note_off_manual(manual, key.into()).0 {
                             handle.send(aristide_engine::Command::StopVoice { handle: h });
                         }
                     }
@@ -2839,7 +2839,7 @@ mod tests {
                         });
                     }
                 } else {
-                    for h in console.note_off_manual(manual_index, key.into()) {
+                    for h in console.note_off_manual(manual_index, key.into()).0 {
                         handle.send(aristide_engine::Command::StopVoice { handle: h });
                     }
                 }
@@ -2905,7 +2905,7 @@ mod tests {
                 }
                 if !off && frame >= hold_frames {
                     off = true;
-                    for h in console.note_off_manual(manual_index, 60) {
+                    for h in console.note_off_manual(manual_index, 60).0 {
                         handle.send(aristide_engine::Command::StopVoice { handle: h });
                     }
                 }
@@ -3018,7 +3018,7 @@ mod tests {
             }
             if !sent_off && frame >= hold_frames {
                 sent_off = true;
-                for h in console.note_off_manual(manual_index, 60) {
+                for h in console.note_off_manual(manual_index, 60).0 {
                     handle.send(aristide_engine::Command::StopVoice { handle: h });
                 }
             }

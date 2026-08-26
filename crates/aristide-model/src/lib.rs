@@ -287,6 +287,24 @@ pub struct CouplerTarget {
     pub repitch: Option<bool>,
 }
 
+/// Which source keys a route listens to. The classic coupler hears
+/// them all; the "intelligent" Bass and Melody couplers hear only the
+/// extreme of the keys *currently held* — an automatic pedal under the
+/// lowest note of a chord, a solo stop singing its highest. Which key
+/// is extreme changes as keys go down and up, so these routes retarget
+/// live rather than routing each press independently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CouplerScope {
+    /// Every key the route's range covers (the classic coupler).
+    #[default]
+    AllKeys,
+    /// Only the lowest currently-held key in range (GO `Bass`).
+    Bass,
+    /// Only the highest currently-held key in range (GO `Melody`).
+    Melody,
+}
+
 /// One rule inside a coupler: for source keys in a range, optionally
 /// silence the key's own division and/or send a shifted copy somewhere.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -301,6 +319,10 @@ pub struct CouplerRoute {
     /// note *moves* instead of doubling (GO's `UnisonOff` is this over
     /// the whole compass, with no target).
     pub unison_off: bool,
+    /// Which keys in range the route hears: all of them, or only the
+    /// lowest/highest currently held.
+    #[serde(default)]
+    pub scope: CouplerScope,
     /// The coupled copy; `None` for a pure unison-off route.
     pub target: Option<CouplerTarget>,
 }
@@ -338,6 +360,7 @@ impl Coupler {
                 low_key: None,
                 high_key: None,
                 unison_off: false,
+                scope: CouplerScope::default(),
                 target: Some(CouplerTarget {
                     manual: to,
                     key_shift,

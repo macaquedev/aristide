@@ -170,7 +170,9 @@ pub struct CouplersConfig {
     ///
     /// A coupler may carry several routes (a 16' that transposes the
     /// bottom octave instead of doubling it is two), and a route may
-    /// set `unison_off` and `repitch`.
+    /// set `unison_off`, `repitch`, and `scope` (`"bass"`/`"melody"`
+    /// for the intelligent couplers that follow only the lowest/highest
+    /// held key).
     #[serde(default, rename = "define")]
     pub define: Vec<CouplerDef>,
     /// Couplers taken off the console, by name pattern — the set (or a
@@ -213,6 +215,10 @@ pub struct RouteDef {
     /// note moves instead of doubling.
     #[serde(default)]
     pub unison_off: bool,
+    /// `"all-keys"` (the default), or `"bass"`/`"melody"`: couple only
+    /// the lowest/highest currently-held key in the route's range.
+    #[serde(default)]
+    pub scope: aristide_model::CouplerScope,
     /// Let this route repitch pipes the destination hasn't got (and so
     /// reach past its compass); omit to follow `[couplers] repitch`.
     pub repitch: Option<bool>,
@@ -332,6 +338,7 @@ fn resolve_coupler(
             low_key: key(&route.low)?,
             high_key: key(&route.high)?,
             unison_off: route.unison_off,
+            scope: route.scope,
             target,
         });
     }
@@ -808,6 +815,7 @@ repitch = true
                 low: None,
                 high: None,
                 unison_off: false,
+                scope: aristide_model::CouplerScope::AllKeys,
                 repitch: None,
             }],
         }];

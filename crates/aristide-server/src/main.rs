@@ -859,8 +859,14 @@ impl State {
                     engine.send(start_command(&start));
                 }
             } else {
-                for handle in console.note_off_manual(keyboard.manual, u16::from(key)) {
+                let (stopped, starts) =
+                    console.note_off_manual(keyboard.manual, u16::from(key));
+                for handle in stopped {
                     engine.send(Command::StopVoice { handle });
+                }
+                // A Bass/Melody coupler retargeting onto another held key.
+                for start in starts {
+                    engine.send(start_command(&start));
                 }
             }
         }
@@ -3194,8 +3200,25 @@ fn handle_midi(message: &[u8], port: usize, state: &Mutex<State>) {
             Control::Organ(console) => {
                 live_notes.remove(&(port, channel, data1));
                 for (manual, key) in lands {
-                    for handle in console.note_off_manual(manual, key) {
+                    let (stopped, starts) = console.note_off_manual(manual, key);
+                    for handle in stopped {
                         send(Command::StopVoice { handle });
+                    }
+                    // A Bass/Melody coupler retargeting onto another
+                    // held key.
+                    for start in starts {
+                        send(Command::StartVoice {
+                            handle: start.handle,
+                            sample: start.spec.sample,
+                            rate: start.spec.rate,
+                            gain: start.spec.gain,
+                            group: start.spec.group,
+                            wind_weight: start.spec.wind_weight,
+                            brightness: start.spec.brightness,
+                            enclosure: start.spec.enclosure,
+                            bus: start.spec.bus,
+                            delay_frames: start.spec.delay_frames,
+                        });
                     }
                 }
             }
