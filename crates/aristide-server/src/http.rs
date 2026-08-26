@@ -1048,7 +1048,7 @@ fn apply_note(state: &Mutex<State>, manual: usize, key: u16, on: bool) {
     } = &mut *state;
     if let Control::Organ(console) = control {
         if on {
-            let (starts, retriggered) = console.note_on_manual(manual, key);
+            let (starts, retriggered) = console.note_on_manual(manual, key, 127);
             for handle in retriggered {
                 engine.send(Command::StopVoice { handle });
             }

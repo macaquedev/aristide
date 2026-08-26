@@ -81,6 +81,10 @@ pub struct Console {
     /// same physical pipe at two pitches simultaneously, while the same
     /// pitch reached by several routes still merges into one voice.
     sounding: HashMap<(usize, u16), Vec<(StopId, RankId, i32)>>,
+    /// The velocity each held key was struck with — a stop drawn
+    /// mid-hold prices its new voices at the press it joins, not at
+    /// some fresh default.
+    held_velocity: HashMap<(usize, u16), u8>,
     /// The most recent voice handle started per pipe — used to expedite
     /// a still-releasing (pallet-staggered) predecessor when the pipe
     /// re-speaks, so a pipe can never overlap itself at full level.
@@ -193,6 +197,7 @@ impl Console {
             enclosure_positions: Vec::new(),
             next_handle: 0,
             sounding: HashMap::new(),
+            held_velocity: HashMap::new(),
             speaking: HashMap::new(),
             stop_routing: HashMap::new(),
             last_pipe_voice: HashMap::new(),
@@ -904,8 +909,16 @@ impl Console {
     /// a pipe can't speak twice, and doubling correlated audio jumps
     /// +6 dB into clipping.
     /// `note_on` addressed by manual index — the coordinate UIs speak
-    /// (a clicked on-screen key has no MIDI channel).
-    pub fn note_on_manual(&mut self, manual_index: usize, key: u16) -> (Vec<VoiceStart>, Vec<u64>) {
+    /// (a clicked on-screen key has no MIDI channel). `velocity` prices
+    /// each voice through its rank's velocity→volume ramp; ranks
+    /// without one (the organ norm) ignore it, and sources without a
+    /// velocity (UI clicks) pass 127, GO's on-screen behaviour.
+    pub fn note_on_manual(
+        &mut self,
+        manual_index: usize,
+        key: u16,
+        velocity: u8,
+    ) -> (Vec<VoiceStart>, Vec<u64>) {
         if manual_index >= self.organ.manuals.len() {
             return (Vec::new(), Vec::new());
         }
@@ -919,9 +932,11 @@ impl Console {
                 retriggered.push(handle);
             }
         }
+        self.held_velocity.insert((manual_index, key), velocity);
         let mut starts = Vec::new();
         let mut held = Vec::new();
-        for voice in self.voices_for_key(manual_index, key, None) {
+        for mut voice in self.voices_for_key(manual_index, key, None) {
+            voice.spec.gain *= voice.spec.velocity.gain(velocity);
             if voice.spec.percussive {
                 // One-shots (noises) aren't refcounted.
                 let handle = self.next_handle;
@@ -948,6 +963,7 @@ impl Console {
 
     /// `note_off` addressed by manual index (see `note_on_manual`).
     pub fn note_off_manual(&mut self, manual_index: usize, key: u16) -> Vec<u64> {
+        self.held_velocity.remove(&(manual_index, key));
         let mut released = Vec::new();
         for (_, rank, pipe) in self
             .sounding
@@ -1068,8 +1084,14 @@ impl Console {
         let mut expedited = Vec::new();
         let held_keys: Vec<(usize, u16)> = self.sounding.keys().copied().collect();
         for (manual_index, key) in held_keys {
+            let velocity = self
+                .held_velocity
+                .get(&(manual_index, key))
+                .copied()
+                .unwrap_or(127);
             let mut new_entries = Vec::new();
-            for voice in self.voices_for_key(manual_index, key, Some(stop)) {
+            for mut voice in self.voices_for_key(manual_index, key, Some(stop)) {
+                voice.spec.gain *= voice.spec.velocity.gain(velocity);
                 // One-shots strike on key press, not on drawing the
                 // stop mid-hold.
                 if voice.spec.percussive {
@@ -1434,6 +1456,7 @@ impl Console {
     /// Forget everything sounding (the engine is told separately).
     pub fn all_off(&mut self) {
         self.sounding.clear();
+        self.held_velocity.clear();
         self.speaking.clear();
     }
 
@@ -1536,6 +1559,7 @@ mod tests {
                     id: RankId(id),
                     name: format!("rank {id}"),
                     windchest: 1,
+                    velocity_volume: Default::default(),
                     pipes: (0..61)
                         .map(|_| Pipe {
                             nominal_frequency_hz: 440.0,
@@ -1562,6 +1586,7 @@ mod tests {
                         sample: rank - 1,
                         rate: 1.0,
                         gain: 1.0,
+                        velocity: Default::default(),
                         percussive: false,
                         group: 0,
                         wind_weight: 1.0,
@@ -1585,7 +1610,7 @@ mod tests {
         let mut console = test_console();
         console.set_compass(0, 31, 101);
 
-        let (top, _) = console.note_on_manual(0, 101);
+        let (top, _) = console.note_on_manual(0, 101, 127);
         assert_eq!(top.len(), 2, "both stops speak five keys above the set");
         for start in &top {
             let semitones = start.spec.rate.log2() * 12.0;
@@ -1598,7 +1623,7 @@ mod tests {
 
         // Downward is the same mechanism and sounds better: a longer,
         // slower pipe is what the bottom of a keyboard wants anyway.
-        let (bottom, _) = console.note_on_manual(0, 31);
+        let (bottom, _) = console.note_on_manual(0, 31, 127);
         assert_eq!(bottom.len(), 2);
         for start in &bottom {
             let semitones = start.spec.rate.log2() * 12.0;
@@ -1607,7 +1632,7 @@ mod tests {
         console.note_off_manual(0, 31);
 
         // Inside the set's own compass nothing is repitched at all.
-        let (native, _) = console.note_on_manual(0, 60);
+        let (native, _) = console.note_on_manual(0, 60, 127);
         assert!(native.iter().all(|s| (s.spec.rate - 1.0).abs() < 1e-6));
     }
 
@@ -1620,9 +1645,9 @@ mod tests {
         let mut console = test_console();
         console.set_compass(0, 31, 101);
 
-        let (first, _) = console.note_on_manual(0, 101);
+        let (first, _) = console.note_on_manual(0, 101, 127);
         assert_eq!(first.len(), 2);
-        let (second, _) = console.note_on_manual(0, 100);
+        let (second, _) = console.note_on_manual(0, 100, 127);
         assert_eq!(
             second.len(),
             2,
@@ -1648,14 +1673,14 @@ mod tests {
     fn keys_outside_the_compass_stay_silent() {
         let mut console = test_console();
         assert!(
-            console.note_on_manual(0, 97).0.is_empty(),
+            console.note_on_manual(0, 97, 127).0.is_empty(),
             "the set's compass is the default, and 97 is past it"
         );
         console.set_compass(0, 36, 97);
-        assert_eq!(console.note_on_manual(0, 97).0.len(), 2, "now it plays");
+        assert_eq!(console.note_on_manual(0, 97, 127).0.len(), 2, "now it plays");
         console.note_off_manual(0, 97);
         assert!(
-            console.note_on_manual(0, 98).0.is_empty(),
+            console.note_on_manual(0, 98, 127).0.is_empty(),
             "one key past the keyboard is still nothing"
         );
     }
@@ -1667,7 +1692,7 @@ mod tests {
         let mut console = test_console();
         console.specs.remove(&(RankId(1), 24));
 
-        let (starts, _) = console.note_on_manual(0, 60);
+        let (starts, _) = console.note_on_manual(0, 60, 127);
         assert_eq!(starts.len(), 2, "the hole is filled, not skipped");
         let stretched: Vec<f32> = starts
             .iter()
@@ -1695,13 +1720,13 @@ mod tests {
         console.set_compass(0, 36, 101);
 
         assert_eq!(
-            console.note_on_manual(0, 80).0.len(),
+            console.note_on_manual(0, 80, 127).0.len(),
             1,
             "inside the set's compass the short stop simply doesn't cover it"
         );
         console.note_off_manual(0, 80);
         assert_eq!(
-            console.note_on_manual(0, 101).0.len(),
+            console.note_on_manual(0, 101, 127).0.len(),
             1,
             "and it is not carried past the set's compass either"
         );
@@ -1759,6 +1784,7 @@ mod tests {
                 id: RankId(1),
                 name: "Bourdon unit".into(),
                 windchest: 1,
+                velocity_volume: Default::default(),
                 pipes: (0..73)
                     .map(|_| Pipe {
                         nominal_frequency_hz: 440.0,
@@ -1783,6 +1809,7 @@ mod tests {
                     sample: 0,
                     rate: 1.0,
                     gain: 1.0,
+                    velocity: Default::default(),
                     percussive: false,
                     group: 0,
                     wind_weight: 1.0,
@@ -1797,6 +1824,59 @@ mod tests {
         Console::new(organ, specs, vec![StopId(1), StopId(2)], 48_000.0)
     }
 
+    /// GO's velocity ramp: gain runs linearly from `at_zero` (velocity
+    /// 0) to `at_full` (127). Ranks without a ramp — the organ norm —
+    /// must be untouched by whatever velocity arrives, and a stop drawn
+    /// mid-hold joins the press at the velocity it was struck with.
+    #[test]
+    fn velocity_prices_voices_through_the_rank_ramp() {
+        let mut console = test_console();
+        for pipe in 0..61u16 {
+            console
+                .specs
+                .get_mut(&(RankId(1), pipe))
+                .expect("spec")
+                .velocity = aristide_model::VelocityVolume {
+                at_zero: 0.25,
+                at_full: 1.0,
+            };
+        }
+        // sample = rank - 1 in the fixture: 0 is the ramped Principal,
+        // 1 the unramped Octave.
+        let gain_of = |starts: &[VoiceStart], sample: u32| {
+            starts
+                .iter()
+                .find(|s| s.spec.sample == sample)
+                .expect("both stops speak")
+                .spec
+                .gain
+        };
+
+        let (starts, _) = console.note_on_manual(0, 60, 127);
+        assert!((gain_of(&starts, 0) - 1.0).abs() < 1e-6, "full touch = full gain");
+        assert!((gain_of(&starts, 1) - 1.0).abs() < 1e-6);
+        console.note_off_manual(0, 60);
+
+        let (starts, _) = console.note_on_manual(0, 64, 0);
+        assert!((gain_of(&starts, 0) - 0.25).abs() < 1e-6, "softest touch = at_zero");
+        assert!(
+            (gain_of(&starts, 1) - 1.0).abs() < 1e-6,
+            "an unramped rank never hears velocity"
+        );
+        console.note_off_manual(0, 64);
+
+        let (starts, _) = console.note_on_manual(0, 67, 64);
+        let expected = 0.25 + 0.75 * 64.0 / 127.0;
+        assert!((gain_of(&starts, 0) - expected).abs() < 1e-6, "linear in between");
+        console.note_off_manual(0, 67);
+
+        // Mid-hold: the stop's late voices join the press's velocity.
+        console.set_drawn(StopId(1), false);
+        console.note_on_manual(0, 60, 0);
+        let (_, starts) = console.set_drawn(StopId(1), true);
+        assert!((gain_of(&starts, 0) - 0.25).abs() < 1e-6);
+    }
+
     /// Widening a manual reaches keys the *stop* never had — but when
     /// the stop's rank is a unit rank, the pipes those keys want are
     /// often real (the other stop's window covers them). A real pipe at
@@ -1809,7 +1889,7 @@ mod tests {
         // Pedal native 36..67, widened a fourth up. Key 72 wants pipe
         // 36 — past the 16' window, squarely inside the 8' treble.
         console.set_compass(0, 36, 72);
-        let (starts, _) = console.note_on_manual(0, 72);
+        let (starts, _) = console.note_on_manual(0, 72, 127);
         assert_eq!(starts.len(), 1, "the extended pedal key speaks");
         assert!(
             (starts[0].spec.rate - 1.0).abs() < 1e-6,
@@ -1820,7 +1900,7 @@ mod tests {
         // Downward off the Swell 8': pipes 7..11 are the 16' bottom
         // the 8' window never reached, and they are equally real.
         console.set_compass(1, 31, 96);
-        let (starts, _) = console.note_on_manual(1, 31);
+        let (starts, _) = console.note_on_manual(1, 31, 127);
         assert_eq!(starts.len(), 1);
         assert!((starts[0].spec.rate - 1.0).abs() < 1e-6);
         console.note_off_manual(1, 31);
@@ -1828,7 +1908,7 @@ mod tests {
         // Past the rank's REAL end the old rule still holds: swell key
         // 99 wants pipe 75 of 73, so the last pipe stretches to serve.
         console.set_compass(1, 31, 101);
-        let (starts, _) = console.note_on_manual(1, 99);
+        let (starts, _) = console.note_on_manual(1, 99, 127);
         assert_eq!(starts.len(), 1);
         let semitones = starts[0].spec.rate.log2() * 12.0;
         assert!((semitones - 3.0).abs() < 1e-3, "got {semitones}");
@@ -1847,7 +1927,7 @@ mod tests {
 
         // The played key speaks at pitch, and its 16' copy speaks only
         // because that pipe exists.
-        let (starts, _) = console.note_on_manual(0, 60);
+        let (starts, _) = console.note_on_manual(0, 60, 127);
         assert_eq!(starts.len(), 2, "the key and its 16' copy");
         assert!(
             starts.iter().all(|s| (s.spec.rate - 1.0).abs() < 1e-6),
@@ -1857,7 +1937,7 @@ mod tests {
 
         // Twelve keys from the bottom, the 16' copy runs off the end of
         // the rank. The key itself still speaks; the copy does not.
-        let (starts, _) = console.note_on_manual(0, 40);
+        let (starts, _) = console.note_on_manual(0, 40, 127);
         assert_eq!(
             starts.len(),
             1,
@@ -1868,7 +1948,7 @@ mod tests {
 
         // The same key played five below the set's own compass is
         // repitched — that is the player's keyboard, not a coupler.
-        let (starts, _) = console.note_on_manual(0, 31);
+        let (starts, _) = console.note_on_manual(0, 31, 127);
         assert_eq!(starts.len(), 1, "only the direct voice, repitched");
         let semitones = starts[0].spec.rate.log2() * 12.0;
         assert!((semitones + 5.0).abs() < 1e-3, "got {semitones}");
@@ -1886,11 +1966,11 @@ mod tests {
         }
         console.set_coupler(0, true); // II/I, unison
 
-        let (starts, _) = console.note_on_manual(0, 60);
+        let (starts, _) = console.note_on_manual(0, 60, 127);
         assert_eq!(starts.len(), 2, "both divisions have this key");
         console.note_off_manual(0, 60);
 
-        let (starts, _) = console.note_on_manual(0, 90);
+        let (starts, _) = console.note_on_manual(0, 90, 127);
         assert_eq!(
             starts.len(),
             1,
@@ -1907,7 +1987,7 @@ mod tests {
         console.set_compass(0, 24, 96);
         console.set_coupler(1, true); // 16' I
 
-        let (starts, _) = console.note_on_manual(0, 40);
+        let (starts, _) = console.note_on_manual(0, 40, 127);
         assert_eq!(starts.len(), 2, "now the 16' copy is filled in");
         let stretched: Vec<f32> = starts
             .iter()
@@ -1921,7 +2001,7 @@ mod tests {
     #[test]
     fn note_on_starts_one_voice_per_drawn_stop() {
         let mut console = test_console();
-        let (starts, _) = console.note_on_manual(0, 60);
+        let (starts, _) = console.note_on_manual(0, 60, 127);
         assert_eq!(starts.len(), 2);
         let stops = console.note_off_manual(0, 60);
         assert_eq!(stops.len(), 2);
@@ -1936,14 +2016,14 @@ mod tests {
     #[test]
     fn stop_routing_stamps_bus_and_delay_on_voices() {
         let mut console = test_console();
-        let (starts, _) = console.note_on_manual(0, 60);
+        let (starts, _) = console.note_on_manual(0, 60, 127);
         assert!(starts.iter().all(|s| s.spec.bus == 0));
         assert!(starts.iter().all(|s| s.spec.delay_frames == 0));
         console.note_off_manual(0, 60);
 
         let routed = console.stop_states()[0].0;
         console.set_stop_routing([(routed, (3u8, 480u32))].into_iter().collect());
-        let (starts, _) = console.note_on_manual(0, 60);
+        let (starts, _) = console.note_on_manual(0, 60, 127);
         assert_eq!(starts.len(), 2);
         let stamped: Vec<(u8, u32)> = starts
             .iter()
@@ -1962,7 +2042,7 @@ mod tests {
         // tracked: the key lights and can be released cleanly.
         console.set_drawn(StopId(1), false);
         console.set_drawn(StopId(2), false);
-        let (starts, _) = console.note_on_manual(0, 60);
+        let (starts, _) = console.note_on_manual(0, 60, 127);
         assert!(starts.is_empty());
         assert_eq!(console.manual_states()[0].4, vec![60]);
 
@@ -1994,7 +2074,7 @@ mod tests {
         console.set_drawn(StopId(1), false);
         console.set_drawn(StopId(2), false);
         console.set_coupler(0, true); // II/I
-        assert!(console.note_on_manual(0, 60).0.is_empty());
+        assert!(console.note_on_manual(0, 60, 127).0.is_empty());
 
         // The Swell stop drawn mid-hold sounds through the coupler.
         let (_, starts) = console.set_drawn(StopId(2), true);
@@ -2007,8 +2087,8 @@ mod tests {
     #[test]
     fn keys_outside_the_manual_are_ignoredable() {
         let mut console = test_console();
-        assert!(console.note_on_manual(0, 20).0.is_empty());
-        assert!(console.note_on_manual(0, 120).0.is_empty());
+        assert!(console.note_on_manual(0, 20, 127).0.is_empty());
+        assert!(console.note_on_manual(0, 120, 127).0.is_empty());
         assert!(console.note_off_manual(0, 20).is_empty());
     }
 
@@ -2037,6 +2117,7 @@ mod tests {
             id: RankId(id),
             name: format!("rank {id}"),
             windchest: 1,
+            velocity_volume: Default::default(),
             pipes: (0..61)
                 .map(|_| Pipe {
                     nominal_frequency_hz: 440.0,
@@ -2075,6 +2156,7 @@ mod tests {
                         sample: rank - 1,
                         rate: 1.0,
                         gain: 1.0,
+                        velocity: Default::default(),
                         percussive: false,
                         group: 0,
                         wind_weight: 1.0,
@@ -2113,12 +2195,12 @@ mod tests {
         console.set_coupler(index, true);
 
         // Below tenor C the coupler simply isn't there.
-        assert_eq!(console.note_on_manual(0, 47).0.len(), 1);
+        assert_eq!(console.note_on_manual(0, 47, 127).0.len(), 1);
         console.note_off_manual(0, 47);
 
         // From tenor C up: the played key plus its fourth-down copy on
         // II — a real pipe, nothing repitched.
-        let (starts, _) = console.note_on_manual(0, 48);
+        let (starts, _) = console.note_on_manual(0, 48, 127);
         assert_eq!(starts.len(), 2);
         let copy = starts.iter().find(|s| s.spec.sample == 1).expect("II speaks");
         assert!((copy.spec.rate - 1.0).abs() < 1e-6);
@@ -2163,7 +2245,7 @@ mod tests {
         console.set_coupler(index, true);
 
         // Above the break: the classic doubling, real pipes only.
-        let (starts, _) = console.note_on_manual(0, 60);
+        let (starts, _) = console.note_on_manual(0, 60, 127);
         assert_eq!(starts.len(), 2, "the key and its 16' copy");
         assert!(starts.iter().all(|s| (s.spec.rate - 1.0).abs() < 1e-6));
         console.note_off_manual(0, 60);
@@ -2171,7 +2253,7 @@ mod tests {
         // In the bottom octave the note moves: one voice, sounding an
         // octave below the played key, bent down from the deepest pipe
         // the rank has — past the compass, because this route asked to.
-        let (starts, _) = console.note_on_manual(0, 40);
+        let (starts, _) = console.note_on_manual(0, 40, 127);
         assert_eq!(starts.len(), 1, "unison off: the played key itself is silent");
         let semitones = starts[0].spec.rate.log2() * 12.0;
         assert!(
@@ -2187,7 +2269,7 @@ mod tests {
     #[test]
     fn coupler_changes_land_on_held_notes() {
         let mut console = coupled_console();
-        let (starts, _) = console.note_on_manual(0, 60);
+        let (starts, _) = console.note_on_manual(0, 60, 127);
         assert_eq!(starts.len(), 1, "only the Great before coupling");
 
         // Engaging II/I under the held key speaks the Swell at once.
@@ -2224,7 +2306,7 @@ mod tests {
         });
         let index = console.organ.couplers.len() - 1;
 
-        let (starts, _) = console.note_on_manual(0, 60);
+        let (starts, _) = console.note_on_manual(0, 60, 127);
         let direct = starts[0].handle;
 
         // Engaging unison-off silences the held key's own division…
@@ -2244,21 +2326,21 @@ mod tests {
     fn couplers_route_between_manuals_and_octaves() {
         let mut console = coupled_console();
         // Channel 0 → Great (no pedal in this organ → identity map).
-        assert_eq!(console.note_on_manual(0, 60).0.len(), 1, "no couplers yet");
+        assert_eq!(console.note_on_manual(0, 60, 127).0.len(), 1, "no couplers yet");
         console.note_off_manual(0, 60);
 
         console.set_coupler(0, true); // II/I
-        assert_eq!(console.note_on_manual(0, 60).0.len(), 2, "unison coupler adds II");
+        assert_eq!(console.note_on_manual(0, 60, 127).0.len(), 2, "unison coupler adds II");
         assert_eq!(console.note_off_manual(0, 60).len(), 2, "note-off kills both");
 
         console.set_coupler(1, true); // 16' I (self, −12)
         // Great C + Swell C (II/I) + Great C−12 (16' I). Coupled notes
         // don't re-couple, so the sub-octave stays on the Great.
-        assert_eq!(console.note_on_manual(0, 60).0.len(), 3);
+        assert_eq!(console.note_on_manual(0, 60, 127).0.len(), 3);
         console.note_off_manual(0, 60);
 
         // Out-of-compass shifted notes drop out quietly.
-        assert_eq!(console.note_on_manual(0, 37).0.len(), 2, "37-12 is below compass");
+        assert_eq!(console.note_on_manual(0, 37, 127).0.len(), 2, "37-12 is below compass");
         console.note_off_manual(0, 37);
     }
 
@@ -2266,7 +2348,7 @@ mod tests {
     fn tuning_retunes_and_transposes() {
         let mut console = test_console();
         // Equal temperament, a=440: everything at unity rate.
-        let baseline = console.note_on_manual(0, 60).0[0].spec.rate;
+        let baseline = console.note_on_manual(0, 60, 127).0[0].spec.rate;
         assert!((baseline - 1.0).abs() < 1e-6);
         console.note_off_manual(0, 60);
 
@@ -2277,7 +2359,7 @@ mod tests {
             a4_hz: 440.0,
             transpose: 0,
         });
-        let meantone_c = console.note_on_manual(0, 60).0[0].spec.rate;
+        let meantone_c = console.note_on_manual(0, 60, 127).0[0].spec.rate;
         let expected = (10.265f32 / 1200.0).exp2();
         assert!(
             (meantone_c - expected).abs() < 1e-4,
@@ -2293,13 +2375,13 @@ mod tests {
             a4_hz: 440.0,
             transpose: 2,
         });
-        let (transposed, _) = console.note_on_manual(0, 60);
+        let (transposed, _) = console.note_on_manual(0, 60, 127);
         assert_eq!(transposed.len(), 2, "both drawn stops sound");
         // Pipe index = key 62 − first_midi 36 = 26; sample index equals
         // rank − 1 in the fixture, so instead verify by keying at the
         // compass edge: 96 + 2 is out of range → silent.
         console.note_off_manual(0, 60);
-        assert!(console.note_on_manual(0, 96).0.is_empty(), "96+2 exceeds compass");
+        assert!(console.note_on_manual(0, 96, 127).0.is_empty(), "96+2 exceeds compass");
     }
 
     /// One instrument, two pitches: the Swell tuned apart speaks its
@@ -2319,7 +2401,7 @@ mod tests {
             }),
         );
         console.set_coupler(0, true); // II/I: playing the Great adds the Swell
-        let (starts, _) = console.note_on_manual(0, 60);
+        let (starts, _) = console.note_on_manual(0, 60, 127);
         assert_eq!(starts.len(), 2);
         let mut rates: Vec<f32> = starts.iter().map(|s| s.spec.rate).collect();
         rates.sort_by(f32::total_cmp);
@@ -2341,11 +2423,11 @@ mod tests {
                 transpose: 2,
             }),
         );
-        assert!(console.note_on_manual(0, 96).0.is_empty(), "96+2 runs off the Great");
-        assert_eq!(console.note_on_manual(1, 96).0.len(), 1, "the Swell is unmoved");
+        assert!(console.note_on_manual(0, 96, 127).0.is_empty(), "96+2 runs off the Great");
+        assert_eq!(console.note_on_manual(1, 96, 127).0.len(), 1, "the Swell is unmoved");
         // Back on the shared tuning, the Great answers again.
         console.set_manual_tuning(0, None);
-        assert_eq!(console.note_on_manual(0, 96).0.len(), 1);
+        assert_eq!(console.note_on_manual(0, 96, 127).0.len(), 1);
     }
 
     /// A Scala scale re-anchors keys to the nearest recorded pipe: a
@@ -2375,14 +2457,14 @@ mod tests {
         console.set_manual_tuning(0, Some(tuning));
 
         // The anchor: a′ is a′, the nominal pipe untouched.
-        let (starts, _) = console.note_on_manual(0, 69);
+        let (starts, _) = console.note_on_manual(0, 69, 127);
         assert_eq!(starts.len(), 1);
         assert!((starts[0].spec.rate - 1.0).abs() < 1e-6, "a' unbent: {}", starts[0].spec.rate);
         console.note_off_manual(0, 69);
 
         // Five 19-EDO steps up = 315.79¢, where the ladder has 500¢:
         // re-anchored two pipes down, bent +15.79¢.
-        let (starts, _) = console.note_on_manual(0, 74);
+        let (starts, _) = console.note_on_manual(0, 74, 127);
         assert_eq!(starts.len(), 1);
         let expected = ((5.0 * 1200.0 / 19.0 - 300.0) / 1200.0f32).exp2();
         assert!(
@@ -2394,7 +2476,7 @@ mod tests {
 
         // Nineteen steps = one octave exactly: key 88 sounds the pipe
         // seven below its own, unbent.
-        let (starts, _) = console.note_on_manual(0, 88);
+        let (starts, _) = console.note_on_manual(0, 88, 127);
         assert_eq!(starts.len(), 1);
         assert!(
             (starts[0].spec.rate - 1.0).abs() < 1e-6,
@@ -2404,7 +2486,7 @@ mod tests {
         console.note_off_manual(0, 88);
 
         // The Swell follows the shared tuning, untouched by all this.
-        let (starts, _) = console.note_on_manual(1, 74);
+        let (starts, _) = console.note_on_manual(1, 74, 127);
         assert_eq!(starts.len(), 1);
         assert!((starts[0].spec.rate - 1.0).abs() < 1e-6);
     }
@@ -2415,7 +2497,7 @@ mod tests {
     #[test]
     fn a_tuning_change_drifts_held_voices() {
         let mut console = test_console();
-        let (starts, _) = console.note_on_manual(0, 60);
+        let (starts, _) = console.note_on_manual(0, 60, 127);
         assert_eq!(starts.len(), 2, "both drawn stops sound");
         let mut tuning = console.tuning();
         tuning.a4_hz = 415.0;
@@ -2464,7 +2546,7 @@ mod tests {
             transpose: 0,
         };
         let mut console = coupled_console();
-        let (starts, _) = console.note_on_manual(0, 74);
+        let (starts, _) = console.note_on_manual(0, 74, 127);
         assert_eq!(starts.len(), 1);
         assert!((starts[0].spec.rate - 1.0).abs() < 1e-6);
         console.set_manual_tuning(0, Some(tuning));
@@ -2488,7 +2570,7 @@ mod tests {
     #[test]
     fn per_note_bends_stack_with_tuning_drift() {
         let mut console = coupled_console();
-        let (starts, _) = console.note_on_manual(0, 60);
+        let (starts, _) = console.note_on_manual(0, 60, 127);
         assert_eq!(starts.len(), 1);
         let base = starts[0].spec.rate;
         let handle = starts[0].handle;
@@ -2542,9 +2624,9 @@ mod tests {
         };
         let mut console = coupled_console();
         console.set_manual_tuning(0, Some(tuning));
-        assert_eq!(console.note_on_manual(0, 60).0.len(), 1, "mapped key sounds");
+        assert_eq!(console.note_on_manual(0, 60, 127).0.len(), 1, "mapped key sounds");
         console.note_off_manual(0, 60);
-        assert!(console.note_on_manual(0, 61).0.is_empty(), "unmapped key is silent");
+        assert!(console.note_on_manual(0, 61, 127).0.is_empty(), "unmapped key is silent");
     }
 
     /// Moving a stop re-homes it mid-hold: the key holding its new
@@ -2552,12 +2634,12 @@ mod tests {
     #[test]
     fn moving_a_stop_rehomes_it_under_held_keys() {
         let mut console = coupled_console();
-        let (starts, _) = console.note_on_manual(0, 60);
+        let (starts, _) = console.note_on_manual(0, 60, 127);
         assert_eq!(starts.len(), 1, "only the Great's own stop");
         let (stopped, starts) = console.move_stop(StopId(2), 0);
         assert!(stopped.is_empty(), "nothing sounded on the Swell");
         assert_eq!(starts.len(), 1, "the moved stop speaks under the held key");
-        assert!(console.note_on_manual(1, 62).0.is_empty(), "the Swell gave it up");
+        assert!(console.note_on_manual(1, 62, 127).0.is_empty(), "the Swell gave it up");
         assert_eq!(console.note_off_manual(0, 60).len(), 2);
         assert_eq!(console.stop_states()[1].3, 0, "stop 2 reports the Great");
     }
@@ -2568,20 +2650,20 @@ mod tests {
     fn a_coupler_off_the_console_stays_restorable() {
         let mut console = coupled_console();
         console.set_coupler(0, true);
-        assert_eq!(console.note_on_manual(0, 60).0.len(), 2);
+        assert_eq!(console.note_on_manual(0, 60, 127).0.len(), 2);
         console.note_off_manual(0, 60);
 
         console.set_coupler_available(0, false);
         assert!(!console.coupler_engaged(0));
         assert!(!console.coupler_states()[0].3);
-        assert_eq!(console.note_on_manual(0, 60).0.len(), 1);
+        assert_eq!(console.note_on_manual(0, 60, 127).0.len(), 1);
         console.note_off_manual(0, 60);
         console.set_coupler(0, true);
         assert!(!console.coupler_engaged(0), "off the console means unpullable");
 
         console.set_coupler_available(0, true);
         console.set_coupler(0, true);
-        assert_eq!(console.note_on_manual(0, 60).0.len(), 2);
+        assert_eq!(console.note_on_manual(0, 60, 127).0.len(), 2);
     }
 
     #[test]
@@ -2594,9 +2676,9 @@ mod tests {
         let mut console = coupled_console();
         console.set_coupler(1, true); // 16' I: self-coupler at −12
 
-        let (first, _) = console.note_on_manual(0, 72);
+        let (first, _) = console.note_on_manual(0, 72, 127);
         assert_eq!(first.len(), 2, "72 direct + coupled 60");
-        let (second, _) = console.note_on_manual(0, 60);
+        let (second, _) = console.note_on_manual(0, 60, 127);
         assert_eq!(
             second.len(),
             1,
@@ -2626,7 +2708,7 @@ mod tests {
         let mut console = coupled_console();
         console.set_coupler(1, true); // 16' I self-coupler
 
-        let (starts, _) = console.note_on_manual(0, 72); // pipes 36 and 24
+        let (starts, _) = console.note_on_manual(0, 72, 127); // pipes 36 and 24
         let shared_pipe_voice = starts
             .iter()
             .map(|s| s.handle)
@@ -2636,7 +2718,7 @@ mod tests {
         assert_eq!(released.len(), 2);
 
         // Immediately press 60 → its direct pipe IS 72's coupled pipe.
-        let (_, expedited) = console.note_on_manual(0, 60);
+        let (_, expedited) = console.note_on_manual(0, 60, 127);
         assert!(
             expedited.contains(&shared_pipe_voice)
                 || released.contains(&shared_pipe_voice),
@@ -2654,7 +2736,7 @@ mod tests {
         console.set_coupler(0, true); // II/I
         console.set_coupler(2, true); // I/II — cycle
         // I→II and II→I at unison collapse to the same two notes.
-        assert_eq!(console.note_on_manual(0, 60).0.len(), 2);
+        assert_eq!(console.note_on_manual(0, 60, 127).0.len(), 2);
         console.note_off_manual(0, 60);
     }
 
@@ -2664,12 +2746,12 @@ mod tests {
         // release the first press's voices — a pipe can't speak twice,
         // and doubling correlated audio is an instant +6 dB.
         let mut console = test_console();
-        let (first, retriggered) = console.note_on_manual(0, 60);
+        let (first, retriggered) = console.note_on_manual(0, 60, 127);
         assert_eq!(first.len(), 2);
         assert!(retriggered.is_empty());
         let first_handles: Vec<u64> = first.iter().map(|s| s.handle).collect();
 
-        let (second, retriggered) = console.note_on_manual(0, 60);
+        let (second, retriggered) = console.note_on_manual(0, 60, 127);
         assert_eq!(second.len(), 2);
         assert_eq!(retriggered, first_handles, "old voices released");
 

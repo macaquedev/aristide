@@ -848,8 +848,10 @@ impl State {
                 if !within {
                     continue;
                 }
+                // A clicked key has no velocity; full, as GO's
+                // on-screen console sends.
                 let (starts, retriggered) =
-                    console.note_on_manual(keyboard.manual, u16::from(key));
+                    console.note_on_manual(keyboard.manual, u16::from(key), 127);
                 for handle in retriggered {
                     engine.send(Command::StopVoice { handle });
                 }
@@ -3145,7 +3147,7 @@ fn handle_midi(message: &[u8], port: usize, state: &Mutex<State>) {
             }),
             Control::Organ(console) => {
                 for &(manual, key) in &lands {
-                    let (starts, retriggered) = console.note_on_manual(manual, key);
+                    let (starts, retriggered) = console.note_on_manual(manual, key, velocity);
                     for handle in retriggered {
                         send(Command::StopVoice { handle });
                     }

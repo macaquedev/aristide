@@ -177,6 +177,34 @@ impl Pipe {
     }
 }
 
+/// Key-velocity→volume ramp (GO `MinVelocityVolume`/`MaxVelocityVolume`
+/// ÷ 100): a linear gain multiplier running from `at_zero` at MIDI
+/// velocity 0 to `at_full` at velocity 127. The default (1.0 at both
+/// ends) is velocity-insensitive — what a pipe organ's pallet valve is.
+/// Tracker-touch sets declare a slope to let key speed shade the tone.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct VelocityVolume {
+    pub at_zero: f64,
+    pub at_full: f64,
+}
+
+impl Default for VelocityVolume {
+    fn default() -> Self {
+        VelocityVolume {
+            at_zero: 1.0,
+            at_full: 1.0,
+        }
+    }
+}
+
+impl VelocityVolume {
+    /// The gain multiplier a press at `velocity` earns.
+    pub fn gain(&self, velocity: u8) -> f32 {
+        let along = f64::from(velocity.min(127)) / 127.0;
+        (self.at_zero + (self.at_full - self.at_zero) * along) as f32
+    }
+}
+
 /// A rank: one row of pipes of common construction (e.g. "Principal 8'").
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Rank {
@@ -185,7 +213,14 @@ pub struct Rank {
     /// Which wind supply this rank speaks on (1-based, format-side
     /// numbering; GO `WindchestGroup`). Drives the wind model.
     pub windchest: u32,
+    /// How key velocity shades this rank's volume; identity by default.
+    #[serde(default, skip_serializing_if = "is_default_velocity")]
+    pub velocity_volume: VelocityVolume,
     pub pipes: Vec<Pipe>,
+}
+
+fn is_default_velocity(v: &VelocityVolume) -> bool {
+    *v == VelocityVolume::default()
 }
 
 /// Maps a contiguous run of a manual's keys onto a rank's pipes.

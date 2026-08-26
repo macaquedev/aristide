@@ -26,6 +26,9 @@ pub struct VoiceSpec {
     pub nominal_hz: f32,
     /// Linear gain.
     pub gain: f32,
+    /// The rank's velocity→volume ramp; the console multiplies its
+    /// value for the press's velocity into `gain` at note-on.
+    pub velocity: aristide_model::VelocityVolume,
     /// Loop-less percussive samples get no StopVoice on key release.
     pub percussive: bool,
     /// Wind group (0-based engine index, from the ODF windchest).
@@ -248,6 +251,7 @@ pub fn build(organ: &Organ, device_rate: f32) -> Result<LoadedBank> {
                         * (cents / 1200.0).exp2()) as f32,
                     nominal_hz: pipe.nominal_frequency_hz as f32,
                     gain: db_to_linear(pipe.gain_db),
+                    velocity: rank.velocity_volume,
                     percussive: p.info.percussive,
                     group: (rank.windchest.saturating_sub(1))
                         .min(aristide_engine::wind::MAX_WIND_GROUPS as u32 - 1)
@@ -574,6 +578,7 @@ mod tests {
                 id: aristide_model::RankId(1),
                 name: "Test rank".into(),
                 windchest: 1,
+                velocity_volume: Default::default(),
                 pipes: rank_pipes,
             }],
             ..Default::default()
@@ -845,7 +850,7 @@ mod tests {
                 while next < events.len() && events[next].0 < frame + block {
                     match events[next].1 {
                         Event::Note(key, true) => {
-                            let (starts, retriggered) = console.note_on_manual(2, key.into());
+                            let (starts, retriggered) = console.note_on_manual(2, key.into(), 127);
                             for h in retriggered {
                                 handle.send(aristide_engine::Command::StopVoice { handle: h });
                             }
@@ -1014,7 +1019,7 @@ mod tests {
                     match events[next].1 {
                         Event::Note(channel, key, true) => {
                             let (starts, retriggered) =
-                                console.note_on_manual(manual_of(channel), key.into());
+                                console.note_on_manual(manual_of(channel), key.into(), 127);
                             for h in retriggered {
                                 handle.send(aristide_engine::Command::StopVoice { handle: h });
                             }
@@ -1277,7 +1282,7 @@ mod tests {
                 for handle_id in console.note_off_manual(manual_index, key.into()) {
                     handle.send(aristide_engine::Command::StopVoice { handle: handle_id });
                 }
-                let (starts, retriggered) = console.note_on_manual(manual_index, key.into());
+                let (starts, retriggered) = console.note_on_manual(manual_index, key.into(), 127);
                 for handle_id in retriggered {
                     handle.send(aristide_engine::Command::StopVoice { handle: handle_id });
                 }
@@ -1384,7 +1389,7 @@ mod tests {
                               on: bool| {
             for &key in &keys {
                 if on {
-                    let (starts, _) = console.note_on_manual(manual_index, key.into());
+                    let (starts, _) = console.note_on_manual(manual_index, key.into(), 127);
                     voices_started += starts.len();
                     for start in starts {
                         handle.send(aristide_engine::Command::StartVoice {
@@ -1486,7 +1491,7 @@ mod tests {
         let mut buffer = vec![0.0f32; block * 2];
         for cycle in 0..6 {
             for &key in &chord {
-                let (starts, retriggered) = console.note_on_manual(manual_index, key.into());
+                let (starts, retriggered) = console.note_on_manual(manual_index, key.into(), 127);
                 for h in retriggered {
                     handle.send(aristide_engine::Command::StopVoice { handle: h });
                 }
@@ -1580,7 +1585,7 @@ mod tests {
         // release everything in one burst.
         let keys = [48u8, 50, 52, 53, 55, 57, 59, 60, 62, 64];
         for &key in &keys {
-            let (starts, _) = console.note_on_manual(manual_index, key.into());
+            let (starts, _) = console.note_on_manual(manual_index, key.into(), 127);
             for start in starts {
                 handle.send(aristide_engine::Command::StartVoice {
                     handle: start.handle,
@@ -1657,7 +1662,7 @@ mod tests {
                 .id,
         ];
         let mut console = crate::console::Console::new(organ, loaded.specs, drawn, 48000.0);
-        let (starts, _) = console.note_on_manual(manual_index, 60);
+        let (starts, _) = console.note_on_manual(manual_index, 60, 127);
         assert!(!starts.is_empty(), "middle C should sound");
 
         let (mut engine, mut handle) =
@@ -1806,7 +1811,7 @@ mod tests {
                     vec![stop.id],
                     48_000.0,
                 );
-                let (starts, _) = console.note_on_manual(manual_index, midi);
+                let (starts, _) = console.note_on_manual(manual_index, midi, 127);
                 assert!(!starts.is_empty(), "{} key {key_index}: silent", stop.name);
                 let (mut engine, mut handle) =
                     aristide_engine::Engine::new(48_000.0, bank.clone());
@@ -1975,7 +1980,7 @@ mod tests {
                 let (_, key, on) = events[next_event];
                 next_event += 1;
                 if on {
-                    let (starts, retriggered) = console.note_on_manual(manual_index, key.into());
+                    let (starts, retriggered) = console.note_on_manual(manual_index, key.into(), 127);
                     for h in retriggered {
                         assert!(handle.send(aristide_engine::Command::StopVoice { handle: h }));
                     }
@@ -2173,7 +2178,7 @@ mod tests {
                 let (_, key, on) = events[next_event];
                 next_event += 1;
                 if on {
-                    let (starts, retriggered) = console.note_on_manual(manual_index, key.into());
+                    let (starts, retriggered) = console.note_on_manual(manual_index, key.into(), 127);
                     for h in retriggered {
                         assert!(handle.send(aristide_engine::Command::StopVoice { handle: h }));
                     }
@@ -2269,7 +2274,7 @@ mod tests {
             let (mut engine, mut handle) =
                 aristide_engine::Engine::new(device_rate, bank.clone());
             engine.set_release_stagger(0.0);
-            let (starts, _) = console.note_on_manual(manual_index, key.into());
+            let (starts, _) = console.note_on_manual(manual_index, key.into(), 127);
             let voice = starts.first().expect("voice");
             let (sample, rate) = (voice.spec.sample, voice.spec.rate as f64);
             for st in starts {
@@ -2406,7 +2411,7 @@ mod tests {
                     let (_, key, on) = events[next];
                     next += 1;
                     if on {
-                        let (starts, retriggered) = console.note_on_manual(manual_index, key.into());
+                        let (starts, retriggered) = console.note_on_manual(manual_index, key.into(), 127);
                         for h in retriggered {
                             handle.send(aristide_engine::Command::StopVoice { handle: h });
                         }
@@ -2542,7 +2547,7 @@ mod tests {
                     let (_, key, on) = events[next];
                     next += 1;
                     if on {
-                        let (starts, retriggered) = console.note_on_manual(manual, key.into());
+                        let (starts, retriggered) = console.note_on_manual(manual, key.into(), 127);
                         for h in retriggered {
                             handle.send(aristide_engine::Command::StopVoice { handle: h });
                         }
@@ -2579,7 +2584,7 @@ mod tests {
                 48000.0,
             );
             for key in [67u8, 72, 76, 79] {
-                let (starts, _) = probe_console.note_on_manual(manual, key.into());
+                let (starts, _) = probe_console.note_on_manual(manual, key.into(), 127);
                 for st in &starts {
                     let smp = loaded.bank.get(st.spec.sample).unwrap();
                     println!(
@@ -2623,7 +2628,7 @@ mod tests {
                 vec![stop.id],
                 device_rate,
             );
-            let (starts, _) = console.note_on_manual(manual, 67);
+            let (starts, _) = console.note_on_manual(manual, 67, 127);
             for (i, st) in starts.iter().enumerate() {
                 let smp = loaded.bank.get(st.spec.sample).unwrap();
                 let frames = smp.frames();
@@ -2698,7 +2703,7 @@ mod tests {
                 let mut frame = 0usize;
                 while frame < total {
                     if frame <= on_at && on_at < frame + block {
-                        let (starts, _) = console.note_on_manual(manual, key.into());
+                        let (starts, _) = console.note_on_manual(manual, key.into(), 127);
                         for st in &starts {
                             let smp = loaded.bank.get(st.spec.sample).unwrap();
                             println!(
@@ -2815,7 +2820,7 @@ mod tests {
                 let (_, key, on) = events[next];
                 next += 1;
                 if on {
-                    let (starts, retriggered) = console.note_on_manual(manual_index, key.into());
+                    let (starts, retriggered) = console.note_on_manual(manual_index, key.into(), 127);
                     for h in retriggered {
                         handle.send(aristide_engine::Command::StopVoice { handle: h });
                     }
@@ -2882,7 +2887,7 @@ mod tests {
             while frame < total {
                 if !on {
                     on = true;
-                    let (starts, _) = console.note_on_manual(manual_index, 60);
+                    let (starts, _) = console.note_on_manual(manual_index, 60, 127);
                     for st in starts {
                         handle.send(aristide_engine::Command::StartVoice {
                             handle: st.handle,
@@ -2930,7 +2935,7 @@ mod tests {
         // Find the montre middle-C spec through the console instead.
         let mut console =
             crate::console::Console::new(organ.clone(), loaded.specs.clone(), drawn.clone(), device_rate);
-        let (starts, _) = console.note_on_manual(manual_index, 60);
+        let (starts, _) = console.note_on_manual(manual_index, 60, 127);
         let st = starts.first().expect("montre voice");
         let sample = loaded.bank.get(st.spec.sample).expect("sample");
         let tail = sample.release_start().unwrap_or(0);
@@ -2995,7 +3000,7 @@ mod tests {
         while frame < total {
             if !sent_on {
                 sent_on = true;
-                let (starts, _) = console.note_on_manual(manual_index, 60);
+                let (starts, _) = console.note_on_manual(manual_index, 60, 127);
                 for st in starts {
                     handle.send(aristide_engine::Command::StartVoice {
                         handle: st.handle,

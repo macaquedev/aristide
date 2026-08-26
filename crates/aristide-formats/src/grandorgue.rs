@@ -625,6 +625,13 @@ impl Builder<'_> {
         // Both standalone [RankNNN] and old-style [StopNNN] sections carry
         // their windchest assignment under the same key.
         let windchest = section.int_or("WindchestGroup", 1)?.max(1) as u32;
+        // Velocity→volume ramp endpoints, percent (notes §3/§8). GO's
+        // "per-pipe" read uses the same unprefixed keys in the same
+        // section, so one rank-level read is exactly its behaviour.
+        let velocity_volume = aristide_model::VelocityVolume {
+            at_zero: section.float_or("MinVelocityVolume", 100.0)?.clamp(0.0, 1000.0) / 100.0,
+            at_full: section.float_or("MaxVelocityVolume", 100.0)?.clamp(0.0, 1000.0) / 100.0,
+        };
         // The rank's pitch class: 8 = unison (8′), 16 = an octave up
         // (4′), 4 = an octave down (16′), 24 = a twelfth (2⅔′)…
         // Per-pipe overrides default to this (GO GORank/GOSoundingPipe).
@@ -643,6 +650,7 @@ impl Builder<'_> {
             id,
             name: String::new(),
             windchest,
+            velocity_volume,
             pipes,
         })
     }
@@ -1099,6 +1107,55 @@ Pipe001PitchTuning=-15
         assert!((pipe.gain_db - (6.0 + 20.0 * 0.5f64.log10())).abs() < 1e-6);
         // Tuning adds: 10 + 5 + 0 - 15 = 0 cents.
         assert!(pipe.pitch_tuning_cents.abs() < 1e-9);
+    }
+
+    /// `MinVelocityVolume`/`MaxVelocityVolume` (percent, default 100)
+    /// become the rank's velocity→volume ramp; a section without them
+    /// stays velocity-insensitive (notes §3/§8).
+    #[test]
+    fn velocity_volume_ramp_reaches_the_model() {
+        let text = "\
+[Organ]
+ChurchName=Touchy
+HasPedals=N
+NumberOfManuals=1
+NumberOfWindchestGroups=1
+
+[WindchestGroup001]
+Name=W
+
+[Manual001]
+Name=M
+NumberOfLogicalKeys=1
+FirstAccessibleKeyLogicalKeyNumber=1
+FirstAccessibleKeyMIDINoteNumber=60
+NumberOfAccessibleKeys=1
+NumberOfStops=2
+Stop001=1
+Stop002=2
+
+[Stop001]
+Name=Tracker
+FirstAccessiblePipeLogicalKeyNumber=1
+NumberOfAccessiblePipes=1
+MinVelocityVolume=25
+MaxVelocityVolume=150
+Pipe001=a.wav
+
+[Stop002]
+Name=Plain
+FirstAccessiblePipeLogicalKeyNumber=1
+NumberOfAccessiblePipes=1
+Pipe001=b.wav
+";
+        let organ = parse_str(text).organ;
+        let ramp = organ.ranks[0].velocity_volume;
+        assert!((ramp.at_zero - 0.25).abs() < 1e-9);
+        assert!((ramp.at_full - 1.5).abs() < 1e-9);
+        assert!((ramp.gain(127) - 1.5).abs() < 1e-6);
+        assert!((ramp.gain(0) - 0.25).abs() < 1e-6);
+        assert_eq!(organ.ranks[1].velocity_volume, Default::default());
+        assert!((organ.ranks[1].velocity_volume.gain(1) - 1.0).abs() < 1e-6);
     }
 
     #[test]

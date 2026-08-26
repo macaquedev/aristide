@@ -1038,6 +1038,7 @@ impl Assembly<'_> {
             id: new,
             name: String::new(),
             windchest: 0,
+            velocity_volume: Default::default(),
             pipes: Vec::new(),
         });
         let organ = &self.sources[source_idx].1;
@@ -1287,6 +1288,7 @@ mod tests {
             id: RankId(id),
             name: name.into(),
             windchest,
+            velocity_volume: Default::default(),
             pipes,
         };
         Organ {
