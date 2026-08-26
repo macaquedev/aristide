@@ -633,6 +633,16 @@ impl SampledVoice {
                 .clamp(0.006 * output_rate as f64, 0.184 * output_rate as f64);
             (1.0 / frames) as f32
         }
+        // A producer-tuned crossfade (ODF ReleaseCrossfadeLength)
+        // overrides the pitch-scaled default; the note-age cap stays —
+        // a mid-attack release must still collapse, not swell.
+        fn odf_fade_step(ms: u16, output_rate: f32, age_ms: u32) -> f32 {
+            let age_frames = age_ms as f64 * 0.001 * output_rate as f64;
+            let frames = (f64::from(ms) * 0.001 * output_rate as f64)
+                .min(age_frames.max(0.006 * output_rate as f64))
+                .max(1.0);
+            (1.0 / frames) as f32
+        }
         match self.phase {
             SamplePhase::Held | SamplePhase::Crossfade => {}
             _ => return,
@@ -662,7 +672,11 @@ impl SampledVoice {
                 } else {
                     1.0
                 };
-                self.fade_step = pitch_scaled_fade_step(sample, self.rate, output_rate, age_ms);
+                self.fade_step = if option.crossfade_ms > 0 {
+                    odf_fade_step(option.crossfade_ms, output_rate, age_ms)
+                } else {
+                    pitch_scaled_fade_step(sample, self.rate, output_rate, age_ms)
+                };
                 self.fade = 0.0;
                 self.phase = SamplePhase::Crossfade;
                 return;
@@ -716,7 +730,11 @@ impl SampledVoice {
                 // key, so compensate the measured tail decay rate with a
                 // per-frame gain factor. Down-repitched pipes were the
                 // "bell": their tails rang up to 40% too long.
-                self.fade_step = pitch_scaled_fade_step(sample, self.rate, output_rate, age_ms);
+                self.fade_step = if sample.release_crossfade_ms() > 0 {
+                    odf_fade_step(sample.release_crossfade_ms(), output_rate, age_ms)
+                } else {
+                    pitch_scaled_fade_step(sample, self.rate, output_rate, age_ms)
+                };
                 if let Some(period) = sample.measured_period() {
                     let f0 = sample.sample_rate_hz() as f64 / period;
                     // Depth grows with pipe pitch: ~35 cents at 1 kHz+,
@@ -1291,9 +1309,14 @@ impl Engine {
                 bus,
                 delay_frames,
             } => {
-                if self.bank.get(sample).is_none() || !(rate > 0.0) {
+                let Some(start_position) = self
+                    .bank
+                    .get(sample)
+                    .map(|s| s.attack_start() as f64)
+                    .filter(|_| rate > 0.0)
+                else {
                     return;
-                }
+                };
                 let enclosure = if (enclosure as usize) < MAX_ENCLOSURES {
                     enclosure
                 } else {
@@ -1320,7 +1343,7 @@ impl Engine {
                     self.voices[slot] = Voice::Sampled(SampledVoice {
                         handle,
                         sample,
-                        position: 0.0,
+                        position: start_position,
                         release_position: 0.0,
                         rate: rate as f64,
                         rate_target: rate as f64,
@@ -2417,8 +2440,8 @@ mod tests {
         // Push releases first so their indices exist for attach.
         let short_id = bank.push(short);
         let long_id = bank.push(long);
-        source.attach_release(bank.get(short_id).expect("short"), short_id, Some(300), None);
-        source.attach_release(bank.get(long_id).expect("long"), long_id, None, None);
+        source.attach_release(bank.get(short_id).expect("short"), short_id, Some(300), None, 0);
+        source.attach_release(bank.get(long_id).expect("long"), long_id, None, None, 0);
         let source_id = bank.push(source);
         let bank = Arc::new(bank);
 
@@ -2459,6 +2482,38 @@ mod tests {
         assert!(
             tenuto > 0.9,
             "tenuto should use the 1.5 s release, rang for {tenuto:.2} s"
+        );
+    }
+
+    /// ODF `AttackStart`: the voice's cursor begins at the marked
+    /// frame, skipping lead-in the producer excluded.
+    #[test]
+    fn attack_start_skips_lead_in() {
+        let mut data = vec![0.0f32; 100];
+        data.extend(std::iter::repeat(0.5f32).take(400));
+        let mut sample = Sample::new(data, 1, 48000.0, None, 500).expect("valid");
+        sample.set_attack_start(100);
+        let mut bank = SampleBank::default();
+        let id = bank.push(sample);
+        let (mut engine, mut handle) = Engine::new(48000.0, Arc::new(bank));
+        handle.send(Command::StartVoice {
+            handle: 1,
+            sample: id,
+            rate: 1.0,
+            gain: 1.0,
+            group: 0,
+            wind_weight: 0.0,
+            brightness: 0.0,
+            enclosure: ENCLOSURE_NONE,
+            bus: 0,
+            delay_frames: 0,
+        });
+        let mut buffer = vec![0.0f32; 64 * 2];
+        engine.process(&mut buffer, 2);
+        assert!(
+            buffer[0].abs() > 1e-4,
+            "playback should begin in the marked material, not the lead-in: {}",
+            buffer[0]
         );
     }
 
@@ -2504,12 +2559,13 @@ mod tests {
         let mut bank = SampleBank::default();
         let plain_id = bank.push(plain);
         let tremmed_id = bank.push(tremmed);
-        source.attach_release(bank.get(plain_id).expect("plain"), plain_id, None, Some(false));
+        source.attach_release(bank.get(plain_id).expect("plain"), plain_id, None, Some(false), 0);
         source.attach_release(
             bank.get(tremmed_id).expect("tremmed"),
             tremmed_id,
             None,
             Some(true),
+            0,
         );
         let source_id = bank.push(source);
         let bank = Arc::new(bank);

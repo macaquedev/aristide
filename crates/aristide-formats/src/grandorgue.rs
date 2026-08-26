@@ -833,10 +833,17 @@ impl Builder<'_> {
             let path = section.string(&release_prefix)?;
             let max_ms = section.int_or(&format!("{release_prefix}MaxKeyPressTime"), -1)?;
             let wave_tremulant = section.bool3(&format!("{release_prefix}IsTremulant"))?;
+            let cue_point = section.int_or(&format!("{release_prefix}CuePoint"), -1)?;
+            let release_end = section.int_or(&format!("{release_prefix}ReleaseEnd"), -1)?;
             releases.push(ReleaseSample {
                 path: normalize_path(path),
                 max_key_press_ms: (max_ms >= 0).then_some(max_ms as u32),
                 wave_tremulant,
+                cue_point_frame: (cue_point >= 0).then_some(cue_point as u32),
+                release_end_frame: (release_end >= 0).then_some(release_end as u32),
+                release_crossfade_ms: section
+                    .int_or(&format!("{release_prefix}ReleaseCrossfadeLength"), 0)?
+                    .clamp(0, 3000) as u16,
             });
         }
         pipe.source = PipeSource::Sampled { attacks, releases };
@@ -867,6 +874,8 @@ impl Builder<'_> {
         }
         let max_since_release =
             section.int_or(&format!("{prefix}MaxTimeSinceLastRelease"), -1)?;
+        let cue_point = section.int_or(&format!("{prefix}CuePoint"), -1)?;
+        let release_end = section.int_or(&format!("{prefix}ReleaseEnd"), -1)?;
         // Empty `loops` means: fall back to the WAV's own smpl chunk at
         // sample-load time.
         Ok(AttackSample {
@@ -881,6 +890,14 @@ impl Builder<'_> {
                 .then_some(max_since_release as u32),
             loop_crossfade_ms: section
                 .int_or(&format!("{prefix}LoopCrossfadeLength"), 0)?
+                .clamp(0, 3000) as u16,
+            attack_start_frame: section
+                .int_or(&format!("{prefix}AttackStart"), 0)?
+                .max(0) as u32,
+            cue_point_frame: (cue_point >= 0).then_some(cue_point as u32),
+            release_end_frame: (release_end >= 0).then_some(release_end as u32),
+            release_crossfade_ms: section
+                .int_or(&format!("{prefix}ReleaseCrossfadeLength"), 0)?
                 .clamp(0, 3000) as u16,
         })
     }
@@ -1388,6 +1405,10 @@ Pipe001Loop001End=48000
 Pipe001LoopCrossfadeLength=90
 Pipe001AttackCount=1
 Pipe001IsTremulant=N
+Pipe001AttackStart=200
+Pipe001CuePoint=50000
+Pipe001ReleaseEnd=90000
+Pipe001ReleaseCrossfadeLength=120
 Pipe001Attack001=a-trem.wav
 Pipe001Attack001IsTremulant=Y
 Pipe001Attack001AttackVelocity=64
@@ -1395,6 +1416,9 @@ Pipe001Attack001MaxTimeSinceLastRelease=250
 Pipe001ReleaseCount=2
 Pipe001Release001=a-short.wav
 Pipe001Release001MaxKeyPressTime=500
+Pipe001Release001CuePoint=300
+Pipe001Release001ReleaseEnd=40000
+Pipe001Release001ReleaseCrossfadeLength=80
 Pipe001Release002=a-long.wav
 Pipe001Release002IsTremulant=Y
 ";
@@ -1414,7 +1438,13 @@ Pipe001Release002IsTremulant=Y
         assert_eq!(attacks[0].min_velocity, 0);
         assert_eq!(attacks[0].max_time_since_last_release_ms, None);
         assert_eq!(attacks[0].loop_crossfade_ms, 90);
+        assert_eq!(attacks[0].attack_start_frame, 200);
+        assert_eq!(attacks[0].cue_point_frame, Some(50000));
+        assert_eq!(attacks[0].release_end_frame, Some(90000));
+        assert_eq!(attacks[0].release_crossfade_ms, 120);
         assert_eq!(attacks[1].loop_crossfade_ms, 0);
+        assert_eq!(attacks[1].attack_start_frame, 0);
+        assert_eq!(attacks[1].cue_point_frame, None);
         assert!(attacks[1].loops.is_empty());
         assert_eq!(attacks[1].wave_tremulant, Some(true));
         assert_eq!(attacks[1].min_velocity, 64);
@@ -1422,8 +1452,13 @@ Pipe001Release002IsTremulant=Y
         assert_eq!(releases.len(), 2);
         assert_eq!(releases[0].max_key_press_ms, Some(500));
         assert_eq!(releases[0].wave_tremulant, None);
+        assert_eq!(releases[0].cue_point_frame, Some(300));
+        assert_eq!(releases[0].release_end_frame, Some(40000));
+        assert_eq!(releases[0].release_crossfade_ms, 80);
         assert_eq!(releases[1].max_key_press_ms, None);
         assert_eq!(releases[1].wave_tremulant, Some(true));
+        assert_eq!(releases[1].cue_point_frame, None);
+        assert_eq!(releases[1].release_crossfade_ms, 0);
     }
 
     #[test]

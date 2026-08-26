@@ -84,6 +84,13 @@ pub struct Sample {
     /// out, and the voice would end in a hard cut. Voices add whatever
     /// extra decay settles the tail to silence by EOF.
     tail_eof_level_db: f32,
+    /// Frame where playback starts (ODF `AttackStart`; 0 = the file's
+    /// first frame) — lead-in the producer marked as not-the-note.
+    attack_start: u64,
+    /// Producer-tuned key-off crossfade into the *embedded* tail, in
+    /// ms (ODF `ReleaseCrossfadeLength`; 0 = the engine's pitch-scaled
+    /// default). Separate releases carry theirs on [`ReleaseOption`].
+    release_crossfade_ms: u16,
 }
 
 /// A separate recorded release, selectable by how long the note was
@@ -100,6 +107,9 @@ pub struct ReleaseOption {
     /// chest's wave trem is engaged, `Some(false)` only while it is
     /// not, `None` either way.
     pub wave_trem: Option<bool>,
+    /// Producer-tuned key-off crossfade in ms (ODF
+    /// `ReleaseCrossfadeLength`; 0 = the engine's pitch-scaled fade).
+    pub crossfade_ms: u16,
     /// Phase map from the source sample's cycle into the release's
     /// opening period.
     alignment: Option<ReleaseAlignment>,
@@ -160,6 +170,8 @@ impl Sample {
             tail_reference_level: 0.0,
             tail_decay_db_per_s: 0.0,
             tail_eof_level_db: -120.0,
+            attack_start: 0,
+            release_crossfade_ms: 0,
         };
         if let Some(tail) = sample.release_start() {
             // Short window (~12 ms at 44.1 k): high pipes' room decay is
@@ -483,6 +495,7 @@ impl Sample {
         target_index: u32,
         max_hold_ms: Option<u32>,
         wave_trem: Option<bool>,
+        crossfade_ms: u16,
     ) {
         let level = target.mean_abs(0, 512.min(target.frames()));
         let alignment = match (self.measured_period, self.sustain_loop) {
@@ -514,6 +527,7 @@ impl Sample {
             sample: target_index,
             max_hold_ms,
             wave_trem,
+            crossfade_ms,
             alignment,
             level,
         };
@@ -542,6 +556,31 @@ impl Sample {
     pub fn release_start(&self) -> Option<u64> {
         (self.sustain_loop.is_some() && self.release_start < self.frames())
             .then_some(self.release_start)
+    }
+
+    /// Start playback at `frame` instead of 0 (ODF `AttackStart`).
+    /// Clamped so the cursor can always still reach the sustain loop.
+    pub fn set_attack_start(&mut self, frame: u64) {
+        let ceiling = match self.sustain_loop {
+            Some((start, _)) => start,
+            None => self.frames().saturating_sub(1),
+        };
+        self.attack_start = frame.min(ceiling);
+    }
+
+    #[inline]
+    pub fn attack_start(&self) -> u64 {
+        self.attack_start
+    }
+
+    /// Declare the producer's key-off crossfade for the embedded tail.
+    pub fn set_release_crossfade_ms(&mut self, ms: u16) {
+        self.release_crossfade_ms = ms;
+    }
+
+    #[inline]
+    pub fn release_crossfade_ms(&self) -> u16 {
+        self.release_crossfade_ms
     }
 
     /// Raw interleaved data + channel count, for the sinc reader.

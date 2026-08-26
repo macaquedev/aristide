@@ -119,9 +119,30 @@ pub struct AttackSample {
     /// on this to keep the loop from thumping every pass.
     #[serde(default, skip_serializing_if = "is_zero_u16")]
     pub loop_crossfade_ms: u16,
+    /// Frame where playback begins (GO `AttackStart`; 0 = the file's
+    /// start). Producers use it to skip lead-in silence or noise.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub attack_start_frame: u32,
+    /// Frame where this attack's embedded release tail begins (GO
+    /// `CuePoint`; `None` = trust the file's own `cue` chunk).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cue_point_frame: Option<u32>,
+    /// Frame where the embedded release tail ends (GO `ReleaseEnd`;
+    /// `None` = end of file). Material past it is the producer saying
+    /// "don't play this".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_end_frame: Option<u32>,
+    /// Producer-tuned key-off crossfade in milliseconds (GO
+    /// `ReleaseCrossfadeLength`; 0 = the engine's pitch-scaled fade).
+    #[serde(default, skip_serializing_if = "is_zero_u16")]
+    pub release_crossfade_ms: u16,
 }
 
 fn is_zero_u16(value: &u16) -> bool {
+    *value == 0
+}
+
+fn is_zero_u32(value: &u32) -> bool {
     *value == 0
 }
 
@@ -140,6 +161,18 @@ pub struct ReleaseSample {
     /// wave-tremulant state this release was recorded under.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wave_tremulant: Option<bool>,
+    /// Frame where the release proper begins within the file (GO
+    /// `CuePoint`; `None` = the file's start) — lead-in is skipped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cue_point_frame: Option<u32>,
+    /// Frame where the release ends (GO `ReleaseEnd`; `None` = end of
+    /// file) — the rest is trimmed at load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_end_frame: Option<u32>,
+    /// Producer-tuned key-off crossfade in milliseconds (GO
+    /// `ReleaseCrossfadeLength`; 0 = the engine's pitch-scaled fade).
+    #[serde(default, skip_serializing_if = "is_zero_u16")]
+    pub release_crossfade_ms: u16,
 }
 
 /// Address of one pipe within an [`Organ`].

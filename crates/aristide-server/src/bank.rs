@@ -135,7 +135,7 @@ pub fn build(organ: &Organ, device_rate: f32) -> Result<LoadedBank> {
             for (attack_index, attack) in attacks.iter().enumerate() {
                 let absolute = organ.base_path.join(&attack.path);
                 let entry = decoded.entry(attack.path.clone()).or_insert_with(|| {
-                    match decode(&absolute, &attack.loops, attack.loop_crossfade_ms) {
+                    match decode(&absolute, attack) {
                         Ok((mut sample, info)) => {
                             // Phase-align the release splice to this pipe's
                             // fundamental (shared files share the pitch).
@@ -150,7 +150,7 @@ pub fn build(organ: &Organ, device_rate: f32) -> Result<LoadedBank> {
                                     .entry(release.path.clone())
                                     .or_insert_with(|| {
                                         let path = organ.base_path.join(&release.path);
-                                        match decode_release(&path) {
+                                        match decode_release(&path, release) {
                                             Ok(release_sample) => Some(bank.push(release_sample)),
                                             Err(reason) => {
                                                 skipped.push(format!(
@@ -168,6 +168,7 @@ pub fn build(organ: &Organ, device_rate: f32) -> Result<LoadedBank> {
                                             index,
                                             release.max_key_press_ms,
                                             release.wave_tremulant,
+                                            release.release_crossfade_ms,
                                         );
                                     }
                                 }
@@ -413,16 +414,25 @@ struct DecodedInfo {
 /// GO's own fallback order.
 fn decode(
     path: &std::path::Path,
-    odf_loops: &[aristide_model::SampleLoop],
-    loop_crossfade_ms: u16,
+    attack: &aristide_model::AttackSample,
 ) -> Result<(Sample, DecodedInfo), String> {
     let mut file = wav::read(path).map_err(|e| e.to_string())?;
+    // ODF ReleaseEnd: the embedded tail ends here; material past it is
+    // the producer saying "don't play this".
+    if let Some(end) = attack.release_end_frame {
+        let end = u64::from(end);
+        if end > 0 && end < file.info.frames {
+            file.samples.truncate(end as usize * file.info.channels as usize);
+            file.info.frames = end;
+        }
+    }
     let frames = file.info.frames;
+    let loop_crossfade_ms = attack.loop_crossfade_ms;
 
-    let mut loops: Vec<(u64, u64)> = if odf_loops.is_empty() {
+    let mut loops: Vec<(u64, u64)> = if attack.loops.is_empty() {
         file.info.loops.iter().map(|l| (l.start, l.end + 1)).collect()
     } else {
-        odf_loops.iter().map(|l| (l.start, l.end + 1)).collect()
+        attack.loops.iter().map(|l| (l.start, l.end + 1)).collect()
     };
     loops.retain(|&(start, end)| start < end && end <= frames);
     // Longest loop wins until multi-loop selection lands (M4).
@@ -459,14 +469,22 @@ fn decode(
     }
 
     let release_start = match sustain_loop {
-        Some((_, loop_end)) => file
-            .info
-            .cue_points
-            .iter()
-            .copied()
+        // An explicit ODF CuePoint outranks the file's own cue chunk;
+        // one that lands inside the loop (or past the data) is junk
+        // and falls back to the file's markers.
+        Some((_, loop_end)) => attack
+            .cue_point_frame
+            .map(u64::from)
             .filter(|&cue| cue >= loop_end && cue < frames)
-            .max()
-            .unwrap_or(loop_end),
+            .unwrap_or_else(|| {
+                file.info
+                    .cue_points
+                    .iter()
+                    .copied()
+                    .filter(|&cue| cue >= loop_end && cue < frames)
+                    .max()
+                    .unwrap_or(loop_end)
+            }),
         None => frames,
     };
 
@@ -477,6 +495,8 @@ fn decode(
         sustain_loop,
         release_start,
     )?;
+    sample.set_attack_start(u64::from(attack.attack_start_frame));
+    sample.set_release_crossfade_ms(attack.release_crossfade_ms);
     // Alternate loops beyond the primary: voices rotate through them.
     for &(start, end) in &loops {
         if Some((start, end)) != sustain_loop {
@@ -501,16 +521,37 @@ fn decode(
 }
 
 /// Decode a separate release file: a one-shot entry (no loops — it's a
-/// decay), played from its start on key-off.
-fn decode_release(path: &std::path::Path) -> Result<Sample, String> {
+/// decay), played from its start on key-off. ODF `CuePoint` skips a
+/// lead-in, `ReleaseEnd` trims the far end — GO builds the release
+/// section between exactly those markers.
+fn decode_release(
+    path: &std::path::Path,
+    release: &aristide_model::ReleaseSample,
+) -> Result<Sample, String> {
     let file = wav::read(path).map_err(|e| e.to_string())?;
     let frames = file.info.frames;
+    let channels = file.info.channels as usize;
+    let start = release
+        .cue_point_frame
+        .map(u64::from)
+        .filter(|&cue| cue < frames)
+        .unwrap_or(0);
+    let end = release
+        .release_end_frame
+        .map(u64::from)
+        .filter(|&end| end > start && end <= frames)
+        .unwrap_or(frames);
+    let samples = if (start, end) == (0, frames) {
+        file.samples
+    } else {
+        file.samples[start as usize * channels..end as usize * channels].to_vec()
+    };
     Sample::new(
-        file.samples,
+        samples,
         file.info.channels,
         file.info.sample_rate as f32,
         None,
-        frames,
+        end - start,
     )
 }
 
@@ -715,8 +756,8 @@ mod tests {
                         ],
                         releases: vec![aristide_model::ReleaseSample {
                             path: PathBuf::from("rel.wav"),
-                            max_key_press_ms: None,
                             wave_tremulant: Some(true),
+                            ..Default::default()
                         }],
                     },
                 }],
@@ -740,6 +781,67 @@ mod tests {
             assert_eq!(sample.release_options().len(), 1);
             assert_eq!(sample.release_options()[0].wave_trem, Some(true));
         }
+    }
+
+    /// ODF sample boundaries: `AttackStart` moves the playback origin,
+    /// `ReleaseEnd` trims an attack's embedded tail, and a separate
+    /// release is cut to its `CuePoint`..`ReleaseEnd` window; the
+    /// producer's `ReleaseCrossfadeLength` rides the release option.
+    #[test]
+    fn odf_sample_boundaries_are_honoured() {
+        let dir = std::env::temp_dir().join("aristide-boundaries-test");
+        std::fs::create_dir_all(&dir).expect("test dir");
+        write_test_wav(&dir.join("att.wav"), 60); // 512 frames, loop 64..447
+        write_test_wav(&dir.join("rel.wav"), 60);
+        let organ = aristide_model::Organ {
+            name: "boundaries".into(),
+            base_path: dir,
+            ranks: vec![aristide_model::Rank {
+                id: aristide_model::RankId(1),
+                name: "Test rank".into(),
+                windchest: 1,
+                velocity_volume: Default::default(),
+                pipes: vec![aristide_model::Pipe {
+                    nominal_frequency_hz: 440.0,
+                    pitch_tuning_cents: 0.0,
+                    pitch_correction_cents: 0.0,
+                    gain_db: 0.0,
+                    midi_key_number: None,
+                    midi_pitch_fraction_cents: None,
+                    source: aristide_model::PipeSource::Sampled {
+                        attacks: vec![aristide_model::AttackSample {
+                            path: PathBuf::from("att.wav"),
+                            attack_start_frame: 32,
+                            release_end_frame: Some(500),
+                            release_crossfade_ms: 120,
+                            ..Default::default()
+                        }],
+                        releases: vec![aristide_model::ReleaseSample {
+                            path: PathBuf::from("rel.wav"),
+                            cue_point_frame: Some(100),
+                            release_end_frame: Some(400),
+                            release_crossfade_ms: 80,
+                            ..Default::default()
+                        }],
+                    },
+                }],
+            }],
+            ..Default::default()
+        };
+        let loaded = build(&organ, 44_100.0).expect("builds");
+        let spec = loaded.specs[&(aristide_model::RankId(1), 0u16)];
+        let sample = loaded.bank.get(spec.sample).expect("attack sample");
+        assert_eq!(sample.attack_start(), 32);
+        assert_eq!(sample.frames(), 500, "ReleaseEnd trims the attack file");
+        assert_eq!(sample.release_crossfade_ms(), 120);
+        let option = &sample.release_options()[0];
+        assert_eq!(option.crossfade_ms, 80);
+        let release = loaded.bank.get(option.sample).expect("release sample");
+        assert_eq!(
+            release.frames(),
+            300,
+            "the release is the CuePoint..ReleaseEnd window"
+        );
     }
 
     /// ODF `LoopCrossfadeLength` (ms): the loop's last frames blend
