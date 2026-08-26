@@ -3,6 +3,7 @@
 Newest first. One entry per work session; keep entries factual and short.
 Milestones refer to DESIGN.md.
 
+- [2026-08-26 — tremulants come alive; attacks stop machine-gunning (gap §2+§4)](progress/2026-08-26-tremulants-and-multi-attack.md)
 - [2026-08-24 — keyboard kinds + Scala scales (M6 opens)](progress/2026-08-24-keyboard-kinds-and-scala.md)
 - [2026-08-18 — couplers become routes](progress/2026-08-18-flexible-couplers.md)
 - [2026-08-18 — anything can be bound to anything](progress/2026-08-18-bindings.md)

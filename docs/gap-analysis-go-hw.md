@@ -23,11 +23,11 @@ Related repo research (don't duplicate, extend): `docs/research/release-modeling
 `docs/research/vpo-rendering-techniques.md`, `docs/research/hauptwerk-wind-model.md`,
 `docs/go-odf-notes.md`.
 
-Suggested overall priority (2026-08-26 revision): **§2+§4 → §3 → §8+§9 → §7 → §6/§1
-residue**, then the rest. The original top items (§1 enclosures, §6 pitch, §5
-routing) have largely landed; what's left of "sets don't sound right" is
-tremulants + multi-attack (§2/§4), the memory wall (§3) is the "can't load my
-set" blocker, and combinations (§7) block serious playing use.
+Suggested overall priority (2026-08-26 revision, updated same day): §2+§4
+landed — **next: §3 → §8+§9 → §7**, then the residues. The memory wall (§3)
+is the "can't load my set" blocker; §8+§9 (release/loop ODF keys, truncation,
+crossfade baking) are small and finish "sets sound as authored"; combinations
+(§7) block serious playing use.
 
 ---
 
@@ -73,7 +73,7 @@ depths. (HW V Features Data Sheet p12; UG5 p213.)
 
 ---
 
-## 2. ODF tremulants unsupported; tremmed samples can't play (worse than GO and HW) — ⚠ STILL OPEN, now top priority
+## 2. ODF tremulants unsupported; tremmed samples can't play — ✅ LARGELY DONE (2026-08-26)
 
 **GO:** two tremulant types (`GOTremulantType`): synth and wave.
 - Synth (`GOSoundProviderSynthedTrem`): 16-bit sine control signal, applied as a
@@ -93,27 +93,34 @@ phase-synchronized, with continuous subtle depth randomization; rate voicable
 per tremulant. Sets may alternatively ship real tremmed ranks that play directly.
 (DS5 p12/p15; UG5 p215.)
 
-**Aristide (unchanged since 2026-08-12):** `[Tremulant]` sections are still not
-parsed (no `NumberOfTremulants` handling in `grandorgue.rs::build`); `IsTremulant`
-appears nowhere in the code; the synth tremulant
-(`aristide-engine/src/wind.rs::TremulantParams`) is genuinely good in kind
-(pressure-based → FM+AM+brightness together, rate/depth wander) but is wired
-only via the sidecar `[tremulant]` table (one instance: rate/depth/chests) and
-toggled via an `Action::Tremulant` binding; depth is uniform per chest.
+**Aristide now (commits `46d833f`/`b1bd337`):**
+- `[TremulantNNN]` parses (Synth figures — Period is *ms* per cycle, see the
+  corrected `go-odf-notes.md` §6 — and the Wave marker); windchests carry
+  tremulant membership; composites renumber it like enclosures; adoption is
+  test-proven equivalent.
+- **Synth trems sound**, per chest, from the ODF: rate = 1000/Period Hz,
+  pressure depth inverted through the wind gain exponent so the author's
+  `AmpModDepth` amplitude comes out (FM + brightness then follow physically —
+  still better in kind than GO's AM-only trem), engage/disengage ramp = GO's
+  two `1/rate`-second ramps averaged. Demo's Tremblant: 5.1 Hz, Récit only.
+- **Wave trems switch recordings**: `Command::SetWaveTremulant` flags the
+  chest; note-ons prefer `IsTremulant=Y` attack variants (§4 machinery);
+  note-offs select releases matching the per-voice state captured at key-off
+  (held voices follow the switch; tails keep what they released under).
+- Per-tremulant control: `State.trems`, `tremulant:<name>` bindings,
+  `/api/trem?idx=`, `"trems"` in the state JSON. A hand-written sidecar
+  `[tremulant]` (now `Option`) replaces the set's own; the default-tremulant
+  fallback remains for trem-less sets.
 
-One adjacent improvement landed: GO's detached-release behavior (old §12a) is
-now ours too — wind/trem factors freeze per voice at release.
-
-**Impact:** high. Sets with tremmed ranks (very common; Grabowski ships them as
-separate ranks, ~30% extra RAM) lose their best tremulant; sets defining synth
-trems in the ODF get no tremulant at all without hand-written sidecar config.
-
-**Fix hints:** parse `[Tremulant]` (type, period/start/stop rates, amp depth,
-windchest membership) → map GOSynthTrem onto our wind-group tremulant
-(convert period/depth to `TremulantParams`); implement wave-trem sample switching
-on top of the §4 multi-attack machinery (voice sample-switch mid-block already
-exists — `SampledVoice.sample` switch path in `lib.rs::process`); select releases
-by trem state.
+**Remaining gaps:**
+- **Mid-hold wave-trem attack switch** (GO `SwitchToAnotherAttack`, 184 ms
+  key-scaled phase-aligned crossfade): engaging a wave trem doesn't make
+  already-held notes undulate until re-pressed. Needs an engine
+  crossfade-into-another-sample's-loop path (the release-splice machinery
+  pointed at a loop instead of a tail). Synth-trem sets are unaffected.
+- Console UI still renders one knob (toggles all); a per-tremulant panel is
+  screenshot-harness work.
+- HW's measured per-pipe trem waveforms remain §11.
 
 ---
 
@@ -154,7 +161,7 @@ big one, design already sketched in DESIGN.md/bank.rs comments.
 
 ---
 
-## 4. Multi-attack samples parsed, then ignored — ⚠ MOSTLY OPEN (velocity gain landed)
+## 4. Multi-attack samples parsed, then ignored — ✅ LARGELY DONE (2026-08-26)
 
 **GO:** `GetAttack(velocity, releasedDurationMs)` — attack selection by
 `AttackVelocity` (min velocity) and `MaxTimeSinceLastRelease` (fast-repetition
@@ -175,20 +182,26 @@ velocity→tracker-action model modifying attack harmonic content/pitch/amplitud
   voice through the ramp — including voices started late by a stop drawn
   mid-hold or a coupler recouple, which reuse the held press's velocity.
   Old §12c is closed.
-- **Attack selection is still first-only**: `server/bank.rs::build` uses
-  `attacks.first()`; every keypress plays the identical attack transient.
-  No `AttackVelocity`, no `MaxTimeSinceLastRelease`, no random tie-break.
+- **Attack selection is real** (`b1bd337`): every variant decodes into the
+  bank (`LoadedBank.attack_options`, borrowed pipes inherit their target's
+  table); `console.rs::price` runs GO's `GetAttack` at all three voice-pricing
+  sites (note-on, stop drawn mid-hold, recouple) — candidates gated by the
+  `IsTremulant` tri-state vs the chest's wave-trem state, `AttackVelocity ≤`
+  the press, `MaxTimeSinceLastRelease` against a per-pipe last-release clock;
+  most-specific wins (highest velocity bound, then tightest window), ties
+  rotated by xorshift. Separate releases attach to *each* variant and are
+  selected engine-side by (trem state, hold time).
 
-**Impact:** clearly audible on repetition — trills/repeated notes machine-gun the
-speech transient. Our loop randomization + per-voice flow noise decorrelate the
-sustain, not the attack.
-
-**Fix hints:** extend `VoiceSpec` to a small attack table; selection control-side
-in `console.rs::note_on_manual` (it already tracks per-key handles and
-velocities; add last-release timestamps per pipe). Random pick among eligible
-attacks = the cheap 80%. Tremmed attacks (§2) ride the same mechanism
-(`IsTremulant` becomes a selector dimension, GO's `GOBool3` semantics in
-`go-odf-notes.md`).
+**Remaining gaps (small):**
+- Additional attacks are assumed at the primary's recording pitch (rate
+  follows file sample rate only); GO tunes each file through the full pitch
+  pipeline.
+- Release selection takes the first qualifying `MaxKeyPressTime` (sorted);
+  GO adds a random rotation among exact ties.
+- The last-release clock keys on (rank, sounded identity), not the physical
+  pipe, so a *different* key borrowing the same pipe doesn't count as its
+  re-attack.
+- HW's layered chiff / velocity-morphing attacks remain out of scope.
 
 ---
 
@@ -430,9 +443,10 @@ e. **Single audio device via cpal default** — ⚠ still true (named M6 deferra
 f. **GO-format sets only** — ⚠ still true. The browse UI now *lists*
    `.organ_hauptwerk_xml` files (`beb4e98`) but no loader exists — selecting
    one does nothing. HW-unencrypted loader (per DESIGN.md legal boundary) is M7.
-g. **GO synth trem ramps** with ODF start/stop rates; ours is a fixed sidecar
-   `ramp_seconds` (0.7 s default, `wind.rs::TremulantParams`) — ⚠ still true.
-   Cosmetic once §2 lands (no ODF trem attributes are parsed at all yet).
+g. ~~GO synth trem ramps ignored.~~ ✅ **Fixed** (`b1bd337`): ODF
+   `StartRate`/`StopRate` (each a `1/rate`-second ramp in GO) map onto
+   `ramp_seconds` as their average; sidecar trems keep the 0.7 s default.
+   Residue: one knob serves both directions where GO ramps asymmetrically.
 h. **NEW: `--record` header lies on widened streams** — see §5. Stereo 16-bit
    header hardcoded in `spawn_recorder` while the tap delivers N-channel frames
    after `ensure_channels` widens the device.
@@ -466,8 +480,8 @@ Re-verified 2026-08-26 — all still accurate, list grown:
 
 | Work package | Sections | Independent? |
 |---|---|---|
-| Tremulants + multi-attack (ODF trems, IsTremulant, attack selection, trem-state releases) | §2 + §4 | one package, now top priority |
-| Memory (i16 + load cache + parallel decode; streaming later) | §3 | yes |
+| ~~Tremulants + multi-attack~~ | §2 + §4 | ✅ landed 2026-08-26 (residue: mid-hold wave switch, trem UI) |
+| Memory (i16 + load cache + parallel decode; streaming later) | §3 | yes, now top priority |
 | Release ODF keys + truncation | §8 | yes (small) |
 | Loop crossfade baking | §9 | yes (small) |
 | Voicing sidecar (gain/cents/brightness) + combination action | §7 | control-side only |
@@ -475,5 +489,6 @@ Re-verified 2026-08-26 — all still accurate, list grown:
 | Pitch residue (`IgnorePitch`/`AcceptsRetuning`, temperament table) | §6 residue | yes (small) |
 | Correctness nits | §12b | small, anytime |
 
-Status ledger: §1 ✅, §5 ✅ (residue), §6 ✅ (residue), §12a/c/d ✅;
-§2, §3, §4, §7, §8, §9, §10, §11, §12b/e/f/g/h ⚠ open.
+Status ledger: §1 ✅, §2 ✅ (residue), §4 ✅ (residue), §5 ✅ (residue),
+§6 ✅ (residue), §12a/c/d/g ✅;
+§3, §7, §8, §9, §10, §11, §12b/e/f/h ⚠ open.
