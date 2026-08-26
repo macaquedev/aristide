@@ -135,7 +135,7 @@ pub fn build(organ: &Organ, device_rate: f32) -> Result<LoadedBank> {
             for (attack_index, attack) in attacks.iter().enumerate() {
                 let absolute = organ.base_path.join(&attack.path);
                 let entry = decoded.entry(attack.path.clone()).or_insert_with(|| {
-                    match decode(&absolute, &attack.loops) {
+                    match decode(&absolute, &attack.loops, attack.loop_crossfade_ms) {
                         Ok((mut sample, info)) => {
                             // Phase-align the release splice to this pipe's
                             // fundamental (shared files share the pitch).
@@ -411,8 +411,12 @@ struct DecodedInfo {
 /// `smpl` chunk (both use inclusive end frames). The release tail starts
 /// at the file's last cue marker past the loop, else right after it —
 /// GO's own fallback order.
-fn decode(path: &std::path::Path, odf_loops: &[aristide_model::SampleLoop]) -> Result<(Sample, DecodedInfo), String> {
-    let file = wav::read(path).map_err(|e| e.to_string())?;
+fn decode(
+    path: &std::path::Path,
+    odf_loops: &[aristide_model::SampleLoop],
+    loop_crossfade_ms: u16,
+) -> Result<(Sample, DecodedInfo), String> {
+    let mut file = wav::read(path).map_err(|e| e.to_string())?;
     let frames = file.info.frames;
 
     let mut loops: Vec<(u64, u64)> = if odf_loops.is_empty() {
@@ -423,6 +427,36 @@ fn decode(path: &std::path::Path, odf_loops: &[aristide_model::SampleLoop]) -> R
     loops.retain(|&(start, end)| start < end && end <= frames);
     // Longest loop wins until multi-loop selection lands (M4).
     let sustain_loop = loops.iter().copied().max_by_key(|&(start, end)| end - start);
+
+    // The producer asked for a loop crossfade: bake GO's raised-cosine
+    // blend into the last `fade` frames of each loop, fading the
+    // recorded material into the stretch that *precedes* loop start —
+    // after which wrapping to the start continues the waveform. Butt
+    // loops stay the default (Appleton 2019); this runs only when the
+    // ODF says the loop points need the help.
+    let fade = (u64::from(loop_crossfade_ms) * u64::from(file.info.sample_rate)) / 1000;
+    if fade > 0 {
+        let channels = file.info.channels as usize;
+        for &(start, end) in &loops {
+            if start < fade || end - start <= fade {
+                continue; // GO drops these loops; we keep them butt-spliced
+            }
+            for pos in 0..fade {
+                let keep = ((core::f64::consts::PI * (pos as f64 + 0.5) / fade as f64)
+                    .cos()
+                    + 1.0)
+                    * 0.5;
+                let into = end - fade + pos;
+                let from = start - fade + pos;
+                for channel in 0..channels {
+                    let a = file.samples[into as usize * channels + channel];
+                    let b = file.samples[from as usize * channels + channel];
+                    file.samples[into as usize * channels + channel] =
+                        (a as f64 * keep + b as f64 * (1.0 - keep)) as f32;
+                }
+            }
+        }
+    }
 
     let release_start = match sustain_loop {
         Some((_, loop_end)) => file
@@ -706,6 +740,64 @@ mod tests {
             assert_eq!(sample.release_options().len(), 1);
             assert_eq!(sample.release_options()[0].wave_trem, Some(true));
         }
+    }
+
+    /// ODF `LoopCrossfadeLength` (ms): the loop's last frames blend
+    /// into the material preceding loop start, so the wrap continues
+    /// the waveform instead of thumping (GO's raised-cosine bake).
+    #[test]
+    fn odf_loop_crossfade_is_baked_at_decode() {
+        let dir = std::env::temp_dir().join("aristide-loop-crossfade-test");
+        std::fs::create_dir_all(&dir).expect("test dir");
+        write_test_wav(&dir.join("looped.wav"), 60);
+        let organ_with = |crossfade_ms: u16| aristide_model::Organ {
+            name: "crossfade".into(),
+            base_path: dir.clone(),
+            ranks: vec![aristide_model::Rank {
+                id: aristide_model::RankId(1),
+                name: "Test rank".into(),
+                windchest: 1,
+                velocity_volume: Default::default(),
+                pipes: vec![aristide_model::Pipe {
+                    nominal_frequency_hz: 440.0,
+                    pitch_tuning_cents: 0.0,
+                    pitch_correction_cents: 0.0,
+                    gain_db: 0.0,
+                    midi_key_number: None,
+                    midi_pitch_fraction_cents: None,
+                    source: aristide_model::PipeSource::Sampled {
+                        attacks: vec![aristide_model::AttackSample {
+                            path: PathBuf::from("looped.wav"),
+                            loop_crossfade_ms: crossfade_ms,
+                            ..Default::default()
+                        }],
+                        releases: Vec::new(),
+                    },
+                }],
+            }],
+            ..Default::default()
+        };
+        let seam_step = |crossfade_ms: u16| -> f32 {
+            let loaded = build(&organ_with(crossfade_ms), 44_100.0).expect("builds");
+            let spec = loaded.specs[&(aristide_model::RankId(1), 0u16)];
+            let sample = loaded.bank.get(spec.sample).expect("sample");
+            let (start, end) = sample.sustain_loop().expect("loop");
+            // Wrap continuity: the loop's final frame should sit where
+            // the frame before loop start sits, so end−1 → start reads
+            // like start−1 → start.
+            let (last, _) = sample.read((end - 1) as f64);
+            let (before_start, _) = sample.read((start - 1) as f64);
+            (last - before_start).abs()
+        };
+        // The fixture's smpl loop (64..447 of a slow sine) is a bad
+        // butt splice on purpose.
+        let butt = seam_step(0);
+        let faded = seam_step(1); // 1 ms @ 44.1 kHz = 44 frames
+        assert!(butt > 0.05, "fixture loop should butt-splice badly: {butt}");
+        assert!(
+            faded < 0.01,
+            "crossfaded seam should continue the waveform: {faded} (butt {butt})"
+        );
     }
 
     fn rate_cents(loaded: &LoadedBank, pipe: u16) -> f64 {

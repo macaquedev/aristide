@@ -268,8 +268,8 @@ loaded from the bare `PipeNNN=` filename itself, with these fields (all optional
 | `ReleaseEnd` | int | −1–`MAX_SAMPLE_LENGTH`, default −1 (frame offset where the attack's *internal* release tail ends, if any; −1 = end of file) |
 | `LoopCount` | int | 0–100, default 0 |
 | `Loop%03dStart` / `Loop%03dEnd` | int | required if `LoopCount`>0; `End` must be > `Start`, both ≤ `MAX_SAMPLE_LENGTH` |
-| `LoopCrossfadeLength` | int | 0–3000, default 0 (samples, crossfade length at loop point) |
-| `ReleaseCrossfadeLength` | int | 0–3000, default 0 — only read if `LoadRelease` is true |
+| `LoopCrossfadeLength` | int | 0–3000, default 0 — **milliseconds** (corrected 2026-08-26: `fade_len = len * sample_rate / 1000`, GOSoundAudioSection.cpp `Setup`); raised-cosine blend baked across each loop seam at load |
+| `ReleaseCrossfadeLength` | int | 0–3000, default 0 — **milliseconds** (`m_ReleaseCrossfadeLength; // in ms`, GOSoundAudioSection.h) — only read if `LoadRelease` is true |
 
 If `LoopCount=0` **and** the ODF doesn't declare loops for that attack, GO falls back to
 reading loop points from the WAV file's own `smpl` chunk (see §9).

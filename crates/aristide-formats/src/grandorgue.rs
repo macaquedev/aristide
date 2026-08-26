@@ -879,6 +879,9 @@ impl Builder<'_> {
                 .clamp(0, 127) as u8,
             max_time_since_last_release_ms: (max_since_release >= 0)
                 .then_some(max_since_release as u32),
+            loop_crossfade_ms: section
+                .int_or(&format!("{prefix}LoopCrossfadeLength"), 0)?
+                .clamp(0, 3000) as u16,
         })
     }
 
@@ -1382,6 +1385,7 @@ Pipe001MIDIKeyNumber=61
 Pipe001LoopCount=1
 Pipe001Loop001Start=1000
 Pipe001Loop001End=48000
+Pipe001LoopCrossfadeLength=90
 Pipe001AttackCount=1
 Pipe001IsTremulant=N
 Pipe001Attack001=a-trem.wav
@@ -1409,6 +1413,8 @@ Pipe001Release002IsTremulant=Y
         assert_eq!(attacks[0].wave_tremulant, Some(false));
         assert_eq!(attacks[0].min_velocity, 0);
         assert_eq!(attacks[0].max_time_since_last_release_ms, None);
+        assert_eq!(attacks[0].loop_crossfade_ms, 90);
+        assert_eq!(attacks[1].loop_crossfade_ms, 0);
         assert!(attacks[1].loops.is_empty());
         assert_eq!(attacks[1].wave_tremulant, Some(true));
         assert_eq!(attacks[1].min_velocity, 64);

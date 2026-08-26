@@ -113,6 +113,16 @@ pub struct AttackSample {
     /// `None` = always a candidate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_time_since_last_release_ms: Option<u32>,
+    /// Crossfade to bake across each sustain-loop seam, in
+    /// milliseconds (GO `LoopCrossfadeLength`, 0–3000; 0 = butt loop
+    /// as recorded). Sets whose loop points don't quite line up depend
+    /// on this to keep the loop from thumping every pass.
+    #[serde(default, skip_serializing_if = "is_zero_u16")]
+    pub loop_crossfade_ms: u16,
+}
+
+fn is_zero_u16(value: &u16) -> bool {
+    *value == 0
 }
 
 fn is_zero_u8(value: &u8) -> bool {
