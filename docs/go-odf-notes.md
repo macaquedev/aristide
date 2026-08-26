@@ -455,6 +455,45 @@ temperament is active. For a first playback-only implementation, using
 offset and ignoring the temperament/auto-tuning path (equal temperament, no retuning) is a
 reasonable simplification — set `AcceptsRetuning=N`-equivalent behavior by default.
 
+The two pitch paths, precisely (verified against source, 2026-08-26):
+
+- GO's **default** temperament is "Original temperament" — an unset/unknown `.cmb`
+  `Temperament` name falls back to `m_Temperaments[0]`, which is constructed
+  original-based (`GOTemperamentList::GetTemperament` fallback comment "else return
+  original temperament", `InitTemperaments` first entry; `GOTemperament` constructor
+  defaults `isOriginalBased = true`). Under it, playback offset =
+  `GetManualTuningPitchOffset()` = effective `PitchTuning` (+ runtime ManualTuning).
+  Embedded sample pitch, `MIDIKeyNumber`, `HarmonicNumber` and `PitchCorrection` are all
+  **ignored** — samples play as recorded, so a stock GO install renders each set's own
+  recorded tuning.
+- Every cent-table temperament, **including "Equal temperament"**, is constructed with
+  `isOriginalBased = false` (`GOTemperamentCent` constructors pass `false`), which flips
+  every pipe to `GetAutoTuningPitchOffset()`:
+  `log2(HarmonicNumber/8)·1200 + (pipe_midi_key − sample_midi_key)·100 −
+  sample_pitch_fraction_cents + PitchCorrection + AutoTuningCorrection`, i.e. the sample
+  is retuned from its *declared recorded pitch* onto the pipe's nominal equal-tempered
+  pitch. `PitchTuning` does **not** apply on this path — the two offsets are exclusive —
+  which is why `PitchCorrection` exists at all ("keep me a semitone flat even when
+  retuning", the baroque-pitch use case). The metadata term is skipped (offset
+  contribution 0) when `GetEffectiveIgnorePitch()` is set (a `.cmb`-only key, not ODF) or
+  the sample has no MIDI key (`m_SampleMidiKeyNumber == 0` — unity note 0 means "unset").
+- `sample_midi_key`/`fraction` resolution (`GOSoundingPipe::Validate`): ODF
+  `MIDIKeyNumber` if given, else the WAV `smpl` unity note; fraction = ODF
+  `MIDIPitchFraction` if given, else **0 if ODF `MIDIKeyNumber` was given** (an explicit
+  ODF key silences the file's own fraction), else the `smpl` fraction as cents.
+- `AcceptsRetuning=N` (rank default **true**, `GORank.cpp` line 104) zeroes only the
+  per-key `m_TemperamentOffset` — the metadata reconciliation above still applies under a
+  non-original temperament.
+- Validation gates (`GOSoundingPipe::Validate`): warns when a retunable pipe has no pitch
+  information, warns when the original→auto difference exceeds ±600 cents, and logs an
+  error past ±1800 cents (the offset is still applied; only the diagnostics stop).
+
+Sources: `src/core/temperaments/GOTemperamentList.cpp` (`InitTemperaments`,
+`GetTemperament` fallbacks), `GOTemperament.h` constructor defaults,
+`GOTemperamentCent.cpp`; `src/grandorgue/model/GOSoundingPipe.cpp` lines 370-390
+(`GetManualTuningPitchOffset`/`GetAutoTuningPitchOffset`), 415-470 (`Validate`), 526-560
+(`UpdateTuning`, `SetTemperament`).
+
 `MinVelocityVolume`/`MaxVelocityVolume` (§3/§4) define a **separate**, linear
 velocity-to-volume-multiplier ramp (not part of the amplitude/gain tree): volume scales
 linearly from `MinVelocityVolume`/100 at MIDI velocity 0 to `MaxVelocityVolume`/100 at
