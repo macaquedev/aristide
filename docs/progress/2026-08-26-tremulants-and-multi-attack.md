@@ -1,7 +1,15 @@
 # 2026-08-26 — tremulants come alive; attacks stop machine-gunning
 
 Gap-analysis §2+§4, the "sets don't sound right" residue and the
-re-verified top priority.
+re-verified top priority. The same session then swept the small
+decision-free items: §9 (ODF loop crossfades baked at decode — the
+key is *milliseconds*, notes corrected), §8's parse items
+(AttackStart / CuePoint / ReleaseEnd / ReleaseCrossfadeLength, both
+attack- and release-level), §6's `AcceptsRetuning` opt-out
+(`IgnorePitch` turned out to be a GO settings-file key, not ODF), and
+the §12h `--record` bug (headers now follow the tap's channel count;
+a mid-run change rotates to a numbered segment). §3 (memory wall) is
+next and holds a storage-format decision for the user.
 
 ## ODF tremulants (§2)
 

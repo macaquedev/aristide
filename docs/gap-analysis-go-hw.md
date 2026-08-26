@@ -334,36 +334,31 @@ already there).
 
 ---
 
-## 8. Release handling: producer intent ignored — ⚠ STILL OPEN, unchanged
+## 8. Release handling: producer intent ignored — ✅ MOSTLY DONE (2026-08-26)
 
 Aristide's release *model* (phase-aligned splice, level match, staccato charge,
 repitch decay compensation, release bend — `lib.rs::release`,
 `docs/research/release-modeling.md`) is ahead of GO. The gaps around it are
 unchanged since 2026-08-12:
 
-- **ODF `ReleaseCrossfadeLength` ignored** (GO: 0–3000 ms per release; we always
-  use our pitch-scaled ~9-period fade). Usually ours is fine or better; sets
-  where the producer tuned it are overridden without recourse.
-- **Attack-level `AttackStart`/`CuePoint`/`ReleaseEnd` markers unparsed**
-  (`grandorgue.rs::read_attack` reads only loops; releases add `MaxKeyPressTime`).
-  We trust wav cue chunks only (`server/bank.rs::decode` uses the last cue past
-  loop end, else loop end). Sets that define boundaries in the ODF splice from
-  the wrong frame.
-- **No release truncation.** HW: load-time truncation with frequency-shaped
-  decays for the "wet set → short tails → convolution" dry workflow, PLUS
-  real-time per-perspective tail truncation; GO: per-pipe `ReleaseTail` ms
-  voicing. We have a convolver (`reverb.rs`) but no way to dry the source
-  material. (Note: `fb7b7ad` fixed hot-EOF tails settling to silence — a
-  correctness fix, not truncation.)
-
-**Fix hints:** parse the three ODF keys (small); truncation = start a shaped fade
-`ReleaseTail` ms into Tail phase (the per-sample `tail_decay` gain machinery is
-already there — a per-voice fade trigger is nearly free); frequency-dependent
-shaping can reuse the measured `tail_decay_db_per_s` + pipe f0.
+- ~~ODF `ReleaseCrossfadeLength` ignored.~~ ✅ (`2c5e559`): overrides the
+  pitch-scaled fade on both the embedded tail and each separate release
+  (`ReleaseOption.crossfade_ms`), still capped by note age so mid-attack
+  releases collapse. It is **milliseconds** — notes corrected from GO source.
+- ~~`AttackStart`/`CuePoint`/`ReleaseEnd` unparsed.~~ ✅ (`2c5e559`):
+  `AttackStart` moves the voice's start cursor (clamped to reach the loop);
+  an explicit `CuePoint` outranks the wav cue chunk (junk inside the loop
+  falls back); `ReleaseEnd` trims the attack's embedded tail; separate
+  releases are cut to their `CuePoint..ReleaseEnd` window at decode.
+- **No release truncation** — ⚠ still open. HW: load-time truncation with
+  frequency-shaped decays for the "wet set → short tails → convolution" dry
+  workflow, plus real-time truncation; GO: per-pipe `ReleaseTail` ms voicing.
+  This is voicing-sidecar territory (§7): a per-voice fade trigger over the
+  existing `tail_decay` machinery, shaped by `tail_decay_db_per_s` + pipe f0.
 
 ---
 
-## 9. `LoopCrossfadeLength` unsupported (worse than GO) — ⚠ STILL OPEN, unchanged
+## 9. `LoopCrossfadeLength` unsupported (worse than GO) — ✅ DONE (2026-08-26)
 
 **GO:** bakes raised-cosine loop crossfades into the end-segment at load when the
 ODF asks (0–3000 ms, `DoCrossfade`, GOSoundAudioSection.cpp; loops too short are
@@ -375,8 +370,11 @@ bad loop point still thumps every pass. (Butt loops are the right default —
 Appleton 2019, 3 dB noise-dip argument in `vpo-rendering-techniques.md` §2.2 —
 but only when the producer's loops are good.)
 
-**Fix:** honor the key at decode time in `server/bank.rs::decode` — pre-render
-the crossfade into the sample data like GO. Contained, low-risk.
+**Done** (`c0c50fa`): honored at decode in `server/bank.rs::decode` — GO's
+raised-cosine blend baked into each loop's final frames toward the material
+preceding loop start (fade = ms × rate / 1000; the key is **milliseconds**,
+notes corrected). Loops too short for the fade stay butt-spliced, like GO's
+warning-and-skip. Butt loops remain the default when the ODF asks for nothing.
 
 ---
 
@@ -451,9 +449,10 @@ g. ~~GO synth trem ramps ignored.~~ ✅ **Fixed** (`b1bd337`): ODF
    `StartRate`/`StopRate` (each a `1/rate`-second ramp in GO) map onto
    `ramp_seconds` as their average; sidecar trems keep the 0.7 s default.
    Residue: one knob serves both directions where GO ramps asymmetrically.
-h. **NEW: `--record` header lies on widened streams** — see §5. Stereo 16-bit
-   header hardcoded in `spawn_recorder` while the tap delivers N-channel frames
-   after `ensure_channels` widens the device.
+h. ~~`--record` header lies on widened streams.~~ ✅ **Fixed** (2026-08-26):
+   taps carry their channel count; the first tap writes the header, and a
+   mid-run channel change closes the file and continues in a numbered
+   segment (`spawn_recorder`).
 
 ---
 
@@ -494,5 +493,6 @@ Re-verified 2026-08-26 — all still accurate, list grown:
 | Correctness nits | §12b | small, anytime |
 
 Status ledger: §1 ✅, §2 ✅ (residue), §4 ✅ (residue), §5 ✅ (residue),
-§6 ✅ (residue), §12a/c/d/g ✅;
-§3, §7, §8, §9, §10, §11, §12b/e/f/h ⚠ open.
+§6 ✅ (residue), §8 ✅ (residue: truncation → §7), §9 ✅, §12a/c/d/g/h ✅;
+§3, §7, §10, §11, §12b/e/f ⚠ open — §3 (memory) and §7 (voicing +
+combinations) are the two remaining packages that block real use.
