@@ -91,6 +91,10 @@ pub fn build(organ: &Organ, device_rate: f32) -> Result<LoadedBank> {
             .get(&rank.windchest)
             .copied()
             .unwrap_or(aristide_engine::enclosure::ENCLOSURE_NONE);
+        // Pipes decode first, then pitch decisions settle rank-wide
+        // (the junk-metadata guard below needs the whole rank in view)
+        // before specs are built.
+        let mut pending: Vec<PendingPipe> = Vec::new();
         for (pipe_index, pipe) in rank.pipes.iter().enumerate() {
             let PipeSource::Sampled { attacks, releases } = &pipe.source else {
                 continue;
@@ -144,32 +148,128 @@ pub fn build(organ: &Organ, device_rate: f32) -> Result<LoadedBank> {
                     }
                 }
             });
-            let Some(info) = entry else { continue };
+            let Some(info) = *entry else { continue };
 
-            let cents = pipe.pitch_tuning_cents + attack.pitch_offset_cents;
+            // Where the recording's pitch claim comes from: an explicit
+            // ODF MIDIKeyNumber wins (and silences the file's own
+            // fraction — GO's rule), else the file's smpl chunk.
+            let (sample_key, fraction_cents, from_smpl) =
+                match (pipe.midi_key_number, pipe.midi_pitch_fraction_cents) {
+                    (Some(key), fraction) => (Some(key), fraction.unwrap_or(0.0), false),
+                    (None, Some(fraction)) => (info.unity_note, fraction, true),
+                    (None, None) => (info.unity_note, info.unity_fraction_cents, true),
+                };
+            let original_cents = pipe.pitch_tuning_cents + attack.pitch_offset_cents;
+            let auto_cents = sample_key.map(|key| {
+                let recorded_hz = ladder_hz(key as f64 + fraction_cents / 100.0);
+                1200.0 * (pipe.nominal_frequency_hz / recorded_hz).log2()
+                    + pipe.pitch_correction_cents
+                    + attack.pitch_offset_cents
+            });
+            pending.push(PendingPipe {
+                pipe_index: pipe_index as u16,
+                info,
+                path: attack.path.clone(),
+                original_cents,
+                auto_cents,
+                from_smpl,
+                unity: from_smpl.then_some(sample_key).flatten(),
+            });
+        }
+
+        // Junk-metadata guard: several *distinct* files all claiming
+        // the same smpl unity note across a rank whose slots span
+        // different pitches is an editor's default (unity=60 stamped
+        // everywhere), not a measurement — no honest rank records two
+        // different keys at one pitch. Distrust the whole rank's smpl
+        // pitch (explicit ODF MIDIKeyNumber declarations still count).
+        let smpl_claims: HashMap<&PathBuf, u8> = pending
+            .iter()
+            .filter_map(|p| p.unity.map(|unity| (&p.path, unity)))
+            .collect();
+        let one_unity = smpl_claims.len() >= 3
+            && smpl_claims.values().collect::<std::collections::HashSet<_>>().len() == 1;
+        let distrust_smpl = one_unity && {
+            let nominals: Vec<f64> = pending
+                .iter()
+                .filter(|p| p.unity.is_some())
+                .map(|p| rank.pipes[p.pipe_index as usize].nominal_frequency_hz)
+                .collect();
+            nominals.iter().any(|&hz| (hz - nominals[0]).abs() > 1e-6)
+        };
+        if distrust_smpl {
+            skipped.push(format!(
+                "{}: ignoring embedded pitch metadata (distinct files share one \
+                 unity note across differing keys — an editor default, not a \
+                 measurement)",
+                rank.name
+            ));
+        }
+
+        let mut retuned = 0usize;
+        let mut retuned_max_cents = 0f64;
+        for p in pending {
+            let pipe = &rank.pipes[p.pipe_index as usize];
+            // The recording plays as the set voiced it (as recorded +
+            // PitchTuning) unless its own declared pitch says that
+            // lands somewhere else entirely — then the set relies on
+            // retuning from metadata (unit/extended ranks, borrowed
+            // top octaves, HW-style sets), which used to play wrongly
+            // and silently here. Within the tolerance the declared
+            // pitch and the voicing agree, and the recorded tuning —
+            // the organ's actual temperament and drift — is kept
+            // rather than flattened onto the equal ladder.
+            let cents = match p.auto_cents {
+                Some(auto) if (auto - p.original_cents).abs() > RETUNE_TOLERANCE_CENTS => {
+                    if auto.abs() > 1800.0 {
+                        // GO refuses retunes past 1800 cents; a claim
+                        // that far out is junk metadata, not intent.
+                        skipped.push(format!(
+                            "{} pipe {}: embedded pitch asks for a {auto:.0}-cent \
+                             retune; ignored",
+                            rank.name, p.pipe_index
+                        ));
+                        p.original_cents
+                    } else if p.from_smpl && distrust_smpl {
+                        p.original_cents
+                    } else {
+                        retuned += 1;
+                        retuned_max_cents = retuned_max_cents.max((auto - p.original_cents).abs());
+                        auto
+                    }
+                }
+                _ => p.original_cents,
+            };
             specs.insert(
-                (rank.id, pipe_index as u16),
+                (rank.id, p.pipe_index),
                 VoiceSpec {
-                    sample: info.index,
-                    rate: (info.sample_rate / device_rate as f64
+                    sample: p.info.index,
+                    rate: (p.info.sample_rate / device_rate as f64
                         * (cents / 1200.0).exp2()) as f32,
                     nominal_hz: pipe.nominal_frequency_hz as f32,
                     gain: db_to_linear(pipe.gain_db),
-                    percussive: info.percussive,
+                    percussive: p.info.percussive,
                     group: (rank.windchest.saturating_sub(1))
                         .min(aristide_engine::wind::MAX_WIND_GROUPS as u32 - 1)
                         as u8,
-                    wind_weight: wind_weight(pipe.nominal_frequency_hz, info.percussive),
+                    wind_weight: wind_weight(pipe.nominal_frequency_hz, p.info.percussive),
                     brightness: brightness_coefficient(
                         pipe.nominal_frequency_hz,
                         device_rate,
-                        info.percussive,
+                        p.info.percussive,
                     ),
                     enclosure,
                     bus: 0,
                     delay_frames: 0,
                 },
             );
+        }
+        if retuned > 0 {
+            skipped.push(format!(
+                "{}: {retuned} pipe(s) retuned to their recorded-pitch metadata \
+                 (largest shift {retuned_max_cents:.0} cents)",
+                rank.name
+            ));
         }
     }
 
@@ -199,10 +299,51 @@ pub fn build(organ: &Organ, device_rate: f32) -> Result<LoadedBank> {
     })
 }
 
+/// How far a recording's declared pitch may sit from where the set's
+/// voicing puts it before we believe the set *relies* on metadata
+/// retuning. Under this, the difference is the organ's own recorded
+/// tuning (temperament, drift — tens of cents) and is kept; over it,
+/// the sample sits at another key entirely (unit/extended ranks reuse
+/// on the semitone grid, ≥100 cents) and playing it as voiced would be
+/// wrong by that much, silently.
+const RETUNE_TOLERANCE_CENTS: f64 = 50.0;
+
+/// One sampled pipe awaiting its rank-wide pitch decision.
+struct PendingPipe {
+    pipe_index: u16,
+    info: DecodedInfo,
+    path: PathBuf,
+    /// Playback offset as the set voiced it: PitchTuning et al.
+    original_cents: f64,
+    /// Playback offset that lands the recording's *declared* pitch on
+    /// the pipe's nominal (GO's auto-tuning formula, PitchCorrection
+    /// folded in); `None` when nothing declares a pitch.
+    auto_cents: Option<f64>,
+    /// Whether the declaration came from the file's smpl chunk rather
+    /// than the ODF — only smpl claims fall to the junk guard.
+    from_smpl: bool,
+    /// The smpl unity note backing `auto_cents`, for the junk guard.
+    unity: Option<u8>,
+}
+
+/// The 12-EDO/A440 MIDI ladder that `smpl` unity notes and ODF
+/// MIDIKeyNumber values are defined against. A format fact about the
+/// metadata, not the tuning seam — live key→pitch policy stays in
+/// `tuning.rs`.
+fn ladder_hz(midi: f64) -> f64 {
+    440.0 * ((midi - 69.0) / 12.0).exp2()
+}
+
+#[derive(Clone, Copy)]
 struct DecodedInfo {
     index: u32,
     sample_rate: f64,
     percussive: bool,
+    /// The file's own claim of what pitch it holds: `smpl`-chunk unity
+    /// note (0 = "not set", as GO reads it) plus its fraction in cents
+    /// above that note.
+    unity_note: Option<u8>,
+    unity_fraction_cents: f64,
 }
 
 /// Decode one attack file into an engine [`Sample`].
@@ -255,6 +396,13 @@ fn decode(path: &std::path::Path, odf_loops: &[aristide_model::SampleLoop]) -> R
             index: 0, // filled by the caller after push
             sample_rate: file.info.sample_rate as f64,
             percussive: sustain_loop.is_none(),
+            unity_note: file.info.midi_unity_note.filter(|&note| note != 0),
+            // GO: dwMIDIPitchFraction / UINT_MAX × 100 cents.
+            unity_fraction_cents: file
+                .info
+                .pitch_fraction
+                .map(|fraction| fraction as f64 / u32::MAX as f64 * 100.0)
+                .unwrap_or(0.0),
         },
     ))
 }
@@ -344,6 +492,204 @@ mod tests {
             (0..count).collect()
         };
         map[channel as usize % map.len()]
+    }
+
+    /// A minimal mono 16-bit WAV with an `smpl` chunk claiming `unity`
+    /// (0 = write no smpl chunk) and one sustain loop, written to
+    /// `path`.
+    fn write_test_wav(path: &Path, unity: u8) {
+        let frames: u32 = 512;
+        let mut bytes = Vec::new();
+        let mut chunk = |id: &[u8; 4], payload: &[u8]| {
+            bytes.extend_from_slice(id);
+            bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(payload);
+        };
+        let mut fmt = Vec::new();
+        fmt.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        fmt.extend_from_slice(&1u16.to_le_bytes()); // mono
+        fmt.extend_from_slice(&44_100u32.to_le_bytes());
+        fmt.extend_from_slice(&(44_100u32 * 2).to_le_bytes());
+        fmt.extend_from_slice(&2u16.to_le_bytes());
+        fmt.extend_from_slice(&16u16.to_le_bytes());
+        chunk(b"fmt ", &fmt);
+        if unity != 0 {
+            let mut smpl = vec![0u8; 36];
+            smpl[12..16].copy_from_slice(&(unity as u32).to_le_bytes());
+            // fraction 0, one loop 64..=447
+            smpl[28..32].copy_from_slice(&1u32.to_le_bytes());
+            let mut record = [0u8; 24];
+            record[8..12].copy_from_slice(&64u32.to_le_bytes());
+            record[12..16].copy_from_slice(&447u32.to_le_bytes());
+            smpl.extend_from_slice(&record);
+            chunk(b"smpl", &smpl);
+        }
+        let mut pcm = Vec::new();
+        for i in 0..frames {
+            let value = (f64::sin(i as f64 * 0.1) * 8000.0) as i16;
+            pcm.extend_from_slice(&value.to_le_bytes());
+        }
+        chunk(b"data", &pcm);
+        let mut file = Vec::new();
+        file.extend_from_slice(b"RIFF");
+        file.extend_from_slice(&((bytes.len() + 4) as u32).to_le_bytes());
+        file.extend_from_slice(b"WAVE");
+        file.extend_from_slice(&bytes);
+        std::fs::write(path, file).expect("write test wav");
+    }
+
+    /// A one-rank organ over `pipes` = (file name, unity note,
+    /// nominal MIDI key, PitchTuning cents, ODF MIDIKeyNumber), with
+    /// files created in a fresh temp dir.
+    fn pitch_test_organ(
+        tag: &str,
+        pipes: &[(&str, u8, f64, f64, Option<u8>)],
+    ) -> aristide_model::Organ {
+        let dir = std::env::temp_dir().join(format!("aristide-pitch-test-{tag}"));
+        std::fs::create_dir_all(&dir).expect("test dir");
+        let mut rank_pipes = Vec::new();
+        for &(name, unity, nominal_midi, tuning_cents, odf_key) in pipes {
+            write_test_wav(&dir.join(name), unity);
+            rank_pipes.push(aristide_model::Pipe {
+                nominal_frequency_hz: 440.0 * ((nominal_midi - 69.0) / 12.0).exp2(),
+                pitch_tuning_cents: tuning_cents,
+                pitch_correction_cents: 0.0,
+                gain_db: 0.0,
+                midi_key_number: odf_key,
+                midi_pitch_fraction_cents: None,
+                source: aristide_model::PipeSource::Sampled {
+                    attacks: vec![aristide_model::AttackSample {
+                        path: PathBuf::from(name),
+                        loops: Vec::new(),
+                        pitch_offset_cents: 0.0,
+                    }],
+                    releases: Vec::new(),
+                },
+            });
+        }
+        aristide_model::Organ {
+            name: format!("pitch test {tag}"),
+            base_path: dir,
+            ranks: vec![aristide_model::Rank {
+                id: aristide_model::RankId(1),
+                name: "Test rank".into(),
+                windchest: 1,
+                pipes: rank_pipes,
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn rate_cents(loaded: &LoadedBank, pipe: u16) -> f64 {
+        let spec = loaded.specs.get(&(aristide_model::RankId(1), pipe)).expect("spec");
+        // File and device rates match, so the rate is purely the fold.
+        1200.0 * (spec.rate as f64).log2()
+    }
+
+    /// The §6 bug class: recordings whose declared pitch sits at
+    /// another key entirely retune to their slot; declarations that
+    /// agree with the voicing (within the organ's own tuning) keep the
+    /// recorded character; absurd claims are refused.
+    #[test]
+    fn recorded_pitch_metadata_reconciles() {
+        let organ = pitch_test_organ(
+            "reconcile",
+            &[
+                // smpl claims 60, slot wants 57, nothing voiced: the
+                // set relies on retuning — three semitones down.
+                ("borrowed.wav", 60, 57.0, 0.0, None),
+                // smpl agrees with the slot; +30 cents of voiced
+                // PitchTuning is recorded character, kept verbatim.
+                ("voiced.wav", 60, 60.0, 30.0, None),
+                // ODF declares the recording an octave below the slot.
+                ("odf-key.wav", 0, 60.0, 0.0, Some(48)),
+                // smpl claims 8 octaves off: junk, refused.
+                ("junk.wav", 127, 30.0, 0.0, None),
+            ],
+        );
+        let loaded = build(&organ, 44_100.0).expect("bank builds");
+        assert!((rate_cents(&loaded, 0) - -300.0).abs() < 1.0, "auto retune");
+        assert!((rate_cents(&loaded, 1) - 30.0).abs() < 1.0, "voicing kept");
+        assert!((rate_cents(&loaded, 2) - 1200.0).abs() < 1.0, "ODF key retune");
+        assert!(rate_cents(&loaded, 3).abs() < 1.0, "junk refused");
+        assert!(
+            loaded.skipped.iter().any(|note| note.contains("retuned")),
+            "retunes are reported: {:?}",
+            loaded.skipped
+        );
+        assert!(
+            loaded.skipped.iter().any(|note| note.contains("ignored")),
+            "refusals are reported: {:?}",
+            loaded.skipped
+        );
+    }
+
+    /// Distinct files all claiming one unity note across a rank whose
+    /// slots differ is an editor default, not a measurement — the rank
+    /// keeps its voiced tuning and says why.
+    #[test]
+    fn junk_unity_notes_are_distrusted_rank_wide() {
+        let organ = pitch_test_organ(
+            "junk-unity",
+            &[
+                ("a.wav", 60, 55.0, 0.0, None),
+                ("b.wav", 60, 60.0, 0.0, None),
+                ("c.wav", 60, 65.0, 0.0, None),
+            ],
+        );
+        let loaded = build(&organ, 44_100.0).expect("bank builds");
+        for pipe in 0..3 {
+            assert!(
+                rate_cents(&loaded, pipe).abs() < 1.0,
+                "pipe {pipe} must play as recorded"
+            );
+        }
+        assert!(
+            loaded
+                .skipped
+                .iter()
+                .any(|note| note.contains("ignoring embedded pitch")),
+            "guard is reported: {:?}",
+            loaded.skipped
+        );
+    }
+
+    /// The demo set's own metadata agrees with its voicing everywhere
+    /// (its repitch grid is encoded as PitchTuning and its smpl chunks
+    /// are honest), so reconciliation must not move a single pipe —
+    /// the organ keeps its recorded tuning. And harmonics reach the
+    /// nominal: the Plein jeu's first rank is pitched 2 octaves up
+    /// (HarmonicNumber=32) from its C2 key.
+    #[test]
+    fn demo_set_keeps_its_recorded_tuning() {
+        let Some(path) = demo_organ() else {
+            eprintln!("skipping: demo set not present");
+            return;
+        };
+        let organ = aristide_formats::grandorgue::load(&path).expect("loads").organ;
+        let loaded = build(&organ, 44_100.0).expect("bank builds");
+        assert!(
+            !loaded
+                .skipped
+                .iter()
+                .any(|note| note.contains("retuned") || note.contains("embedded pitch")),
+            "demo pipes must all keep their voiced tuning: {:?}",
+            loaded.skipped
+        );
+        let plein_jeu = organ
+            .ranks
+            .iter()
+            .find(|rank| rank.name.contains("Plein jeu 1st"))
+            .expect("plein jeu rank");
+        let c4 = 440.0 * ((60.0 - 69.0) / 12.0f64).exp2();
+        assert!(
+            (plein_jeu.pipes[0].nominal_frequency_hz - c4).abs() < 1e-6,
+            "C2 key at harmonic 32 sounds C4, got {}",
+            plein_jeu.pipes[0].nominal_frequency_hz
+        );
+        // …and its −600-cent repitch grid is untouched.
+        let spec = loaded.specs.get(&(plein_jeu.id, 0)).expect("spec");
+        assert!(((spec.rate as f64).log2() * 1200.0 + 600.0).abs() < 1.0);
     }
 
     /// The demo set's two ODF enclosures must reach the voice specs:
