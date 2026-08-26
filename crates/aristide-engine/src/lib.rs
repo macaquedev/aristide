@@ -306,6 +306,15 @@ struct SampledVoice {
     group: u8,
     /// How much wind this voice draws while sounding.
     wind_weight: f32,
+    /// Chest factors (pressure/tremulant/flow-noise pitch, gain,
+    /// brightness) cached per voice under the same rule as the box
+    /// factors below: a Held voice re-reads them each block; a
+    /// released voice keeps them FROZEN — the pallet is closed, the
+    /// tail is room decay, and it must not wobble (GO detaches
+    /// releases from the windchest likewise).
+    wind_rate: f32,
+    wind_gain: f32,
+    wind_treble: f32,
     /// Output frames since the voice started — drives the wind model's
     /// pallet-opening attack boost.
     age_frames: u32,
@@ -957,6 +966,12 @@ impl Engine {
                     // the pallet hasn't opened yet.
                     continue;
                 }
+                if sampled.phase != SamplePhase::Held {
+                    // A released or fading pipe draws none either: the
+                    // pallet has closed, only the tail is sounding —
+                    // pressure recovers while tails ring out.
+                    continue;
+                }
                 let params = self.wind[sampled.group as usize].params();
                 let attack_frames = params.attack_ms * 0.001 * self.sample_rate;
                 let boost = if (sampled.age_frames as f32) < attack_frames {
@@ -1046,28 +1061,39 @@ impl Engine {
                     let chest = &wind[sampled.group as usize];
                     let params = chest.params();
 
-                    // Per-voice flow noise, linearized around the chest
-                    // factors (a powf per voice per block would also be
-                    // fine, but ±2 % deviations are firmly linear).
-                    let mut deviation = 0.0;
-                    if !lite && params.flow_noise > 0.0 && sampled.wind_weight > 0.0 {
-                        sampled
-                            .wander
-                            .step(dt, params.flow_noise, &mut sampled.rng);
-                        deviation = sampled.wander.deviation();
+                    // Wind factors follow the swell-box rule below: a
+                    // Held voice re-reads its chest each block; a
+                    // released voice keeps the factors frozen from its
+                    // last Held block — the pallet is closed, the tail
+                    // is room decay, and trem/pressure must not wobble
+                    // it.
+                    if !lite && sampled.phase == SamplePhase::Held {
+                        // Per-voice flow noise, linearized around the
+                        // chest factors (a powf per voice per block
+                        // would also be fine, but ±2 % deviations are
+                        // firmly linear).
+                        let mut deviation = 0.0;
+                        if params.flow_noise > 0.0 && sampled.wind_weight > 0.0 {
+                            sampled
+                                .wander
+                                .step(dt, params.flow_noise, &mut sampled.rng);
+                            deviation = sampled.wander.deviation();
+                        }
+                        sampled.wind_rate =
+                            chest.rate_factor() * (1.0 + params.pitch_exponent * deviation);
+                        sampled.wind_gain =
+                            chest.gain_factor() * (1.0 + params.gain_exponent * deviation);
+                        sampled.wind_treble = (chest.brightness_factor()
+                            * (1.0 + params.brightness_exponent * deviation))
+                            .clamp(0.25, 2.0);
                     }
                     let (rate_scale, gain, treble) = if lite {
                         (1.0f64, master, 1.0f32)
                     } else {
                         (
-                            (chest.rate_factor() * (1.0 + params.pitch_exponent * deviation))
-                                as f64,
-                            master
-                                * chest.gain_factor()
-                                * (1.0 + params.gain_exponent * deviation),
-                            (chest.brightness_factor()
-                                * (1.0 + params.brightness_exponent * deviation))
-                                .clamp(0.25, 2.0),
+                            sampled.wind_rate as f64,
+                            master * sampled.wind_gain,
+                            sampled.wind_treble,
                         )
                     };
 
@@ -1263,6 +1289,16 @@ impl Engine {
                     .get(enclosure as usize)
                     .copied()
                     .unwrap_or_default();
+                // Likewise a voice starts at its chest's current
+                // factors, in case it is released before its first
+                // Held block renders (frozen values must be real).
+                let group = group.min(MAX_WIND_GROUPS as u8 - 1);
+                let chest = &self.wind[group as usize];
+                let (wind_rate, wind_gain, wind_treble) = (
+                    chest.rate_factor(),
+                    chest.gain_factor(),
+                    chest.brightness_factor().clamp(0.25, 2.0),
+                );
                 if let Some(slot) = self.allocate_slot() {
                     self.voices[slot] = Voice::Sampled(SampledVoice {
                         handle,
@@ -1289,8 +1325,11 @@ impl Engine {
                         // Onset delays are bounded only against nonsense
                         // (30 s covers any musical canon trick).
                         onset: delay_frames.min((30.0 * self.sample_rate) as u32),
-                        group: group.min(MAX_WIND_GROUPS as u8 - 1),
+                        group,
                         wind_weight: wind_weight.max(0.0),
+                        wind_rate,
+                        wind_gain,
+                        wind_treble,
                         age_frames: 0,
                         tail_decay: 1.0,
                         fade_scale: 1.0,
@@ -2087,6 +2126,57 @@ mod tests {
         );
     }
 
+    /// Releasing a chord closes its pallets: demand drops at key-off,
+    /// not when the tails finally die, so pressure starts recovering
+    /// while the tails are still sounding.
+    #[test]
+    fn released_pipes_stop_drawing_wind() {
+        let period = 480usize;
+        let (mut engine, mut handle) = Engine::new(48000.0, sine_pipe_bank(period, true));
+        engine.set_release_stagger(0.0);
+        for i in 0..30u64 {
+            handle.send(Command::StartVoice {
+                handle: 100 + i,
+                sample: 0,
+                rate: 1.0,
+                gain: 1.0,
+                group: 3,
+                wind_weight: 1.0,
+                brightness: 0.0,
+                enclosure: ENCLOSURE_NONE,
+                bus: 0,
+                delay_frames: 0,
+            });
+        }
+        let mut buffer = vec![0.0f32; 1024 * 2];
+        for _ in 0..70 {
+            engine.process(&mut buffer, 2);
+        }
+        let sagged = engine.wind_pressure(3);
+        assert!(
+            (sagged - 0.94).abs() < 0.004,
+            "steady pressure {sagged} should be ~0.94 under the chord"
+        );
+        for i in 0..30u64 {
+            handle.send(Command::StopVoice { handle: 100 + i });
+        }
+        // ~107 ms after key-off: the ~90 ms crossfades plus ~120 ms of
+        // release material keep the tails sounding, but the pallets are
+        // closed — pressure must already be well on its way back up.
+        for _ in 0..5 {
+            engine.process(&mut buffer, 2);
+        }
+        let recovering = engine.wind_pressure(3);
+        assert!(
+            recovering > 0.955,
+            "pressure {recovering} should recover while tails still ring"
+        );
+        assert!(
+            buffer.iter().any(|&v| v.abs() > 1e-4),
+            "tails already silent — recovery assertion is vacuous"
+        );
+    }
+
     #[test]
     fn limiter_prevents_clipping_without_distorting() {
         // A bank whose single voice massively exceeds full scale.
@@ -2827,6 +2917,50 @@ mod tests {
         // And the tail is actually sounding (the assertion above must
         // not pass vacuously on silence).
         assert!(open_tail.iter().any(|&v| v.abs() > 1e-4), "tail silent");
+    }
+
+    /// Same rule for the wind side: the pallet is closed at key-off,
+    /// so a tremulant engaged afterwards must not modulate the tail
+    /// (bit-identical to a run where the trem never engages).
+    #[test]
+    fn release_tail_ignores_later_tremulant() {
+        let run = |trem_after_release: bool| -> Vec<f32> {
+            let (mut engine, mut handle) = Engine::new(44_100.0, two_tone_bank());
+            engine.set_release_stagger(0.0);
+            handle.send(Command::StartVoice {
+                handle: 1,
+                sample: 0,
+                rate: 1.0,
+                gain: 1.0,
+                group: 0,
+                wind_weight: 0.0,
+                brightness: 0.0,
+                enclosure: ENCLOSURE_NONE,
+                bus: 0,
+                delay_frames: 0,
+            });
+            let sr = 44_100usize;
+            render(&mut engine, sr / 2);
+            handle.send(Command::StopVoice { handle: 1 });
+            render(&mut engine, sr / 10);
+            if trem_after_release {
+                handle.send(Command::SetTremulant {
+                    group: 0,
+                    engaged: true,
+                });
+            }
+            render(&mut engine, sr / 2)
+        };
+        let calm_tail = run(false);
+        let trem_tail = run(true);
+        assert!(
+            calm_tail
+                .iter()
+                .zip(&trem_tail)
+                .all(|(a, b)| (a - b).abs() < 1e-7),
+            "tail changed after key-off tremulant engage"
+        );
+        assert!(calm_tail.iter().any(|&v| v.abs() > 1e-4), "tail silent");
     }
 
     /// A full pedal sweep through the inertia model must not click:
