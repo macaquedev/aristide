@@ -2366,7 +2366,7 @@ struct AudioOutput {
     dsp_budget_ns: Arc<std::sync::atomic::AtomicU64>,
     /// Where each new engine's recording tap goes; the recorder thread
     /// drains them all into one WAV.
-    record: Option<std::sync::mpsc::Sender<rtrb::Consumer<f32>>>,
+    record: Option<std::sync::mpsc::Sender<(rtrb::Consumer<f32>, u16)>>,
     stream: Option<cpal::Stream>,
 }
 
@@ -2509,7 +2509,7 @@ impl AudioOutput {
         // Only a real stream's tap reaches the recorder: a consumer
         // whose build failed would drain nothing forever.
         if let (Some(sender), Some(consumer)) = (&self.record, tap) {
-            let _ = sender.send(consumer);
+            let _ = sender.send((consumer, self.channels.min(u16::MAX as usize) as u16));
         }
         Ok((stream, handle))
     }
@@ -2839,47 +2839,117 @@ fn spawn_recorder(
     path: PathBuf,
     rate: u32,
 ) -> Result<(
-    std::sync::mpsc::Sender<rtrb::Consumer<f32>>,
+    std::sync::mpsc::Sender<(rtrb::Consumer<f32>, u16)>,
     std::thread::JoinHandle<std::io::Result<()>>,
 )> {
     tracing::info!("recording engine output to {}", path.display());
-    let (sender, receiver) = std::sync::mpsc::channel::<rtrb::Consumer<f32>>();
+    let (sender, receiver) = std::sync::mpsc::channel::<(rtrb::Consumer<f32>, u16)>();
     let worker = std::thread::Builder::new()
         .name("aristide-record".into())
         .spawn(move || -> std::io::Result<()> {
             use std::io::{Seek, SeekFrom, Write};
-            let mut file = std::io::BufWriter::new(std::fs::File::create(&path)?);
-            // Placeholder RIFF/data sizes, patched at shutdown.
-            file.write_all(b"RIFF\0\0\0\0WAVEfmt ")?;
-            file.write_all(&16u32.to_le_bytes())?;
-            file.write_all(&1u16.to_le_bytes())?; // PCM
-            file.write_all(&2u16.to_le_bytes())?; // stereo
-            file.write_all(&rate.to_le_bytes())?;
-            file.write_all(&(rate * 4).to_le_bytes())?;
-            file.write_all(&4u16.to_le_bytes())?;
-            file.write_all(&16u16.to_le_bytes())?;
-            file.write_all(b"data\0\0\0\0")?;
+
+            // The header's channel count comes from the tap, not from a
+            // stereo assumption: routed buses can widen the stream, and
+            // an N-channel tap under a 2-channel header is a corrupt
+            // file. A mid-run channel change (organ load reopening the
+            // device wider) rotates to a numbered segment file.
+            fn open_segment(
+                path: &std::path::Path,
+                segment: u32,
+                rate: u32,
+                channels: u16,
+            ) -> std::io::Result<std::io::BufWriter<std::fs::File>> {
+                let target = if segment == 1 {
+                    path.to_path_buf()
+                } else {
+                    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+                    let ext = path.extension().unwrap_or_default().to_string_lossy();
+                    path.with_file_name(format!("{stem}-{segment}.{ext}"))
+                };
+                if segment > 1 {
+                    tracing::info!(
+                        "recording continues in {} ({channels} channels)",
+                        target.display()
+                    );
+                }
+                let mut file = std::io::BufWriter::new(std::fs::File::create(target)?);
+                // Placeholder RIFF/data sizes, patched by finish().
+                file.write_all(b"RIFF\0\0\0\0WAVEfmt ")?;
+                file.write_all(&16u32.to_le_bytes())?;
+                file.write_all(&1u16.to_le_bytes())?; // PCM
+                file.write_all(&channels.to_le_bytes())?;
+                file.write_all(&rate.to_le_bytes())?;
+                file.write_all(&(rate * 2 * u32::from(channels)).to_le_bytes())?;
+                file.write_all(&(2 * channels).to_le_bytes())?;
+                file.write_all(&16u16.to_le_bytes())?;
+                file.write_all(b"data\0\0\0\0")?;
+                Ok(file)
+            }
+
+            fn finish(
+                file: &mut std::io::BufWriter<std::fs::File>,
+                written: u32,
+            ) -> std::io::Result<()> {
+                let inner = file.get_mut();
+                inner.seek(SeekFrom::Start(4))?;
+                inner.write_all(&(36 + written).to_le_bytes())?;
+                inner.seek(SeekFrom::Start(40))?;
+                inner.write_all(&written.to_le_bytes())?;
+                file.flush()
+            }
+
+            let mut file: Option<std::io::BufWriter<std::fs::File>> = None;
             let mut written: u32 = 0;
-            let mut taps: Vec<rtrb::Consumer<f32>> = Vec::new();
+            let mut segment: u32 = 0;
+            let mut channels: u16 = 0;
+            let mut active: Vec<rtrb::Consumer<f32>> = Vec::new();
+            let mut pending: std::collections::VecDeque<(rtrb::Consumer<f32>, u16)> =
+                std::collections::VecDeque::new();
             while !SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
                 while let Ok(tap) = receiver.try_recv() {
-                    taps.push(tap);
+                    pending.push_back(tap);
                 }
-                for tap in &mut taps {
-                    while let Ok(value) = tap.pop() {
-                        let clamped = (value.clamp(-1.0, 1.0) * 32767.0) as i16;
-                        file.write_all(&clamped.to_le_bytes())?;
-                        written = written.saturating_add(2);
+                // Adopt taps that match the current segment's channel
+                // count (the first tap decides it).
+                while let Some(&(_, tap_channels)) = pending.front() {
+                    if file.is_none() {
+                        channels = tap_channels.max(1);
+                        segment += 1;
+                        file = Some(open_segment(&path, segment, rate, channels)?);
+                        written = 0;
+                    } else if tap_channels != channels {
+                        break;
                     }
+                    active.push(pending.pop_front().expect("front exists").0);
+                }
+                if let Some(out) = file.as_mut() {
+                    for tap in &mut active {
+                        while let Ok(value) = tap.pop() {
+                            let clamped = (value.clamp(-1.0, 1.0) * 32767.0) as i16;
+                            out.write_all(&clamped.to_le_bytes())?;
+                            written = written.saturating_add(2);
+                        }
+                    }
+                }
+                // A differently-shaped tap is waiting: once the current
+                // engines are gone and drained, close this segment so
+                // the next loop pass opens the new one.
+                if !pending.is_empty()
+                    && active
+                        .iter()
+                        .all(|tap| tap.is_abandoned() && tap.is_empty())
+                {
+                    if let Some(mut out) = file.take() {
+                        finish(&mut out, written)?;
+                    }
+                    active.clear();
                 }
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
-            let inner = file.get_mut();
-            inner.seek(SeekFrom::Start(4))?;
-            inner.write_all(&(36 + written).to_le_bytes())?;
-            inner.seek(SeekFrom::Start(40))?;
-            inner.write_all(&written.to_le_bytes())?;
-            file.flush()?;
+            if let Some(mut out) = file.take() {
+                finish(&mut out, written)?;
+            }
             Ok(())
         })?;
     Ok((sender, worker))
