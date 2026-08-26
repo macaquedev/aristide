@@ -1264,8 +1264,10 @@ mod tests {
         let pipe = |source: PipeSource| Pipe {
             nominal_frequency_hz: 440.0,
             pitch_tuning_cents: 0.0,
+            pitch_correction_cents: 0.0,
             gain_db: 0.0,
             midi_key_number: None,
+            midi_pitch_fraction_cents: None,
             source,
         };
         let sampled = |path: &str| {

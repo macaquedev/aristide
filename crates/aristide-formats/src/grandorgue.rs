@@ -210,6 +210,7 @@ struct GainChain {
     amplitude_factor: f64,
     gain_db: f64,
     pitch_tuning_cents: f64,
+    pitch_correction_cents: f64,
 }
 
 impl GainChain {
@@ -219,6 +220,8 @@ impl GainChain {
                 * (section.float_or("AmplitudeLevel", 100.0)? / 100.0),
             gain_db: parent.gain_db + section.float_or("Gain", 0.0)?,
             pitch_tuning_cents: parent.pitch_tuning_cents + section.float_or("PitchTuning", 0.0)?,
+            pitch_correction_cents: parent.pitch_correction_cents
+                + section.float_or("PitchCorrection", 0.0)?,
         })
     }
 
@@ -231,6 +234,7 @@ const ROOT_CHAIN: GainChain = GainChain {
     amplitude_factor: 1.0,
     gain_db: 0.0,
     pitch_tuning_cents: 0.0,
+    pitch_correction_cents: 0.0,
 };
 
 /// A `REF:<manual>:<stop>:<pipe>` borrow, recorded while reading pipes and
@@ -621,6 +625,10 @@ impl Builder<'_> {
         // Both standalone [RankNNN] and old-style [StopNNN] sections carry
         // their windchest assignment under the same key.
         let windchest = section.int_or("WindchestGroup", 1)?.max(1) as u32;
+        // The rank's pitch class: 8 = unison (8′), 16 = an octave up
+        // (4′), 4 = an octave down (16′), 24 = a twelfth (2⅔′)…
+        // Per-pipe overrides default to this (GO GORank/GOSoundingPipe).
+        let rank_harmonic = read_harmonic(section, "HarmonicNumber", 8)?;
         let mut pipes = Vec::with_capacity(pipe_count.max(0) as usize);
         for index in 1..=pipe_count {
             let prefix = format!("Pipe{index:03}");
@@ -629,7 +637,7 @@ impl Builder<'_> {
                 rank: id,
                 pipe: (index - 1) as u16,
             };
-            pipes.push(self.read_pipe(section, &prefix, nominal_midi, rank_chain, at)?);
+            pipes.push(self.read_pipe(section, &prefix, nominal_midi, rank_harmonic, rank_chain, at)?);
         }
         Ok(Rank {
             id,
@@ -644,6 +652,7 @@ impl Builder<'_> {
         section: &SectionReader<'_>,
         prefix: &str,
         nominal_midi: i64,
+        rank_harmonic: i64,
         rank_chain: GainChain,
         at: PipeRef,
     ) -> Result<Pipe, OdfError> {
@@ -654,10 +663,17 @@ impl Builder<'_> {
             gain_db: rank_chain.gain_db + section.float_or(&format!("{prefix}Gain"), 0.0)?,
             pitch_tuning_cents: rank_chain.pitch_tuning_cents
                 + section.float_or(&format!("{prefix}PitchTuning"), 0.0)?,
+            pitch_correction_cents: rank_chain.pitch_correction_cents
+                + section.float_or(&format!("{prefix}PitchCorrection"), 0.0)?,
         };
+        let harmonic = read_harmonic(section, &format!("{prefix}HarmonicNumber"), rank_harmonic)?;
         let mut pipe = Pipe {
-            nominal_frequency_hz: midi_to_hz(nominal_midi as f64),
+            // The true sounding pitch: the key's ladder pitch times the
+            // harmonic ratio (8 = unison). GO's expected-pitch formula
+            // log2(H/8)·1200 cents, folded into Hz here.
+            nominal_frequency_hz: midi_to_hz(nominal_midi as f64) * (harmonic as f64 / 8.0),
             pitch_tuning_cents: chain.pitch_tuning_cents,
+            pitch_correction_cents: chain.pitch_correction_cents,
             gain_db: chain.total_gain_db(),
             midi_key_number: match section.int_or(&format!("{prefix}MIDIKeyNumber"), -1)? {
                 -1 => None,
@@ -666,6 +682,19 @@ impl Builder<'_> {
                     return Err(section.invalid(
                         &format!("{prefix}MIDIKeyNumber"),
                         format!("out of range: {other}"),
+                    ));
+                }
+            },
+            midi_pitch_fraction_cents: {
+                let fraction = section.float_or(&format!("{prefix}MIDIPitchFraction"), -1.0)?;
+                if fraction < 0.0 {
+                    None
+                } else if fraction <= 100.0 {
+                    Some(fraction)
+                } else {
+                    return Err(section.invalid(
+                        &format!("{prefix}MIDIPitchFraction"),
+                        format!("out of range: {fraction}"),
                     ));
                 }
             },
@@ -782,6 +811,18 @@ fn set_pipe_source(organ: &mut Organ, at: PipeRef, source: PipeSource) {
 
 fn midi_to_hz(midi: f64) -> f64 {
     440.0 * ((midi - 69.0) / 12.0).exp2()
+}
+
+/// A `HarmonicNumber` key: GO accepts 1–1024 (GOSoundingPipe::Load).
+fn read_harmonic(
+    section: &SectionReader<'_>,
+    key: &str,
+    default: i64,
+) -> Result<i64, OdfError> {
+    match section.int_or(key, default)? {
+        harmonic @ 1..=1024 => Ok(harmonic),
+        other => Err(section.invalid(key, format!("out of range: {other}"))),
+    }
 }
 
 #[cfg(test)]
@@ -1058,6 +1099,53 @@ Pipe001PitchTuning=-15
         assert!((pipe.gain_db - (6.0 + 20.0 * 0.5f64.log10())).abs() < 1e-6);
         // Tuning adds: 10 + 5 + 0 - 15 = 0 cents.
         assert!(pipe.pitch_tuning_cents.abs() < 1e-9);
+    }
+
+    #[test]
+    fn harmonic_correction_and_fraction_reach_the_model() {
+        let text = "\
+[Organ]
+ChurchName=Pitched
+HasPedals=N
+NumberOfManuals=1
+NumberOfWindchestGroups=1
+PitchCorrection=7
+
+[WindchestGroup001]
+PitchCorrection=3
+
+[Manual001]
+Name=M
+NumberOfLogicalKeys=2
+FirstAccessibleKeyLogicalKeyNumber=1
+FirstAccessibleKeyMIDINoteNumber=60
+NumberOfAccessibleKeys=2
+NumberOfStops=1
+Stop001=1
+
+[Stop001]
+Name=Prestant 4
+FirstAccessiblePipeLogicalKeyNumber=1
+NumberOfAccessiblePipes=2
+HarmonicNumber=16
+PitchCorrection=-4
+Pipe001=a.wav
+Pipe001MIDIPitchFraction=25
+Pipe002=b.wav
+Pipe002HarmonicNumber=32
+Pipe002PitchCorrection=1
+";
+        let organ = parse_str(text).organ;
+        let pipes = &organ.ranks[0].pipes;
+        // A 4′ rank (harmonic 16) sounds the key's octave: C4 key → C5.
+        assert!((pipes[0].nominal_frequency_hz - midi_to_hz(72.0)).abs() < 1e-9);
+        // The per-pipe override doubles it again (2′-equivalent).
+        assert!((pipes[1].nominal_frequency_hz - midi_to_hz(85.0)).abs() < 1e-9);
+        // PitchCorrection adds through the chain: 7 + 3 − 4 (+1).
+        assert!((pipes[0].pitch_correction_cents - 6.0).abs() < 1e-9);
+        assert!((pipes[1].pitch_correction_cents - 7.0).abs() < 1e-9);
+        assert_eq!(pipes[0].midi_pitch_fraction_cents, Some(25.0));
+        assert_eq!(pipes[1].midi_pitch_fraction_cents, None);
     }
 
     #[test]

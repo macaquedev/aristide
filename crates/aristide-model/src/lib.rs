@@ -136,16 +136,34 @@ pub enum PipeSource {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Pipe {
     /// Nominal pitch this pipe sounds at concert tuning, before
-    /// temperament/retuning layers.
+    /// temperament/retuning layers. Loaders fold the rank's harmonic
+    /// in: a 4′ rank's pipe under key C4 has a C5 nominal, a 2⅔′
+    /// mutation the twelfth — this is the true sounding pitch, and
+    /// wind draw, brightness and release alignment all key off it.
     pub nominal_frequency_hz: f64,
     /// Set-author tuning correction in cents (already combined across
     /// the organ→windchest→rank→pipe inheritance chain by the loader).
+    /// Applied when the sample is played as recorded (GO `PitchTuning`).
     pub pitch_tuning_cents: f64,
+    /// Set-author correction in cents for the *retuned* path only:
+    /// when playback is reconciled from recorded-pitch metadata, this
+    /// replaces `pitch_tuning_cents` (GO `PitchCorrection`, likewise
+    /// chain-combined). A baroque-pitch set declares "yes, I really am
+    /// a semitone flat — keep me there" through this key.
+    #[serde(default)]
+    pub pitch_correction_cents: f64,
     /// Total gain in dB (amplitude chain folded in by the loader).
     pub gain_db: f64,
     /// Explicit MIDI key of the recording, overriding the sample file's
     /// own `smpl`-chunk unity note when present.
     pub midi_key_number: Option<u8>,
+    /// Explicit recorded-pitch fraction in cents above
+    /// `midi_key_number` (GO `MIDIPitchFraction`, 0–100), overriding
+    /// the sample's own `smpl` fraction. When `midi_key_number` is
+    /// given without this, the fraction is 0 — an explicit ODF key
+    /// silences the file's fraction too (GO's rule).
+    #[serde(default)]
+    pub midi_pitch_fraction_cents: Option<f64>,
     pub source: PipeSource,
 }
 
