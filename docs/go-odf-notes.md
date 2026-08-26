@@ -345,10 +345,23 @@ Source: `src/grandorgue/sound/providers/GOSoundProvider.cpp` lines 203-254 (`Get
 | Key | Type | Required | Range/Default |
 |---|---|---|---|
 | `TremulantType` | enum `Synth`\|`Wave` | no | default `Synth` |
-| `Period` | int | yes, only if `Synth` | 32–441000 (samples, one full cycle) |
+| `Period` | int | yes, only if `Synth` | 32–441000, **milliseconds** per full cycle |
 | `StartRate` | int | yes, only if `Synth` | 1–100 |
 | `StopRate` | int | yes, only if `Synth` | 1–100 |
 | `AmpModDepth` | int | yes, only if `Synth` | 1–100 |
+
+**Synth-tremulant semantics** (corrected 2026-08-26; the range check reads like a
+sample count but the math says milliseconds): GO synthesizes the trem control
+signal as a looping 16-bit sine "sample" at a fixed 44100 Hz with
+`trem_freq = 1000.0 / period` Hz (so the demo set's `Period=196` ≈ 5.1 Hz),
+amplitude `0x7FF0 · AmpModDepth / 100` — i.e. `AmpModDepth` is **percent of
+full-scale amplitude modulation**. `StartRate`/`StopRate` are ramp speeds: the
+synthesized attack section is `44100 / StartRate` frames and the release
+`44100 / StopRate` frames — the engage ramp lasts **`1/StartRate` seconds**
+(1–100 → 1 s down to 10 ms), disengage `1/StopRate` seconds. The signal
+modulates windchest amplitude only (block-rate, no FM). Source:
+`src/grandorgue/sound/providers/GOSoundProviderSynthedTrem.cpp` lines 29-80
+(`Create`: `trem_freq`, `attack_samples`, `trem_amp`).
 
 `Synth` tremulants are a GO-synthesized amplitude/pitch modulation applied to whatever is
 currently sounding on windchests that reference this tremulant — no extra sample files

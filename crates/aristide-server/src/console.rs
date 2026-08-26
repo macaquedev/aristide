@@ -1648,6 +1648,7 @@ mod tests {
             couplers: vec![],
             enclosures: vec![],
             windchests: vec![],
+            tremulants: vec![],
         };
         let mut specs = HashMap::new();
         for rank in 1..=2u32 {
@@ -1872,6 +1873,7 @@ mod tests {
             couplers: vec![],
             enclosures: vec![],
             windchests: vec![],
+            tremulants: vec![],
         };
         let mut specs = HashMap::new();
         for pipe in 0..73u16 {
@@ -2218,6 +2220,7 @@ mod tests {
             ],
             enclosures: vec![],
             windchests: vec![],
+            tremulants: vec![],
         };
         let mut specs = HashMap::new();
         for rank in 1..=2u32 {

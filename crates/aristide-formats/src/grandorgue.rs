@@ -202,6 +202,16 @@ impl SectionReader<'_> {
             Some(other) => Err(self.invalid(key, format!("expected Y or N, got {other:?}"))),
         }
     }
+
+    /// GO's tri-state booleans (`GOBool3`): Y, N, or absent = "either".
+    fn bool3(&self, key: &str) -> Result<Option<bool>, OdfError> {
+        match self.get(key).map(|v| v.chars().next()) {
+            None => Ok(None),
+            Some(Some('Y' | 'y')) => Ok(Some(true)),
+            Some(Some('N' | 'n')) => Ok(Some(false)),
+            Some(other) => Err(self.invalid(key, format!("expected Y or N, got {other:?}"))),
+        }
+    }
 }
 
 /// One level of GO's pipe-config inheritance tree (§8 of the notes):
@@ -285,6 +295,54 @@ impl Builder<'_> {
             });
         }
 
+        // Tremulants: name + how they undulate. Synth trems carry their
+        // modulation figures in the ODF (Period is *milliseconds* per
+        // cycle — GOSoundProviderSynthedTrem computes 1000/period Hz);
+        // Wave trems have no fields of their own here, the pipes' own
+        // IsTremulant sample variants carry the sound.
+        let tremulant_count = organ_section.int_or("NumberOfTremulants", 0)?;
+        let mut tremulants = Vec::new();
+        for index in 1..=tremulant_count {
+            let section = self.ini.section(&format!("Tremulant{index:03}"))?;
+            let name = section
+                .get("Name")
+                .unwrap_or(&format!("Tremulant {index}"))
+                .to_string();
+            let kind = match section.get("TremulantType") {
+                Some(value) if value.eq_ignore_ascii_case("Wave") => {
+                    aristide_model::TremulantKind::Wave
+                }
+                other => {
+                    if let Some(value) = other.filter(|v| !v.eq_ignore_ascii_case("Synth")) {
+                        self.warn(format!(
+                            "[Tremulant{index:03}] TremulantType={value} unknown; \
+                             treating as Synth"
+                        ));
+                    }
+                    // GO requires these for Synth trems; stay lenient
+                    // with a calm 5 Hz default and say so.
+                    let period_ms = section.float_or("Period", 0.0)?;
+                    let period_ms = if (32.0..=441000.0).contains(&period_ms) {
+                        period_ms
+                    } else {
+                        self.warn(format!(
+                            "[Tremulant{index:03}] Period={period_ms} out of range; using 200 ms"
+                        ));
+                        200.0
+                    };
+                    aristide_model::TremulantKind::Synth {
+                        period_ms,
+                        amp_mod_depth_percent: section
+                            .float_or("AmpModDepth", 18.0)?
+                            .clamp(1.0, 100.0),
+                        start_rate: section.int_or("StartRate", 8)?.clamp(1, 100) as u32,
+                        stop_rate: section.int_or("StopRate", 8)?.clamp(1, 100) as u32,
+                    }
+                }
+            };
+            tremulants.push(aristide_model::Tremulant { name, kind });
+        }
+
         let mut windchest_chains = HashMap::new();
         let mut windchests = Vec::new();
         for index in 1..=windchest_count {
@@ -305,6 +363,21 @@ impl Builder<'_> {
                             ));
                         }
                     }
+                    // TremulantNNN references, the same 1-based global
+                    // scheme (GOWindchest.cpp).
+                    let trem_count = section.int_or("NumberOfTremulants", 0)?;
+                    let mut trem_members = Vec::new();
+                    for member in 1..=trem_count {
+                        let reference = section.int(&format!("Tremulant{member:03}"))?;
+                        if (1..=tremulant_count).contains(&reference) {
+                            trem_members.push(reference as u32 - 1);
+                        } else {
+                            self.warn(format!(
+                                "[WindchestGroup{index:03}] Tremulant{member:03}={reference} \
+                                 out of range; ignored"
+                            ));
+                        }
+                    }
                     let windchest = aristide_model::Windchest {
                         number: index as u32,
                         name: section
@@ -312,6 +385,7 @@ impl Builder<'_> {
                             .unwrap_or(&format!("Windchest {index}"))
                             .to_string(),
                         enclosures: members,
+                        tremulants: trem_members,
                     };
                     (GainChain::read(&section, organ_chain)?, windchest)
                 }
@@ -323,6 +397,7 @@ impl Builder<'_> {
                         number: index as u32,
                         name: format!("Windchest {index}"),
                         enclosures: Vec::new(),
+                        tremulants: Vec::new(),
                     };
                     (organ_chain, windchest)
                 }
@@ -336,6 +411,7 @@ impl Builder<'_> {
             base_path: std::mem::take(&mut self.base_path),
             enclosures,
             windchests,
+            tremulants,
             ..Organ::default()
         };
 
@@ -756,9 +832,11 @@ impl Builder<'_> {
             let release_prefix = format!("{prefix}Release{release:03}");
             let path = section.string(&release_prefix)?;
             let max_ms = section.int_or(&format!("{release_prefix}MaxKeyPressTime"), -1)?;
+            let wave_tremulant = section.bool3(&format!("{release_prefix}IsTremulant"))?;
             releases.push(ReleaseSample {
                 path: normalize_path(path),
                 max_key_press_ms: (max_ms >= 0).then_some(max_ms as u32),
+                wave_tremulant,
             });
         }
         pipe.source = PipeSource::Sampled { attacks, releases };
@@ -787,12 +865,20 @@ impl Builder<'_> {
                 end: end as u64,
             });
         }
+        let max_since_release =
+            section.int_or(&format!("{prefix}MaxTimeSinceLastRelease"), -1)?;
         // Empty `loops` means: fall back to the WAV's own smpl chunk at
         // sample-load time.
         Ok(AttackSample {
             path: normalize_path(path),
             loops,
             pitch_offset_cents: 0.0,
+            wave_tremulant: section.bool3(&format!("{prefix}IsTremulant"))?,
+            min_velocity: section
+                .int_or(&format!("{prefix}AttackVelocity"), 0)?
+                .clamp(0, 127) as u8,
+            max_time_since_last_release_ms: (max_since_release >= 0)
+                .then_some(max_since_release as u32),
         })
     }
 
@@ -1297,11 +1383,16 @@ Pipe001LoopCount=1
 Pipe001Loop001Start=1000
 Pipe001Loop001End=48000
 Pipe001AttackCount=1
+Pipe001IsTremulant=N
 Pipe001Attack001=a-trem.wav
+Pipe001Attack001IsTremulant=Y
+Pipe001Attack001AttackVelocity=64
+Pipe001Attack001MaxTimeSinceLastRelease=250
 Pipe001ReleaseCount=2
 Pipe001Release001=a-short.wav
 Pipe001Release001MaxKeyPressTime=500
 Pipe001Release002=a-long.wav
+Pipe001Release002IsTremulant=Y
 ";
         let organ = parse_str(text).organ;
         let pipe = &organ.ranks[0].pipes[0];
@@ -1315,10 +1406,90 @@ Pipe001Release002=a-long.wav
                 end: 48000
             }]
         );
+        assert_eq!(attacks[0].wave_tremulant, Some(false));
+        assert_eq!(attacks[0].min_velocity, 0);
+        assert_eq!(attacks[0].max_time_since_last_release_ms, None);
         assert!(attacks[1].loops.is_empty());
+        assert_eq!(attacks[1].wave_tremulant, Some(true));
+        assert_eq!(attacks[1].min_velocity, 64);
+        assert_eq!(attacks[1].max_time_since_last_release_ms, Some(250));
         assert_eq!(releases.len(), 2);
         assert_eq!(releases[0].max_key_press_ms, Some(500));
+        assert_eq!(releases[0].wave_tremulant, None);
         assert_eq!(releases[1].max_key_press_ms, None);
+        assert_eq!(releases[1].wave_tremulant, Some(true));
+    }
+
+    #[test]
+    fn tremulants_parse_with_windchest_membership() {
+        let text = "\
+[Organ]
+ChurchName=Trem
+HasPedals=N
+NumberOfManuals=1
+NumberOfWindchestGroups=2
+NumberOfTremulants=2
+
+[Tremulant001]
+Name=Tremblant
+Period=196
+AmpModDepth=15
+StartRate=10
+StopRate=6
+
+[Tremulant002]
+Name=Voix humaine trem
+TremulantType=Wave
+
+[WindchestGroup001]
+Name=Main
+
+[WindchestGroup002]
+Name=Recit
+NumberOfTremulants=2
+Tremulant001=001
+Tremulant002=002
+
+[Manual001]
+Name=M
+NumberOfLogicalKeys=1
+FirstAccessibleKeyLogicalKeyNumber=1
+FirstAccessibleKeyMIDINoteNumber=60
+NumberOfAccessibleKeys=1
+NumberOfStops=1
+Stop001=1
+
+[Stop001]
+Name=S
+FirstAccessiblePipeLogicalKeyNumber=1
+NumberOfAccessiblePipes=1
+Pipe001=a.wav
+";
+        let result = parse_str(text);
+        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+        let organ = &result.organ;
+        assert_eq!(organ.tremulants.len(), 2);
+        assert_eq!(organ.tremulants[0].name, "Tremblant");
+        match organ.tremulants[0].kind {
+            aristide_model::TremulantKind::Synth {
+                period_ms,
+                amp_mod_depth_percent,
+                start_rate,
+                stop_rate,
+            } => {
+                assert_eq!(period_ms, 196.0);
+                assert_eq!(amp_mod_depth_percent, 15.0);
+                assert_eq!(start_rate, 10);
+                assert_eq!(stop_rate, 6);
+            }
+            other => panic!("expected Synth, got {other:?}"),
+        }
+        assert_eq!(
+            organ.tremulants[1].kind,
+            aristide_model::TremulantKind::Wave
+        );
+        assert!(organ.windchests[0].tremulants.is_empty());
+        assert_eq!(organ.windchests[1].tremulants, vec![0, 1]);
     }
 
     #[test]

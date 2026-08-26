@@ -89,22 +89,47 @@ pub struct SampleLoop {
 }
 
 /// One recorded attack/sustain sample of a pipe.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AttackSample {
     pub path: PathBuf,
     pub loops: Vec<SampleLoop>,
     /// Recorded pitch in cents relative to the pipe's nominal pitch
     /// (0 = in tune as recorded).
     pub pitch_offset_cents: f64,
+    /// GO `IsTremulant` tri-state: `Some(true)` = candidate only while
+    /// a wave tremulant on the pipe's chest is engaged, `Some(false)` =
+    /// only while it is not, `None` = either. Wave-tremmed sets record
+    /// each pipe twice and switch recordings instead of modulating.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wave_tremulant: Option<bool>,
+    /// Lowest MIDI velocity this attack answers to (GO
+    /// `AttackVelocity`). Selection prefers the highest qualifying
+    /// bound — the most specific match for the press.
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    pub min_velocity: u8,
+    /// Candidate only when the pipe re-speaks within this many ms of
+    /// its previous release (GO `MaxTimeSinceLastRelease`): the
+    /// fast-repetition re-attack of a pipe still speaking down.
+    /// `None` = always a candidate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_time_since_last_release_ms: Option<u32>,
+}
+
+fn is_zero_u8(value: &u8) -> bool {
+    *value == 0
 }
 
 /// One recorded release tail, selected by how long the note was held.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ReleaseSample {
     pub path: PathBuf,
     /// Only used when the note was held at most this long (ms);
     /// `None` = the default/longest release.
     pub max_key_press_ms: Option<u32>,
+    /// GO `IsTremulant` tri-state, as on [`AttackSample`]: which
+    /// wave-tremulant state this release was recorded under.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wave_tremulant: Option<bool>,
 }
 
 /// Address of one pipe within an [`Organ`].
@@ -269,6 +294,43 @@ pub struct Windchest {
     pub name: String,
     /// Indices into [`Organ::enclosures`] this chest sits inside.
     pub enclosures: Vec<u32>,
+    /// Indices into [`Organ::tremulants`] that modulate this chest.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tremulants: Vec<u32>,
+}
+
+/// How a tremulant makes its undulation.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TremulantKind {
+    /// Synthesized modulation of whatever already sounds on the member
+    /// chests (GO `Synth`). GO applies block-rate amplitude only; our
+    /// engine renders it as pressure modulation (FM+AM+brightness), with
+    /// the author's depth honoured on the amplitude leg.
+    Synth {
+        /// One full cycle in milliseconds (GO `Period`; 196 → ~5.1 Hz).
+        period_ms: f64,
+        /// Peak amplitude modulation in percent (GO `AmpModDepth`).
+        amp_mod_depth_percent: f64,
+        /// Engage ramp: GO synthesizes a `1/start_rate`-second fade-in
+        /// (GOSoundProviderSynthedTrem::Create), so 1–100 maps to
+        /// 1 s – 10 ms. Disengage likewise via `stop_rate`.
+        start_rate: u32,
+        stop_rate: u32,
+    },
+    /// Sample-switching tremulant (GO `Wave`): pipes on the member
+    /// chests carry `wave_tremulant`-marked attack/release variants,
+    /// and engaging the tremulant prefers those recordings.
+    Wave,
+}
+
+/// A tremulant as the set defines it (GO `[TremulantNNN]`): a console
+/// control undulating every pipe on its member windchests. Membership
+/// lives on [`Windchest::tremulants`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Tremulant {
+    pub name: String,
+    pub kind: TremulantKind,
 }
 
 /// Where a coupler route sends its copies.
@@ -392,6 +454,8 @@ pub struct Organ {
     pub couplers: Vec<Coupler>,
     pub enclosures: Vec<Enclosure>,
     pub windchests: Vec<Windchest>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tremulants: Vec<Tremulant>,
 }
 
 impl Organ {

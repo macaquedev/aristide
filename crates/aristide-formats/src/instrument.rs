@@ -491,12 +491,14 @@ struct Assembly<'a> {
     ranks: Vec<Rank>,
     windchests: Vec<Windchest>,
     enclosures: Vec<Enclosure>,
+    tremulants: Vec<aristide_model::Tremulant>,
     /// Source manuals pulled as whole divisions, per source: the only
     /// pulls that carry the source's own couplers with them.
     division_map: Vec<HashMap<ManualId, usize>>,
     rank_map: HashMap<(usize, RankId), RankId>,
     chest_map: HashMap<(usize, u32), u32>,
     enclosure_map: HashMap<(usize, u32), u32>,
+    tremulant_map: HashMap<(usize, u32), u32>,
     warnings: Vec<String>,
 }
 
@@ -519,10 +521,12 @@ pub fn assemble(
         ranks: Vec::new(),
         windchests: Vec::new(),
         enclosures: Vec::new(),
+        tremulants: Vec::new(),
         division_map: vec![HashMap::new(); sources.len()],
         rank_map: HashMap::new(),
         chest_map: HashMap::new(),
         enclosure_map: HashMap::new(),
+        tremulant_map: HashMap::new(),
         warnings,
     };
     for manual in &def.manuals {
@@ -551,6 +555,9 @@ pub fn assemble(
             for enclosure in 0..organ.enclosures.len() as u32 {
                 assembly.enclosure_index(source_idx, enclosure);
             }
+            for tremulant in 0..organ.tremulants.len() as u32 {
+                assembly.tremulant_index(source_idx, tremulant);
+            }
             let mut numbers: Vec<u32> = organ.windchests.iter().map(|c| c.number).collect();
             numbers.sort_unstable();
             for number in numbers {
@@ -575,6 +582,9 @@ pub fn assemble(
             let organ = &sources[source_idx].1;
             for enclosure in 0..organ.enclosures.len() as u32 {
                 assembly.enclosure_index(source_idx, enclosure);
+            }
+            for tremulant in 0..organ.tremulants.len() as u32 {
+                assembly.tremulant_index(source_idx, tremulant);
             }
             let mut numbers: Vec<u32> = organ.windchests.iter().map(|c| c.number).collect();
             numbers.sort_unstable();
@@ -851,6 +861,7 @@ fn apply_enclosure_defs(organ: &mut Organ, defs: &[EnclosureDef], warnings: &mut
                             number: chest,
                             name: String::new(),
                             enclosures: Vec::new(),
+                            tremulants: Vec::new(),
                         });
                     next_chest += 1;
                     own.number = next_chest;
@@ -1095,6 +1106,7 @@ impl Assembly<'_> {
                 number: old,
                 name: format!("{alias} chest {old}"),
                 enclosures: Vec::new(),
+                tremulants: Vec::new(),
             });
         chest.number = new;
         chest.enclosures = chest
@@ -1102,6 +1114,12 @@ impl Assembly<'_> {
             .clone()
             .into_iter()
             .filter_map(|e| self.enclosure_index(source_idx, e))
+            .collect();
+        chest.tremulants = chest
+            .tremulants
+            .clone()
+            .into_iter()
+            .filter_map(|t| self.tremulant_index(source_idx, t))
             .collect();
         self.windchests.push(chest);
         new
@@ -1122,6 +1140,24 @@ impl Assembly<'_> {
         let new = self.enclosures.len() as u32;
         self.enclosure_map.insert((source_idx, old), new);
         self.enclosures.push(enclosure.clone());
+        Some(new)
+    }
+
+    fn tremulant_index(&mut self, source_idx: usize, old: u32) -> Option<u32> {
+        if let Some(new) = self.tremulant_map.get(&(source_idx, old)) {
+            return Some(*new);
+        }
+        let organ = &self.sources[source_idx].1;
+        let Some(tremulant) = organ.tremulants.get(old as usize) else {
+            self.warnings.push(format!(
+                "{:?}: a windchest names tremulant {old}, which it hasn't got",
+                self.sources[source_idx].0
+            ));
+            return None;
+        };
+        let new = self.tremulants.len() as u32;
+        self.tremulant_map.insert((source_idx, old), new);
+        self.tremulants.push(tremulant.clone());
         Some(new)
     }
 
@@ -1248,6 +1284,7 @@ impl Assembly<'_> {
             couplers,
             enclosures: std::mem::take(&mut self.enclosures),
             windchests: std::mem::take(&mut self.windchests),
+            tremulants: std::mem::take(&mut self.tremulants),
         }
     }
 }
@@ -1275,12 +1312,11 @@ mod tests {
             pipe(PipeSource::Sampled {
                 attacks: vec![AttackSample {
                     path: PathBuf::from(path),
-                    loops: Vec::new(),
-                    pitch_offset_cents: 0.0,
+                    ..Default::default()
                 }],
                 releases: vec![ReleaseSample {
                     path: PathBuf::from(path),
-                    max_key_press_ms: None,
+                    ..Default::default()
                 }],
             })
         };
@@ -1370,13 +1406,24 @@ mod tests {
                     number: 1,
                     name: "Main".into(),
                     enclosures: vec![],
+                    tremulants: vec![],
                 },
                 Windchest {
                     number: 2,
                     name: "Swell chest".into(),
                     enclosures: vec![1],
+                    tremulants: vec![0],
                 },
             ],
+            tremulants: vec![aristide_model::Tremulant {
+                name: "Tremblant".into(),
+                kind: aristide_model::TremulantKind::Synth {
+                    period_ms: 200.0,
+                    amp_mod_depth_percent: 15.0,
+                    start_rate: 10,
+                    stop_rate: 6,
+                },
+            }],
         }
     }
 

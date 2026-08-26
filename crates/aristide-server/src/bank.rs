@@ -564,8 +564,7 @@ mod tests {
                 source: aristide_model::PipeSource::Sampled {
                     attacks: vec![aristide_model::AttackSample {
                         path: PathBuf::from(name),
-                        loops: Vec::new(),
-                        pitch_offset_cents: 0.0,
+                        ..Default::default()
                     }],
                     releases: Vec::new(),
                 },
