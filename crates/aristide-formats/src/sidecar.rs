@@ -132,6 +132,18 @@ pub struct VoicingConfig {
     /// ```
     #[serde(default, rename = "delay")]
     pub delays: Vec<OnsetDelayDef>,
+    /// Level and fine-tuning adjustments by stop pattern — the fix for
+    /// one honking stop or a division out of balance, without touching
+    /// the set:
+    ///
+    /// ```toml
+    /// [[voicing.adjust]]
+    /// stops = ["Trompette*"]
+    /// gain_db = -2.5
+    /// cents = 1.5
+    /// ```
+    #[serde(default, rename = "adjust")]
+    pub adjusts: Vec<VoicingAdjustDef>,
 }
 
 /// One onset-delay rule.
@@ -140,6 +152,18 @@ pub struct VoicingConfig {
 pub struct OnsetDelayDef {
     pub stops: Vec<String>,
     pub ms: f64,
+}
+
+/// One level/tuning voicing rule. Cents ride the same pitch math as
+/// tuning (wind draw and brightness follow the sounding pitch).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VoicingAdjustDef {
+    pub stops: Vec<String>,
+    #[serde(default)]
+    pub gain_db: f64,
+    #[serde(default)]
+    pub cents: f64,
 }
 
 /// How couplers behave at the edges of a division, and any couplers the

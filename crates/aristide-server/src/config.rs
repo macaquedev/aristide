@@ -64,8 +64,8 @@ const HEADER: &str = "\
 #                key (named by physical position)
 #   action       octave-up, octave-down, transpose-up, transpose-down,
 #                transpose:<n>, transpose-reset, stop:<name>,
-#                coupler:<name>, tremulant, tremulant:<name>, cancel,
-#                panic, enclosure:<name>
+#                coupler:<name>, tremulant, tremulant:<name>,
+#                general:<n>, set, cancel, panic, enclosure:<name>
 #   manual       optional; which keyboard a pitch action shifts. Absent
 #                means every keyboard on the same device.
 #
@@ -210,6 +210,24 @@ pub struct OrganConfig {
     /// the transposer, an expression shoe. Order is the slot numbering.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub controls: Vec<Control>,
+    /// Recallable registrations — the combination action's generals,
+    /// keyed by piston slot. Stored as names (the text vocabulary
+    /// bindings use), so a combination survives a rename honestly:
+    /// anything the loaded organ hasn't got is reported and skipped,
+    /// never silently dropped from the file.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub generals: std::collections::BTreeMap<u8, General>,
+}
+
+/// One stored general: the console state a piston brings back.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct General {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stops: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub couplers: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tremulants: Vec<String>,
 }
 
 /// One binding: this message, from this device, does this.

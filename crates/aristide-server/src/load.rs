@@ -800,6 +800,28 @@ pub fn prepare(
         if !plan.is_empty() {
             console.set_stop_routing(plan);
         }
+        // Voicing trims: level and cents per stop pattern.
+        let mut adjust: std::collections::HashMap<aristide_model::StopId, (f32, f32)> =
+            std::collections::HashMap::new();
+        for rule in &sidecar.voicing.adjusts {
+            let gain = 10f32.powf((rule.gain_db.clamp(-40.0, 20.0) as f32) / 20.0);
+            let ratio = ((rule.cents.clamp(-200.0, 200.0) / 1200.0) as f32).exp2();
+            for pattern in &rule.stops {
+                let matched = aristide_formats::sidecar::match_names(&stop_names, pattern);
+                if matched.is_empty() {
+                    load_warnings.push(format!("voicing.adjust: {pattern:?} matches nothing"));
+                }
+                for at in matched {
+                    let entry = adjust.entry(stop_ids[at].0).or_insert((1.0, 1.0));
+                    entry.0 *= gain;
+                    entry.1 *= ratio;
+                }
+            }
+        }
+        if !adjust.is_empty() {
+            tracing::info!("voicing: {} stop(s) trimmed", adjust.len());
+            console.set_stop_adjust(adjust);
+        }
     }
     tracing::info!(
         "tuning: {} @ a'={} Hz, transpose {:+}",

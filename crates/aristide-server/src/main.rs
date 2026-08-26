@@ -551,6 +551,9 @@ pub struct State {
     /// loaded). The plain `tremulant` action/endpoint toggles them all;
     /// named actions (`tremulant:Tremblant`) reach one.
     pub trems: Vec<TremControl>,
+    /// The combination setter: while armed, the next general press
+    /// stores the current registration instead of recalling.
+    pub setter_armed: bool,
     pub master_gain: f32,
     /// Reverb wet level; `None` = no IR loaded.
     pub reverb_wet: Option<f32>,
@@ -1243,6 +1246,21 @@ impl State {
                 let engaged = !self.trems.iter().any(|t| t.engaged);
                 self.set_tremulant(engaged);
             }
+            (control::Action::General(slot), _) => {
+                let slot = *slot;
+                self.general(slot);
+            }
+            (control::Action::Set, _) => {
+                self.setter_armed = !self.setter_armed;
+                tracing::info!(
+                    "setter {}",
+                    if self.setter_armed {
+                        "armed — the next general press stores"
+                    } else {
+                        "disarmed"
+                    }
+                );
+            }
             (control::Action::Cancel, _) => {
                 let Control::Organ(console) = control else {
                     return;
@@ -1270,6 +1288,160 @@ impl State {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// A general piston: recall the stored registration — or, with the
+    /// setter armed, store the current one (and disarm, as a console's
+    /// Set does).
+    pub fn general(&mut self, slot: u8) {
+        if self.setter_armed {
+            self.setter_armed = false;
+            self.store_general(slot);
+        } else {
+            self.recall_general(slot);
+        }
+    }
+
+    /// Capture the console as it stands into a general, by name — the
+    /// text vocabulary bindings use, so the file stays honest across
+    /// renames — and persist it with the organ's other per-organ state.
+    pub fn store_general(&mut self, slot: u8) {
+        let Control::Organ(console) = &self.control else {
+            return;
+        };
+        let stops: Vec<String> = console
+            .stop_states()
+            .iter()
+            .filter(|(_, _, _, _, drawn)| *drawn)
+            .map(|(_, name, _, _, _)| name.to_string())
+            .collect();
+        let couplers: Vec<String> = console
+            .coupler_states()
+            .iter()
+            .filter(|(_, _, engaged, available)| *engaged && *available)
+            .map(|(_, name, _, _)| name.to_string())
+            .collect();
+        let tremulants: Vec<String> = self
+            .trems
+            .iter()
+            .filter(|trem| trem.engaged)
+            .map(|trem| trem.name.clone())
+            .collect();
+        tracing::info!(
+            "general {slot} stored: {} stop(s), {} coupler(s), {} tremulant(s)",
+            stops.len(),
+            couplers.len(),
+            tremulants.len()
+        );
+        let organ = self.organ_key.clone();
+        self.midi_config.organs.entry(organ).or_default().generals.insert(
+            slot,
+            config::General {
+                stops,
+                couplers,
+                tremulants,
+            },
+        );
+        self.persist();
+    }
+
+    /// Bring a stored general back: every stop, coupler and tremulant
+    /// diffs to the stored state — landing on held keys immediately,
+    /// as pistons on an electric action do. Stored names the loaded
+    /// organ hasn't got are reported and skipped, never fatal.
+    pub fn recall_general(&mut self, slot: u8) {
+        let Some(general) = self
+            .midi_config
+            .organs
+            .get(&self.organ_key)
+            .and_then(|organ| organ.generals.get(&slot))
+            .cloned()
+        else {
+            tracing::info!("general {slot}: nothing stored");
+            return;
+        };
+        // Tremulant targets first (their toggles need &mut self after
+        // the console borrow ends).
+        let trem_targets: Vec<(usize, bool)> = self
+            .trems
+            .iter()
+            .enumerate()
+            .map(|(index, trem)| {
+                (index, general.tremulants.iter().any(|n| *n == trem.name))
+            })
+            .collect();
+        let mut missing: Vec<String> = general
+            .tremulants
+            .iter()
+            .filter(|name| !self.trems.iter().any(|t| t.name == **name))
+            .map(|name| format!("tremulant {name:?}"))
+            .collect();
+        {
+            let State {
+                engine, control, ..
+            } = &mut *self;
+            let Control::Organ(console) = control else {
+                return;
+            };
+            let stop_states: Vec<(StopId, String, bool)> = console
+                .stop_states()
+                .iter()
+                .map(|(id, name, _, _, drawn)| (*id, name.to_string(), *drawn))
+                .collect();
+            for name in &general.stops {
+                if !stop_states.iter().any(|(_, n, _)| n == name) {
+                    missing.push(format!("stop {name:?}"));
+                }
+            }
+            for (id, name, drawn) in stop_states {
+                let wanted = general.stops.iter().any(|n| *n == name);
+                if wanted != drawn {
+                    let (stopped, starts) = console.set_drawn(id, wanted);
+                    for handle in stopped {
+                        engine.send(Command::StopVoice { handle });
+                    }
+                    for start in starts {
+                        engine.send(start_command(&start));
+                    }
+                }
+            }
+            let coupler_states: Vec<(usize, String, bool, bool)> = console
+                .coupler_states()
+                .iter()
+                .map(|(index, name, engaged, available)| {
+                    (*index, name.to_string(), *engaged, *available)
+                })
+                .collect();
+            for name in &general.couplers {
+                if !coupler_states
+                    .iter()
+                    .any(|(_, n, _, available)| n == name && *available)
+                {
+                    missing.push(format!("coupler {name:?}"));
+                }
+            }
+            for (index, name, engaged, available) in coupler_states {
+                if !available {
+                    continue;
+                }
+                let wanted = general.couplers.iter().any(|n| *n == name);
+                if wanted != engaged {
+                    let (stopped, starts) = console.set_coupler(index, wanted);
+                    for handle in stopped {
+                        engine.send(Command::StopVoice { handle });
+                    }
+                    for start in starts {
+                        engine.send(start_command(&start));
+                    }
+                }
+            }
+        }
+        for (index, wanted) in trem_targets {
+            self.set_tremulant_at(index, wanted);
+        }
+        if !missing.is_empty() {
+            tracing::warn!("general {slot}: not on this organ: {}", missing.join(", "));
         }
     }
 
@@ -2253,6 +2425,7 @@ fn main() -> Result<()> {
         channel_bend: HashMap::new(),
         ltn_cache: HashMap::new(),
         trems: Vec::new(),
+        setter_armed: false,
         master_gain: args.master_gain.unwrap_or(0.178),
         reverb_wet: None,
         expression_cc: 11,
@@ -2810,6 +2983,7 @@ fn perform_load(
     state.control = Control::Organ(console);
     state.suggested_channels = suggested_channels;
     state.trems = trems;
+    state.setter_armed = false;
     state.reverb_wet = reverb.map(|(_, wet)| wet);
     state.expression_cc = expression_cc;
     state.composite_path = composite.map(|(path, _)| path);
@@ -3464,6 +3638,49 @@ fn midi_note_to_hz(key: u8) -> f32 {
 mod tests {
     use super::*;
 
+    /// A general captures the console and brings it back: store with
+    /// the setter armed, wipe everything, recall — the same stops,
+    /// coupler and tremulant return.
+    #[test]
+    fn generals_store_and_recall() {
+        let Some((state, _)) = demo_state("Montre 8'") else {
+            return;
+        };
+        let mut state = state.lock().expect("state");
+        if let Control::Organ(console) = &mut state.control {
+            console.set_coupler(0, true);
+        }
+        state.set_tremulant(true);
+        state.setter_armed = true;
+        state.general(3);
+        assert!(!state.setter_armed, "storing disarms the setter");
+
+        if let Control::Organ(console) = &mut state.control {
+            console.cancel();
+            console.set_coupler(0, false);
+        }
+        state.set_tremulant(false);
+        if let Control::Organ(console) = &state.control {
+            assert!(
+                console.stop_states().iter().all(|(_, _, _, _, drawn)| !drawn),
+                "cancel wiped the registration"
+            );
+        }
+
+        state.general(3);
+        if let Control::Organ(console) = &state.control {
+            assert!(
+                console
+                    .stop_states()
+                    .iter()
+                    .any(|(_, name, _, _, drawn)| *drawn && *name == "Montre 8'"),
+                "the stored stop returns"
+            );
+            assert!(console.coupler_states()[0].2, "the stored coupler returns");
+        }
+        assert!(state.trems[0].engaged, "the stored tremulant returns");
+    }
+
     /// A live state on the demo set, with `stop` drawn so notes make
     /// voices (held keys are only recorded for pipes that speak).
     fn demo_state(stop: &str) -> Option<(Arc<Mutex<State>>, usize)> {
@@ -3516,6 +3733,7 @@ mod tests {
                 groups: vec![0],
                 engaged: false,
             }],
+            setter_armed: false,
             master_gain: 0.178,
             reverb_wet: None,
             expression_cc: 11,

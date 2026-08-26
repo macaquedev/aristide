@@ -86,6 +86,12 @@ pub enum Action {
     /// Toggle a tremulant by name — or every tremulant the organ has,
     /// the way one switch serves the whole console (`None`).
     Tremulant(Option<String>),
+    /// Recall the numbered general combination — or store it, when the
+    /// setter is armed. The organist's thumb pistons.
+    General(u8),
+    /// Arm/disarm the setter: while armed, the next general press
+    /// stores the current registration instead of recalling.
+    Set,
     /// Retire everything, as the cancel piston does.
     Cancel,
     /// Silence: every voice killed, however it got there.
@@ -113,6 +119,8 @@ impl Action {
             "stop" => Action::Stop(named(argument)?),
             "coupler" => Action::Coupler(named(argument)?),
             "tremulant" => Action::Tremulant(named(argument)),
+            "general" => Action::General(argument.parse().ok()?),
+            "set" => Action::Set,
             "cancel" => Action::Cancel,
             "panic" => Action::Panic,
             "enclosure" => Action::Enclosure(named(argument)?),
@@ -140,6 +148,8 @@ impl fmt::Display for Action {
             Action::Coupler(name) => write!(f, "coupler:{name}"),
             Action::Tremulant(None) => write!(f, "tremulant"),
             Action::Tremulant(Some(name)) => write!(f, "tremulant:{name}"),
+            Action::General(slot) => write!(f, "general:{slot}"),
+            Action::Set => write!(f, "set"),
             Action::Cancel => write!(f, "cancel"),
             Action::Panic => write!(f, "panic"),
             Action::Enclosure(name) => write!(f, "enclosure:{name}"),
@@ -148,13 +158,15 @@ impl fmt::Display for Action {
 }
 
 /// Every action a UI can offer, in the order it reads best.
-pub const CATALOGUE: [&str; 10] = [
+pub const CATALOGUE: [&str; 12] = [
     "octave-up",
     "octave-down",
     "transpose-up",
     "transpose-down",
     "transpose-reset",
     "tremulant",
+    "general:",
+    "set",
     "cancel",
     "panic",
     "stop:",
@@ -231,6 +243,8 @@ mod tests {
             "coupler:II/I",
             "tremulant",
             "tremulant:Tremblant",
+            "general:3",
+            "set",
             "cancel",
             "panic",
             "enclosure:Récit",

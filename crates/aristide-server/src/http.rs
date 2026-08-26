@@ -994,6 +994,18 @@ fn respond(
             engine.send(Command::AllNotesOff);
             json(state_json_locked(&state))
         }
+        (Method::Post, "/api/general") => {
+            let slot = param(query, "n").and_then(|v| v.parse::<u8>().ok());
+            let mut state = state.lock().expect("state poisoned");
+            if let Some(slot) = slot {
+                if param(query, "store") == Some("1") {
+                    state.store_general(slot);
+                } else {
+                    state.recall_general(slot);
+                }
+            }
+            json(state_json_locked(&state))
+        }
         (Method::Post, "/api/trem") => {
             let on = param(query, "on") == Some("1");
             let index = param(query, "idx").and_then(|v| v.parse::<usize>().ok());
@@ -1185,9 +1197,17 @@ fn state_json_locked(state: &State) -> String {
         ));
     }
     // The single-knob field the console renders today: any engaged.
+    let general_slots: Vec<String> = state
+        .midi_config
+        .organs
+        .get(&state.organ_key)
+        .map(|organ| organ.generals.keys().map(|slot| slot.to_string()).collect())
+        .unwrap_or_default();
     out.push_str(&format!(
-        "],\"tremulant\":{},\"gain\":{}",
+        "],\"tremulant\":{},\"generals\":[{}],\"setter\":{},\"gain\":{}",
         state.trems.iter().any(|t| t.engaged),
+        general_slots.join(","),
+        state.setter_armed,
         state.master_gain
     ));
     if let Control::Organ(console) = &state.control {
@@ -1819,6 +1839,7 @@ mod tests {
                 groups: vec![0, 1],
                 engaged: false,
             }],
+            setter_armed: false,
             master_gain: 0.178,
             reverb_wet: Some(0.25),
             expression_cc: 11,
@@ -2700,6 +2721,7 @@ mod tests {
             channel_bend: std::collections::HashMap::new(),
             ltn_cache: std::collections::HashMap::new(),
             trems: Vec::new(),
+            setter_armed: false,
             master_gain: 0.178,
             reverb_wet: None,
             expression_cc: 11,

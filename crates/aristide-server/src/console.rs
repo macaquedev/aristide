@@ -108,6 +108,10 @@ pub struct Console {
     /// sidecar's `[routing]`/`[voicing]` — stamped onto each voice's
     /// spec as it is priced. Stops not named route to bus 0, delay 0.
     stop_routing: HashMap<StopId, (u8, u32)>,
+    /// Per stop: (linear gain, pitch ratio) from the sidecar's
+    /// `[[voicing.adjust]]` — the user's own level/tuning trim,
+    /// stamped like routing.
+    stop_adjust: HashMap<StopId, (f32, f32)>,
     /// Per manual: the inclusive MIDI note range that manual answers to.
     /// Starts as the sample set's own compass and is widened to the
     /// player's keyboard (see `set_compass`) — a key outside it is
@@ -228,6 +232,7 @@ impl Console {
             held_velocity: HashMap::new(),
             speaking: HashMap::new(),
             stop_routing: HashMap::new(),
+            stop_adjust: HashMap::new(),
             last_pipe_voice: HashMap::new(),
             attack_options: HashMap::new(),
             last_released: HashMap::new(),
@@ -472,6 +477,12 @@ impl Console {
     /// delay in frames). Applies from the next voice started.
     pub fn set_stop_routing(&mut self, routing: HashMap<StopId, (u8, u32)>) {
         self.stop_routing = routing;
+    }
+
+    /// Install the sidecar's per-stop voicing trims (linear gain,
+    /// pitch ratio).
+    pub fn set_stop_adjust(&mut self, adjust: HashMap<StopId, (f32, f32)>) {
+        self.stop_adjust = adjust;
     }
 
     /// Re-price every held voice under the current tunings and return
@@ -944,6 +955,13 @@ impl Console {
                         spec.bus = bus;
                         spec.delay_frames = delay_frames;
                     }
+                    // The user's voicing trim: level directly, cents
+                    // through the same pitch fold as tuning below.
+                    let adjust = self.stop_adjust.get(&stop.id).copied();
+                    if let Some((gain, _)) = adjust {
+                        spec.gain *= gain;
+                    }
+                    let adjust_ratio = adjust.map_or(1.0, |(_, ratio)| ratio);
                     // Identity at cent resolution: two keys anchored to
                     // the same pipe but bent apart are two virtual
                     // pipes; two keys the scale sends to the same pitch
@@ -957,7 +975,7 @@ impl Console {
                         deviation,
                         target,
                         ladder_key: midi_key,
-                        spec: self.voiced(spec, ratio * bend_ratio),
+                        spec: self.voiced(spec, ratio * bend_ratio * adjust_ratio),
                     });
                 }
             }
@@ -1906,6 +1924,29 @@ mod tests {
         assert!(
             (starts[0].spec.rate - 2.0).abs() < 1e-6,
             "rate follows the variant: {}",
+            starts[0].spec.rate
+        );
+    }
+
+    /// A `[[voicing.adjust]]` trim lands on every voice the stop
+    /// prices: level directly, cents through the pitch fold.
+    #[test]
+    fn voicing_adjust_trims_level_and_pitch() {
+        let mut console = test_console();
+        console.set_drawn(StopId(2), false);
+        let mut adjust = HashMap::new();
+        adjust.insert(StopId(1), (0.5f32, 1.01f32));
+        console.set_stop_adjust(adjust);
+        let (starts, _) = console.note_on_manual(0, 60, 127);
+        assert_eq!(starts.len(), 1);
+        assert!(
+            (starts[0].spec.gain - 0.5).abs() < 1e-6,
+            "gain trim: {}",
+            starts[0].spec.gain
+        );
+        assert!(
+            (starts[0].spec.rate - 1.01).abs() < 1e-6,
+            "pitch trim: {}",
             starts[0].spec.rate
         );
     }
