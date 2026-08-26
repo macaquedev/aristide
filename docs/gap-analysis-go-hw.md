@@ -23,11 +23,11 @@ Related repo research (don't duplicate, extend): `docs/research/release-modeling
 `docs/research/vpo-rendering-techniques.md`, `docs/research/hauptwerk-wind-model.md`,
 `docs/go-odf-notes.md`.
 
-Suggested overall priority (2026-08-26 revision, updated same day): §2+§4
-landed — **next: §3 → §8+§9 → §7**, then the residues. The memory wall (§3)
-is the "can't load my set" blocker; §8+§9 (release/loop ODF keys, truncation,
-crossfade baking) are small and finish "sets sound as authored"; combinations
-(§7) block serious playing use.
+Suggested overall priority (2026-08-26 revision, updated through the day):
+§2+§4, §8+§9, and §3's core (16-bit residency, load cache, parallel decode)
+have all landed. **Next: §7** (voicing sidecar + combination action — blocks
+serious playing use), then §3's streaming for sets beyond RAM, §5/§12
+residues, and the HW-only fidelity gaps (§10/§11).
 
 ---
 
@@ -124,7 +124,7 @@ per tremulant. Sets may alternatively ship real tremmed ranks that play directly
 
 ---
 
-## 3. Memory & load scalability (worse than GO and HW) — ⚠ STILL OPEN, unchanged
+## 3. Memory & load scalability (worse than GO and HW) — ✅ LARGELY DONE (2026-08-26)
 
 **GO:** per-pipe/organ `BitsPerSample` 8/12/16/20/24; optional lossless delta
 compression in RAM (`encode = val - (prev + (prev-last)/2)`, 8/16-bit packing,
@@ -140,24 +140,32 @@ compression on by default** (disabling costs 40–60% more RAM, "no effect on
 audio"), per-rank disable of multiple attacks/loops/releases, release truncation
 at load, rank enable/disable. (UG5 p76; DS5 p14.)
 
-**Aristide (re-verified 2026-08-26, nothing changed):** every sample fully
-decoded to interleaved **f32** and kept resident
-(`aristide-engine/src/bank.rs::Sample.data: Vec<f32>`; `SampleBank::resident_bytes`).
-No bit-depth option, no compression, no cache (full re-decode + re-analysis —
-period refinement, tail measurement — every launch), no streaming, no
-partial-load options, and decoding is **single-threaded** (`server/bank.rs::build`
-loops sequentially; no rayon/thread pool in the workspace).
+**Aristide now (2026-08-26):**
+- **(a) 16-bit residency is the default** (`SampleData::{F32,I16}`;
+  sidecar `[samples] bits = 16|32`, 32 = bit-exact f32 for A/B). Analysis
+  (periods, phase maps, tail measurement) always runs at full decode
+  precision, then quantizes. Dedicated i16 SIMD sinc kernels (SSE2 + AVX2,
+  sign-extend in-register, dequant scale folded into the final sum) hold the
+  read cost to ≈ +8% for −50% RAM and halved memory traffic; the equivalence
+  test pins i16 reads within quantization noise of f32.
+- **(b) GO-style load cache** (`server/cache.rs`; `[samples] cache = false`
+  opts out): decoded samples + all analysis persist under
+  `~/.config/aristide/cache/`, validity **per entry** (source mtime+size and a
+  hash of the exact decode inputs — the ODF attack/release record, aligning
+  pitch, residency), so an ODF edit invalidates only what it touched. Atomic
+  temp+rename writes; any structural surprise reads as a miss. Demo set:
+  440 ms cold → ~30 ms warm.
+- **(c) parallel decode**: every unique file decodes and analyzes on a worker
+  pool (`available_parallelism`), assembly stays sequential.
 
-**Impact:** hard scalability wall. 16-bit compressed HW set of 8 GB ≈ 30+ GB here
-(f32 = 2× 16-bit, plus no compression ≈ another 1.5–2×). Big free sets (Friesach
-full ~ tens of GB in HW terms) simply won't fit. Load time also scales badly.
-
-**Fix hints (independent sub-tasks):** (a) i16 storage + dequant at read (the
-sinc reader touches samples in exactly one place — `SincTable::read` /
-`Sample::raw`); (b) GO-style load cache: serialize decoded data + analysis
-results keyed by a content hash; (c) parallel decode (embarrassingly parallel
-over files); (d) per-rank mono/loop/release load options; (e) streaming is the
-big one, design already sketched in DESIGN.md/bank.rs comments.
+**Remaining (the true residue):**
+- **(e) streaming** — the big one; still needed for sets that exceed RAM even
+  at 16-bit. Design sketched in DESIGN.md/bank.rs comments.
+- (d) per-rank load options (mono downmix, first-loop/first-release-only,
+  rank disable).
+- Lossless delta compression (GO's) would buy another ~1.5–2× at RT decode
+  cost — worth revisiting only if 16-bit residency still doesn't fit a
+  target set.
 
 ---
 
@@ -484,7 +492,7 @@ Re-verified 2026-08-26 — all still accurate, list grown:
 | Work package | Sections | Independent? |
 |---|---|---|
 | ~~Tremulants + multi-attack~~ | §2 + §4 | ✅ landed 2026-08-26 (residue: mid-hold wave switch, trem UI) |
-| Memory (i16 + load cache + parallel decode; streaming later) | §3 | yes, now top priority |
+| ~~Memory (i16 + load cache + parallel decode)~~ | §3 | ✅ landed 2026-08-26 (residue: streaming, per-rank load options) |
 | Release ODF keys + truncation | §8 | yes (small) |
 | Loop crossfade baking | §9 | yes (small) |
 | Voicing sidecar (gain/cents/brightness) + combination action | §7 | control-side only |
@@ -492,7 +500,8 @@ Re-verified 2026-08-26 — all still accurate, list grown:
 | Pitch residue (`IgnorePitch`/`AcceptsRetuning`, temperament table) | §6 residue | yes (small) |
 | Correctness nits | §12b | small, anytime |
 
-Status ledger: §1 ✅, §2 ✅ (residue), §4 ✅ (residue), §5 ✅ (residue),
-§6 ✅ (residue), §8 ✅ (residue: truncation → §7), §9 ✅, §12a/c/d/g/h ✅;
-§3, §7, §10, §11, §12b/e/f ⚠ open — §3 (memory) and §7 (voicing +
-combinations) are the two remaining packages that block real use.
+Status ledger: §1 ✅, §2 ✅ (residue), §3 ✅ (residue: streaming, load
+options), §4 ✅ (residue), §5 ✅ (residue), §6 ✅ (residue), §8 ✅ (residue:
+truncation → §7), §9 ✅, §12a/c/d/g/h ✅;
+§7, §10, §11, §12b/e/f ⚠ open — §7 (voicing + combinations) is the one
+remaining package that blocks real use.

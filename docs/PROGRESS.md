@@ -3,6 +3,7 @@
 Newest first. One entry per work session; keep entries factual and short.
 Milestones refer to DESIGN.md.
 
+- [2026-08-26 — the memory wall comes down: 16-bit residency, parallel decode, load cache (gap §3)](progress/2026-08-26-memory-wall.md)
 - [2026-08-26 — tremulants come alive; attacks stop machine-gunning (gap §2+§4)](progress/2026-08-26-tremulants-and-multi-attack.md)
 - [2026-08-24 — keyboard kinds + Scala scales (M6 opens)](progress/2026-08-24-keyboard-kinds-and-scala.md)
 - [2026-08-18 — couplers become routes](progress/2026-08-18-flexible-couplers.md)
