@@ -40,8 +40,10 @@ function splitLabel(name) {
 export class Console {
   /// `openPreferences(tab)` is how the console reaches the settings that
   /// no longer live on the bar itself — the tuning readout is a button
-  /// onto its own preferences tab. `enterEditMode()` is what an empty
-  /// organ's card offers instead: straight into the editor, no dialog.
+  /// onto its own preferences tab. `enterEditMode(x, y)` is what an
+  /// empty organ's card offers instead: editing unlocked and the add
+  /// menu open at the click — an empty organ is already auto-unlocked,
+  /// so unlocking alone would visibly do nothing.
   /// `decorate` is set by main.js after construction (see editor.js) and
   /// called at the end of every structural `build()` — Console builds
   /// the DOM, the editor only ever decorates what's already there.
@@ -127,13 +129,18 @@ export class Console {
     title.textContent = snapshot.organ ?? "Untitled organ";
     const note = document.createElement("p");
     note.textContent =
-      "An empty organ — unlock editing, then double-click anywhere to add " +
+      "An empty organ, ready to edit — double-click anywhere to add " +
       "manuals and sample sets. Added sets offer their stops in the " +
       "Library drawer, ready to drag onto a manual.";
     const open = document.createElement("button");
     open.type = "button";
-    open.textContent = "Unlock and build";
-    open.addEventListener("click", () => this.enterEditMode());
+    open.textContent = "Start building";
+    // stopPropagation: the click must not reach the window listener
+    // that closes popovers, or it would shut the add menu it opens.
+    open.addEventListener("click", (event) => {
+      event.stopPropagation();
+      this.enterEditMode(event.clientX, event.clientY);
+    });
     this.el.emptyCard.append(title, note, open);
   }
 

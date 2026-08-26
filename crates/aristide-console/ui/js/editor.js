@@ -183,6 +183,17 @@ export class Editor {
     this.unlock();
   }
 
+  /// The empty-organ card's "Unlock and build". Unlocking alone would
+  /// be a no-op there — an empty organ auto-unlocks the moment it
+  /// loads (see `update`) — so the button delivers the build half too:
+  /// the add menu opens where the click landed, the same menu the
+  /// double-click gesture reaches.
+  beginBuild(x, y) {
+    if (!this.unlocked) this.unlock();
+    const rect = this.el.canvas.getBoundingClientRect();
+    this.openAddMenu(x ?? rect.left + rect.width / 2, y ?? rect.top + rect.height / 2);
+  }
+
   unlock() {
     this.unlocked = true;
     this.hideLockNote();

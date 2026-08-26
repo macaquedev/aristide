@@ -26,7 +26,7 @@ let snapshot = {}; // the latest state, for menus that ask what is true now
 const prefs = new Preferences(document, base, (query) => send(query));
 const picker = new Picker(document, base, (query) => send(query));
 const editor = new Editor(document, base, (query) => send(query));
-const view = new Console(document, (query) => send(query), (tab) => prefs.open(tab), () => editor.unlock());
+const view = new Console(document, (query) => send(query), (tab) => prefs.open(tab), (x, y) => editor.beginBuild(x, y));
 view.decorate = (snapshot) => editor.decorateConsole(snapshot);
 const keys = new PianoKeys(document, (query) => send(query));
 const conflict = new ConflictDialog(document, (query) => send(query));
