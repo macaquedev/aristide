@@ -232,7 +232,21 @@ pub struct Pipe {
     /// silences the file's fraction too (GO's rule).
     #[serde(default)]
     pub midi_pitch_fraction_cents: Option<f64>,
+    /// Whether pitch metadata may retune this pipe away from how it
+    /// was voiced (GO `AcceptsRetuning`, rank default folded in by the
+    /// loader). False = play as recorded, whatever the metadata claims
+    /// — chiffs, percussions and effects opt out this way.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub accepts_retuning: bool,
     pub source: PipeSource,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 impl Pipe {

@@ -273,7 +273,9 @@ pub fn build(organ: &Organ, device_rate: f32) -> Result<LoadedBank> {
             // pitch and the voicing agree, and the recorded tuning —
             // the organ's actual temperament and drift — is kept
             // rather than flattened onto the equal ladder.
-            let cents = match p.auto_cents {
+            // A pipe (or rank) declaring AcceptsRetuning=N plays as
+            // voiced no matter what the metadata claims.
+            let cents = match p.auto_cents.filter(|_| pipe.accepts_retuning) {
                 Some(auto) if (auto - p.original_cents).abs() > RETUNE_TOLERANCE_CENTS => {
                     if auto.abs() > 1800.0 {
                         // GO refuses retunes past 1800 cents; a claim
@@ -691,6 +693,7 @@ mod tests {
                 gain_db: 0.0,
                 midi_key_number: odf_key,
                 midi_pitch_fraction_cents: None,
+                accepts_retuning: true,
                 source: aristide_model::PipeSource::Sampled {
                     attacks: vec![aristide_model::AttackSample {
                         path: PathBuf::from(name),
@@ -739,6 +742,7 @@ mod tests {
                     gain_db: 0.0,
                     midi_key_number: None,
                     midi_pitch_fraction_cents: None,
+                    accepts_retuning: true,
                     source: aristide_model::PipeSource::Sampled {
                         attacks: vec![
                             aristide_model::AttackSample {
@@ -783,6 +787,22 @@ mod tests {
         }
     }
 
+    /// ODF `AcceptsRetuning=N`: the pipe plays as voiced no matter how
+    /// far its metadata says it sits from the slot.
+    #[test]
+    fn accepts_retuning_off_disables_the_auto_retune() {
+        // smpl claims 60, slot wants 57: normally a 3-semitone retune.
+        let mut organ =
+            pitch_test_organ("no-retune", &[("borrowed.wav", 60, 57.0, 0.0, None)]);
+        organ.ranks[0].pipes[0].accepts_retuning = false;
+        let loaded = build(&organ, 44_100.0).expect("builds");
+        assert!(
+            rate_cents(&loaded, 0).abs() < 1.0,
+            "declared AcceptsRetuning=N must play as voiced: {} cents",
+            rate_cents(&loaded, 0)
+        );
+    }
+
     /// ODF sample boundaries: `AttackStart` moves the playback origin,
     /// `ReleaseEnd` trims an attack's embedded tail, and a separate
     /// release is cut to its `CuePoint`..`ReleaseEnd` window; the
@@ -808,6 +828,7 @@ mod tests {
                     gain_db: 0.0,
                     midi_key_number: None,
                     midi_pitch_fraction_cents: None,
+                    accepts_retuning: true,
                     source: aristide_model::PipeSource::Sampled {
                         attacks: vec![aristide_model::AttackSample {
                             path: PathBuf::from("att.wav"),
@@ -867,6 +888,7 @@ mod tests {
                     gain_db: 0.0,
                     midi_key_number: None,
                     midi_pitch_fraction_cents: None,
+                    accepts_retuning: true,
                     source: aristide_model::PipeSource::Sampled {
                         attacks: vec![aristide_model::AttackSample {
                             path: PathBuf::from("looped.wav"),

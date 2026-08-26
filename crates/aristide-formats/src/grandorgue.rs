@@ -721,6 +721,7 @@ impl Builder<'_> {
         // (4′), 4 = an octave down (16′), 24 = a twelfth (2⅔′)…
         // Per-pipe overrides default to this (GO GORank/GOSoundingPipe).
         let rank_harmonic = read_harmonic(section, "HarmonicNumber", 8)?;
+        let rank_retuning = section.bool_or("AcceptsRetuning", true)?;
         let mut pipes = Vec::with_capacity(pipe_count.max(0) as usize);
         for index in 1..=pipe_count {
             let prefix = format!("Pipe{index:03}");
@@ -729,7 +730,15 @@ impl Builder<'_> {
                 rank: id,
                 pipe: (index - 1) as u16,
             };
-            pipes.push(self.read_pipe(section, &prefix, nominal_midi, rank_harmonic, rank_chain, at)?);
+            pipes.push(self.read_pipe(
+                section,
+                &prefix,
+                nominal_midi,
+                rank_harmonic,
+                rank_retuning,
+                rank_chain,
+                at,
+            )?);
         }
         Ok(Rank {
             id,
@@ -740,12 +749,14 @@ impl Builder<'_> {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn read_pipe(
         &mut self,
         section: &SectionReader<'_>,
         prefix: &str,
         nominal_midi: i64,
         rank_harmonic: i64,
+        rank_retuning: bool,
         rank_chain: GainChain,
         at: PipeRef,
     ) -> Result<Pipe, OdfError> {
@@ -791,6 +802,8 @@ impl Builder<'_> {
                     ));
                 }
             },
+            accepts_retuning: section
+                .bool_or(&format!("{prefix}AcceptsRetuning"), rank_retuning)?,
             source: PipeSource::Silent,
         };
 

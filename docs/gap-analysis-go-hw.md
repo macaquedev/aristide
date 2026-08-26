@@ -278,8 +278,12 @@ default, not a measurement). Repitched/borrowed/extended pipes ride the same
 math. The "silent wrong-octave" bug class is closed.
 
 **Remaining gaps:**
-- `IgnorePitch` and per-rank `AcceptsRetuning` are not implemented — no per-rank
-  opt-out of the auto-retune heuristic.
+- ~~`AcceptsRetuning`~~ ✅ (2026-08-26): parsed per rank (default true) and per
+  pipe (default = rank), folded into `Pipe.accepts_retuning`; `false` skips the
+  auto-retune reconciliation entirely. `IgnorePitch` turns out to be a
+  **CMBSetting** (GO's per-organ user settings file), not an ODF key
+  (`GOPipeConfig.cpp` reads it with `CMBSetting`) — the equivalent user-side
+  override belongs to our voicing sidecar, not the loader.
 - The tolerance heuristic is deliberately not GO's exact temperament-conditional
   dispatch; divergence is documented in `go-odf-notes.md`. Watch for sets where
   a <50-cent metadata error should have been corrected.

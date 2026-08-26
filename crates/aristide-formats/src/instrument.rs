@@ -1306,6 +1306,7 @@ mod tests {
             gain_db: 0.0,
             midi_key_number: None,
             midi_pitch_fraction_cents: None,
+            accepts_retuning: true,
             source,
         };
         let sampled = |path: &str| {
