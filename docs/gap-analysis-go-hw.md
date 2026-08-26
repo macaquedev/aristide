@@ -24,10 +24,11 @@ Related repo research (don't duplicate, extend): `docs/research/release-modeling
 `docs/go-odf-notes.md`.
 
 Suggested overall priority (2026-08-26 revision, updated through the day):
-§2+§4, §8+§9, and §3's core (16-bit residency, load cache, parallel decode)
-have all landed. **Next: §7** (voicing sidecar + combination action — blocks
-serious playing use), then §3's streaming for sets beyond RAM, §5/§12
-residues, and the HW-only fidelity gaps (§10/§11).
+§2+§4, §8+§9, §3's core (16-bit residency, load cache, parallel decode) and
+§7's core (voicing trims, generals + setter) have all landed. **Next**: the
+residues by musical value — divisionals/sequencer (§7), mid-hold wave-trem
+switch (§2), streaming (§3) — plus §5/§12 residues and the HW-only fidelity
+gaps (§10/§11).
 
 ---
 
@@ -304,7 +305,7 @@ math. The "silent wrong-octave" bug class is closed.
 
 ---
 
-## 7. Voicing tools & combination action — ⚠ MOSTLY OPEN (bindings/MIDI-learn landed)
+## 7. Voicing tools & combination action — ✅ CORE LANDED (2026-08-26)
 
 **GO:** per-pipe hierarchical config editable live in the UI and persisted per
 organ (.cmb): Amplitude, Gain dB, ManualTuning, TrackerDelay, ReleaseTail ms,
@@ -322,23 +323,24 @@ divisions, MIDI learn on everything. (UG5 pp213–215.)
   stops, couplers, tremulant, cancel, enclosures — with genuine **MIDI learn**
   (`/api/midi/bind`, `/api/control/bind`, learn state machines in `main.rs`),
   persisted per organ. The Tauri console (panel canvas) edits all of it.
-- **Voicing sidecar exists but covers one parameter:** `[[voicing.delay]]`
-  (per-stop-pattern onset delay, load-time only). No per-pipe/per-rank gain,
-  cents, or brightness voicing yet — even though all three exist as per-voice
-  engine parameters (`gain`, `rate`, `brightness_a`), so the engine side is free.
-- **Combinations:** only a general **cancel** piston (`Action::Cancel`,
-  `/api/cancel`). No recallable registrations — no generals/divisionals,
-  no sequencer, no crescendo.
+- **Voicing trims** (2026-08-26): `[[voicing.adjust]]` — `gain_db` and
+  `cents` by stop pattern, stamped at voice pricing exactly like routing;
+  cents ride the same pitch fold as tuning so wind draw and brightness follow
+  the sounding pitch. The fix for one honking stop or an unbalanced division.
+- **Generals** (2026-08-26): `general:<n>` recalls a stored registration —
+  stops, couplers, tremulants diffed to the stored state, landing on held
+  keys like an electric action; `set` arms the setter so the next general
+  press *stores* (and disarms, as consoles do). Stored as names in the
+  per-organ user config (bindings' text-vocabulary rule: a name the loaded
+  organ hasn't got is reported and skipped, never dropped from the file).
+  `POST /api/general?n=&store=`, `"generals"`/`"setter"` in the state JSON.
 
-**Impact:** usability. No way to fix one honking pipe or balance a division;
-no hands-free registration changes. Blocks serious use even when the sound is
-right.
-
-**Fix hints:** extend the voicing sidecar schema (per-pipe/pattern gain/cents/
-brightness → the existing engine params), HTTP endpoints + console editor after;
-combination action is pure control-side state (drawn-stop sets keyed to piston
-numbers, triggered through the existing binding vocabulary — the plumbing is
-already there).
+**Remaining:**
+- Voicing at *pipe* scope (key ranges) and a brightness/EQ leg; a console
+  voicing editor and live HTTP adjustment (sidecar is load-time).
+- Divisionals, the stepper/sequencer, crescendo; GO's `DivisionalsStore*`
+  semantics; a console piston rail (UI work, screenshot harness).
+- HW-style release truncation as a voicing parameter (from §8).
 
 ---
 
@@ -501,7 +503,8 @@ Re-verified 2026-08-26 — all still accurate, list grown:
 | Correctness nits | §12b | small, anytime |
 
 Status ledger: §1 ✅, §2 ✅ (residue), §3 ✅ (residue: streaming, load
-options), §4 ✅ (residue), §5 ✅ (residue), §6 ✅ (residue), §8 ✅ (residue:
-truncation → §7), §9 ✅, §12a/c/d/g/h ✅;
-§7, §10, §11, §12b/e/f ⚠ open — §7 (voicing + combinations) is the one
-remaining package that blocks real use.
+options), §4 ✅ (residue), §5 ✅ (residue), §6 ✅ (residue), §7 ✅ core
+(residue: divisionals/sequencer/crescendo, pipe-scope voicing, UI),
+§8 ✅ (residue: truncation), §9 ✅, §12a/c/d/g/h ✅;
+§10, §11, §12b/e/f ⚠ open. What remains is residue and the HW-only
+fidelity gaps — no whole package blocks real use any more.
