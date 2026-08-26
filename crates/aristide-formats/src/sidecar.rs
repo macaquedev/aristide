@@ -34,8 +34,11 @@ pub struct Sidecar {
     pub registration: Registration,
     #[serde(default)]
     pub wind: Wind,
-    #[serde(default)]
-    pub tremulant: Tremulant,
+    /// A hand-declared tremulant. `None` (section absent) lets the
+    /// set's own `[Tremulant]` definitions stand; writing the section
+    /// replaces them with this single instrument-wide one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tremulant: Option<Tremulant>,
     #[serde(default)]
     pub tuning: TuningConfig,
     #[serde(default)]

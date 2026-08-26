@@ -112,6 +112,10 @@ pub enum Command {
     },
     /// Engage/disengage one wind group's tremulant (ramped).
     SetTremulant { group: u8, engaged: bool },
+    /// Flag one wind group's *wave* tremulant: no synthesized
+    /// modulation, only which recording variants pipes on the chest
+    /// prefer — held voices will pick releases matching this state.
+    SetWaveTremulant { group: u8, engaged: bool },
     /// Reconfigure one enclosure's box model.
     SetEnclosure {
         enclosure: u8,
@@ -362,6 +366,10 @@ struct SampledVoice {
     /// same millisecond across a chord, and spreading the release also
     /// spreads the crossfade CPU spike that a mass release causes.
     pending_release: Option<(u16, u32)>,
+    /// The chest's wave-tremulant state as this voice last saw it —
+    /// which recording variant its release should match. Follows the
+    /// live state while Held (GO selects by the state at key-off).
+    wave_trem: bool,
     phase: SamplePhase,
     /// The cursor has left the sustain loop for release material (set at
     /// crossfade completion). Loop wrapping and seam-tap reads must never
@@ -635,6 +643,11 @@ impl SampledVoice {
             let chosen = sample
                 .release_options()
                 .iter()
+                .filter(|option| {
+                    option
+                        .wave_trem
+                        .is_none_or(|wants| wants == self.wave_trem)
+                })
                 .find(|option| option.max_hold_ms.is_none_or(|max| age_ms <= max));
             if let Some(option) = chosen {
                 self.external_release = Some(option.sample);
@@ -778,6 +791,9 @@ pub struct Engine {
     /// Output buses (scratch + delay rings preallocated; see routing.rs).
     buses: Vec<Bus>,
     wind: [WindGroup; MAX_WIND_GROUPS],
+    /// Wave-tremulant state per wind group (bitmask): sample-variant
+    /// selection only, no modulation — see [`Command::SetWaveTremulant`].
+    wave_trems: u32,
     enclosures: [Enclosure; MAX_ENCLOSURES],
     reverb: Option<reverb::Reverb>,
     /// Diagnostic "safe mode": linear interpolation, no wind/tremulant/
@@ -824,6 +840,7 @@ impl Engine {
             voices: vec![Voice::Idle; MAX_VOICES].into_boxed_slice(),
             buses: (0..MAX_BUSES).map(|_| Bus::new(sample_rate)).collect(),
             wind: [WindGroup::default(); MAX_WIND_GROUPS],
+            wave_trems: 0,
             enclosures: [Enclosure::default(); MAX_ENCLOSURES],
             reverb: None,
             lite: false,
@@ -1334,6 +1351,7 @@ impl Engine {
                         tail_decay: 1.0,
                         fade_scale: 1.0,
                         pending_release: None,
+                        wave_trem: self.wave_trems & (1u32 << u32::from(group).min(31)) != 0,
                         brightness_a: brightness.clamp(0.0, 1.0),
                         lowpass: [0.0; 2],
                         enclosure,
@@ -1379,6 +1397,24 @@ impl Engine {
             Command::SetTremulant { group, engaged } => {
                 if let Some(wind) = self.wind.get_mut(group as usize) {
                     wind.set_tremulant(engaged);
+                }
+            }
+            Command::SetWaveTremulant { group, engaged } => {
+                let bit = 1u32 << u32::from(group).min(31);
+                if engaged {
+                    self.wave_trems |= bit;
+                } else {
+                    self.wave_trems &= !bit;
+                }
+                // Held voices follow the switch so their eventual
+                // release matches the state at key-off; tails keep the
+                // state they released under.
+                for voice in self.voices.iter_mut() {
+                    if let Voice::Sampled(sampled) = voice {
+                        if sampled.group == group && sampled.phase == SamplePhase::Held {
+                            sampled.wave_trem = engaged;
+                        }
+                    }
                 }
             }
             Command::SetEnclosure { enclosure, params } => {
@@ -2381,8 +2417,8 @@ mod tests {
         // Push releases first so their indices exist for attach.
         let short_id = bank.push(short);
         let long_id = bank.push(long);
-        source.attach_release(bank.get(short_id).expect("short"), short_id, Some(300));
-        source.attach_release(bank.get(long_id).expect("long"), long_id, None);
+        source.attach_release(bank.get(short_id).expect("short"), short_id, Some(300), None);
+        source.attach_release(bank.get(long_id).expect("long"), long_id, None, None);
         let source_id = bank.push(source);
         let bank = Arc::new(bank);
 
@@ -2423,6 +2459,105 @@ mod tests {
         assert!(
             tenuto > 0.9,
             "tenuto should use the 1.5 s release, rang for {tenuto:.2} s"
+        );
+    }
+
+    /// A wave tremulant switches which recorded release a note-off
+    /// splices to: pipes carry `IsTremulant`-marked variants, and the
+    /// voice matches the chest's wave-trem state at key-off.
+    #[test]
+    fn releases_select_by_wave_trem_state() {
+        let period = 480usize;
+        let omega = std::f64::consts::TAU / period as f64;
+        let sine = |frames: usize, envelope: &dyn Fn(usize) -> f64| -> Vec<f32> {
+            (0..frames)
+                .map(|n| (envelope(n) * (omega * n as f64).sin()) as f32)
+                .collect()
+        };
+        let attack_frames = period * 16;
+        let mut source = Sample::new(
+            sine(attack_frames, &|_| 1.0),
+            1,
+            48000.0,
+            Some(((period * 4) as u64, (period * 12) as u64)),
+            attack_frames as u64,
+        )
+        .expect("valid");
+        source.align_release(48000.0 / period as f32);
+        let plain = Sample::new(
+            sine(7200, &|n| 1.0 - n as f64 / 7200.0),
+            1,
+            48000.0,
+            None,
+            7200,
+        )
+        .expect("valid");
+        let tremmed = Sample::new(
+            sine(72000, &|n| 1.0 - n as f64 / 72000.0),
+            1,
+            48000.0,
+            None,
+            72000,
+        )
+        .expect("valid");
+
+        let mut bank = SampleBank::default();
+        let plain_id = bank.push(plain);
+        let tremmed_id = bank.push(tremmed);
+        source.attach_release(bank.get(plain_id).expect("plain"), plain_id, None, Some(false));
+        source.attach_release(
+            bank.get(tremmed_id).expect("tremmed"),
+            tremmed_id,
+            None,
+            Some(true),
+        );
+        let source_id = bank.push(source);
+        let bank = Arc::new(bank);
+
+        let audible_seconds = |trem_on: bool| -> f64 {
+            let (mut engine, mut handle) = Engine::new(48000.0, Arc::clone(&bank));
+            engine.set_release_stagger(0.0);
+            handle.send(Command::StartVoice {
+                handle: 1,
+                sample: source_id,
+                rate: 1.0,
+                gain: 1.0,
+                group: 0,
+                wind_weight: 0.0,
+                brightness: 0.0,
+                enclosure: ENCLOSURE_NONE,
+                bus: 0,
+                delay_frames: 0,
+            });
+            if trem_on {
+                // Engaged mid-hold: the held voice must follow the
+                // switch, exactly as an organist drawing the trem does.
+                handle.send(Command::SetWaveTremulant {
+                    group: 0,
+                    engaged: true,
+                });
+            }
+            let mut buffer = vec![0.0f32; 24000 * 2];
+            engine.process(&mut buffer, 2);
+            handle.send(Command::StopVoice { handle: 1 });
+            let mut buffer = vec![0.0f32; 96000 * 2];
+            engine.process(&mut buffer, 2);
+            let last = buffer
+                .chunks(2)
+                .rposition(|f| f[0].abs() > 0.001)
+                .unwrap_or(0);
+            last as f64 / 48000.0
+        };
+
+        let dry = audible_seconds(false);
+        let undulating = audible_seconds(true);
+        assert!(
+            dry < 0.35,
+            "trem off must pick the plain 0.15 s release, rang {dry:.2} s"
+        );
+        assert!(
+            undulating > 0.9,
+            "trem on must pick the tremmed 1.5 s release, rang {undulating:.2} s"
         );
     }
 

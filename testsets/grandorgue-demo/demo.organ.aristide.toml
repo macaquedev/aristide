@@ -29,13 +29,14 @@ transpose = 0
 # ir = "synthetic"        # or a path to an IR wav next to the set
 # wet = 0.2
 
-[tremulant]
-# Toggled from the web console. This set defines no windchest groups,
-# so the tremulant acts on the whole organ (chest 1).
-# Typical range 4-7 Hz; lower = calmer.
-rate_hz = 4.6
-depth_cents = 12.0
-chests = [1]
+# The set's own [Tremulant001] ("Tremblant", 196 ms ≈ 5.1 Hz on the
+# Récit chest) is read from the ODF and needs nothing here. Writing a
+# [tremulant] section replaces the set's tremulants with this single
+# instrument-wide one:
+# [tremulant]
+# rate_hz = 4.6           # typical range 4-7 Hz; lower = calmer
+# depth_cents = 12.0
+# chests = [3]            # 1-based ODF windchest numbers; empty = all
 
 [enclosures]
 # Swell boxes (the set defines two: Recit on chest 3, an undisplayed

@@ -996,8 +996,13 @@ fn respond(
         }
         (Method::Post, "/api/trem") => {
             let on = param(query, "on") == Some("1");
-            apply_trem(state, on);
-            json(state_json(state))
+            let index = param(query, "idx").and_then(|v| v.parse::<usize>().ok());
+            let mut state = state.lock().expect("state poisoned");
+            match index {
+                Some(index) => state.set_tremulant_at(index, on),
+                None => state.set_tremulant(on),
+            }
+            json(state_json_locked(&state))
         }
         (Method::Post, "/api/enclosure") => {
             let index = param(query, "idx").and_then(|v| v.parse::<usize>().ok());
@@ -1102,28 +1107,6 @@ fn send_start(engine: &mut aristide_engine::EngineHandle, noise: Option<crate::c
     }
 }
 
-fn apply_trem(state: &Mutex<State>, on: bool) {
-    let mut state = state.lock().expect("state poisoned");
-    let changed = state.trem_engaged != on;
-    state.trem_engaged = on;
-    let groups = state.trem_groups.clone();
-    for group in groups {
-        state.engine.send(Command::SetTremulant { group, engaged: on });
-    }
-    if changed {
-        let State {
-            engine, control, ..
-        } = &mut *state;
-        if let Control::Organ(console) = control {
-            let (start, stop) = console.tremulant_toggle_noise(on);
-            send_start(engine, start);
-            if let Some(handle) = stop {
-                engine.send(Command::StopVoice { handle });
-            }
-        }
-    }
-}
-
 fn state_json(state: &Mutex<State>) -> String {
     state_json_locked(&state.lock().expect("state poisoned"))
 }
@@ -1190,9 +1173,22 @@ fn state_json_locked(state: &State) -> String {
             ));
         }
     }
+    out.push_str("],\"trems\":[");
+    for (index, trem) in state.trems.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        out.push_str(&format!(
+            "{{\"idx\":{index},\"name\":{},\"on\":{}}}",
+            json_string(&trem.name),
+            trem.engaged
+        ));
+    }
+    // The single-knob field the console renders today: any engaged.
     out.push_str(&format!(
         "],\"tremulant\":{},\"gain\":{}",
-        state.trem_engaged, state.master_gain
+        state.trems.iter().any(|t| t.engaged),
+        state.master_gain
     ));
     if let Control::Organ(console) = &state.control {
         out.push_str(&format!(",\"organ\":{}", json_string(console.organ_name())));
@@ -1817,8 +1813,12 @@ mod tests {
             live_notes: std::collections::HashMap::new(),
             channel_bend: std::collections::HashMap::new(),
             ltn_cache: std::collections::HashMap::new(),
-            trem_groups: vec![0, 1],
-            trem_engaged: false,
+            trems: vec![crate::TremControl {
+                name: "Tremulant".into(),
+                wave: false,
+                groups: vec![0, 1],
+                engaged: false,
+            }],
             master_gain: 0.178,
             reverb_wet: Some(0.25),
             expression_cc: 11,
@@ -2699,8 +2699,7 @@ mod tests {
             live_notes: std::collections::HashMap::new(),
             channel_bend: std::collections::HashMap::new(),
             ltn_cache: std::collections::HashMap::new(),
-            trem_groups: Vec::new(),
-            trem_engaged: false,
+            trems: Vec::new(),
             master_gain: 0.178,
             reverb_wet: None,
             expression_cc: 11,

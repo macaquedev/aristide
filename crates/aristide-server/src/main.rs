@@ -260,10 +260,22 @@ pub enum Subject {
     Stop(StopId),
     Coupler(usize),
     Enclosure(usize),
+    /// Index into [`State::trems`], for a named tremulant action.
+    Tremulant(usize),
     /// A pitch action's target: one manual, or every keyboard on the
     /// device the trigger arrived on.
     Manual(usize),
     Device,
+}
+
+/// One engageable tremulant on the loaded organ, as the control plane
+/// tracks it: which engine wind groups it drives and whether it is a
+/// wave (sample-switching) or synth (pressure-modulating) tremulant.
+pub struct TremControl {
+    pub name: String,
+    pub wave: bool,
+    pub groups: Vec<u8>,
+    pub engaged: bool,
 }
 
 /// One assignment as the MIDI callback sees it: already resolved to a
@@ -534,10 +546,10 @@ pub struct State {
     /// Lumatone maps by the path the config spelled, loaded once;
     /// `None` records a failed load so it isn't retried every rescan.
     pub ltn_cache: HashMap<String, Option<std::sync::Arc<aristide_model::lumatone::LumatoneMap>>>,
-    /// Wind groups the tremulant acts on (from the sidecar; empty when
-    /// no set is loaded).
-    pub trem_groups: Vec<u8>,
-    pub trem_engaged: bool,
+    /// The loaded organ's engageable tremulants (empty when no set is
+    /// loaded). The plain `tremulant` action/endpoint toggles them all;
+    /// named actions (`tremulant:Tremblant`) reach one.
+    pub trems: Vec<TremControl>,
     pub master_gain: f32,
     /// Reverb wet level; `None` = no IR loaded.
     pub reverb_wet: Option<f32>,
@@ -964,6 +976,10 @@ impl State {
                 let names: Vec<&str> = names.iter().map(String::as_str).collect();
                 Subject::Enclosure(boxes[one(&names, name)?].0)
             }
+            control::Action::Tremulant(Some(name)) => {
+                let names: Vec<&str> = self.trems.iter().map(|t| t.name.as_str()).collect();
+                Subject::Tremulant(one(&names, name)?)
+            }
             control::Action::Transpose(_) | control::Action::TransposeReset => match manual {
                 Some(name) => {
                     let names = self.manual_names();
@@ -1218,8 +1234,12 @@ impl State {
                     send(start_command(&start));
                 }
             }
-            (control::Action::Tremulant, _) => {
-                let engaged = !self.trem_engaged;
+            (control::Action::Tremulant(_), Subject::Tremulant(index)) => {
+                let engaged = self.trems.get(index).is_some_and(|t| t.engaged);
+                self.set_tremulant_at(index, !engaged);
+            }
+            (control::Action::Tremulant(None), _) => {
+                let engaged = !self.trems.iter().any(|t| t.engaged);
                 self.set_tremulant(engaged);
             }
             (control::Action::Cancel, _) => {
@@ -1252,12 +1272,39 @@ impl State {
         }
     }
 
-    /// Engage or release the tremulant, with its own switch noise.
+    /// Engage or release every tremulant at once — what the plain
+    /// `tremulant` binding and the console's single knob mean.
     pub fn set_tremulant(&mut self, on: bool) {
-        let changed = self.trem_engaged != on;
-        self.trem_engaged = on;
-        for group in self.trem_groups.clone() {
-            self.engine.send(Command::SetTremulant { group, engaged: on });
+        for index in 0..self.trems.len() {
+            self.set_tremulant_at(index, on);
+        }
+    }
+
+    /// Engage or release one tremulant, with the switch noise.
+    pub fn set_tremulant_at(&mut self, index: usize, on: bool) {
+        let Some(trem) = self.trems.get_mut(index) else {
+            return;
+        };
+        let changed = trem.engaged != on;
+        trem.engaged = on;
+        let wave = trem.wave;
+        let groups = trem.groups.clone();
+        if wave {
+            // Sample-switching tremulant: new notes on these chests
+            // pick their `wave_tremulant` attack variants, and the
+            // engine selects matching releases at note-off.
+            if let Control::Organ(console) = &mut self.control {
+                for &group in &groups {
+                    console.set_wave_tremulant(group, on);
+                }
+            }
+            for group in groups {
+                self.engine.send(Command::SetWaveTremulant { group, engaged: on });
+            }
+        } else {
+            for group in groups {
+                self.engine.send(Command::SetTremulant { group, engaged: on });
+            }
         }
         if !changed {
             return;
@@ -2204,8 +2251,7 @@ fn main() -> Result<()> {
         live_notes: HashMap::new(),
         channel_bend: HashMap::new(),
         ltn_cache: HashMap::new(),
-        trem_groups: Vec::new(),
-        trem_engaged: false,
+        trems: Vec::new(),
         master_gain: args.master_gain.unwrap_or(0.178),
         reverb_wet: None,
         expression_cc: 11,
@@ -2586,7 +2632,7 @@ fn perform_load(
         console,
         bank,
         wind,
-        tremulant,
+        tremulants,
         enclosures,
         expression_cc,
         reverb,
@@ -2708,24 +2754,37 @@ fn perform_load(
         );
         handle.send(Command::SetEnclosure { enclosure, params });
     }
-    let trem_groups = match &tremulant {
-        Some((params, groups)) => {
+    let mut trems = Vec::new();
+    for setup in tremulants {
+        if setup.wave {
             tracing::info!(
-                "tremulant: {:.1} Hz, ±{:.0}% pressure, chests {:?}",
-                params.rate_hz,
-                params.depth * 100.0,
-                groups
+                "tremulant {:?}: wave (sample-switching), chests {:?}",
+                setup.name,
+                setup.groups
             );
-            for &group in groups {
+        } else {
+            tracing::info!(
+                "tremulant {:?}: {:.1} Hz, ±{:.0}% pressure, ramp {:.2} s, chests {:?}",
+                setup.name,
+                setup.params.rate_hz,
+                setup.params.depth * 100.0,
+                setup.params.ramp_seconds,
+                setup.groups
+            );
+            for &group in &setup.groups {
                 handle.send(Command::SetTremulantParams {
                     group,
-                    params: *params,
+                    params: setup.params,
                 });
             }
-            groups.clone()
         }
-        None => Vec::new(),
-    };
+        trems.push(TremControl {
+            name: setup.name,
+            wave: setup.wave,
+            groups: setup.groups,
+            engaged: false,
+        });
+    }
 
     let mut state = state.lock().expect("state poisoned");
     // Assignments are per organ, so the loaded set's own name is the
@@ -2749,8 +2808,7 @@ fn perform_load(
     state.engine = handle;
     state.control = Control::Organ(console);
     state.suggested_channels = suggested_channels;
-    state.trem_groups = trem_groups;
-    state.trem_engaged = false;
+    state.trems = trems;
     state.reverb_wet = reverb.map(|(_, wet)| wet);
     state.expression_cc = expression_cc;
     state.composite_path = composite.map(|(path, _)| path);
@@ -3381,8 +3439,12 @@ mod tests {
             keyboard: Vec::new(),
             live_notes: HashMap::new(),
             channel_bend: HashMap::new(),
-            trem_groups: Vec::new(),
-            trem_engaged: false,
+            trems: vec![TremControl {
+                name: "Tremulant".into(),
+                wave: false,
+                groups: vec![0],
+                engaged: false,
+            }],
             master_gain: 0.178,
             reverb_wet: None,
             expression_cc: 11,
@@ -4076,7 +4138,10 @@ mod tests {
                 !console.is_drawn(stop),
                 "the press worked the stop it names"
             );
-            assert!(state.trem_engaged, "and the tremulant, both from one press");
+            assert!(
+                state.trems.iter().any(|t| t.engaged),
+                "and the tremulant, both from one press"
+            );
         }
 
         // Re-pointing the kept row at another action keeps its

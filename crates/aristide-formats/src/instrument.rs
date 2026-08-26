@@ -113,7 +113,7 @@ pub struct Definition {
     #[serde(default)]
     pub wind: sidecar::Wind,
     #[serde(default)]
-    pub tremulant: sidecar::Tremulant,
+    pub tremulant: Option<sidecar::Tremulant>,
     #[serde(default)]
     pub tuning: sidecar::TuningConfig,
     #[serde(default)]

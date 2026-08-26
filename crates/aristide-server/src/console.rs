@@ -114,6 +114,20 @@ pub struct Console {
     /// silent, which is the locked compass rule with the player's
     /// hardware supplying the number.
     compass: Vec<(i16, i16)>,
+    /// Pipes with several recorded attacks (GO multi-attack): the
+    /// selection table `price` consults per press. Keyed like `specs`.
+    attack_options: HashMap<(RankId, u16), Vec<crate::bank::AttackOption>>,
+    /// When each pipe (at a sounded identity) last fully released —
+    /// what "re-speaks within N ms" is measured against for the
+    /// fast-repetition re-attack samples.
+    last_released: HashMap<(RankId, i32), std::time::Instant>,
+    /// Wave-tremulant state per engine wind group, as a bitmask —
+    /// which recording variant (`wave_tremulant`) a chest's pipes
+    /// should currently prefer.
+    wave_trems: u32,
+    /// Attack-selection tie-break state (GO randomizes among equally
+    /// specific candidates so repetition doesn't machine-gun one file).
+    rng: u32,
 }
 
 /// One speaking pipe's voice, with the pitch bookkeeping live retuning
@@ -151,11 +165,25 @@ impl Speaking {
 struct KeyVoice {
     stop: StopId,
     rank: RankId,
+    /// Physical pipe index in the rank — the key for the pipe-level
+    /// tables (attack options); `identity` is the *sounded* position.
+    pipe: u16,
     identity: i32,
     deviation: f64,
     target: usize,
     ladder_key: i16,
     spec: VoiceSpec,
+}
+
+/// The engine's xorshift, control-side: cheap, stateful, deterministic
+/// per console — all attack tie-breaking needs.
+fn xorshift(state: &mut u32) -> u32 {
+    let mut x = *state;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    *state = x;
+    x
 }
 
 impl Console {
@@ -201,6 +229,10 @@ impl Console {
             speaking: HashMap::new(),
             stop_routing: HashMap::new(),
             last_pipe_voice: HashMap::new(),
+            attack_options: HashMap::new(),
+            last_released: HashMap::new(),
+            wave_trems: 0,
+            rng: 0x2F6E2B1,
         };
         console.classify_noises();
         // Noise stops must never be part of the registration.
@@ -920,6 +952,7 @@ impl Console {
                     voices.push(KeyVoice {
                         stop: stop.id,
                         rank: range.rank,
+                        pipe,
                         identity,
                         deviation,
                         target,
@@ -930,6 +963,93 @@ impl Console {
             }
         }
         voices
+    }
+
+    /// Install the multi-attack selection tables from the loaded bank.
+    pub fn set_attack_options(
+        &mut self,
+        options: HashMap<(RankId, u16), Vec<crate::bank::AttackOption>>,
+    ) {
+        self.attack_options = options;
+    }
+
+    /// Record which recording variant pipes on `group` should prefer —
+    /// the wave tremulant's contribution to attack/release selection.
+    pub fn set_wave_tremulant(&mut self, group: u8, engaged: bool) {
+        let bit = 1u32 << (group as u32).min(31);
+        if engaged {
+            self.wave_trems |= bit;
+        } else {
+            self.wave_trems &= !bit;
+        }
+    }
+
+    fn wave_trem_engaged(&self, group: u8) -> bool {
+        self.wave_trems & (1u32 << (group as u32).min(31)) != 0
+    }
+
+    /// Price a voice for one press: velocity through the rank's volume
+    /// ramp, and — when the pipe has recorded variants — GO's attack
+    /// selection (`GetAttack`): among candidates whose wave-trem state
+    /// matches, whose `min_velocity` is within the press, and whose
+    /// re-attack window covers the time since the pipe last released,
+    /// the most specific wins (highest velocity bound, then tightest
+    /// window), ties broken at random so repetition never machine-guns
+    /// one file.
+    fn price(&mut self, voice: &mut KeyVoice, velocity: u8) {
+        voice.spec.gain *= voice.spec.velocity.gain(velocity);
+        let Some(options) = self.attack_options.get(&(voice.rank, voice.pipe)) else {
+            return;
+        };
+        let trem_on = self.wave_trem_engaged(voice.spec.group);
+        let since_ms = self
+            .last_released
+            .get(&(voice.rank, voice.identity))
+            .map(|at| at.elapsed().as_millis().min(u128::from(u32::MAX)) as u32);
+        let eligible = |option: &crate::bank::AttackOption| {
+            option.wave_tremulant.is_none_or(|wants| wants == trem_on)
+                && option.min_velocity <= velocity
+                && option
+                    .max_since_release_ms
+                    .is_none_or(|max| since_ms.is_some_and(|since| since <= max))
+        };
+        // Most specific first: highest velocity bound, then the
+        // tightest re-attack window (a bounded window beats none).
+        let best = options
+            .iter()
+            .filter(|option| eligible(option))
+            .map(|option| {
+                (
+                    option.min_velocity,
+                    match option.max_since_release_ms {
+                        Some(max) => u64::from(u32::MAX) - u64::from(max),
+                        None => 0,
+                    },
+                )
+            })
+            .max();
+        let Some(best) = best else { return };
+        let candidates: Vec<&crate::bank::AttackOption> = options
+            .iter()
+            .filter(|option| {
+                eligible(option)
+                    && option.min_velocity == best.0
+                    && match option.max_since_release_ms {
+                        Some(max) => u64::from(u32::MAX) - u64::from(max),
+                        None => 0,
+                    } == best.1
+            })
+            .collect();
+        let pick = if candidates.len() > 1 {
+            (xorshift(&mut self.rng) as usize) % candidates.len()
+        } else {
+            0
+        };
+        let Some(chosen) = candidates.get(pick) else { return };
+        if chosen.sample != voice.spec.sample {
+            voice.spec.rate *= chosen.rate_factor;
+            voice.spec.sample = chosen.sample;
+        }
     }
 
     /// A pipe's spec as it must sound at one pitch: `ratio` is the
@@ -984,7 +1104,7 @@ impl Console {
         let mut starts = Vec::new();
         let mut held = Vec::new();
         for mut voice in self.voices_for_key(manual_index, key, None) {
-            voice.spec.gain *= voice.spec.velocity.gain(velocity);
+            self.price(&mut voice, velocity);
             if voice.spec.percussive {
                 // One-shots (noises) aren't refcounted.
                 let handle = self.next_handle;
@@ -1086,6 +1206,10 @@ impl Console {
         if voice.holders == 0 {
             let handle = voice.handle;
             self.speaking.remove(&(rank, pipe));
+            // The re-attack clock: fast-repetition attack variants are
+            // selected against how long ago the pipe stopped speaking.
+            self.last_released
+                .insert((rank, pipe), std::time::Instant::now());
             Some(handle)
         } else {
             None
@@ -1153,7 +1277,7 @@ impl Console {
                 .unwrap_or(127);
             let mut new_entries = Vec::new();
             for mut voice in self.voices_for_key(manual_index, key, Some(stop)) {
-                voice.spec.gain *= voice.spec.velocity.gain(velocity);
+                self.price(&mut voice, velocity);
                 // One-shots strike on key press, not on drawing the
                 // stop mid-hold.
                 if voice.spec.percussive {
@@ -1341,15 +1465,14 @@ impl Console {
                 .get(&(manual_index, key))
                 .copied()
                 .unwrap_or(127);
-            let desired: Vec<KeyVoice> = self
+            let mut desired: Vec<KeyVoice> = self
                 .voices_for_key(manual_index, key, None)
                 .into_iter()
-                .map(|mut voice| {
-                    voice.spec.gain *= voice.spec.velocity.gain(velocity);
-                    voice
-                })
                 .filter(|voice| !voice.spec.percussive)
                 .collect();
+            for voice in &mut desired {
+                self.price(voice, velocity);
+            }
             let mut remaining = self
                 .sounding
                 .remove(&(manual_index, key))
@@ -1673,6 +1796,117 @@ mod tests {
             }
         }
         Console::new(organ, specs, vec![StopId(1), StopId(2)], 48_000.0)
+    }
+
+    fn attack(
+        sample: u32,
+        min_velocity: u8,
+        max_since_release_ms: Option<u32>,
+        wave_tremulant: Option<bool>,
+    ) -> crate::bank::AttackOption {
+        crate::bank::AttackOption {
+            sample,
+            rate_factor: 1.0,
+            wave_tremulant,
+            min_velocity,
+            max_since_release_ms,
+        }
+    }
+
+    /// GO's `GetAttack` semantics: the most specific eligible attack
+    /// wins — highest velocity bound first, then the tightest
+    /// re-attack window — and the `IsTremulant` tri-state gates
+    /// candidacy against the chest's wave-trem state.
+    #[test]
+    fn attack_selection_by_velocity_reattack_and_trem_state() {
+        let mut console = test_console();
+        console.set_drawn(StopId(2), false);
+        let variants = vec![
+            attack(0, 0, None, Some(false)),  // the plain attack
+            attack(10, 80, None, Some(false)), // hard strike
+            attack(11, 0, Some(60_000), Some(false)), // re-attack
+            attack(12, 0, None, Some(true)),  // tremmed variant
+        ];
+        let mut options = HashMap::new();
+        options.insert((RankId(1), 24u16), variants.clone()); // key 60
+        options.insert((RankId(1), 26u16), variants); // key 62
+        console.set_attack_options(options);
+
+        // A first gentle press: nothing has released yet and the trem
+        // is off, so only the plain attack qualifies.
+        let (starts, _) = console.note_on_manual(0, 60, 64);
+        assert_eq!(starts.len(), 1);
+        assert_eq!(starts[0].spec.sample, 0, "plain attack on a first press");
+        console.note_off_manual(0, 60);
+
+        // Re-pressed while the pipe is still speaking down: the
+        // fast-repetition variant is more specific than the plain one.
+        let (starts, _) = console.note_on_manual(0, 60, 64);
+        assert_eq!(starts[0].spec.sample, 11, "re-attack within the window");
+        console.note_off_manual(0, 60);
+
+        // A hard strike: the velocity bound outranks the window.
+        let (starts, _) = console.note_on_manual(0, 60, 127);
+        assert_eq!(starts[0].spec.sample, 10, "velocity-bound attack");
+        console.note_off_manual(0, 60);
+
+        // Wave tremulant on: only the tremmed recording matches now
+        // (fresh key so the re-attack window stays out of the picture).
+        console.set_wave_tremulant(0, true);
+        let (starts, _) = console.note_on_manual(0, 62, 64);
+        assert_eq!(starts[0].spec.sample, 12, "tremmed variant under the trem");
+    }
+
+    /// Equally specific candidates rotate randomly (GO's tie-break) so
+    /// repetition doesn't machine-gun one recording of the transient.
+    #[test]
+    fn equal_attack_candidates_are_rotated_at_random() {
+        let mut console = test_console();
+        console.set_drawn(StopId(2), false);
+        let mut options = HashMap::new();
+        options.insert(
+            (RankId(1), 24u16),
+            vec![attack(0, 0, None, None), attack(10, 0, None, None)],
+        );
+        console.set_attack_options(options);
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..40 {
+            let (starts, _) = console.note_on_manual(0, 60, 64);
+            seen.insert(starts[0].spec.sample);
+            console.note_off_manual(0, 60);
+        }
+        assert!(
+            seen.contains(&0) && seen.contains(&10),
+            "40 presses never rotated: {seen:?}"
+        );
+    }
+
+    /// An attack recorded at another sample rate carries its rate
+    /// factor onto the spec so it still sounds at the pipe's pitch.
+    #[test]
+    fn selected_attack_applies_its_rate_factor() {
+        let mut console = test_console();
+        console.set_drawn(StopId(2), false);
+        let mut options = HashMap::new();
+        options.insert(
+            (RankId(1), 24u16),
+            vec![
+                attack(0, 0, None, Some(false)),
+                crate::bank::AttackOption {
+                    rate_factor: 2.0,
+                    ..attack(12, 0, None, Some(true))
+                },
+            ],
+        );
+        console.set_attack_options(options);
+        console.set_wave_tremulant(0, true);
+        let (starts, _) = console.note_on_manual(0, 60, 64);
+        assert_eq!(starts[0].spec.sample, 12);
+        assert!(
+            (starts[0].spec.rate - 2.0).abs() < 1e-6,
+            "rate follows the variant: {}",
+            starts[0].spec.rate
+        );
     }
 
     /// The fixture manual is MIDI 36..96. Widening it to a keyboard

@@ -19,11 +19,25 @@ use crate::{bank, tuning, Setup};
 /// Everything a load produces: the playable console, the samples it
 /// plays, and the engine-wide settings the caller sends once the new
 /// engine exists.
+/// One engageable tremulant, ready for the console and the engine: the
+/// ODF's own tremulants when the set defines any, else the sidecar's
+/// (or default) instrument-wide one.
+#[derive(Debug, Clone)]
+pub struct TremulantSetup {
+    pub name: String,
+    /// Wave tremulants switch sample variants instead of modulating
+    /// pressure; their `params` are unused.
+    pub wave: bool,
+    pub params: aristide_engine::wind::TremulantParams,
+    /// 0-based engine wind groups (ODF chest number − 1).
+    pub groups: Vec<u8>,
+}
+
 pub struct PreparedInstrument {
     pub console: Console,
     pub bank: SampleBank,
     pub wind: Option<aristide_engine::wind::WindParams>,
-    pub tremulant: Option<(aristide_engine::wind::TremulantParams, Vec<u8>)>,
+    pub tremulants: Vec<TremulantSetup>,
     pub enclosures: Vec<(u8, aristide_engine::enclosure::EnclosureParams)>,
     pub expression_cc: u8,
     pub reverb: Option<(Arc<aristide_engine::reverb::PreparedIr>, f32)>,
@@ -424,26 +438,94 @@ pub fn prepare(
         ..defaults
     });
 
-    // Tremulant: pitch cents → pressure swing through the same
-    // exponent, applied to the sidecar's chests (default: all).
-    let depth_cents = sidecar.tremulant.depth_cents.clamp(0.0, 30.0);
-    let trem_params = aristide_engine::wind::TremulantParams {
-        rate_hz: sidecar.tremulant.rate_hz.clamp(0.5, 12.0) as f32,
-        depth: (2f64.powf(depth_cents / (1200.0 * kp)) - 1.0) as f32,
-        ..Default::default()
-    };
+    // Tremulants. Precedence: a hand-written sidecar `[tremulant]`
+    // replaces everything (explicit override); else the set's own
+    // `[Tremulant]` definitions each become an engageable control on
+    // their member chests; else the historical fallback — one default
+    // tremulant over every chest, so the `tremulant` binding always
+    // means something.
     let max_groups = aristide_engine::wind::MAX_WIND_GROUPS as u32;
-    let groups: Vec<u8> = if sidecar.tremulant.chests.is_empty() {
-        (0..max_groups as u8).collect()
-    } else {
-        sidecar
-            .tremulant
-            .chests
-            .iter()
-            .map(|&chest| chest.saturating_sub(1).min(max_groups - 1) as u8)
-            .collect()
+    let group_of = |chest: u32| chest.saturating_sub(1).min(max_groups - 1) as u8;
+    let sidecar_setup = |declared: &aristide_formats::sidecar::Tremulant| {
+        // Pitch cents → pressure swing through the pitch exponent.
+        let depth_cents = declared.depth_cents.clamp(0.0, 30.0);
+        TremulantSetup {
+            name: "Tremulant".to_string(),
+            wave: false,
+            params: aristide_engine::wind::TremulantParams {
+                rate_hz: declared.rate_hz.clamp(0.5, 12.0) as f32,
+                depth: (2f64.powf(depth_cents / (1200.0 * kp)) - 1.0) as f32,
+                ..Default::default()
+            },
+            groups: if declared.chests.is_empty() {
+                (0..max_groups as u8).collect()
+            } else {
+                declared.chests.iter().map(|&c| group_of(c)).collect()
+            },
+        }
     };
-    let tremulant = Some((trem_params, groups));
+    let tremulants: Vec<TremulantSetup> = match (&sidecar.tremulant, organ.tremulants.len()) {
+        (Some(declared), _) => vec![sidecar_setup(declared)],
+        (None, 0) => vec![sidecar_setup(&Default::default())],
+        (None, _) => organ
+            .tremulants
+            .iter()
+            .enumerate()
+            .map(|(index, tremulant)| {
+                let groups: Vec<u8> = organ
+                    .windchests
+                    .iter()
+                    .filter(|chest| chest.tremulants.contains(&(index as u32)))
+                    .map(|chest| group_of(chest.number))
+                    .collect();
+                match tremulant.kind {
+                    aristide_model::TremulantKind::Synth {
+                        period_ms,
+                        amp_mod_depth_percent,
+                        start_rate,
+                        stop_rate,
+                    } => {
+                        // GO's AmpModDepth is percent amplitude swing;
+                        // our depth is a pressure swing the engine maps
+                        // to gain as P^gain_exponent — invert that so
+                        // the author's amplitude depth comes out, and
+                        // FM/brightness follow physically.
+                        let kg = aristide_engine::wind::WindParams::default().gain_exponent
+                            as f64;
+                        let amplitude = 1.0 + (amp_mod_depth_percent / 100.0).min(0.9);
+                        // GO ramps: 1/StartRate s up, 1/StopRate s down;
+                        // one engine knob, so split the difference.
+                        let ramp = 0.5 * (1.0 / start_rate as f64 + 1.0 / stop_rate as f64);
+                        TremulantSetup {
+                            name: tremulant.name.clone(),
+                            wave: false,
+                            params: aristide_engine::wind::TremulantParams {
+                                rate_hz: (1000.0 / period_ms).clamp(0.5, 12.0) as f32,
+                                depth: (amplitude.powf(1.0 / kg) - 1.0) as f32,
+                                ramp_seconds: ramp.clamp(0.05, 2.0) as f32,
+                                ..Default::default()
+                            },
+                            groups,
+                        }
+                    }
+                    aristide_model::TremulantKind::Wave => TremulantSetup {
+                        name: tremulant.name.clone(),
+                        wave: true,
+                        params: Default::default(),
+                        groups,
+                    },
+                }
+            })
+            .collect(),
+    };
+    for setup in &tremulants {
+        if setup.groups.is_empty() {
+            tracing::warn!(
+                "tremulant {:?}: no windchest references it — engaging it will do nothing",
+                setup.name
+            );
+        }
+    }
 
     // Enclosures: one engine box per ODF enclosure, floor from the
     // set's AmpMinimumLevel unless the sidecar overrides, filter and
@@ -504,6 +586,7 @@ pub fn prepare(
 
     let suggested: Vec<Option<u8>> = per_source_suggested.concat();
     let mut console = Console::new(organ, loaded.specs, drawn, sample_rate);
+    console.set_attack_options(loaded.attack_options);
     let temperament = tuning::Temperament::parse(&sidecar.tuning.temperament)
         .unwrap_or_else(|| {
             tracing::warn!(
@@ -698,7 +781,7 @@ pub fn prepare(
         console,
         bank: loaded.bank,
         wind,
-        tremulant,
+        tremulants,
         enclosures,
         expression_cc,
         reverb,
@@ -800,9 +883,19 @@ mod tests {
             "the sidecar's wind model survives adoption"
         );
         assert_eq!(
-            format!("{:?}", adopted.tremulant),
-            format!("{:?}", direct.tremulant)
+            format!("{:?}", adopted.tremulants),
+            format!("{:?}", direct.tremulants),
+            "the set's tremulants survive adoption, same chests"
         );
+        // The demo's ODF Tremblant: 196 ms period ≈ 5.1 Hz, Récit
+        // chest only (group 2), instead of the old sidecar default
+        // sweeping every chest.
+        assert_eq!(direct.tremulants.len(), 1);
+        let tremblant = &direct.tremulants[0];
+        assert_eq!(tremblant.name, "Tremblant");
+        assert!(!tremblant.wave);
+        assert_eq!(tremblant.groups, vec![2]);
+        assert!((tremblant.params.rate_hz - 1000.0 / 196.0).abs() < 0.01);
         assert_eq!(
             format!("{:?}", adopted.enclosures),
             format!("{:?}", direct.enclosures)

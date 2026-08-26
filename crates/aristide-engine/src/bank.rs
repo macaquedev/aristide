@@ -95,6 +95,11 @@ pub struct ReleaseOption {
     /// Selected when the note was held at most this long; `None` = the
     /// default/longest release.
     pub max_hold_ms: Option<u32>,
+    /// Which wave-tremulant state this release was recorded under
+    /// (GO `IsTremulant` tri-state): `Some(true)` only while the
+    /// chest's wave trem is engaged, `Some(false)` only while it is
+    /// not, `None` either way.
+    pub wave_trem: Option<bool>,
     /// Phase map from the source sample's cycle into the release's
     /// opening period.
     alignment: Option<ReleaseAlignment>,
@@ -477,6 +482,7 @@ impl Sample {
         target: &Sample,
         target_index: u32,
         max_hold_ms: Option<u32>,
+        wave_trem: Option<bool>,
     ) {
         let level = target.mean_abs(0, 512.min(target.frames()));
         let alignment = match (self.measured_period, self.sustain_loop) {
@@ -507,6 +513,7 @@ impl Sample {
         let option = ReleaseOption {
             sample: target_index,
             max_hold_ms,
+            wave_trem,
             alignment,
             level,
         };

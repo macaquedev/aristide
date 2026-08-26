@@ -50,11 +50,32 @@ pub struct VoiceSpec {
     pub delay_frames: u32,
 }
 
+/// One selectable attack of a pipe (GO multi-attack): which bank sample
+/// it is and the conditions under which GO's `GetAttack` would pick it.
+#[derive(Debug, Clone, Copy)]
+pub struct AttackOption {
+    pub sample: u32,
+    /// Multiplier on the pipe's primary [`VoiceSpec::rate`] when this
+    /// attack replaces it (differing file sample rates; the recording
+    /// pitch is assumed shared — variants are the same pipe re-miked).
+    pub rate_factor: f32,
+    /// GO `IsTremulant` tri-state against the chest's wave-trem state.
+    pub wave_tremulant: Option<bool>,
+    /// Lowest MIDI velocity this attack answers to.
+    pub min_velocity: u8,
+    /// Only when the pipe re-speaks within this many ms of its last
+    /// release (fast-repetition re-attack); `None` = always.
+    pub max_since_release_ms: Option<u32>,
+}
+
 pub struct LoadedBank {
     pub bank: SampleBank,
     /// (rank, pipe index) → playback spec. Borrowed pipes carry their
     /// target's spec; silent and failed pipes are absent.
     pub specs: HashMap<(RankId, u16), VoiceSpec>,
+    /// Pipes with more than one decoded attack: the selection table the
+    /// console consults at note-on. Absent for single-attack pipes.
+    pub attack_options: HashMap<(RankId, u16), Vec<AttackOption>>,
     /// Human-readable notes about anything that didn't load.
     pub skipped: Vec<String>,
 }
@@ -62,6 +83,7 @@ pub struct LoadedBank {
 pub fn build(organ: &Organ, device_rate: f32) -> Result<LoadedBank> {
     let mut bank = SampleBank::default();
     let mut specs: HashMap<(RankId, u16), VoiceSpec> = HashMap::new();
+    let mut attack_options: HashMap<(RankId, u16), Vec<AttackOption>> = HashMap::new();
     let mut skipped = Vec::new();
     // path → Ok(bank index + source metadata) or failure already noted.
     let mut decoded: HashMap<PathBuf, Option<DecodedInfo>> = HashMap::new();
@@ -102,56 +124,84 @@ pub fn build(organ: &Organ, device_rate: f32) -> Result<LoadedBank> {
             let PipeSource::Sampled { attacks, releases } = &pipe.source else {
                 continue;
             };
-            let Some(attack) = attacks.first() else {
+            if attacks.is_empty() {
                 skipped.push(format!("{} pipe {pipe_index}: no attacks", rank.name));
                 continue;
-            };
-            let absolute = organ.base_path.join(&attack.path);
-            let entry = decoded.entry(attack.path.clone()).or_insert_with(|| {
-                match decode(&absolute, &attack.loops) {
-                    Ok((mut sample, info)) => {
-                        // Phase-align the release splice to this pipe's
-                        // fundamental (shared files share the pitch).
-                        sample.align_release(pipe.nominal_frequency_hz as f32);
-                        // Separate recorded releases become their own
-                        // one-shot bank entries, attached with hold-time
-                        // bounds and cross-file phase maps.
-                        for release in releases {
-                            let release_index = *release_cache
-                                .entry(release.path.clone())
-                                .or_insert_with(|| {
-                                    let path = organ.base_path.join(&release.path);
-                                    match decode_release(&path) {
-                                        Ok(release_sample) => Some(bank.push(release_sample)),
-                                        Err(reason) => {
-                                            skipped.push(format!(
-                                                "{}: {reason}",
-                                                release.path.display()
-                                            ));
-                                            None
+            }
+            // Decode every attack variant; the first that decodes is
+            // the pipe's primary (its metadata drives the rank-wide
+            // pitch decision), the rest join the selection table.
+            let mut variants: Vec<(usize, DecodedInfo)> = Vec::new();
+            for (attack_index, attack) in attacks.iter().enumerate() {
+                let absolute = organ.base_path.join(&attack.path);
+                let entry = decoded.entry(attack.path.clone()).or_insert_with(|| {
+                    match decode(&absolute, &attack.loops) {
+                        Ok((mut sample, info)) => {
+                            // Phase-align the release splice to this pipe's
+                            // fundamental (shared files share the pitch).
+                            sample.align_release(pipe.nominal_frequency_hz as f32);
+                            // Separate recorded releases become their own
+                            // one-shot bank entries, attached with hold-time
+                            // bounds, trem state, and cross-file phase maps
+                            // — to every attack variant, so a note started
+                            // on any of them can splice out.
+                            for release in releases {
+                                let release_index = *release_cache
+                                    .entry(release.path.clone())
+                                    .or_insert_with(|| {
+                                        let path = organ.base_path.join(&release.path);
+                                        match decode_release(&path) {
+                                            Ok(release_sample) => Some(bank.push(release_sample)),
+                                            Err(reason) => {
+                                                skipped.push(format!(
+                                                    "{}: {reason}",
+                                                    release.path.display()
+                                                ));
+                                                None
+                                            }
                                         }
+                                    });
+                                if let Some(index) = release_index {
+                                    if let Some(target) = bank.get(index) {
+                                        sample.attach_release(
+                                            target,
+                                            index,
+                                            release.max_key_press_ms,
+                                            release.wave_tremulant,
+                                        );
                                     }
-                                });
-                            if let Some(index) = release_index {
-                                if let Some(target) = bank.get(index) {
-                                    sample.attach_release(
-                                        target,
-                                        index,
-                                        release.max_key_press_ms,
-                                    );
                                 }
                             }
+                            let index = bank.push(sample);
+                            Some(DecodedInfo { index, ..info })
                         }
-                        let index = bank.push(sample);
-                        Some(DecodedInfo { index, ..info })
+                        Err(reason) => {
+                            skipped.push(format!("{}: {reason}", attack.path.display()));
+                            None
+                        }
                     }
-                    Err(reason) => {
-                        skipped.push(format!("{}: {reason}", attack.path.display()));
-                        None
-                    }
+                });
+                if let Some(info) = *entry {
+                    variants.push((attack_index, info));
                 }
-            });
-            let Some(info) = *entry else { continue };
+            }
+            let Some(&(primary_index, info)) = variants.first() else {
+                continue;
+            };
+            let attack = &attacks[primary_index];
+            if variants.len() > 1 {
+                let options = variants
+                    .iter()
+                    .map(|&(index, variant)| AttackOption {
+                        sample: variant.index,
+                        rate_factor: (variant.sample_rate / info.sample_rate) as f32,
+                        wave_tremulant: attacks[index].wave_tremulant,
+                        min_velocity: attacks[index].min_velocity,
+                        max_since_release_ms: attacks[index].max_time_since_last_release_ms,
+                    })
+                    .collect();
+                attack_options.insert((rank.id, pipe_index as u16), options);
+            }
 
             // Where the recording's pitch claim comes from: an explicit
             // ODF MIDIKeyNumber wins (and silences the file's own
@@ -284,9 +334,13 @@ pub fn build(organ: &Organ, device_rate: f32) -> Result<LoadedBank> {
                 continue;
             }
             let target = resolve_borrow(organ, pipe);
-            match target.and_then(|t| specs.get(&(t.rank, t.pipe)).copied()) {
-                Some(spec) => {
+            match target.and_then(|t| specs.get(&(t.rank, t.pipe)).copied().map(|s| (t, s))) {
+                Some((target, spec)) => {
                     specs.insert((rank.id, pipe_index as u16), spec);
+                    if let Some(options) = attack_options.get(&(target.rank, target.pipe)) {
+                        let options = options.clone();
+                        attack_options.insert((rank.id, pipe_index as u16), options);
+                    }
                 }
                 None => skipped.push(format!(
                     "{} pipe {pipe_index}: borrow target has no sample",
@@ -299,6 +353,7 @@ pub fn build(organ: &Organ, device_rate: f32) -> Result<LoadedBank> {
     Ok(LoadedBank {
         bank,
         specs,
+        attack_options,
         skipped,
     })
 }
@@ -581,6 +636,75 @@ mod tests {
                 pipes: rank_pipes,
             }],
             ..Default::default()
+        }
+    }
+
+    /// Every attack variant decodes into the bank and the selection
+    /// table carries GO's metadata; separate releases attach to each
+    /// variant with their trem state.
+    #[test]
+    fn multi_attack_pipes_build_selection_tables() {
+        let dir = std::env::temp_dir().join("aristide-multi-attack-test");
+        std::fs::create_dir_all(&dir).expect("test dir");
+        for name in ["plain.wav", "trem.wav", "rel.wav"] {
+            write_test_wav(&dir.join(name), 60);
+        }
+        let organ = aristide_model::Organ {
+            name: "multi attack".into(),
+            base_path: dir,
+            ranks: vec![aristide_model::Rank {
+                id: aristide_model::RankId(1),
+                name: "Test rank".into(),
+                windchest: 1,
+                velocity_volume: Default::default(),
+                pipes: vec![aristide_model::Pipe {
+                    nominal_frequency_hz: 440.0,
+                    pitch_tuning_cents: 0.0,
+                    pitch_correction_cents: 0.0,
+                    gain_db: 0.0,
+                    midi_key_number: None,
+                    midi_pitch_fraction_cents: None,
+                    source: aristide_model::PipeSource::Sampled {
+                        attacks: vec![
+                            aristide_model::AttackSample {
+                                path: PathBuf::from("plain.wav"),
+                                wave_tremulant: Some(false),
+                                ..Default::default()
+                            },
+                            aristide_model::AttackSample {
+                                path: PathBuf::from("trem.wav"),
+                                wave_tremulant: Some(true),
+                                min_velocity: 64,
+                                max_time_since_last_release_ms: Some(250),
+                                ..Default::default()
+                            },
+                        ],
+                        releases: vec![aristide_model::ReleaseSample {
+                            path: PathBuf::from("rel.wav"),
+                            max_key_press_ms: None,
+                            wave_tremulant: Some(true),
+                        }],
+                    },
+                }],
+            }],
+            ..Default::default()
+        };
+        let loaded = build(&organ, 44_100.0).expect("builds");
+        assert_eq!(loaded.bank.len(), 3, "two attacks + one release decoded");
+        let key = (aristide_model::RankId(1), 0u16);
+        let options = loaded.attack_options.get(&key).expect("selection table");
+        assert_eq!(options.len(), 2);
+        assert_eq!(options[0].sample, loaded.specs[&key].sample, "primary first");
+        assert_eq!(options[0].wave_tremulant, Some(false));
+        assert_eq!(options[1].wave_tremulant, Some(true));
+        assert_eq!(options[1].min_velocity, 64);
+        assert_eq!(options[1].max_since_release_ms, Some(250));
+        assert!((options[1].rate_factor - 1.0).abs() < 1e-6, "same file rate");
+        // Both variants can splice out to the separate release.
+        for option in options {
+            let sample = loaded.bank.get(option.sample).expect("sample");
+            assert_eq!(sample.release_options().len(), 1);
+            assert_eq!(sample.release_options()[0].wave_trem, Some(true));
         }
     }
 

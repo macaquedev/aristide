@@ -83,7 +83,9 @@ pub enum Action {
     /// Draw or retire a stop by name — a thumb piston's usual job.
     Stop(String),
     Coupler(String),
-    Tremulant,
+    /// Toggle a tremulant by name — or every tremulant the organ has,
+    /// the way one switch serves the whole console (`None`).
+    Tremulant(Option<String>),
     /// Retire everything, as the cancel piston does.
     Cancel,
     /// Silence: every voice killed, however it got there.
@@ -110,7 +112,7 @@ impl Action {
             "transpose-reset" => Action::TransposeReset,
             "stop" => Action::Stop(named(argument)?),
             "coupler" => Action::Coupler(named(argument)?),
-            "tremulant" => Action::Tremulant,
+            "tremulant" => Action::Tremulant(named(argument)),
             "cancel" => Action::Cancel,
             "panic" => Action::Panic,
             "enclosure" => Action::Enclosure(named(argument)?),
@@ -136,7 +138,8 @@ impl fmt::Display for Action {
             Action::TransposeReset => write!(f, "transpose-reset"),
             Action::Stop(name) => write!(f, "stop:{name}"),
             Action::Coupler(name) => write!(f, "coupler:{name}"),
-            Action::Tremulant => write!(f, "tremulant"),
+            Action::Tremulant(None) => write!(f, "tremulant"),
+            Action::Tremulant(Some(name)) => write!(f, "tremulant:{name}"),
             Action::Cancel => write!(f, "cancel"),
             Action::Panic => write!(f, "panic"),
             Action::Enclosure(name) => write!(f, "enclosure:{name}"),
@@ -227,6 +230,7 @@ mod tests {
             "stop:Montre 8'",
             "coupler:II/I",
             "tremulant",
+            "tremulant:Tremblant",
             "cancel",
             "panic",
             "enclosure:Récit",

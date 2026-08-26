@@ -64,8 +64,8 @@ const HEADER: &str = "\
 #                key (named by physical position)
 #   action       octave-up, octave-down, transpose-up, transpose-down,
 #                transpose:<n>, transpose-reset, stop:<name>,
-#                coupler:<name>, tremulant, cancel, panic,
-#                enclosure:<name>
+#                coupler:<name>, tremulant, tremulant:<name>, cancel,
+#                panic, enclosure:<name>
 #   manual       optional; which keyboard a pitch action shifts. Absent
 #                means every keyboard on the same device.
 #
