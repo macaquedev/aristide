@@ -68,12 +68,16 @@ export class Editor {
     this.stopOpen = null; // stop id the stop-editor popover is open for, or null
     this.stopSrcOpen = false; // the stop popover's own source-picker subview is showing
     this.couplerOpen = null; // coupler idx the route-editor popover is open for, or null
-    // The open coupler's routes, edited locally: cloned from the
-    // snapshot the moment the popover opens and never re-synced from a
-    // later poll while it's up (see openCouplerForm/syncCouplerForm) —
-    // every routes change rebuilds the organ, and "Apply routes" is the
-    // only thing that ever posts them, once, as a whole.
+    // The open coupler's routes, edited locally and auto-applied:
+    // every change posts the whole array through a coalescing queue
+    // (see scheduleCouplerApply) — each apply rebuilds the organ, so
+    // edits made mid-rebuild wait it out and only the newest state is
+    // ever sent. Once an apply settles, the server's echo folds back
+    // into the working copy (syncCouplerForm), never under the pointer.
     this.couplerRoutes = null;
+    this.couplerPending = null; // the newest unapplied {idx, routes}, if any
+    this.couplerApplying = false; // an apply pump is running
+    this.couplerResync = false; // a settled apply awaits folding back in
     this.addCouplerNamed = false; // the add form's name field was typed in
     this.tuningBrowseKind = null; // "scale" | "keymap" | null — the tuning form's own file browser
     this.tuningBrowseDir = null;
@@ -188,7 +192,6 @@ export class Editor {
       couplerName: root.getElementById("editor-coupler-name"),
       couplerRoutesBox: root.getElementById("editor-coupler-routes"),
       couplerRouteAdd: root.getElementById("editor-coupler-route-add"),
-      couplerApply: root.getElementById("editor-coupler-apply"),
       couplerError: root.getElementById("editor-coupler-error"),
       couplerClose: root.getElementById("editor-coupler-close"),
       addCoupler: root.getElementById("editor-add-coupler"),
@@ -1427,18 +1430,20 @@ export class Editor {
 
   // ---- the coupler-route popover: right-click any coupler rocker ----------
   //
-  // A rename posts live, field by field, the stop popover's own
-  // contract. But a routes change always rebuilds the organ (the file's
-  // coupler line is rewritten outright), so the route table edits a
-  // local working copy — cloned once when the popover opens — and only
-  // "Apply routes" ever posts it, as a whole. Later polls, while the
-  // popover is open, refresh the title and name but deliberately leave
-  // the working copy alone; reopening the popover re-clones it fresh.
+  // Everything posts live, field by field, the stop popover's own
+  // contract. A routes change always rebuilds the organ (the file's
+  // coupler line is rewritten outright), so route edits go through a
+  // coalescing queue: each change posts the whole array, an apply in
+  // flight makes later changes wait, and only the newest state is ever
+  // sent — clicking through three pitches costs one rebuild, not
+  // three. Later polls refresh the title and name; the routes fold
+  // back in from the server's echo only once an apply has settled and
+  // the pointer is elsewhere (syncCouplerForm).
 
   wireCouplerForm() {
     this.el.couplerClose.addEventListener("click", () => this.closeCouplerForm());
-    // Every field commits its own way (name on change, routes only on
-    // Apply) — Enter in the name field must not also reload the page.
+    // Every field commits on its own change — Enter in the name field
+    // must not also reload the page.
     this.el.couplerForm.addEventListener("submit", (event) => event.preventDefault());
 
     this.el.couplerName.addEventListener("change", () => {
@@ -1453,12 +1458,50 @@ export class Editor {
       if (!this.couplerRoutes) return;
       this.couplerRoutes.push({ from: 0, to: 0, shift: 0 });
       this.renderCouplerRoutes();
+      this.scheduleCouplerApply();
     });
+  }
 
-    this.el.couplerApply.addEventListener("click", () => {
-      if (this.couplerOpen == null || !this.couplerRoutes) return;
-      this.couplerCommand(commands.organCouplerRoutes(this.couplerOpen, this.couplerRoutes));
-    });
+  /// Queue the working copy for an auto-apply. Coalescing: the newest
+  /// state replaces anything still waiting, so however many fields
+  /// change while a rebuild is in flight, exactly one apply follows.
+  scheduleCouplerApply() {
+    if (this.couplerOpen == null || !this.couplerRoutes) return;
+    this.couplerPending = {
+      idx: this.couplerOpen,
+      routes: structuredClone(this.couplerRoutes),
+    };
+    this.pumpCouplerApply();
+  }
+
+  /// Drains the pending apply, waiting out rebuilds the same way
+  /// runQueue does — the server refuses structural edits mid-rebuild,
+  /// and every apply here starts one. The pending edit is captured at
+  /// schedule time, so it still lands if the popover closes meanwhile.
+  async pumpCouplerApply() {
+    if (this.couplerApplying) return;
+    this.couplerApplying = true;
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    while (this.couplerPending) {
+      const { idx, routes } = this.couplerPending;
+      this.couplerPending = null;
+      for (let attempt = 0; attempt < 40; attempt++) {
+        while (this.lastSnapshot?.loading) await sleep(150);
+        const ok = await this.couplerCommand(commands.organCouplerRoutes(idx, routes));
+        if (ok) {
+          this.couplerResync = true;
+          break;
+        }
+        // A real refusal stays shown; only "still loading" retries.
+        if (!/loading/i.test(this.el.couplerError.textContent)) break;
+        this.hideCouplerError();
+        await sleep(250);
+      }
+      // Give the poll a beat to notice the rebuild this apply started,
+      // or the next iteration's wait would sail right past it.
+      await sleep(300);
+    }
+    this.couplerApplying = false;
   }
 
   openCouplerForm(idx, x, y) {
@@ -1488,10 +1531,12 @@ export class Editor {
     this.hideCouplerError();
   }
 
-  /// Refreshes only the title and (unless focused) the name field from
-  /// the snapshot — the routes stay the local working copy untouched
-  /// (see the section header above). A coupler that vanished (removed
-  /// from elsewhere) takes its popover with it.
+  /// Refreshes the title and (unless focused) the name field from the
+  /// snapshot; the routes stay the local working copy until an
+  /// auto-apply has settled, when the server's echo folds back in —
+  /// but never while the pointer is in the route table, and never
+  /// mid-queue. A coupler that vanished (removed from elsewhere)
+  /// takes its popover with it.
   syncCouplerForm() {
     const coupler = this.lastSnapshot?.couplers.find((c) => c.idx === this.couplerOpen);
     if (!coupler) {
@@ -1500,6 +1545,17 @@ export class Editor {
     }
     this.el.couplerTitle.textContent = coupler.name;
     if (this.root.activeElement !== this.el.couplerName) this.el.couplerName.value = coupler.name;
+    if (
+      this.couplerResync &&
+      !this.couplerApplying &&
+      !this.couplerPending &&
+      !this.lastSnapshot?.loading &&
+      !this.el.couplerRoutesBox.contains(this.root.activeElement)
+    ) {
+      this.couplerResync = false;
+      this.couplerRoutes = structuredClone(coupler.routes ?? []);
+      this.renderCouplerRoutes();
+    }
   }
 
   /// Rebuilds the route blocks from `this.couplerRoutes` — the local
@@ -1509,7 +1565,7 @@ export class Editor {
   /// on [Great] at [Sub-octave (16′)]" — the wire's from/to (played/
   /// sounding) stays under the hood. Fields this form doesn't expose
   /// (low/high/repitch) are left on the route object untouched, so
-  /// Apply round-trips them.
+  /// every auto-apply round-trips them.
   renderCouplerRoutes() {
     const container = this.el.couplerRoutesBox;
     container.replaceChildren();
@@ -1548,6 +1604,7 @@ export class Editor {
       onSelect.value = route.from == null ? "" : String(route.from);
       onSelect.addEventListener("change", () => {
         route.from = Number(onSelect.value);
+        this.scheduleCouplerApply();
       });
       soundsSelect.title = "Whose stops speak — the division this coupler borrows.";
       soundsSelect.addEventListener("change", () => {
@@ -1560,6 +1617,7 @@ export class Editor {
           route.to = Number(soundsSelect.value);
         }
         this.renderCouplerRoutes();
+        this.scheduleCouplerApply();
       });
       what.append(word("Sounds"), soundsSelect, word("on"), onSelect);
       block.append(what);
@@ -1602,10 +1660,13 @@ export class Editor {
           route.shift = Number(pitchSelect.value);
           keysInput.value = route.shift;
           showKeys(false);
+          this.scheduleCouplerApply();
         });
         keysInput.addEventListener("change", () => {
           const value = Number(keysInput.value);
-          if (Number.isFinite(value)) route.shift = Math.round(value);
+          if (!Number.isFinite(value)) return;
+          route.shift = Math.round(value);
+          this.scheduleCouplerApply();
         });
         at.append(word("at"), pitchSelect, keysInput, keysWord);
         block.append(at);
@@ -1626,6 +1687,7 @@ export class Editor {
       scopeSelect.addEventListener("change", () => {
         if (scopeSelect.value) route.scope = scopeSelect.value;
         else delete route.scope;
+        this.scheduleCouplerApply();
       });
 
       const unisonLabel = document.createElement("label");
@@ -1639,6 +1701,7 @@ export class Editor {
       unisonCheck.addEventListener("change", () => {
         if (unisonCheck.checked) route.unison_off = true;
         else delete route.unison_off;
+        this.scheduleCouplerApply();
       });
       unisonLabel.append(unisonCheck, document.createTextNode(" own stops off"));
 
@@ -1653,6 +1716,7 @@ export class Editor {
         remove.addEventListener("click", () => {
           this.couplerRoutes.splice(i, 1);
           this.renderCouplerRoutes();
+          this.scheduleCouplerApply();
         });
         how.append(remove);
       }

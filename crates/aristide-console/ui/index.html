@@ -609,10 +609,10 @@
   </div>
 
   <!-- The coupler-route popover: right-click any coupler rocker in edit
-       mode. The name posts live, field by field, the stop popover's own
-       contract — but every routes change rebuilds the organ, so the
-       route table edits a local copy and only "Apply routes" posts it,
-       once, as a whole. -->
+       mode. Everything posts live, field by field — a routes change
+       rebuilds the organ, so those go through a coalescing queue that
+       waits a rebuild out and sends only the newest state (editor.js's
+       scheduleCouplerApply). -->
   <div class="editor-add hidden" id="editor-coupler">
     <form class="editor-add-form" id="editor-coupler-form">
       <span class="editor-tuning-head">
@@ -622,7 +622,6 @@
       <div id="editor-coupler-routes" class="coupler-routes"></div>
       <span class="editor-add-form-actions">
         <button class="ghost" type="button" id="editor-coupler-route-add">Add route</button>
-        <button class="ghost" type="button" id="editor-coupler-apply">Apply routes</button>
       </span>
       <p class="organ-edit-error hidden" id="editor-coupler-error"></p>
       <span class="editor-add-form-actions">

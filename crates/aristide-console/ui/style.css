@@ -1174,10 +1174,9 @@ input[type="range"]:hover::-webkit-slider-thumb { filter: brightness(1.15); }
    wide once a cents field shares its row */
 #editor-stop-footage { width: 70px; }
 
-/* the coupler route editor: wide enough for a route's From/To selects
-   and Shift field on one line without wrapping; each route is a
-   compact two-line block, and only "Apply routes" ever posts — every
-   other field just edits the local working copy (see editor.js) */
+/* the coupler route editor: wide enough for a route's selects on one
+   line without wrapping; each route is a compact block whose fields
+   auto-apply through a coalescing queue (see editor.js) */
 #editor-coupler-form { width: 320px; }
 .coupler-routes { display: flex; flex-direction: column; gap: 8px; }
 .coupler-route {

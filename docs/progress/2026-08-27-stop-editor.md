@@ -105,6 +105,11 @@ coupler's own grammar: **"Sounds [Swell] on [Great] at [Sub-octave
 count only under "Other…", scope as "lowest key held (Bass)", unison
 off as "own stops off". The add form speaks the same sentence and
 suggests the conventional name ("16′ Swell to Great") until overtyped.
+Route edits auto-apply — no Apply button: every change posts the whole
+array through a coalescing queue that waits a rebuild out and sends
+only the newest state, so clicking through three pitches costs one
+rebuild; once an apply settles, the server's echo folds back into the
+form (never under the pointer).
 
 Jamb layout became the player's:
 
