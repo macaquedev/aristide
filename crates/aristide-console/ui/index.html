@@ -391,21 +391,30 @@
         <button class="ghost" type="button" id="editor-add-enc-cancel">Cancel</button>
       </span>
     </form>
+    <!-- Spoken the way couplers are named: "Swell to Great" means the
+         Swell's stops sound while you play the Great. The name field
+         follows the selection until the player types their own. -->
     <form class="editor-add-form hidden" id="editor-add-coupler-form">
-      <input id="editor-add-coupler-name" type="text" placeholder="Swell to Great" autocomplete="off" spellcheck="false" />
       <label class="settings-row">
-        <span class="rail-label">From</span>
-        <select id="editor-add-coupler-from"></select>
+        <span class="rail-label">Sounds</span>
+        <select id="editor-add-coupler-sounds"></select>
       </label>
       <label class="settings-row">
-        <span class="rail-label">To</span>
-        <select id="editor-add-coupler-to"></select>
+        <span class="rail-label">on</span>
+        <select id="editor-add-coupler-on"></select>
       </label>
       <label class="settings-row">
-        <span class="rail-label">Shift</span>
-        <span class="stepper"><input id="editor-add-coupler-shift" type="number" min="-24" max="24" step="1" value="0" /></span>
+        <span class="rail-label">at</span>
+        <select id="editor-add-coupler-at">
+          <option value="0">Unison</option>
+          <option value="-12">Sub-octave (16&prime;)</option>
+          <option value="12">Super-octave (4&prime;)</option>
+        </select>
       </label>
-      <p class="pane-note">&minus;12 sub-octave &middot; 0 unison &middot; +12 super-octave</p>
+      <input id="editor-add-coupler-name" type="text" placeholder="Name" autocomplete="off" spellcheck="false" />
+      <p class="pane-note">&ldquo;Swell to Great&rdquo;: the Swell's stops speak
+        while you play the Great. Finer routes &mdash; ranges, bass/melody,
+        unison off &mdash; are a right-click on the new rocker.</p>
       <span class="editor-add-form-actions">
         <button class="ghost" type="submit">Add</button>
         <button class="ghost" type="button" id="editor-add-coupler-cancel">Cancel</button>

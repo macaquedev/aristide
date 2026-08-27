@@ -74,6 +74,7 @@ export class Editor {
     // every routes change rebuilds the organ, and "Apply routes" is the
     // only thing that ever posts them, once, as a whole.
     this.couplerRoutes = null;
+    this.addCouplerNamed = false; // the add form's name field was typed in
     this.tuningBrowseKind = null; // "scale" | "keymap" | null — the tuning form's own file browser
     this.tuningBrowseDir = null;
     this.tuningBrowseParent = null;
@@ -193,9 +194,9 @@ export class Editor {
       addCoupler: root.getElementById("editor-add-coupler"),
       addCouplerForm: root.getElementById("editor-add-coupler-form"),
       addCouplerName: root.getElementById("editor-add-coupler-name"),
-      addCouplerFrom: root.getElementById("editor-add-coupler-from"),
-      addCouplerTo: root.getElementById("editor-add-coupler-to"),
-      addCouplerShift: root.getElementById("editor-add-coupler-shift"),
+      addCouplerSounds: root.getElementById("editor-add-coupler-sounds"),
+      addCouplerOn: root.getElementById("editor-add-coupler-on"),
+      addCouplerAt: root.getElementById("editor-add-coupler-at"),
       addCouplerCancel: root.getElementById("editor-add-coupler-cancel"),
       hex: root.getElementById("editor-hex"),
       hexTitle: root.getElementById("editor-hex-title"),
@@ -389,6 +390,7 @@ export class Editor {
     this.wireKeyboardContextMenu();
     this.wireCouplerContextMenus();
     this.wirePanelMoves(snapshot);
+    this.wirePanelResize();
     this.addDivisionButtons(snapshot);
     this.placePending(snapshot);
   }
@@ -409,7 +411,8 @@ export class Editor {
     for (const knob of this.root.querySelectorAll('.knob[data-key^="stop-"]')) {
       const id = Number(knob.dataset.key.slice("stop-".length));
       knob.title =
-        "Ctrl-drag to move or enclose this stop, or unlock to drag it plain — right-click to edit it.";
+        "Drag to reorder, move, or enclose this stop (ctrl reaches through the lock) — " +
+        "right-click to edit it.";
       this.wireDragSource(knob, () => {
         const stop = this.lastSnapshot?.stops.find((s) => s.id === id);
         if (!stop) return null;
@@ -634,6 +637,61 @@ export class Editor {
     const x = parseFloat(panel.style.left) / canvasRect.width;
     const y = parseFloat(panel.style.top) / canvasRect.height;
     this.organCommand(commands.organPanelPlace(panel.dataset.panel, x, y));
+  }
+
+  // ---- resizing jambs: the grip in the corner ------------------------------
+  //
+  // Dragging the grip sets the panel's width — which is what wraps
+  // the knob rank into columns (see .division-knobs); the height
+  // always follows the content, so nothing is ever clipped. The size
+  // persists as canvas fractions alongside the panel's position, the
+  // panel-placement contract.
+
+  wirePanelResize() {
+    for (const panel of this.el.canvas.querySelectorAll(".panel-jamb")) {
+      const grip = document.createElement("div");
+      grip.className = "panel-grip";
+      grip.title = "Drag to widen — the stops wrap into columns.";
+      grip.addEventListener("pointerdown", (event) => {
+        if (event.button !== 0) return;
+        if (!(event.ctrlKey || this.unlocked)) return;
+        event.preventDefault();
+        event.stopPropagation(); // never also a panel move
+        this.startPanelResize(panel, event);
+      });
+      panel.append(grip);
+    }
+  }
+
+  startPanelResize(panel, event) {
+    const start = { x: event.clientX, w: panel.offsetWidth };
+    // Never narrower than one knob and the body's padding — a rank
+    // can wrap, but a knob must not be clipped.
+    const floor = 118;
+    panel.dataset.dragging = "1"; // layoutPanels leaves a mid-gesture panel alone
+    panel.classList.add("sized");
+    const move = (e) => {
+      panel.style.width = `${Math.max(floor, start.w + e.clientX - start.x)}px`;
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      delete panel.dataset.dragging;
+      const canvas = this.el.canvas.getBoundingClientRect();
+      if (!canvas.width || !canvas.height) return;
+      this.organCommand(
+        commands.organPanelPlace(
+          panel.dataset.panel,
+          parseFloat(panel.style.left || "0") / canvas.width,
+          parseFloat(panel.style.top || "0") / canvas.height,
+          {
+            w: panel.offsetWidth / canvas.width,
+            h: panel.offsetHeight / canvas.height,
+          }
+        )
+      );
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up, { once: true });
   }
 
   // ---- the per-division "+" ------------------------------------------------
@@ -1445,74 +1503,125 @@ export class Editor {
   }
 
   /// Rebuilds the route blocks from `this.couplerRoutes` — the local
-  /// working copy, never the snapshot directly. Each route gets a
-  /// compact two-line block; fields this form doesn't expose (low/high/
-  /// repitch) are left on the route object untouched, so Apply round-
-  /// trips them.
+  /// working copy, never the snapshot directly. Each route reads the
+  /// way a coupler is named: "Swell to Great" means SWELL'S STOPS
+  /// SOUND when the GREAT is played, so the row says "Sounds [Swell]
+  /// on [Great] at [Sub-octave (16′)]" — the wire's from/to (played/
+  /// sounding) stays under the hood. Fields this form doesn't expose
+  /// (low/high/repitch) are left on the route object untouched, so
+  /// Apply round-trips them.
   renderCouplerRoutes() {
     const container = this.el.couplerRoutesBox;
     container.replaceChildren();
     const manuals = this.lastSnapshot?.manuals ?? [];
-    const manualOptions = (select, includeNone) => {
-      select.replaceChildren();
-      if (includeNone) {
-        const none = document.createElement("option");
-        none.value = "";
-        none.textContent = "(none — silence only)";
-        select.append(none);
-      }
-      for (const manual of manuals) {
+    const word = (text) => {
+      const span = document.createElement("span");
+      span.className = "rail-label";
+      span.textContent = text;
+      return span;
+    };
+    const options = (select, entries) => {
+      for (const [value, text] of entries) {
         const opt = document.createElement("option");
-        opt.value = manual.idx;
-        opt.textContent = manual.name;
+        opt.value = value;
+        opt.textContent = text;
         select.append(opt);
       }
     };
+    const manualEntries = manuals.map((manual) => [String(manual.idx), manual.name]);
 
     this.couplerRoutes.forEach((route, i) => {
       const block = document.createElement("div");
       block.className = "coupler-route";
 
-      const line1 = document.createElement("div");
-      line1.className = "coupler-route-row";
-
-      const fromSelect = document.createElement("select");
-      manualOptions(fromSelect, false);
-      fromSelect.value = route.from ?? "";
-      fromSelect.addEventListener("change", () => {
-        route.from = fromSelect.value === "" ? null : Number(fromSelect.value);
+      // "Sounds <division> on <keyboard>" — the coupler's own word
+      // order. Sounding nothing turns the route into a pure silencer
+      // (the classic Unison Off stop), which needs no pitch either.
+      const what = document.createElement("div");
+      what.className = "coupler-route-row";
+      const soundsSelect = document.createElement("select");
+      options(soundsSelect, [...manualEntries, ["", "(nothing — silence)"]]);
+      soundsSelect.value = route.to == null ? "" : String(route.to);
+      const onSelect = document.createElement("select");
+      onSelect.title = "The keyboard you play — where the coupler listens.";
+      options(onSelect, manualEntries);
+      onSelect.value = route.from == null ? "" : String(route.from);
+      onSelect.addEventListener("change", () => {
+        route.from = Number(onSelect.value);
       });
-
-      const toSelect = document.createElement("select");
-      manualOptions(toSelect, true);
-      toSelect.value = route.to == null ? "" : route.to;
-      toSelect.addEventListener("change", () => {
-        route.to = toSelect.value === "" ? null : Number(toSelect.value);
+      soundsSelect.title = "Whose stops speak — the division this coupler borrows.";
+      soundsSelect.addEventListener("change", () => {
+        if (soundsSelect.value === "") {
+          route.to = null;
+          // A route that sounds nothing must at least silence, or it
+          // does nothing at all (the server refuses a dead line).
+          route.unison_off = true;
+        } else {
+          route.to = Number(soundsSelect.value);
+        }
+        this.renderCouplerRoutes();
       });
+      what.append(word("Sounds"), soundsSelect, word("on"), onSelect);
+      block.append(what);
 
-      const shiftInput = document.createElement("input");
-      shiftInput.type = "number";
-      shiftInput.min = "-24";
-      shiftInput.max = "24";
-      shiftInput.step = "1";
-      shiftInput.value = route.shift ?? 0;
-      shiftInput.addEventListener("change", () => {
-        const value = Number(shiftInput.value);
-        route.shift = Number.isFinite(value) ? value : 0;
-      });
-
-      line1.append(fromSelect, toSelect, shiftInput);
-
-      const line2 = document.createElement("div");
-      line2.className = "coupler-route-row";
-
-      const scopeSelect = document.createElement("select");
-      for (const [value, text] of [["", "All keys"], ["bass", "Bass"], ["melody", "Melody"]]) {
-        const opt = document.createElement("option");
-        opt.value = value;
-        opt.textContent = text;
-        scopeSelect.append(opt);
+      // "at <pitch>" — the organ's own words for the shift, with the
+      // raw key count only for the odd coupler (a fourths coupler,
+      // a quint) the presets don't name.
+      if (route.to != null) {
+        const at = document.createElement("div");
+        at.className = "coupler-route-row";
+        const pitchSelect = document.createElement("select");
+        options(pitchSelect, [
+          ["0", "Unison"],
+          ["-12", "Sub-octave (16′)"],
+          ["12", "Super-octave (4′)"],
+          ["custom", "Other…"],
+        ]);
+        const keysInput = document.createElement("input");
+        keysInput.type = "number";
+        keysInput.min = "-24";
+        keysInput.max = "24";
+        keysInput.step = "1";
+        keysInput.title = "Keys added to what you play: −12 an octave down, +7 a fifth up…";
+        const keysWord = word("keys");
+        const showKeys = (shown) => {
+          keysInput.classList.toggle("hidden", !shown);
+          keysWord.classList.toggle("hidden", !shown);
+        };
+        const shift = route.shift ?? 0;
+        const preset = ["0", "-12", "12"].includes(String(shift));
+        pitchSelect.value = preset ? String(shift) : "custom";
+        keysInput.value = shift;
+        showKeys(!preset);
+        pitchSelect.addEventListener("change", () => {
+          if (pitchSelect.value === "custom") {
+            showKeys(true);
+            keysInput.focus();
+            return;
+          }
+          route.shift = Number(pitchSelect.value);
+          keysInput.value = route.shift;
+          showKeys(false);
+        });
+        keysInput.addEventListener("change", () => {
+          const value = Number(keysInput.value);
+          if (Number.isFinite(value)) route.shift = Math.round(value);
+        });
+        at.append(word("at"), pitchSelect, keysInput, keysWord);
+        block.append(at);
       }
+
+      const how = document.createElement("div");
+      how.className = "coupler-route-row";
+      const scopeSelect = document.createElement("select");
+      scopeSelect.title =
+        "Which played keys couple: all of them, or only the lowest/highest " +
+        "held — the intelligent Bass and Melody couplers.";
+      options(scopeSelect, [
+        ["", "every key"],
+        ["bass", "lowest key held (Bass)"],
+        ["melody", "highest key held (Melody)"],
+      ]);
       scopeSelect.value = route.scope ?? "";
       scopeSelect.addEventListener("change", () => {
         if (scopeSelect.value) route.scope = scopeSelect.value;
@@ -1520,16 +1629,20 @@ export class Editor {
       });
 
       const unisonLabel = document.createElement("label");
+      unisonLabel.title =
+        "Silence the played keyboard's own stops here, so the note moves " +
+        "instead of doubling.";
       const unisonCheck = document.createElement("input");
       unisonCheck.type = "checkbox";
       unisonCheck.checked = !!route.unison_off;
+      unisonCheck.disabled = route.to == null; // a pure silencer must silence
       unisonCheck.addEventListener("change", () => {
         if (unisonCheck.checked) route.unison_off = true;
         else delete route.unison_off;
       });
-      unisonLabel.append(unisonCheck, document.createTextNode(" unison off"));
+      unisonLabel.append(unisonCheck, document.createTextNode(" own stops off"));
 
-      line2.append(scopeSelect, unisonLabel);
+      how.append(scopeSelect, unisonLabel);
 
       if (this.couplerRoutes.length > 1) {
         const remove = document.createElement("button");
@@ -1541,10 +1654,10 @@ export class Editor {
           this.couplerRoutes.splice(i, 1);
           this.renderCouplerRoutes();
         });
-        line2.append(remove);
+        how.append(remove);
       }
 
-      block.append(line1, line2);
+      block.append(how);
       container.append(block);
     });
   }
@@ -1816,7 +1929,7 @@ export class Editor {
     ghost.className = "organ-drag-ghost";
     ghost.textContent = label;
     document.body.append(ghost);
-    this.drag = { kind, payload, ghost, label, targetType: null, targetIdx: null };
+    this.drag = { kind, payload, ghost, label, targetType: null, targetIdx: null, insert: null };
     this.positionGhost(event.clientX, event.clientY);
     if (this.binAllowed(kind)) this.el.bin.classList.add("visible");
     this._dragMove = (e) => this.dragMove(e);
@@ -1846,16 +1959,71 @@ export class Editor {
     }
     const manual = el.closest("[data-drop-manual]");
     if (manual && this.manualAllowed(this.drag.kind)) {
-      return { type: "manual", idx: Number(manual.dataset.dropManual) };
+      const hit = { type: "manual", idx: Number(manual.dataset.dropManual) };
+      // Over a jamb division a dragged stop carries a *position* too:
+      // where in the knob rank it would land. A keyboard is a plain
+      // "onto this manual" target, as before.
+      if (this.drag.kind === "stop" && manual.classList.contains("division")) {
+        hit.insert = this.insertionPoint(manual, x, y);
+      }
+      return hit;
     }
     return null;
   }
 
+  /// Where in a division's knob rank the dragged stop would land: the
+  /// nearest stop knob (the dragged one doesn't count) and which side
+  /// of it the pointer sits — normalized to "before this stop id",
+  /// with null meaning the bottom of the rank. Works unchanged when a
+  /// resized jamb has wrapped the rank into columns: nearest-knob is a
+  /// distance, not an index.
+  insertionPoint(division, x, y) {
+    const dragged = `stop-${this.drag.payload.id}`;
+    const knobs = [...division.querySelectorAll('.knob[data-key^="stop-"]')].filter(
+      (knob) => knob.dataset.key !== dragged
+    );
+    if (!knobs.length) return { beforeId: null, marker: null, side: "after" };
+    let nearest = null;
+    let best = Infinity;
+    for (const knob of knobs) {
+      const rect = knob.getBoundingClientRect();
+      const dx = x - (rect.left + rect.width / 2);
+      const dy = y - (rect.top + rect.height / 2);
+      const d = dx * dx + dy * dy;
+      if (d < best) {
+        best = d;
+        nearest = knob;
+      }
+    }
+    const rect = nearest.getBoundingClientRect();
+    const id = (knob) => Number(knob.dataset.key.slice("stop-".length));
+    // Which side of the nearest knob the pointer means: judged along
+    // whichever axis it's further out on, so a wrapped grid reads
+    // left/right within a row and above/below across rows — and the
+    // seam is drawn on the matching edge.
+    const dx = (x - (rect.left + rect.width / 2)) / rect.width;
+    const dy = (y - (rect.top + rect.height / 2)) / rect.height;
+    const before = Math.abs(dx) > Math.abs(dy) ? dx < 0 : dy < 0;
+    const horizontal = Math.abs(dx) > Math.abs(dy);
+    const side = horizontal ? (before ? "left" : "right") : before ? "before" : "after";
+    if (before) {
+      return { beforeId: id(nearest), marker: nearest, side };
+    }
+    const next = knobs[knobs.indexOf(nearest) + 1] ?? null;
+    return { beforeId: next ? id(next) : null, marker: nearest, side };
+  }
+
   applyDropHighlight(hit) {
     for (const el of this.root.querySelectorAll(".drop-target")) el.classList.remove("drop-target");
+    for (const el of this.root.querySelectorAll(
+      ".insert-before, .insert-after, .insert-left, .insert-right"
+    )) {
+      el.classList.remove("insert-before", "insert-after", "insert-left", "insert-right");
+    }
     this.el.bin.classList.remove("drop-target");
     this.drag.targetType = hit?.type ?? null;
     this.drag.targetIdx = hit?.idx ?? null;
+    this.drag.insert = hit?.insert ? { manual: hit.idx, beforeId: hit.insert.beforeId } : null;
     this.drag.ghost.textContent = this.drag.label;
     if (!hit) return;
 
@@ -1884,6 +2052,19 @@ export class Editor {
       return;
     }
 
+    // Over a jamb division a dragged stop shows where it would land —
+    // a seam beside the nearest knob — whether it's coming home to its
+    // own rank (a pure reorder) or arriving from another manual.
+    if (this.drag.kind === "stop" && hit.insert) {
+      hit.insert.marker?.classList.add(`insert-${hit.insert.side}`);
+      const manual = this.lastSnapshot?.manuals.find((m) => m.idx === hit.idx);
+      this.drag.ghost.textContent =
+        hit.idx === this.drag.payload.midx
+          ? `Place ${this.drag.label} here`
+          : `${this.drag.label} → ${manual?.name ?? "here"}`;
+      return;
+    }
+
     // Dropping a stop back on its own manual, or a manual's cheek on its
     // own board, isn't a move — no need to light it up as one.
     if (this.drag.kind === "stop" && hit.idx === this.drag.payload.midx) return;
@@ -1903,6 +2084,11 @@ export class Editor {
     drag.ghost.remove();
     this.el.bin.classList.remove("visible", "drop-target");
     for (const el of this.root.querySelectorAll(".drop-target")) el.classList.remove("drop-target");
+    for (const el of this.root.querySelectorAll(
+      ".insert-before, .insert-after, .insert-left, .insert-right"
+    )) {
+      el.classList.remove("insert-before", "insert-after", "insert-left", "insert-right");
+    }
 
     const { targetType, targetIdx } = drag;
     if (!targetType) return;
@@ -1917,11 +2103,36 @@ export class Editor {
           const already = stop?.enc?.includes(targetIdx);
           this.organCommand(commands.organEnclosureAssign(enclosure.name, drag.payload.id, !already));
         }
-      } else if (targetType === "manual" && targetIdx !== drag.payload.midx) {
-        // A live reassignment, not a rebuild — but the server refuses
-        // it mid-rebuild (stale names would poison the file), so it
-        // goes through the queue, which waits any rebuild out.
-        this.runQueue([commands.organMove(drag.payload.id, targetIdx)]);
+      } else if (targetType === "manual") {
+        const sameManual = targetIdx === drag.payload.midx;
+        if (drag.insert && drag.insert.manual === targetIdx) {
+          // The drop carried a position: deal the destination rank out
+          // anew with the dragged stop where the seam showed. The list
+          // is the snapshot's display order minus the dragged stop,
+          // spliced back in front of `beforeId` (null = the bottom).
+          const ids = (this.lastSnapshot?.stops ?? [])
+            .filter((s) => s.midx === targetIdx && s.id !== drag.payload.id)
+            .map((s) => s.id);
+          const at = drag.insert.beforeId == null ? ids.length : ids.indexOf(drag.insert.beforeId);
+          ids.splice(at < 0 ? ids.length : at, 0, drag.payload.id);
+          if (sameManual) {
+            this.organCommand(commands.organStopOrder(targetIdx, ids));
+          } else {
+            // Arriving from another manual: move first (live), then
+            // place — the queue waits each response out, and refusals
+            // surface like any other edit's.
+            this.runQueue([
+              commands.organMove(drag.payload.id, targetIdx),
+              commands.organStopOrder(targetIdx, ids),
+            ]);
+          }
+        } else if (!sameManual) {
+          // A keyboard drop names no position — the stop joins the
+          // manual at the bottom of its rank, as it always has. Live,
+          // but the server refuses it mid-rebuild (stale names would
+          // poison the file), so it goes through the queue.
+          this.runQueue([commands.organMove(drag.payload.id, targetIdx)]);
+        }
       }
     } else if (drag.kind === "manual") {
       if (targetType === "bin") {
@@ -2329,13 +2540,24 @@ export class Editor {
       this.organCommand(commands.organEnclosureAdd(name)).then((ok) => ok && this.closeAdd());
     });
 
+    // The name follows the selection ("Swell to Great", "16′ Swell to
+    // Great") until the player types one of their own — see
+    // suggestCouplerName.
+    for (const select of [this.el.addCouplerSounds, this.el.addCouplerOn, this.el.addCouplerAt]) {
+      select.addEventListener("change", () => this.suggestCouplerName());
+    }
+    this.el.addCouplerName.addEventListener("input", () => {
+      this.addCouplerNamed = this.el.addCouplerName.value.trim() !== "";
+    });
     this.el.addCouplerForm.addEventListener("submit", (event) => {
       event.preventDefault();
       const name = this.el.addCouplerName.value.trim();
       if (!name) return;
-      const from = Number(this.el.addCouplerFrom.value);
-      const to = Number(this.el.addCouplerTo.value);
-      const shift = Math.min(24, Math.max(-24, Math.round(Number(this.el.addCouplerShift.value) || 0)));
+      // Spoken order to wire order: what SOUNDS is the route's target,
+      // what it's played ON is where the route listens.
+      const to = Number(this.el.addCouplerSounds.value);
+      const from = Number(this.el.addCouplerOn.value);
+      const shift = Number(this.el.addCouplerAt.value) || 0;
       if (!Number.isFinite(from) || !Number.isFinite(to)) return;
       this.organCommand(commands.organCouplerAdd(name, [{ from, to, shift }])).then(
         (ok) => ok && this.closeAdd()
@@ -2415,9 +2637,10 @@ export class Editor {
     this.closeAddPanels();
     this.el.addCouplerForm.classList.remove("hidden");
     this.el.addCouplerName.value = "";
-    this.el.addCouplerShift.value = 0;
+    this.addCouplerNamed = false;
+    this.el.addCouplerAt.value = "0";
     const manuals = this.lastSnapshot?.manuals ?? [];
-    for (const select of [this.el.addCouplerFrom, this.el.addCouplerTo]) {
+    for (const select of [this.el.addCouplerSounds, this.el.addCouplerOn]) {
       select.replaceChildren();
       for (const manual of manuals) {
         const opt = document.createElement("option");
@@ -2426,8 +2649,33 @@ export class Editor {
         select.append(opt);
       }
     }
+    // The classic default: the second manual sounding on the first —
+    // and a name to match, ready to be overtyped.
+    if (manuals.length > 1) {
+      this.el.addCouplerSounds.value = String(manuals[1].idx);
+      this.el.addCouplerOn.value = String(manuals[0].idx);
+    }
+    this.suggestCouplerName();
     if (this.addAnchor) this.positionPopover(this.el.add, this.addAnchor.x, this.addAnchor.y);
-    requestAnimationFrame(() => this.el.addCouplerName.focus());
+  }
+
+  /// The conventional name for what the add form's selects say:
+  /// "Swell to Great", "16′ Swell to Great" for a sub-octave, "Great
+  /// 4′" when a manual couples to itself at a pitch. Only fills the
+  /// name until the player types their own.
+  suggestCouplerName() {
+    if (this.addCouplerNamed) return;
+    const manuals = this.lastSnapshot?.manuals ?? [];
+    const name = (value) => manuals.find((m) => String(m.idx) === value)?.name;
+    const sounds = name(this.el.addCouplerSounds.value);
+    const on = name(this.el.addCouplerOn.value);
+    if (!sounds || !on) return;
+    const shift = Number(this.el.addCouplerAt.value) || 0;
+    const pitch = shift === -12 ? "16′" : shift === 12 ? "4′" : "";
+    this.el.addCouplerName.value =
+      sounds === on
+        ? `${sounds} ${pitch || "Unison"}`.trim()
+        : `${pitch} ${sounds} to ${on}`.trim();
   }
 
   openSourceForm() {

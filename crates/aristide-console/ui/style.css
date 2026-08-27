@@ -1178,7 +1178,7 @@ input[type="range"]:hover::-webkit-slider-thumb { filter: brightness(1.15); }
    and Shift field on one line without wrapping; each route is a
    compact two-line block, and only "Apply routes" ever posts — every
    other field just edits the local working copy (see editor.js) */
-#editor-coupler-form { width: 300px; }
+#editor-coupler-form { width: 320px; }
 .coupler-routes { display: flex; flex-direction: column; gap: 8px; }
 .coupler-route {
   display: flex;
@@ -1193,6 +1193,7 @@ input[type="range"]:hover::-webkit-slider-thumb { filter: brightness(1.15); }
 .coupler-route-row { display: flex; align-items: center; gap: 6px; }
 .coupler-route-row select { flex: 1 1 auto; min-width: 0; }
 .coupler-route-row input[type="number"] { flex: 0 0 auto; width: 52px; }
+.coupler-route-row .rail-label { flex: 0 0 auto; }
 .coupler-route-row label {
   display: flex;
   align-items: center;
@@ -1867,6 +1868,51 @@ body.editing .panel-jamb.empty { display: block; }
   min-width: 88px;
 }
 
+/* the knobs' own wrap container. One knob wide by default — the
+   single column a jamb has always been — but a player-sized panel
+   (see .panel.sized) lifts the cap and the knobs wrap at the panel's
+   width into as many columns as fit. Width drives the wrap and height
+   just grows, so nothing is ever clipped (a height-driven column wrap
+   cannot widen its own container — a CSS limitation, not a choice). */
+.division-knobs {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 10px 14px;
+  max-width: 88px;
+}
+
+/* a player-sized jamb: the panel takes the dragged width, the
+   division fills it, and the knob rank wraps to fit */
+.panel.sized .division,
+.panel.sized .division-knobs { width: 100%; max-width: none; }
+
+/* the editor's resize grip, jambs only: a quiet corner hatch */
+.panel-grip {
+  display: none;
+  position: absolute;
+  right: 1px;
+  bottom: 1px;
+  width: 14px;
+  height: 14px;
+  cursor: ew-resize;
+  background: repeating-linear-gradient(
+    135deg,
+    transparent 0 3px,
+    #ffffff2e 3px 4px
+  );
+  border-bottom-right-radius: 5px;
+}
+body.editing .panel-jamb .panel-grip { display: block; }
+
+/* where a dragged stop would land: a bright seam on the edge of the
+   knob the pointer is nearest — above/below in a column, left/right
+   within a wrapped row */
+.knob.insert-before { box-shadow: 0 -7px 0 -2px var(--accent), var(--bevel); }
+.knob.insert-after { box-shadow: 0 7px 0 -2px var(--accent), var(--bevel); }
+.knob.insert-left { box-shadow: -9px 0 0 -2px var(--accent), var(--bevel); }
+.knob.insert-right { box-shadow: 9px 0 0 -2px var(--accent), var(--bevel); }
+
 .division-head {
   display: flex;
   align-items: center;
@@ -2220,6 +2266,8 @@ body[data-density="spacious"] .keyboard.microtonal { --hex-w: 35px; --hex-h: 40p
 
 body[data-density="compact"] .panel-jamb .panel-body { gap: 12px; padding: 12px 10px 14px; }
 body[data-density="compact"] .division { gap: 7px; }
+body[data-density="compact"] .division-knobs { gap: 7px 11px; max-width: 78px; }
+body[data-density="compact"] .panel.sized .division-knobs { max-width: none; }
 body[data-density="compact"] .knob { width: 78px; min-height: 46px; }
 body[data-density="compact"] .coupler-rail { padding: 6px 10px; }
 body[data-density="compact"] .rocker { min-width: 58px; height: 28px; }
@@ -2229,6 +2277,8 @@ body[data-density="compact"] .shoe-track { height: 108px; }
 
 body[data-density="spacious"] .panel-jamb .panel-body { gap: 20px; padding: 20px 18px 22px; }
 body[data-density="spacious"] .division { gap: 13px; }
+body[data-density="spacious"] .division-knobs { gap: 13px 17px; max-width: 98px; }
+body[data-density="spacious"] .panel.sized .division-knobs { max-width: none; }
 body[data-density="spacious"] .knob { width: 98px; min-height: 58px; }
 body[data-density="spacious"] .coupler-rail { padding: 10px 14px; }
 body[data-density="spacious"] .rocker { min-width: 70px; height: 36px; }

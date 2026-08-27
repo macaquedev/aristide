@@ -235,13 +235,20 @@ export class Console {
       title.textContent = manual.name;
       head.append(title);
       column.append(head);
+      // The knobs live in a wrap container of their own: one knob
+      // wide it stacks the single column it always has, but a jamb
+      // the player has resized (see layoutPanels) frees the width and
+      // the rank wraps into columns.
+      const knobs = document.createElement("div");
+      knobs.className = "division-knobs";
       for (const stop of stops) {
-        column.append(this.drawknob(stop.name, `stop-${stop.id}`, (on) =>
+        knobs.append(this.drawknob(stop.name, `stop-${stop.id}`, (on) =>
           this.send(commands.stop(stop.id, on)), stopFace(stop)
         ));
       }
+      column.append(knobs);
       body.append(column);
-      if (stops.length) lastColumn = column;
+      if (stops.length) lastColumn = knobs;
     }
 
     // Couplers rail (built before the tremulant so the trem knob has a
@@ -521,6 +528,20 @@ export class Console {
     const H = this.el.canvas.clientHeight;
     if (!W || !H || !this.panels.size) return;
     const placed = snapshot.layout ?? {};
+    // Sizes first, positions second: the default layout measures every
+    // panel to seat the unplaced ones around the placed, so a jamb's
+    // player-set width must be real before anything is measured — or
+    // the auto-laid panels seat themselves over the columns it grew.
+    for (const [id, el] of this.panels) {
+      if (el.dataset.dragging) continue;
+      // A player-sized panel: the dragged width is what wraps a
+      // jamb's knobs into columns; height always follows the content,
+      // so nothing is ever clipped. (`h` still rides the layout for
+      // symmetry; only the width is load-bearing today.)
+      const sized = placed[id]?.w != null;
+      el.classList.toggle("sized", sized);
+      el.style.width = sized ? `${Math.round(placed[id].w * W)}px` : "";
+    }
     const defaults = this.defaultLayout(snapshot, W, H);
     for (const [id, el] of this.panels) {
       if (el.dataset.dragging) continue;

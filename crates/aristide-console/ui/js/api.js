@@ -144,11 +144,20 @@ export const commands = {
   // numeric id from snapshot.stops[], `enclosure` its name.
   organEnclosureAssign: (enclosure, stopId, inBox) =>
     `/api/organ/enclosure/assign?enclosure=${encodeURIComponent(enclosure)}&stop=${stopId}&in=${inBox ? 1 : 0}`,
-  // Where a console panel sits on the canvas, as fractions of its size.
-  // Cosmetic: written to the organ file but no rebuild. Panel ids are
-  // "keyboard:<manual>", "jamb:<manual>", "couplers", "shoes".
-  organPanelPlace: (panel, x, y) =>
-    `/api/organ/panel/place?panel=${encodeURIComponent(panel)}&x=${x.toFixed(4)}&y=${y.toFixed(4)}`,
+  // Where a console panel sits on the canvas — and, with `size`
+  // ({w, h}), how big it is (a sized jamb wraps its stops into
+  // columns; size left out keeps whatever the panel has on record).
+  // All fractions of the canvas. Cosmetic: written to the organ file
+  // but no rebuild. Panel ids are "keyboard:<manual>",
+  // "jamb:<manual>", "couplers", "shoes".
+  organPanelPlace: (panel, x, y, size) =>
+    `/api/organ/panel/place?panel=${encodeURIComponent(panel)}&x=${x.toFixed(4)}&y=${y.toFixed(4)}` +
+    (size ? `&w=${size.w.toFixed(4)}&h=${size.h.toFixed(4)}` : ""),
+  // A division's drawknob order, top of the jamb first — display only
+  // and live like panel placement: the snapshot deals the stops out
+  // anew, nothing structural moves.
+  organStopOrder: (manual, stops) =>
+    `/api/organ/stop/order?manual=${manual}&stops=${stops.join(",")}`,
   // Takes a coupler off the console (keep=0) or restores it (keep=1) —
   // distinct from the rail's own on/off, which only engages a coupler
   // that's already on the console.
