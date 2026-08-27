@@ -102,6 +102,11 @@ pub enum Command {
         enclosure: u8,
         bus: u8,
         delay_frames: u32,
+        /// The pipe's sounding frequency in Hz — how big a pipe this
+        /// is, which is what decides how fast its amplitude can answer
+        /// the chest (speech time ~ tens of periods). 0 = unpitched
+        /// (noises): chest factors apply unlagged.
+        nominal_hz: f32,
     },
     /// Reconfigure one wind group's supply model.
     SetWind { group: u8, params: WindParams },
@@ -319,6 +324,18 @@ struct SampledVoice {
     wind_rate: f32,
     wind_gain: f32,
     wind_treble: f32,
+    /// This pipe's own answer to the chest, fixed at voice start.
+    /// `wind_sens` spreads the modulation depth across the chorus (no
+    /// two pipes are voiced identically); the two rates are 1/τ for
+    /// the one-pole lags below — pitch follows pressure within a few
+    /// speaking periods, amplitude and timbre only over the pipe's
+    /// speech time (~tens of periods), so a 16' bass barely flutters
+    /// at tremulant rates while a 2' pipe follows the valve, and every
+    /// pipe sits at its own phase. Uniform, instant factors are the
+    /// single-LFO sound of an electronic vibrato.
+    wind_sens: f32,
+    wind_pitch_rate: f32,
+    wind_gain_rate: f32,
     /// Output frames since the voice started — drives the wind model's
     /// pallet-opening attack boost.
     age_frames: u32,
@@ -850,7 +867,7 @@ pub struct Engine {
 impl Engine {
     pub fn new(sample_rate: f32, bank: Arc<SampleBank>) -> (Engine, EngineHandle) {
         let (producer, consumer) = RingBuffer::new(COMMAND_QUEUE_CAPACITY);
-        let engine = Engine {
+        let mut engine = Engine {
             sample_rate,
             commands: consumer,
             bank,
@@ -876,6 +893,12 @@ impl Engine {
             envelope_step: 1.0 - (-1.0 / (0.01 * sample_rate)).exp(),
             enc_ramp: 1.0 - (-1.0 / (0.005 * sample_rate)).exp(),
         };
+        // Sixteen chests must not share one random sequence and one
+        // tremulant phase — decorrelated once, here, they drift apart
+        // for the rest of their lives.
+        for (index, group) in engine.wind.iter_mut().enumerate() {
+            group.decorrelate(index);
+        }
         (engine, EngineHandle { commands: producer })
     }
 
@@ -1114,13 +1137,37 @@ impl Engine {
                                 .step(dt, params.flow_noise, &mut sampled.rng);
                             deviation = sampled.wander.deviation();
                         }
-                        sampled.wind_rate =
-                            chest.rate_factor() * (1.0 + params.pitch_exponent * deviation);
-                        sampled.wind_gain =
-                            chest.gain_factor() * (1.0 + params.gain_exponent * deviation);
-                        sampled.wind_treble = (chest.brightness_factor()
-                            * (1.0 + params.brightness_exponent * deviation))
-                            .clamp(0.25, 2.0);
+                        // The chest says where pressure is; the PIPE
+                        // decides how it answers: its own sensitivity
+                        // spreads the depth across the chorus, and the
+                        // one-pole lags below give each pipe its speech
+                        // dynamics — pitch follows fast, amplitude and
+                        // timbre over ~tens of periods, so basses
+                        // barely flutter at tremulant rates and every
+                        // pipe sits at its own phase. All identity when
+                        // the chest is quiet (factors 1, no noise).
+                        let sens = sampled.wind_sens;
+                        let target_rate = 1.0
+                            + (chest.rate_factor() - 1.0) * sens
+                            + params.pitch_exponent * deviation;
+                        let target_gain = 1.0
+                            + (chest.gain_factor() - 1.0) * sens
+                            + params.gain_exponent * deviation;
+                        // The brightness exponent is calibrated on the
+                        // regulator's few-percent sags; at tremulant
+                        // pressure swings a pipe's spectrum saturates
+                        // long before P^3 says ±6 dB, so the swing is
+                        // capped at ≈ ±2.5 dB.
+                        let target_treble = (1.0
+                            + (chest.brightness_factor() - 1.0) * sens
+                            + params.brightness_exponent * deviation)
+                            .clamp(0.75, 1.33);
+                        let pitch_alpha = (dt * sampled.wind_pitch_rate).min(1.0);
+                        let slow_alpha = (dt * sampled.wind_gain_rate).min(1.0);
+                        sampled.wind_rate += (target_rate - sampled.wind_rate) * pitch_alpha;
+                        sampled.wind_gain += (target_gain - sampled.wind_gain) * slow_alpha;
+                        sampled.wind_treble +=
+                            (target_treble - sampled.wind_treble) * slow_alpha;
                     }
                     let (rate_scale, gain, treble) = if lite {
                         (1.0f64, master, 1.0f32)
@@ -1308,6 +1355,7 @@ impl Engine {
                 enclosure,
                 bus,
                 delay_frames,
+                nominal_hz,
             } => {
                 let Some(start_position) = self
                     .bank
@@ -1329,15 +1377,33 @@ impl Engine {
                     .get(enclosure as usize)
                     .copied()
                     .unwrap_or_default();
+                // The pipe's own response to its chest. Sensitivity is
+                // a fixed per-voice spread (±25 %, hashed from the
+                // handle — no two pipes are voiced identically); the
+                // lag time constants scale with the pipe's period:
+                // pitch answers within a few periods, amplitude and
+                // timbre only over the speech time. Unpitched voices
+                // (nominal_hz = 0) take the chest unlagged.
+                let (wind_sens, wind_pitch_rate, wind_gain_rate) = if nominal_hz > 0.0 {
+                    let mut seed = (handle as u32).wrapping_mul(0x6C07_8965) | 1;
+                    let hz = nominal_hz.clamp(16.0, 8000.0);
+                    (
+                        0.75 + 0.5 * wind::xorshift_unit(&mut seed),
+                        1.0 / (4.0 / hz).clamp(0.004, 0.12),
+                        1.0 / (25.0 / hz).clamp(0.02, 0.6),
+                    )
+                } else {
+                    (1.0, f32::MAX, f32::MAX)
+                };
                 // Likewise a voice starts at its chest's current
                 // factors, in case it is released before its first
                 // Held block renders (frozen values must be real).
                 let group = group.min(MAX_WIND_GROUPS as u8 - 1);
                 let chest = &self.wind[group as usize];
                 let (wind_rate, wind_gain, wind_treble) = (
-                    chest.rate_factor(),
-                    chest.gain_factor(),
-                    chest.brightness_factor().clamp(0.25, 2.0),
+                    1.0 + (chest.rate_factor() - 1.0) * wind_sens,
+                    1.0 + (chest.gain_factor() - 1.0) * wind_sens,
+                    (1.0 + (chest.brightness_factor() - 1.0) * wind_sens).clamp(0.75, 1.33),
                 );
                 if let Some(slot) = self.allocate_slot() {
                     self.voices[slot] = Voice::Sampled(SampledVoice {
@@ -1370,6 +1436,9 @@ impl Engine {
                         wind_rate,
                         wind_gain,
                         wind_treble,
+                        wind_sens,
+                        wind_pitch_rate,
+                        wind_gain_rate,
                         age_frames: 0,
                         tail_decay: 1.0,
                         fade_scale: 1.0,
@@ -1666,6 +1735,7 @@ mod tests {
             enclosure: ENCLOSURE_NONE,
             bus: 0,
             delay_frames: 0,
+            nominal_hz: 0.0,
         });
         // 200 frames from a 100-frame sample: only survivable by looping.
         let out = render(&mut engine, 200);
@@ -1700,6 +1770,7 @@ mod tests {
             enclosure: ENCLOSURE_NONE,
             bus: 0,
             delay_frames: 0,
+            nominal_hz: 0.0,
         });
         render(&mut engine, 10);
         handle.send(Command::StopVoice { handle: 7 });
@@ -1732,6 +1803,7 @@ mod tests {
             enclosure: ENCLOSURE_NONE,
             bus: 0,
             delay_frames: 0,
+            nominal_hz: 0.0,
         });
         handle.send(Command::StopVoice { handle: 1 });
         let out = render(&mut engine, 60);
@@ -1774,6 +1846,7 @@ mod tests {
             enclosure: ENCLOSURE_NONE,
             bus: 0,
             delay_frames: 0,
+            nominal_hz: 0.0,
         });
         render(&mut engine, 20);
         let before = slope(&render(&mut engine, 20));
@@ -1821,6 +1894,7 @@ mod tests {
             enclosure: ENCLOSURE_NONE,
             bus: 0,
             delay_frames: 0,
+            nominal_hz: 0.0,
         });
         render(&mut engine, 20);
         let start = slope(&render(&mut engine, 10));
@@ -1865,6 +1939,7 @@ mod tests {
             enclosure: ENCLOSURE_NONE,
             bus: 0,
             delay_frames: 0,
+            nominal_hz: 0.0,
         });
         render(&mut engine, 10);
         handle.send(Command::SetVoiceRate {
@@ -1900,6 +1975,7 @@ mod tests {
             enclosure: ENCLOSURE_NONE,
             bus: 0,
             delay_frames: 30,
+            nominal_hz: 0.0,
         });
         let out = render(&mut engine, 50);
         assert!(
@@ -1926,6 +2002,7 @@ mod tests {
             enclosure: ENCLOSURE_NONE,
             bus: 0,
             delay_frames: 200,
+            nominal_hz: 0.0,
         });
         render(&mut engine, 50);
         handle.send(Command::StopVoice { handle: 2 });
@@ -1955,6 +2032,7 @@ mod tests {
             enclosure: ENCLOSURE_NONE,
             bus: 1,
             delay_frames: 0,
+            nominal_hz: 0.0,
         });
         let frames = 40;
         let mut buffer = vec![0.0f32; frames * 4];
@@ -2036,6 +2114,7 @@ mod tests {
             enclosure: ENCLOSURE_NONE,
             bus: 0,
             delay_frames: 0,
+            nominal_hz: 0.0,
         });
         let mut buffer = vec![0.0f32; stop_after * 2];
         engine.process(&mut buffer, 2);
@@ -2138,6 +2217,7 @@ mod tests {
                     enclosure: ENCLOSURE_NONE,
             bus: 0,
             delay_frames: 0,
+                    nominal_hz: 0.0,
                 });
             }
             handle.send(Command::StartVoice {
@@ -2151,6 +2231,7 @@ mod tests {
                 enclosure: ENCLOSURE_NONE,
             bus: 0,
             delay_frames: 0,
+                nominal_hz: 0.0,
             });
             // Settle for ~1.5 s (12+ time constants), then measure.
             let mut buffer = vec![0.0f32; 1024 * 2];
@@ -2205,6 +2286,7 @@ mod tests {
                 enclosure: ENCLOSURE_NONE,
                 bus: 0,
                 delay_frames: 0,
+                nominal_hz: 0.0,
             });
         }
         let mut buffer = vec![0.0f32; 1024 * 2];
@@ -2261,6 +2343,7 @@ mod tests {
             enclosure: ENCLOSURE_NONE,
             bus: 0,
             delay_frames: 0,
+            nominal_hz: 0.0,
         });
         // Let the limiter settle, then inspect a window.
         let mut buffer = vec![0.0f32; 48000 * 2];
@@ -2318,6 +2401,7 @@ mod tests {
             enclosure: ENCLOSURE_NONE,
             bus: 0,
             delay_frames: 0,
+            nominal_hz: 0.0,
         });
         let mut buffer = vec![0.0f32; 4800 * 2];
         engine.process(&mut buffer, 2);
@@ -2359,6 +2443,7 @@ mod tests {
             enclosure: ENCLOSURE_NONE,
             bus: 0,
             delay_frames: 0,
+            nominal_hz: 0.0,
         });
         // ~100 loop passes.
         let mut buffer = vec![0.0f32; 10000 * 2];
@@ -2459,6 +2544,7 @@ mod tests {
                 enclosure: ENCLOSURE_NONE,
             bus: 0,
             delay_frames: 0,
+                nominal_hz: 0.0,
             });
             let mut buffer = vec![0.0f32; hold_frames * 2];
             engine.process(&mut buffer, 2);
@@ -2507,6 +2593,7 @@ mod tests {
             enclosure: ENCLOSURE_NONE,
             bus: 0,
             delay_frames: 0,
+            nominal_hz: 0.0,
         });
         let mut buffer = vec![0.0f32; 64 * 2];
         engine.process(&mut buffer, 2);
@@ -2584,6 +2671,7 @@ mod tests {
                 enclosure: ENCLOSURE_NONE,
                 bus: 0,
                 delay_frames: 0,
+                nominal_hz: 0.0,
             });
             if trem_on {
                 // Engaged mid-hold: the held voice must follow the
@@ -2799,6 +2887,7 @@ mod tests {
             enclosure: ENCLOSURE_NONE,
             bus: 0,
             delay_frames: 0,
+            nominal_hz: 0.0,
         });
         // Release 1.5 periods in: the ramp is at ~37 % amplitude.
         let mut buffer = vec![0.0f32; (period * 3 / 2) * 2];
@@ -2848,6 +2937,7 @@ mod tests {
                         enclosure: ENCLOSURE_NONE,
             bus: 0,
             delay_frames: 0,
+                        nominal_hz: 0.0,
                     });
                 }
             }
@@ -2862,6 +2952,7 @@ mod tests {
                 enclosure: ENCLOSURE_NONE,
             bus: 0,
             delay_frames: 0,
+                nominal_hz: 0.0,
             });
             let mut buffer = vec![0.0f32; 1024 * 2];
             for _ in 0..70 {
@@ -2911,6 +3002,7 @@ mod tests {
                 enclosure: ENCLOSURE_NONE,
             bus: 0,
             delay_frames: 0,
+                nominal_hz: 0.0,
             });
             // 10 windows of 0.2 s: the wander drifts across them.
             let mut periods = Vec::new();
@@ -2957,6 +3049,7 @@ mod tests {
             enclosure: ENCLOSURE_NONE,
             bus: 0,
             delay_frames: 0,
+            nominal_hz: 0.0,
         });
         let out = render(&mut engine, 50);
         let master = DEFAULT_MASTER_GAIN;
@@ -3036,6 +3129,7 @@ mod tests {
             enclosure: 0,
             bus: 0,
             delay_frames: 0,
+            nominal_hz: 0.0,
         });
         (engine, handle)
     }
@@ -3110,6 +3204,58 @@ mod tests {
         assert!(open_tail.iter().any(|&v| v.abs() > 1e-4), "tail silent");
     }
 
+    /// A tremulant is not one LFO on the master fader: each pipe
+    /// answers the chest through its own speech dynamics. A small pipe
+    /// follows the valve cycle for cycle; a bass, whose amplitude time
+    /// constant spans many tremulant periods, barely flutters.
+    #[test]
+    fn tremulant_moves_small_pipes_more_than_basses() {
+        let depth_at = |nominal_hz: f32| -> f32 {
+            let (mut engine, mut handle) = Engine::new(44_100.0, two_tone_bank());
+            handle.send(Command::SetTremulant {
+                group: 0,
+                engaged: true,
+            });
+            handle.send(Command::StartVoice {
+                handle: 7,
+                sample: 0,
+                rate: 1.0,
+                gain: 1.0,
+                group: 0,
+                wind_weight: 1.0,
+                brightness: 0.0,
+                enclosure: ENCLOSURE_NONE,
+                bus: 0,
+                delay_frames: 0,
+                nominal_hz,
+            });
+            let sr = 44_100usize;
+            render(&mut engine, 2 * sr); // engage ramp + speech settle
+            let out = render(&mut engine, 2 * sr);
+            // Amplitude undulation depth from 50 ms RMS windows.
+            let window = sr / 20 * 2;
+            let levels: Vec<f32> = out
+                .chunks(window)
+                .map(|chunk| {
+                    (chunk.iter().map(|v| v * v).sum::<f32>() / chunk.len() as f32).sqrt()
+                })
+                .collect();
+            let max = levels.iter().cloned().fold(f32::MIN, f32::max);
+            let min = levels.iter().cloned().fold(f32::MAX, f32::min);
+            (max - min) / (max + min)
+        };
+        let bass = depth_at(50.0);
+        let small = depth_at(2000.0);
+        assert!(
+            small > 2.0 * bass,
+            "speech dynamics missing: bass undulates {bass}, small pipe {small}"
+        );
+        assert!(
+            small > 0.02,
+            "the small pipe should audibly undulate: depth {small}"
+        );
+    }
+
     /// Same rule for the wind side: the pallet is closed at key-off,
     /// so a tremulant engaged afterwards must not modulate the tail
     /// (bit-identical to a run where the trem never engages).
@@ -3129,6 +3275,7 @@ mod tests {
                 enclosure: ENCLOSURE_NONE,
                 bus: 0,
                 delay_frames: 0,
+                nominal_hz: 0.0,
             });
             let sr = 44_100usize;
             render(&mut engine, sr / 2);

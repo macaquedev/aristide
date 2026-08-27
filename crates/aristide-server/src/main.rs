@@ -3553,6 +3553,7 @@ fn handle_midi(message: &[u8], port: usize, state: &Mutex<State>) {
                             enclosure: start.spec.enclosure,
                             bus: start.spec.bus,
                             delay_frames: start.spec.delay_frames,
+                            nominal_hz: start.spec.nominal_hz,
                         });
                     }
                 }
@@ -3602,6 +3603,7 @@ fn handle_midi(message: &[u8], port: usize, state: &Mutex<State>) {
                             enclosure: start.spec.enclosure,
                             bus: start.spec.bus,
                             delay_frames: start.spec.delay_frames,
+                            nominal_hz: start.spec.nominal_hz,
                         });
                     }
                 }
@@ -3705,6 +3707,7 @@ fn start_command(start: &console::VoiceStart) -> Command {
         enclosure: start.spec.enclosure,
         bus: start.spec.bus,
         delay_frames: start.spec.delay_frames,
+        nominal_hz: start.spec.nominal_hz,
     }
 }
 

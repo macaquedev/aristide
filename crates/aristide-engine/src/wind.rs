@@ -181,6 +181,32 @@ impl Wander {
     }
 }
 
+/// The venting valve's pressure signature over one cycle — a
+/// relaxation wave, not a sine. A tremulant beater blows open fast and
+/// closes against the wind more slowly, and the reservoir rounds every
+/// corner: pressure digs down quickly, climbs back gradually. A pure
+/// sine here is exactly the Hammond-vibrato sound this engine must not
+/// make. Built as a phase-skewed sine plus its second harmonic —
+/// smooth everywhere (nothing to alias at valve rates), strongly
+/// asymmetric, peaks ≈ ±1 with the *downward* lobe the sharper one.
+#[inline]
+pub(crate) fn valve_wave(phase: f32) -> f32 {
+    use core::f32::consts::TAU;
+    // Phase skew shapes the timing (fast fall, slow recovery); the
+    // quadratic bend shapes the values (the vent digs deeper than it
+    // crests — venting can dump pressure faster than the regulator can
+    // overshoot it). Scaled so the dip lands near −1.
+    let theta = TAU * phase - 0.75 * (TAU * phase).sin();
+    let base = theta.sin() - 0.35 * (2.0 * theta).sin();
+    0.7 * (base - 0.15 * base * base)
+}
+
+/// Subtracted from the valve wave before it scales pressure: a running
+/// vent bleeds the reservoir, so engaging the tremulant also settles
+/// the chest a touch below nominal — the slight flatten-and-soften a
+/// listener hears when the stop goes on.
+pub(crate) const VENT_BIAS: f32 = 0.18;
+
 #[inline]
 pub(crate) fn xorshift_unit(state: &mut u32) -> f32 {
     let mut x = *state;
@@ -249,6 +275,18 @@ impl WindGroup {
             && self.params.natural_hz > 0.0
     }
 
+    /// Give this group its place in the wind system, once at
+    /// construction: a small fixed tremulant phase lag — pressure
+    /// waves take milliseconds to reach a farther chest — while every
+    /// group keeps the same random sequence, because ONE beater
+    /// drives them all: their rates must wander together, never
+    /// apart. (Fully independent wander was tried and beats the
+    /// chests against each other at ~1 Hz — a slow seasick pump no
+    /// organ makes.)
+    pub fn decorrelate(&mut self, index: usize) {
+        self.tremulant_phase = (index as f32 * 0.618_034).fract() * 0.06;
+    }
+
     pub fn set_tremulant_params(&mut self, params: TremulantParams) {
         self.tremulant = params;
     }
@@ -289,6 +327,10 @@ impl WindGroup {
         }
 
         // Tremulant: pressure modulation on top of the regulator state.
+        // The wave is the valve's relaxation cycle (see `valve_wave`),
+        // sitting slightly below nominal on average (`VENT_BIAS` — a
+        // running vent bleeds the reservoir), with rate and depth
+        // wandering slowly the way a real beater never quite repeats.
         let mut effective = self.pressure;
         if tremulant_active {
             let t = &self.tremulant;
@@ -301,7 +343,7 @@ impl WindGroup {
             let modulation = t.depth
                 * self.depth_wander.value
                 * self.tremulant_level
-                * (core::f32::consts::TAU * self.tremulant_phase).sin();
+                * (valve_wave(self.tremulant_phase) - VENT_BIAS);
             effective = (effective * (1.0 + modulation)).clamp(0.3, 1.5);
         }
         self.rate_factor = effective.powf(p.pitch_exponent);
@@ -450,10 +492,17 @@ mod tests {
             previous = value;
         }
         // ±22 % pressure through P^0.032 → ≈ ±0.64 % rate (±11 cents).
+        // The valve wave digs deeper than it overshoots and rides a
+        // vented (negative) mean, so the downward excursion carries
+        // most of the depth.
         let expected = (1.0f32 + trem.depth).powf(group.params().pitch_exponent) - 1.0;
         assert!(
-            max_f - 1.0 > 0.7 * expected && 1.0 - min_f > 0.7 * expected,
-            "depth: {min_f}..{max_f} vs expected ±{expected}"
+            1.0 - min_f > 0.8 * expected,
+            "dip too shallow: {min_f} vs expected −{expected}"
+        );
+        assert!(
+            max_f - 1.0 > 0.3 * expected,
+            "no upward swing at all: {max_f} vs expected +{expected}"
         );
         assert!(
             (11..=13).contains(&crossings),
@@ -471,6 +520,90 @@ mod tests {
             spread = spread.max((group.rate_factor() - 1.0).abs());
         }
         assert!(spread < 0.0005, "tremulant should have died out: {spread}");
+    }
+
+    /// The valve wave is a relaxation cycle, not a sine: strongly
+    /// asymmetric (it spends unequal time above and below its mean),
+    /// smooth, roughly ±1 in peak, and — via `VENT_BIAS` — its applied
+    /// form averages below zero, settling a running chest flat-and-soft
+    /// of nominal. A pure sine fails every one of these.
+    #[test]
+    fn the_valve_wave_is_no_sine() {
+        let n = 4096;
+        let samples: Vec<f32> = (0..n).map(|i| valve_wave(i as f32 / n as f32)).collect();
+        let peak_up = samples.iter().cloned().fold(f32::MIN, f32::max);
+        let peak_down = samples.iter().cloned().fold(f32::MAX, f32::min);
+        assert!(
+            (0.5..=0.9).contains(&peak_up) && (-1.1..=-0.8).contains(&peak_down),
+            "peaks out of calibration: {peak_down}..{peak_up}"
+        );
+        assert!(
+            peak_down.abs() > peak_up,
+            "the vent must dig deeper than it overshoots: {peak_down} vs {peak_up}"
+        );
+        // Slope asymmetry: the vent dumps pressure faster than the
+        // reservoir recovers it, so the steepest fall clearly outruns
+        // the steepest rise. A sine's are equal.
+        let mut steepest_fall = 0.0f32;
+        let mut steepest_rise = 0.0f32;
+        for i in 0..n {
+            let slope = samples[(i + 1) % n] - samples[i];
+            steepest_rise = steepest_rise.max(slope);
+            steepest_fall = steepest_fall.max(-slope);
+        }
+        assert!(
+            steepest_fall > 1.3 * steepest_rise,
+            "fall {steepest_fall} not clearly faster than rise {steepest_rise} — \
+             this is a sine again"
+        );
+        // Harmonic content: correlation with the best-phase sine stays
+        // clearly under 1 (a sine of any phase correlates ~1.0).
+        let mut sin_dot = 0.0f64;
+        let mut cos_dot = 0.0f64;
+        let mut energy = 0.0f64;
+        for (i, v) in samples.iter().enumerate() {
+            let phi = core::f32::consts::TAU * i as f32 / n as f32;
+            sin_dot += (*v * phi.sin()) as f64;
+            cos_dot += (*v * phi.cos()) as f64;
+            energy += (*v * *v) as f64;
+        }
+        let fundamental = (sin_dot * sin_dot + cos_dot * cos_dot).sqrt() / (n as f64 / 2.0);
+        let rms = (energy / n as f64).sqrt();
+        let purity = fundamental / (rms * std::f64::consts::SQRT_2);
+        assert!(
+            purity < 0.97,
+            "waveform is {purity:.3} sine-pure — the Hammond is back"
+        );
+        // And the mean pressure under the engaged tremulant sits below
+        // nominal: the vent bleeds the reservoir.
+        let wave_mean = samples.iter().sum::<f32>() / n as f32;
+        assert!(
+            wave_mean - VENT_BIAS < -0.1,
+            "applied wave must average below zero: {}",
+            wave_mean - VENT_BIAS
+        );
+    }
+
+    /// Two groups never tick in lock-step once decorrelated: different
+    /// seeds, different starting phases.
+    #[test]
+    fn decorrelated_groups_drift_apart() {
+        let mut a = WindGroup::default();
+        let mut b = WindGroup::default();
+        a.decorrelate(0);
+        b.decorrelate(1);
+        a.set_tremulant(true);
+        b.set_tremulant(true);
+        let dt = 0.005;
+        let mut differed = false;
+        for _ in 0..1000 {
+            a.step(0.0, dt);
+            b.step(0.0, dt);
+            if (a.rate_factor() - b.rate_factor()).abs() > 1e-4 {
+                differed = true;
+            }
+        }
+        assert!(differed, "groups 0 and 1 ran identically");
     }
 
     #[test]

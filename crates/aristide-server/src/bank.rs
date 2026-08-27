@@ -1555,6 +1555,7 @@ mod tests {
                                     enclosure: st.spec.enclosure,
                         bus: st.spec.bus,
                         delay_frames: st.spec.delay_frames,
+                                    nominal_hz: st.spec.nominal_hz,
                                 });
                             }
                         }
@@ -1724,6 +1725,7 @@ mod tests {
                                     enclosure: st.spec.enclosure,
                         bus: st.spec.bus,
                         delay_frames: st.spec.delay_frames,
+                                    nominal_hz: st.spec.nominal_hz,
                                 });
                             }
                         }
@@ -1987,6 +1989,7 @@ mod tests {
                         enclosure: start.spec.enclosure,
                         bus: start.spec.bus,
                         delay_frames: start.spec.delay_frames,
+                        nominal_hz: start.spec.nominal_hz,
                     });
                 }
             }
@@ -2092,6 +2095,7 @@ mod tests {
                         enclosure: start.spec.enclosure,
                         bus: start.spec.bus,
                         delay_frames: start.spec.delay_frames,
+                            nominal_hz: start.spec.nominal_hz,
                         });
                     }
                 } else {
@@ -2196,6 +2200,7 @@ mod tests {
                         enclosure: start.spec.enclosure,
                         bus: start.spec.bus,
                         delay_frames: start.spec.delay_frames,
+                        nominal_hz: start.spec.nominal_hz,
                     });
                 }
                 // Stagger key events across blocks like real playing.
@@ -2287,6 +2292,7 @@ mod tests {
                         enclosure: start.spec.enclosure,
                         bus: start.spec.bus,
                         delay_frames: start.spec.delay_frames,
+                    nominal_hz: start.spec.nominal_hz,
                 });
             }
         }
@@ -2368,6 +2374,7 @@ mod tests {
                         enclosure: start.spec.enclosure,
                         bus: start.spec.bus,
                         delay_frames: start.spec.delay_frames,
+                nominal_hz: start.spec.nominal_hz,
             }));
         }
         let mut buffer = vec![0.0f32; 4800 * 2];
@@ -2516,6 +2523,7 @@ mod tests {
                         enclosure: start.spec.enclosure,
                         bus: start.spec.bus,
                         delay_frames: start.spec.delay_frames,
+                        nominal_hz: start.spec.nominal_hz,
                     }));
                 }
                 let mut buffer = vec![0.0f32; 4800 * 2];
@@ -2685,6 +2693,7 @@ mod tests {
                         enclosure: start.spec.enclosure,
                         bus: start.spec.bus,
                         delay_frames: start.spec.delay_frames,
+                            nominal_hz: start.spec.nominal_hz,
                         }));
                     }
                 } else {
@@ -2884,6 +2893,7 @@ mod tests {
                             enclosure: start.spec.enclosure,
                         bus: start.spec.bus,
                         delay_frames: start.spec.delay_frames,
+                            nominal_hz: start.spec.nominal_hz,
                         }));
                     }
                 } else {
@@ -2978,6 +2988,7 @@ mod tests {
                     enclosure: st.spec.enclosure,
                         bus: st.spec.bus,
                         delay_frames: st.spec.delay_frames,
+                    nominal_hz: st.spec.nominal_hz,
                 });
             }
             let block = 512usize;
@@ -3116,6 +3127,7 @@ mod tests {
                         enclosure: st.spec.enclosure,
                         bus: st.spec.bus,
                         delay_frames: st.spec.delay_frames,
+                                nominal_hz: st.spec.nominal_hz,
                             });
                         }
                     } else {
@@ -3252,6 +3264,7 @@ mod tests {
                         enclosure: st.spec.enclosure,
                         bus: st.spec.bus,
                         delay_frames: st.spec.delay_frames,
+                                nominal_hz: st.spec.nominal_hz,
                             });
                         }
                     } else {
@@ -3414,6 +3427,7 @@ mod tests {
                                 enclosure: st.spec.enclosure,
                         bus: st.spec.bus,
                         delay_frames: st.spec.delay_frames,
+                                nominal_hz: st.spec.nominal_hz,
                             });
                         }
                     }
@@ -3525,6 +3539,7 @@ mod tests {
                         enclosure: st.spec.enclosure,
                         bus: st.spec.bus,
                         delay_frames: st.spec.delay_frames,
+                            nominal_hz: st.spec.nominal_hz,
                         });
                     }
                 } else {
@@ -3589,6 +3604,7 @@ mod tests {
                         enclosure: st.spec.enclosure,
                         bus: st.spec.bus,
                         delay_frames: st.spec.delay_frames,
+                            nominal_hz: st.spec.nominal_hz,
                         });
                     }
                 }
@@ -3702,6 +3718,7 @@ mod tests {
                         enclosure: st.spec.enclosure,
                         bus: st.spec.bus,
                         delay_frames: st.spec.delay_frames,
+                        nominal_hz: st.spec.nominal_hz,
                     });
                 }
             }
