@@ -235,8 +235,11 @@ manual's `hex = { rows, cols, right, upright, anchor }` — the classic
 two-step-vector parameterization, editable from the keyboard's context menu
 with Bosanquet/Wicki–Hayden/harmonic-table presets derived against the
 manual's own steps-per-octave; absent, a Bosanquet default is fitted to the
-compass. A console fact throughout: duplicate hexes share a key number and
-*pitch* still comes only from the tuning layer), and
+compass. Layout edits are *live*, tuning-style — file line plus in-place
+apply, never a reload — because the layout is a console fact throughout:
+duplicate hexes share a key number, a bound Lumatone `.ltn` map's key
+colours tint the hexes in the same extended-key numbering its notes land
+in, and *pitch* still comes only from the tuning layer), and
 per-manual tuning (`[[manual]] temperament/a4_hz/transpose`) —
 a 415 meantone Positif against a 440 equal Great is one instrument. Tuning is
 physical: a coupled copy sounds the destination division's pipes, so it speaks

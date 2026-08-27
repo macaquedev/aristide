@@ -391,6 +391,35 @@ impl MidiPort {
         any.then_some((low, high))
     }
 
+    /// The colour each extended manual key inherits from this port's
+    /// Lumatone maps targeting `manual`, as `(key, 0xRRGGBB)`. The
+    /// `.ltn` colours physical keys; this walks the same channel-rank
+    /// extended numbering as [`note_lands`](Self::note_lands), so a
+    /// colour lands exactly where its key's notes do. Ports without
+    /// maps yield nothing.
+    pub fn map_colors(&self, manual: usize) -> Vec<(u16, u32)> {
+        let mut colors = Vec::new();
+        for route in &self.routes {
+            let Some(map) = &route.map else { continue };
+            if route.manual != manual {
+                continue;
+            }
+            for (rank, channel) in map.channels().enumerate() {
+                for note in 0..128u8 {
+                    let Some(physical) = map.key_for(channel, note) else { continue };
+                    let Some(colour) = map.colour(physical) else { continue };
+                    let extended = rank as i32 * 128 + note as i32 + route.transpose as i32;
+                    if let Ok(key) = u16::try_from(extended) {
+                        colors.push((key, colour));
+                    }
+                }
+            }
+        }
+        colors.sort_unstable();
+        colors.dedup_by_key(|(key, _)| *key);
+        colors
+    }
+
     fn matching(&self, channel: u8, key: Option<u8>) -> Vec<usize> {
         let mut manuals: Vec<usize> = self
             .routes
@@ -2030,25 +2059,39 @@ impl State {
     }
 
     /// Redeclare a microtonal manual's hex-field layout (`None` resets
-    /// to the derived default). Structural, like the kind: the console
-    /// redraws the keyboard, so the file line is followed by a reload.
+    /// to the derived default). Unlike the kind this is NOT structural:
+    /// the layout is a console-drawing fact, no rank or engine state
+    /// moves, so it applies to the live organ and the next snapshot
+    /// redraws — no reload, no sound interruption, and a player
+    /// fiddling with the numbers sees every edit land immediately.
+    /// The file line is still written so the layout survives the next
+    /// load; a manual the file doesn't declare still applies live,
+    /// with a warning that it won't stick (the tuning contract).
     pub fn set_manual_hex(
         &mut self,
         manual: usize,
         layout: Option<aristide_model::HexLayout>,
     ) -> Result<(), String> {
         let names = self.manual_names();
-        let Some(name) = names.get(manual) else {
+        if manual >= names.len() {
             return Err("no such manual".into());
-        };
-        let path = self.organ_file()?;
-        if !config::write_composite_manual_hex(&path, name, layout)? {
-            return Err(format!(
-                "{} has no [[manual]] named {name:?} — it wasn't declared by this file",
-                path.display()
-            ));
         }
-        self.reload_organ_file(path);
+        let Control::Organ(console) = &mut self.control else {
+            return Err("no organ".into());
+        };
+        console.set_manual_hex(manual, layout);
+        if let Some(path) = self.composite_path.clone() {
+            match config::write_composite_manual_hex(&path, &names[manual], layout) {
+                Ok(true) => {}
+                Ok(false) => tracing::warn!(
+                    "hex layout not saved: {} has no [[manual]] named {:?} — declare it \
+                     to keep this layout",
+                    path.display(),
+                    names[manual]
+                ),
+                Err(err) => tracing::warn!("hex layout not saved: {err}"),
+            }
+        }
         Ok(())
     }
 
@@ -3895,6 +3938,75 @@ mod tests {
             MidiPort::map_reach(map),
             Some((60, 132)),
             "compass widening sees the extended span"
+        );
+    }
+
+    /// A map's key colours reach the console keyed by the extended
+    /// manual key its notes land on — physical key numbering stays
+    /// the map's private business. Colours on CC keys never surface
+    /// (no note lands there), and other manuals see nothing.
+    #[test]
+    fn lumatone_colours_land_on_extended_keys() {
+        let ltn = "[Board0]\n\
+                   Key_0=60\nChan_0=1\nCol_0=FF0000\n\
+                   Key_1=62\nChan_1=1\n\
+                   Key_2=4\nChan_2=2\nCol_2=64C8DC\n\
+                   Key_3=70\nChan_3=1\nKTyp_3=2\nCol_3=00FF00\n";
+        let map = aristide_model::lumatone::LumatoneMap::parse(ltn).expect("parses");
+        let port = MidiPort {
+            name: "Lumatone".into(),
+            routes: vec![Route {
+                channel: None,
+                manual: 1,
+                keys: (0, 127),
+                transpose: 0,
+                bend: None,
+                map: Some(std::sync::Arc::new(map)),
+            }],
+            bindings: Vec::new(),
+        };
+        assert_eq!(
+            port.map_colors(1),
+            vec![(60, 0xFF0000), (132, 0x64C8DC)],
+            "coloured note keys in extended numbering; uncoloured and CC keys absent"
+        );
+        assert!(port.map_colors(0).is_empty(), "other manuals see nothing");
+    }
+
+    /// The whole live path from a saved assignment to key colours:
+    /// set_input names an .ltn, resolve_routes loads and attaches it,
+    /// and the port then answers map_colors with extended-key colours
+    /// — what the snapshot serves the hex field.
+    #[test]
+    fn resolved_routes_carry_map_colours() {
+        let Some((state, manual)) = demo_state("Gamba 8'") else {
+            return;
+        };
+        let dir = std::env::temp_dir().join("aristide-ltn-colours-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("colours.ltn");
+        std::fs::write(&path, "[Board0]\nKey_0=60\nChan_0=1\nCol_0=FF0000\n").expect("writes");
+        {
+            let mut locked = state.lock().expect("state poisoned");
+            locked.set_input(
+                manual,
+                0,
+                config::Input {
+                    device: "Test Keyboard".into(),
+                    channel: None,
+                    low: None,
+                    high: None,
+                    transpose: 0,
+                    bend: None,
+                    map: Some(path.to_string_lossy().into_owned()),
+                },
+            );
+        }
+        let locked = state.lock().expect("state poisoned");
+        assert_eq!(
+            locked.midi_ports[0].map_colors(manual),
+            vec![(60, 0xFF0000)],
+            "the resolved route serves its map's colours"
         );
     }
 

@@ -88,7 +88,7 @@ export class Console {
       snapshot.organ,
       snapshot.stops.map((s) => [s.id, s.name, s.manual]),
       snapshot.couplers.map((c) => [c.name, !!c.hidden]),
-      snapshot.manuals.map((m) => [m.name, m.first_key, m.key_count, m.kind, m.hex]),
+      snapshot.manuals.map((m) => [m.name, m.first_key, m.key_count, m.kind, m.hex, m.colors]),
       // No organ (the picker's start-empty state) sends no enclosures
       // at all — same as an organ without a swell box.
       (snapshot.enclosures ?? []).filter((e) => e.displayed).map((e) => e.name),
@@ -400,6 +400,10 @@ export class Console {
           key.classList.add("dead");
         } else {
           key.dataset.midi = midi;
+          // A bound Lumatone map's key colours, keyed the same way
+          // its notes land — the player's own navigation marks.
+          const color = manual.colors?.[midi];
+          if (color) key.style.setProperty("--hex-color", color);
           this.wireKey(key, manual.idx, midi);
         }
         keys.append(key);

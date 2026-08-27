@@ -1287,12 +1287,33 @@ fn state_json_locked(state: &State) -> String {
             first = false;
             let held: Vec<String> = held.iter().map(|k| k.to_string()).collect();
             // Microtonal manuals carry their effective hex layout —
-            // declared or derived, the console just draws it.
+            // declared or derived, the console just draws it — and,
+            // when a Lumatone map routes to them, the map's key
+            // colours in the same extended-key numbering the notes
+            // land in.
             let hex = match console.manual_hex(idx) {
-                Some(hex) => format!(
-                    ",\"hex\":{{\"rows\":{},\"cols\":{},\"right\":{},\"upright\":{},\"anchor\":{}}}",
-                    hex.rows, hex.cols, hex.right, hex.upright, hex.anchor
-                ),
+                Some(hex) => {
+                    let mut colors: Vec<(u16, u32)> = state
+                        .midi_ports
+                        .iter()
+                        .flat_map(|port| port.map_colors(idx))
+                        .collect();
+                    colors.sort_unstable();
+                    colors.dedup_by_key(|(key, _)| *key);
+                    let colors = if colors.is_empty() {
+                        String::new()
+                    } else {
+                        let entries: Vec<String> = colors
+                            .iter()
+                            .map(|(key, colour)| format!("\"{key}\":\"#{colour:06x}\""))
+                            .collect();
+                        format!(",\"colors\":{{{}}}", entries.join(","))
+                    };
+                    format!(
+                        ",\"hex\":{{\"rows\":{},\"cols\":{},\"right\":{},\"upright\":{},\"anchor\":{}}}{colors}",
+                        hex.rows, hex.cols, hex.right, hex.upright, hex.anchor
+                    )
+                }
                 None => String::new(),
             };
             out.push_str(&format!(
@@ -2453,13 +2474,17 @@ mod tests {
         let dup = respond(&state, &Method::Post, "/api/organ/manual/add?name=solo");
         assert_eq!(dup.status_code().0, 400, "duplicate names are refused");
 
-        // A hex layout belongs to microtonal manuals only; a reset
-        // (remove the declaration) needs no console rebuild first.
+        // A hex layout belongs to microtonal manuals only, and unlike
+        // the kind it is a live edit: a reset answers 200 with no
+        // rebuild queued — the console redraws from the next snapshot.
         let hex = respond(&state, &Method::Post, "/api/organ/manual/hex?manual=1&right=2");
         assert_eq!(hex.status_code().0, 400, "hand keyboards have no hex field");
         let hex = respond(&state, &Method::Post, "/api/organ/manual/hex?manual=1&reset=1");
         assert_eq!(hex.status_code().0, 200);
-        settle(&state);
+        assert!(
+            state.lock().expect("state").pending_load.is_none(),
+            "a hex edit is live — it must not queue a rebuild"
+        );
         let hex = respond(&state, &Method::Post, "/api/organ/manual/hex?manual=99&reset=1");
         assert_eq!(hex.status_code().0, 400, "unknown manuals are refused");
 

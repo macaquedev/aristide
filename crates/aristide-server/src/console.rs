@@ -1633,6 +1633,17 @@ impl Console {
         self.organ.manuals.get(manual).map(|m| m.kind).unwrap_or_default()
     }
 
+    /// Redeclare a microtonal manual's hex layout on the live organ.
+    /// A console fact only — no rank, compass or engine state moves —
+    /// so unlike a kind change this needs no rebuild: the next
+    /// snapshot simply draws the new grid. `None` returns the manual
+    /// to the derived default.
+    pub fn set_manual_hex(&mut self, manual: usize, layout: Option<aristide_model::HexLayout>) {
+        if let Some(declared) = self.organ.manuals.get_mut(manual) {
+            declared.hex = layout;
+        }
+    }
+
     /// The hex-field layout a microtonal manual draws with: the
     /// declared one, or the default derived from the (possibly
     /// widened) compass. `None` for the other kinds — they have no

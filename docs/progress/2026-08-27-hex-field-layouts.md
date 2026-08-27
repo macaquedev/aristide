@@ -48,3 +48,34 @@ Hexes outside the compass draw dead: present, dimmed, unplayable.
 
 Still waiting: Lumatone `.ltn` key colours on the hex field (parsed
 since M6, not yet drawn).
+
+## Follow-up, same day: edits went live, colours landed
+
+Field testing caught the first cut's real flaw: layout edits reused
+the kind-change contract — write the file, reload the organ. On a
+sampled organ that meant seconds of rebuild (and silence) per
+keystroke, and any edit made during the rebuild was refused with "an
+organ is already loading" and silently snapped back — the board ended
+up not matching what you typed. Measured on the e2e rig: of two edits
+150 ms apart, the second always lost.
+
+Layout edits are now live, on the tuning contract: the file line is
+written and the layout applies to the running console in place —
+`Console::set_manual_hex`, no reload, no sound interruption. A burst
+of preset + rows + cols edits all land within one poll.
+
+The M6 leftover landed too: a bound `.ltn` map's key colours now tint
+the hex field. `MidiPort::map_colors` walks the same channel-rank
+extended numbering as `note_lands`, so each colour sits exactly where
+its key's notes land; the snapshot carries `colors` beside `hex` and
+the console paints wired hexes with them (held keys light accent,
+grown over the bezel gap, so they read on any colour). One rig
+caveat: the virtual computer keyboard has no `MidiPort`, so colours
+only flow for real device ports — which is what a Lumatone is.
+
+The hexes also got bezels (a center scale opens an even gap on all
+three axes — a border would be eaten by the clip-path), and the whole
+surface got its regression net: `bun tools/e2e/hex-audit.js` runs the
+real server + real console UI under headless-chromium CDP and asserts
+the lattice pixel-for-pixel (position, key number, deadness per hex),
+the live-edit contract, and the colour path.
