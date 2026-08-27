@@ -169,6 +169,24 @@ export const commands = {
   // Resolves a parked MIDI bind that would give a device or message a
   // second job: keep both, replace the existing one, or drop the new bind.
   conflict: (choice) => `/api/conflict?choice=${choice}`,
+  // A stop's own name, live — no rebuild. 400s on a clash with its
+  // sibling stops' names.
+  organStopRename: (id, name) => `/api/organ/stop/rename?stop=${id}&name=${encodeURIComponent(name)}`,
+  // A stop's own voicing, live — no rebuild, the same partial-update
+  // contract as tuning/tremParams. `fields.footage` is text as the
+  // organ world writes it ("16", "5 1/3"); "native" or "" goes back to
+  // the samples' own pitch. `fields.cents`/`fields.gain` are numbers.
+  // Fields left out keep their current values; `fields.reset: 1` clears
+  // every override. A mixture 400s on footage — it speaks several at
+  // once, so there's none to give it.
+  organStopVoice: (id, fields) => `/api/organ/stop/voice?${new URLSearchParams({ stop: id, ...fields })}`,
+  // Retargets a stop's source: structural, the same rebuild contract as
+  // the manual/pull family above — the file rewrites and the organ
+  // rebuilds. `sourceManual`/`sourceStop` name the source's own division
+  // and stop, `from` the source's alias.
+  organStopSource: (id, from, sourceManual, sourceStop) =>
+    `/api/organ/stop/source?stop=${id}&from=${encodeURIComponent(from)}` +
+    `&manual=${encodeURIComponent(sourceManual)}&source_stop=${encodeURIComponent(sourceStop)}`,
 };
 
 /// Start the client. Calls `onState(snapshot)` for every fresh snapshot,

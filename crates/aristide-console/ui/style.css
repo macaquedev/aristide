@@ -1166,6 +1166,14 @@ input[type="range"]:hover::-webkit-slider-thumb { filter: brightness(1.15); }
    rather than disabling */
 .tuning-dimmed { opacity: 0.55; }
 
+/* the stop-editor popover: wide enough for the pitch row's footage and
+   cents fields side by side without wrapping */
+#editor-stop-form,
+#editor-stop-src-view { width: 280px; }
+/* .editor-add-form input[type="text"] defaults to 100% width — too
+   wide once a cents field shares its row */
+#editor-stop-footage { width: 70px; }
+
 /* an empty organ says what to do next */
 .organ-hint {
   margin: 4px 0;

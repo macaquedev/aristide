@@ -198,4 +198,43 @@ export function applyHarnessHooks({ prefs, editor }) {
       }, 200);
     }, 400);
   }
+
+  // A stop drawknob, found by its numeric id (the snapshot's `stops[].id`,
+  // matching its data-key) or by the label text the console built its
+  // knob face from — either is handy from a screenshot script that only
+  // knows one of them.
+  function findStopKnob(ref) {
+    const knobs = [...document.querySelectorAll('.knob[data-key^="stop-"]')];
+    const byId = knobs.find((k) => k.dataset.key === `stop-${ref}`);
+    if (byId) return byId;
+    return knobs.find((k) => {
+      const name = k.querySelector(".stop-name")?.textContent ?? "";
+      const pitch = k.querySelector(".stop-pitch")?.textContent ?? "";
+      return name === ref || (pitch ? `${name} ${pitch}` : name) === ref;
+    });
+  }
+
+  // The stop-editor popover, via a right-click on its drawknob.
+  const stopFormParam = params.get("stopForm"); // a stop id or name
+  if (stopFormParam != null) {
+    setTimeout(() => {
+      editor.unlock();
+      const knob = findStopKnob(stopFormParam);
+      if (!knob) return;
+      const rect = knob.getBoundingClientRect();
+      knob.dispatchEvent(
+        new MouseEvent("contextmenu", {
+          bubbles: true, cancelable: true,
+          clientX: rect.left + 10, clientY: rect.top + 10,
+        })
+      );
+      // One step further in: the stop popover's own source-picker
+      // subview, open — for a screenshot of the real offerings list.
+      if (params.has("stopSrc")) {
+        setTimeout(() => {
+          document.getElementById("editor-stop-src-change")?.click();
+        }, 200);
+      }
+    }, 400);
+  }
 }

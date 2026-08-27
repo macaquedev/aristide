@@ -507,6 +507,67 @@
     </form>
   </div>
 
+  <!-- The stop-editor popover: right-click any drawknob in edit mode.
+       Name and voicing (footage/cents/gain) post live, field by field —
+       no rebuild, the tuning popover's own contract. Retargeting the
+       source is structural, so picking one swaps a subview in over the
+       form, the same idiom as the tuning popover's scale browser below. -->
+  <div class="editor-add hidden" id="editor-stop">
+    <form class="editor-add-form" id="editor-stop-form">
+      <span class="editor-tuning-head">
+        <span class="rail-label" id="editor-stop-title">Stop</span>
+        <button class="ghost hidden" type="button" id="editor-stop-reset">Native voicing</button>
+      </span>
+      <input id="editor-stop-name" type="text" autocomplete="off" spellcheck="false" placeholder="Name" />
+      <label class="settings-row">
+        <span class="rail-label">Pitch</span>
+        <span class="stepper">
+          <input id="editor-stop-footage" type="text" list="editor-stop-footages" autocomplete="off" spellcheck="false" />
+          <input id="editor-stop-cents" type="number" min="-2400" max="2400" step="0.5" /> cents
+        </span>
+      </label>
+      <datalist id="editor-stop-footages">
+        <option value="32"></option>
+        <option value="16"></option>
+        <option value="10 2/3"></option>
+        <option value="8"></option>
+        <option value="6 2/5"></option>
+        <option value="5 1/3"></option>
+        <option value="4"></option>
+        <option value="3 1/5"></option>
+        <option value="2 2/3"></option>
+        <option value="2"></option>
+        <option value="1 3/5"></option>
+        <option value="1 1/3"></option>
+        <option value="1"></option>
+      </datalist>
+      <label class="settings-row">
+        <span class="rail-label">Gain</span>
+        <span class="stepper"><input id="editor-stop-gain" type="number" min="-40" max="20" step="0.5" /> dB</span>
+      </label>
+      <div class="settings-row">
+        <span class="rail-label">Source</span>
+        <span class="tuning-scale-value">
+          <span class="tuning-scale-name" id="editor-stop-src"></span>
+          <button class="ghost" type="button" id="editor-stop-src-change">Change&hellip;</button>
+        </span>
+      </div>
+      <p class="organ-edit-error hidden" id="editor-stop-error"></p>
+      <span class="editor-add-form-actions">
+        <button class="ghost" type="button" id="editor-stop-close">Close</button>
+      </span>
+    </form>
+    <div class="editor-add-form editor-add-browse hidden" id="editor-stop-src-view">
+      <span class="editor-tuning-head">
+        <span class="rail-label">Choose a source stop</span>
+      </span>
+      <div id="editor-stop-src-list" class="picker-browse-list"></div>
+      <span class="editor-add-form-actions">
+        <button class="ghost" type="button" id="editor-stop-src-cancel">Cancel</button>
+      </span>
+    </div>
+  </div>
+
   <!-- The per-manual tuning popover, opened from the keyboard menu above.
        Seeded from the snapshot's effective tuning for that manual;
        applies live, field by field — no rebuild. A Scala scale, when

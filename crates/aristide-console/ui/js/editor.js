@@ -32,6 +32,42 @@ const KEYBOARD_KINDS = [
   ["microtonal", "Microtonal keyboard"],
 ];
 
+/// Footages the organ world writes as fractions, feet paired with the
+/// label — in the order the stop popover's own datalist offers them.
+/// `formatFootage` uses the same table (extended a fourth-foot lower)
+/// to snap a computed value back to its familiar name.
+const STANDARD_FOOTAGES = [
+  [32, "32"],
+  [16, "16"],
+  [32 / 3, "10 2/3"],
+  [8, "8"],
+  [32 / 5, "6 2/5"],
+  [16 / 3, "5 1/3"],
+  [4, "4"],
+  [16 / 5, "3 1/5"],
+  [8 / 3, "2 2/3"],
+  [2, "2"],
+  [8 / 5, "1 3/5"],
+  [4 / 3, "1 1/3"],
+  [1, "1"],
+  [4 / 5, "4/5"],
+  [2 / 3, "2/3"],
+  [1 / 2, "1/2"],
+];
+
+/// A footage in feet, written the way the organ world writes it. A rank
+/// is never built to land exactly on 5.333' — it's "5 1/3" tuned a hair
+/// sharp or flat — so a value within 60 cents (a quarter-semitone) of a
+/// standard footage snaps to that name; anything further off isn't
+/// really that footage any more; it's shown as plain feet instead.
+function formatFootage(feet) {
+  if (feet == null) return "";
+  for (const [candidate, label] of STANDARD_FOOTAGES) {
+    if (Math.abs(1200 * Math.log2(feet / candidate)) < 60) return label;
+  }
+  return feet.toFixed(2);
+}
+
 /// Swallows the click a suppressed drag would otherwise leave behind —
 /// a drag that crossed the threshold must not also toggle the drawknob
 /// (or fire whatever else the element's own click listener does).
@@ -65,6 +101,8 @@ export class Editor {
     this.tuningManual = null; // manual idx the tuning popover is open for, or null
     this.hexManual = null; // manual idx the hex-layout popover is open for, or null
     this.tremOpen = null; // trem idx the shape popover is open for, or null
+    this.stopOpen = null; // stop id the stop-editor popover is open for, or null
+    this.stopSrcOpen = false; // the stop popover's own source-picker subview is showing
     this.tuningBrowseKind = null; // "scale" | "keymap" | null — the tuning form's own file browser
     this.tuningBrowseDir = null;
     this.tuningBrowseParent = null;
@@ -155,6 +193,21 @@ export class Editor {
       tremWobble: root.getElementById("editor-trem-wobble"),
       tremError: root.getElementById("editor-trem-error"),
       tremClose: root.getElementById("editor-trem-close"),
+      stop: root.getElementById("editor-stop"),
+      stopForm: root.getElementById("editor-stop-form"),
+      stopTitle: root.getElementById("editor-stop-title"),
+      stopReset: root.getElementById("editor-stop-reset"),
+      stopName: root.getElementById("editor-stop-name"),
+      stopFootage: root.getElementById("editor-stop-footage"),
+      stopCents: root.getElementById("editor-stop-cents"),
+      stopGain: root.getElementById("editor-stop-gain"),
+      stopSrc: root.getElementById("editor-stop-src"),
+      stopSrcChange: root.getElementById("editor-stop-src-change"),
+      stopError: root.getElementById("editor-stop-error"),
+      stopClose: root.getElementById("editor-stop-close"),
+      stopSrcView: root.getElementById("editor-stop-src-view"),
+      stopSrcList: root.getElementById("editor-stop-src-list"),
+      stopSrcCancel: root.getElementById("editor-stop-src-cancel"),
       hex: root.getElementById("editor-hex"),
       hexTitle: root.getElementById("editor-hex-title"),
       hexReset: root.getElementById("editor-hex-reset"),
@@ -174,6 +227,7 @@ export class Editor {
     this.wireTuningForm();
     this.wireHexForm();
     this.wireTremForm();
+    this.wireStopForm();
     this.wireCanvas();
   }
 
@@ -248,6 +302,7 @@ export class Editor {
     this.closeTuningForm();
     this.closeHexForm();
     this.closeTremForm();
+    this.closeStopForm();
   }
 
   // A double-click on a locked canvas is someone reaching for the add
@@ -321,6 +376,7 @@ export class Editor {
     if (this.tuningManual != null) this.syncTuningForm();
     if (this.hexManual != null) this.syncHexForm();
     if (this.tremOpen != null) this.syncTremForm();
+    if (this.stopOpen != null) this.syncStopForm();
   }
 
   /// Called by Console right after every structural rebuild (see its
@@ -333,6 +389,7 @@ export class Editor {
     if (empty) return; // the empty card has its own single button, wired by Console
     this.tagManualTargets();
     this.wireStopDrags(snapshot);
+    this.wireStopContextMenus();
     this.wireCheekDrags(snapshot);
     this.wireShoeDrags(snapshot);
     this.wireTremKnob();
@@ -358,11 +415,30 @@ export class Editor {
   wireStopDrags() {
     for (const knob of this.root.querySelectorAll('.knob[data-key^="stop-"]')) {
       const id = Number(knob.dataset.key.slice("stop-".length));
-      knob.title = "Ctrl-drag to move or enclose this stop — or unlock to drag it plain.";
+      knob.title =
+        "Ctrl-drag to move or enclose this stop, or unlock to drag it plain — right-click to edit it.";
       this.wireDragSource(knob, () => {
         const stop = this.lastSnapshot?.stops.find((s) => s.id === id);
         if (!stop) return null;
         return { kind: "stop", payload: { id: stop.id, midx: stop.midx, name: stop.name }, label: stop.name };
+      });
+    }
+  }
+
+  /// Right-click any stop drawknob in edit mode opens its editor — name,
+  /// voicing, and source — the same reach-through-the-lock contract as
+  /// the keyboard and tremulant context menus.
+  wireStopContextMenus() {
+    for (const knob of this.root.querySelectorAll('.knob[data-key^="stop-"]')) {
+      const id = Number(knob.dataset.key.slice("stop-".length));
+      knob.addEventListener("contextmenu", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (!this.unlocked && !event.ctrlKey) {
+          this.nudgeUnlock();
+          return;
+        }
+        this.openStopForm(id, event.clientX, event.clientY);
       });
     }
   }
@@ -1042,6 +1118,209 @@ export class Editor {
     this.el.tremError.textContent = "";
   }
 
+  // ---- the stop-editor popover: right-click any drawknob ------------------
+  //
+  // Name and voicing (footage, cents, gain) post live, field by field —
+  // no rebuild, exactly the tuning popover's contract. Retargeting a
+  // stop's source is structural, so picking one swaps a subview in over
+  // the form (`openStopSrcView`/`closeStopSrcView`), the same idiom as
+  // the tuning popover's own scale browser.
+
+  wireStopForm() {
+    this.el.stopClose.addEventListener("click", () => this.closeStopForm());
+    this.el.stopSrcChange.addEventListener("click", () => this.openStopSrcView());
+    this.el.stopSrcCancel.addEventListener("click", () => this.closeStopSrcView());
+
+    // Every field commits on change already — Enter in the name field
+    // must not also reload the page.
+    this.el.stopForm.addEventListener("submit", (event) => event.preventDefault());
+
+    this.el.stopName.addEventListener("change", () => {
+      if (this.stopOpen == null) return;
+      const stop = this.lastSnapshot?.stops.find((s) => s.id === this.stopOpen);
+      const name = this.el.stopName.value.trim();
+      if (!stop || !name || name === stop.name) return;
+      this.stopCommand(commands.organStopRename(this.stopOpen, name));
+    });
+
+    this.el.stopFootage.addEventListener("change", () => {
+      if (this.stopOpen == null) return;
+      const text = this.el.stopFootage.value.trim();
+      this.stopCommand(commands.organStopVoice(this.stopOpen, { footage: text || "native" }));
+    });
+
+    this.el.stopCents.addEventListener("change", () => {
+      if (this.stopOpen == null) return;
+      const cents = Number(this.el.stopCents.value);
+      if (!Number.isFinite(cents)) return;
+      this.stopCommand(commands.organStopVoice(this.stopOpen, { cents }));
+    });
+
+    this.el.stopGain.addEventListener("change", () => {
+      if (this.stopOpen == null) return;
+      const gain = Number(this.el.stopGain.value);
+      if (!Number.isFinite(gain)) return;
+      this.stopCommand(commands.organStopVoice(this.stopOpen, { gain }));
+    });
+
+    this.el.stopReset.addEventListener("click", () => {
+      if (this.stopOpen == null) return;
+      this.stopCommand(commands.organStopVoice(this.stopOpen, { reset: 1 }));
+    });
+  }
+
+  openStopForm(id, x, y) {
+    this.closeAdd();
+    this.closeDivisionMenu();
+    this.closeKeyboardMenu();
+    this.closeTuningForm();
+    this.closeHexForm();
+    this.closeTremForm();
+    this.stopOpen = id;
+    this.hideStopError();
+    this.closeStopSrcView();
+    this.syncStopForm();
+    this.el.stop.classList.remove("hidden");
+    this.positionPopover(this.el.stop, x, y);
+  }
+
+  closeStopForm() {
+    this.stopOpen = null;
+    this.el.stop.classList.add("hidden");
+    this.hideStopError();
+    this.closeStopSrcView();
+  }
+
+  /// Refills the form from the snapshot's stop entry — on open and on
+  /// every later poll, so a rebuild's or another session's edit lands
+  /// in the fields. Never touches the source-picker subview — a poll
+  /// landing mid-navigation must not yank it shut (the tuning popover's
+  /// browse idiom).
+  syncStopForm() {
+    const stop = this.lastSnapshot?.stops.find((s) => s.id === this.stopOpen);
+    if (!stop) {
+      this.closeStopForm();
+      return;
+    }
+    this.el.stopTitle.textContent = stop.name;
+    const pitch = stop.pitch ?? {};
+    this.el.stopReset.classList.toggle("hidden", !pitch.own);
+
+    if (this.root.activeElement !== this.el.stopName) this.el.stopName.value = stop.name;
+
+    if (this.root.activeElement !== this.el.stopFootage) {
+      this.el.stopFootage.value = formatFootage(pitch.footage ?? pitch.native);
+    }
+    // A mixture speaks several footages at once — there is no single
+    // number the footage field could hold, so it's disabled and the
+    // stop is voiced in cents alone.
+    const mixture = pitch.native == null;
+    this.el.stopFootage.disabled = mixture;
+    this.el.stopFootage.title = mixture
+      ? "A mixture speaks several footages — tune it in cents"
+      : "";
+
+    if (this.root.activeElement !== this.el.stopCents) this.el.stopCents.value = pitch.cents ?? 0;
+    if (this.root.activeElement !== this.el.stopGain) this.el.stopGain.value = pitch.gain ?? 0;
+
+    const src = stop.src;
+    this.el.stopSrc.textContent = src
+      ? `${src.from} · ${src.manual}${src.stop ? ` · ${src.stop}` : ""}`
+      : "—";
+  }
+
+  /// Sends a stop field update directly (not through the app-wide
+  /// `send()`), so a 400's reason lands in this popover rather than the
+  /// global status strip — the same local-fetch idiom `tremCommand` uses.
+  async stopCommand(query) {
+    this.hideStopError();
+    const { ok, error } = await this.organCommandResult(query);
+    if (error != null) this.showStopError(error);
+    return ok;
+  }
+
+  showStopError(text) {
+    this.el.stopError.textContent = text;
+    this.el.stopError.classList.remove("hidden");
+  }
+
+  hideStopError() {
+    this.el.stopError.classList.add("hidden");
+    this.el.stopError.textContent = "";
+  }
+
+  /// Swaps the source-picker subview in over the form: every source's
+  /// every division's every stop, including already-pulled ones —
+  /// retargeting a stop at one already on the console is legal
+  /// borrowing, not a claim that has to be free first.
+  async openStopSrcView() {
+    if (this.stopOpen == null) return;
+    this.stopSrcOpen = true;
+    this.el.stopForm.classList.add("hidden");
+    this.el.stopSrcView.classList.remove("hidden");
+    this.el.stopSrcList.replaceChildren(this.emptyNote("Reading the sources…"));
+    if (!this.offerings) await this.fetchOfferings(false);
+    this.renderStopSrcList();
+  }
+
+  closeStopSrcView() {
+    this.stopSrcOpen = false;
+    this.el.stopSrcView.classList.add("hidden");
+    this.el.stopForm.classList.remove("hidden");
+  }
+
+  renderStopSrcList() {
+    this.el.stopSrcList.replaceChildren();
+    const sources = this.offerings;
+    if (sources == null) {
+      this.el.stopSrcList.append(this.emptyNote("Couldn't read this organ's sources."));
+      return;
+    }
+    const stop = this.lastSnapshot?.stops.find((s) => s.id === this.stopOpen);
+    const current = stop?.src;
+    let any = false;
+    for (const source of sources) {
+      for (const manual of source.manuals ?? []) {
+        const stops = manual.stops ?? [];
+        if (!stops.length) continue;
+        any = true;
+        const title = document.createElement("span");
+        title.className = "organ-stop-group-title";
+        title.textContent = `${source.alias} · ${manual.name}`;
+        this.el.stopSrcList.append(title);
+        for (const srcStop of stops) {
+          const isCurrent =
+            !!current &&
+            current.from === source.alias &&
+            current.manual === manual.name &&
+            current.stop === srcStop.name;
+          const row = document.createElement("button");
+          row.type = "button";
+          row.className = "menu-item";
+          row.classList.toggle("checked", isCurrent);
+          row.disabled = isCurrent;
+          row.innerHTML = `<span>${srcStop.name}</span>`;
+          row.addEventListener("click", async () => {
+            if (this.stopOpen == null) return;
+            const { ok, error } = await this.organCommandResult(
+              commands.organStopSource(this.stopOpen, source.alias, manual.name, srcStop.name)
+            );
+            // The response is a snapshot mid-rebuild, not the settled
+            // result — the popover stays open and the next poll's
+            // syncStopForm() will re-sync its source line once the
+            // rebuild lands.
+            if (error != null) this.showStopError(error);
+            else this.closeStopSrcView();
+          });
+          this.el.stopSrcList.append(row);
+        }
+      }
+    }
+    if (!any) {
+      this.el.stopSrcList.append(this.emptyNote("The sources have nothing to offer."));
+    }
+  }
+
   // ---- the hex-layout popover: a microtonal manual's isomorphic grid ------
   //
   // Two step-vectors (right, up-right, in key-number steps), the grid
@@ -1704,6 +1983,7 @@ export class Editor {
       this.el.tuning,
       this.el.hex,
       this.el.trem,
+      this.el.stop,
     ]) {
       el.addEventListener("click", (event) => event.stopPropagation());
     }
@@ -1714,6 +1994,7 @@ export class Editor {
       this.closeTuningForm();
       this.closeHexForm();
       this.closeTremForm();
+      this.closeStopForm();
     });
     window.addEventListener("keydown", (event) => {
       if (event.key !== "Escape") return;
@@ -1723,6 +2004,7 @@ export class Editor {
       this.closeTuningForm();
       this.closeHexForm();
       this.closeTremForm();
+      this.closeStopForm();
     });
   }
 
