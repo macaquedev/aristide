@@ -623,6 +623,109 @@ fn respond(
                 None => bad_request("missing stop"),
             }
         }
+        // Rename a stop — a label, so it lands live (no rebuild) and
+        // is kept in the organ's file. Refused mid-load: the write
+        // addresses file lines by names a rebuild may be changing.
+        (Method::Post, "/api/organ/stop/rename") => {
+            let mut state = state.lock().expect("state poisoned");
+            if state.loading.is_some() || state.pending_load.is_some() {
+                return bad_request("an organ is already loading");
+            }
+            match (
+                param(query, "stop").and_then(|v| v.parse::<u32>().ok()),
+                param(query, "name").map(unescape),
+            ) {
+                (Some(stop), Some(name)) => {
+                    match state.rename_stop(aristide_model::StopId(stop), &name) {
+                        Ok(()) => json(state_json_locked(&state)),
+                        Err(err) => bad_request(&err),
+                    }
+                }
+                _ => bad_request("missing stop/name"),
+            }
+        }
+        // A stop's own voicing: `footage` (feet — "16", "4", "2 2/3";
+        // "native" or empty goes back to the samples' own pitch),
+        // `cents` on top, `gain` in dB, or `reset=1` for all-neutral.
+        // Fields left out keep their current values. Live — held keys
+        // re-speak the stop at its new pitch — and written to the
+        // file's [[voicing.adjust]]; no rebuild.
+        (Method::Post, "/api/organ/stop/voice") => {
+            let mut state = state.lock().expect("state poisoned");
+            if state.loading.is_some() || state.pending_load.is_some() {
+                return bad_request("an organ is already loading");
+            }
+            let Some(stop) = param(query, "stop").and_then(|v| v.parse::<u32>().ok()) else {
+                return bad_request("missing stop");
+            };
+            let stop = aristide_model::StopId(stop);
+            let mut voicing = if param(query, "reset").is_some_and(|v| v != "0") {
+                crate::load::StopVoicing::default()
+            } else {
+                state.stop_voicing.get(&stop).copied().unwrap_or_default()
+            };
+            if let Some(text) = param(query, "footage").map(unescape) {
+                let text = text.trim();
+                if text.is_empty() || text.eq_ignore_ascii_case("native") {
+                    voicing.feet = None;
+                } else {
+                    match aristide_formats::sidecar::parse_footage(text) {
+                        Some(feet) => voicing.feet = Some(feet),
+                        None => {
+                            return bad_request(&format!("{text:?} names no footage"));
+                        }
+                    }
+                }
+            }
+            if let Some(cents) = param(query, "cents") {
+                match cents.parse::<f64>() {
+                    Ok(cents) if cents.is_finite() => {
+                        voicing.cents = cents.clamp(-2400.0, 2400.0)
+                    }
+                    _ => return bad_request("cents must be a number"),
+                }
+            }
+            if let Some(gain) = param(query, "gain") {
+                match gain.parse::<f64>() {
+                    Ok(gain) if gain.is_finite() => {
+                        voicing.gain_db = gain.clamp(-40.0, 20.0)
+                    }
+                    _ => return bad_request("gain must be a number of dB"),
+                }
+            }
+            match state.set_stop_voicing(stop, voicing) {
+                Ok(()) => json(state_json_locked(&state)),
+                Err(err) => bad_request(&err),
+            }
+        }
+        // Point a stop at a different source stop — same drawknob,
+        // same label, different pipes. Structural (the pull lines are
+        // rewritten), so the organ rebuilds.
+        (Method::Post, "/api/organ/stop/source") => {
+            let mut state = state.lock().expect("state poisoned");
+            if state.loading.is_some() || state.pending_load.is_some() {
+                return bad_request("an organ is already loading");
+            }
+            match (
+                param(query, "stop").and_then(|v| v.parse::<u32>().ok()),
+                param(query, "from").map(unescape),
+                param(query, "manual").map(unescape),
+                param(query, "source_stop").map(unescape),
+            ) {
+                (Some(stop), Some(from), Some(manual), Some(source_stop)) => {
+                    match state.retarget_stop(
+                        aristide_model::StopId(stop),
+                        &from,
+                        &manual,
+                        &source_stop,
+                    ) {
+                        Ok(()) => json(state_json_locked(&state)),
+                        Err(err) => bad_request(&err),
+                    }
+                }
+                _ => bad_request("missing stop/from/manual/source_stop"),
+            }
+        }
         (Method::Post, "/api/organ/enclosure/add") => {
             let Some(name) = param(query, "name").map(unescape) else {
                 return bad_request("missing name");
@@ -1296,8 +1399,35 @@ fn state_json_locked(state: &State) -> String {
                 .iter()
                 .map(|index| index.to_string())
                 .collect();
+            // Where the stop came from and how it's voiced — what the
+            // console's stop editor shows. `native` is the footage the
+            // samples speak at (null for a mixture), `footage` the
+            // override in force (null = native), `cents`/`gain` the
+            // stop's own trim rule, `own` whether such a rule exists.
+            let src = match state.provenance.get(&id) {
+                Some(prov) => format!(
+                    ",\"src\":{{\"from\":{},\"manual\":{},\"stop\":{}}}",
+                    json_string(&prov.source),
+                    json_string(&prov.source_manual),
+                    json_string(&prov.source_stop)
+                ),
+                None => String::new(),
+            };
+            let voicing = state.stop_voicing.get(&id).copied().unwrap_or_default();
+            let json_feet = |feet: Option<f64>| match feet {
+                Some(feet) if feet.is_finite() => format!("{feet}"),
+                _ => "null".to_string(),
+            };
+            let pitch = format!(
+                ",\"pitch\":{{\"native\":{},\"footage\":{},\"cents\":{},\"gain\":{},\"own\":{}}}",
+                json_feet(console.stop_native_footage(id)),
+                json_feet(voicing.feet),
+                voicing.cents,
+                voicing.gain_db,
+                state.stop_voicing.contains_key(&id)
+            );
             out.push_str(&format!(
-                "{{\"id\":{},\"name\":{},\"manual\":{},\"midx\":{},\"enc\":[{}],\"on\":{}}}",
+                "{{\"id\":{},\"name\":{},\"manual\":{},\"midx\":{},\"enc\":[{}],\"on\":{}{src}{pitch}}}",
                 id.0,
                 json_string(name),
                 json_string(manual),
@@ -2018,6 +2148,32 @@ mod tests {
         let organ = aristide_formats::grandorgue::load(&path)
             .expect("demo set loads")
             .organ;
+        // What load::prepare records for a set standing as itself:
+        // each stop from its own manual, under the wrapper alias the
+        // adoption inventory uses.
+        let provenance: std::collections::HashMap<
+            aristide_model::StopId,
+            aristide_formats::instrument::StopProvenance,
+        > = organ
+            .stops
+            .iter()
+            .map(|stop| {
+                (
+                    stop.id,
+                    aristide_formats::instrument::StopProvenance {
+                        source: "s1".into(),
+                        source_manual: organ
+                            .manuals
+                            .iter()
+                            .find(|m| m.id == stop.manual)
+                            .map(|m| m.name.clone())
+                            .unwrap_or_default(),
+                        source_stop: stop.name.clone(),
+                        via_division: false,
+                    },
+                )
+            })
+            .collect();
         let loaded = crate::bank::build(&organ, 48000.0, 16, None).expect("bank builds");
         let console = crate::console::Console::new(organ, loaded.specs, Vec::new(), 48000.0);
         let (_engine, handle) =
@@ -2052,6 +2208,8 @@ mod tests {
             expression_cc: 11,
             composite_path: None,
             setup: Default::default(),
+            provenance,
+            stop_voicing: Default::default(),
             compass_overrides: Vec::new(),
             pending_load: None,
             loading: None,
@@ -2619,7 +2777,8 @@ mod tests {
             toml::from_str(&std::fs::read_to_string(&file).expect("reads")).expect("parses");
         assert!(
             !def.stops.iter().any(|pull| pull.stop == "Montre 8'"),
-            "the pull line is gone"
+            "the pull line is gone: {}",
+            std::fs::read_to_string(&file).expect("reads")
         );
 
         let offerings = respond(&state, &Method::Get, "/api/organ/offerings");
@@ -2634,6 +2793,149 @@ mod tests {
         assert!(
             body.contains("\"name\":\"Montre 8'\",\"pulled\":false"),
             "the unpulled stop is offered again: {body}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The per-stop editors: rename and voicing land live (no rebuild
+    /// queued — the label changes now, held keys re-speak now) and in
+    /// the file; re-sourcing rewrites the pull and rebuilds. The
+    /// snapshot carries provenance and pitch for every stop, which is
+    /// what the console's right-click popover shows.
+    #[test]
+    fn per_stop_endpoints_edit_live_and_structurally() {
+        let Some(state) = demo_state() else { return };
+        let demo = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testsets/grandorgue-demo/demo.organ");
+        let dir = std::env::temp_dir().join("aristide-per-stop-endpoints-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let organ = aristide_formats::grandorgue::load(&demo).expect("demo parses").organ;
+        let canonical = demo.canonicalize().expect("canonicalizes");
+        let file =
+            crate::config::create_wrapper_organ(&dir, "Stop Editor", &canonical, &organ, None)
+                .expect("inventory written");
+        state.lock().expect("state").composite_path = Some(file.clone());
+
+        // The snapshot says where every stop came from and how it
+        // speaks — Montre 8' is s1's own, an 8' with no trim.
+        let value: serde_json::Value =
+            serde_json::from_str(&state_json(&state)).expect("valid JSON");
+        let montre = value["stops"]
+            .as_array()
+            .expect("stops")
+            .iter()
+            .find(|stop| stop["id"] == 16)
+            .expect("stop 16 exists")
+            .clone();
+        assert_eq!(montre["src"]["from"], "s1");
+        assert_eq!(montre["src"]["manual"], "First Manual");
+        assert_eq!(montre["src"]["stop"], "Montre 8'");
+        assert_eq!(montre["pitch"]["own"], false);
+        let native = montre["pitch"]["native"].as_f64().expect("a footage");
+        assert!((native - 8.0).abs() < 0.5, "an 8' reads as one: {native}");
+
+        // Rename: live — the snapshot changes NOW, nothing rebuilds —
+        // and the pull line carries the new label.
+        let renamed = respond(
+            &state,
+            &Method::Post,
+            "/api/organ/stop/rename?stop=16&name=Diapason%208",
+        );
+        assert_eq!(renamed.status_code().0, 200);
+        assert!(
+            state.lock().expect("state").pending_load.is_none(),
+            "a rename is a label — no rebuild"
+        );
+        assert!(state_json(&state).contains("\"name\":\"Diapason 8\""));
+        let text = std::fs::read_to_string(&file).expect("reads");
+        assert!(text.contains("rename = \"Diapason 8\""), "{text}");
+
+        // Voicing: live too, echoed in the snapshot, written as the
+        // stop's own [[voicing.adjust]] rule under its console name.
+        let voiced = respond(
+            &state,
+            &Method::Post,
+            "/api/organ/stop/voice?stop=16&footage=4&cents=2.5&gain=-3",
+        );
+        assert_eq!(voiced.status_code().0, 200);
+        assert!(state.lock().expect("state").pending_load.is_none(), "voicing is live");
+        let value: serde_json::Value =
+            serde_json::from_str(&state_json(&state)).expect("valid JSON");
+        let montre = value["stops"]
+            .as_array()
+            .expect("stops")
+            .iter()
+            .find(|stop| stop["id"] == 16)
+            .expect("still there")
+            .clone();
+        assert_eq!(montre["pitch"]["footage"], 4.0);
+        assert_eq!(montre["pitch"]["cents"], 2.5);
+        assert_eq!(montre["pitch"]["gain"], -3.0);
+        assert_eq!(montre["pitch"]["own"], true);
+        let text = std::fs::read_to_string(&file).expect("reads");
+        assert!(text.contains("[[voicing.adjust]]"), "{text}");
+        assert!(text.contains("stops = [\"Diapason 8\"]"), "{text}");
+        assert!(text.contains("pitch = 4"), "{text}");
+
+        // A mixture has no single footage to override; cents still do.
+        let plein_jeu = value["stops"]
+            .as_array()
+            .expect("stops")
+            .iter()
+            .find(|stop| stop["name"] == "Plein jeu III")
+            .expect("the mixture")["id"]
+            .as_u64()
+            .expect("an id");
+        assert!(value["stops"]
+            .as_array()
+            .expect("stops")
+            .iter()
+            .any(|stop| stop["name"] == "Plein jeu III" && stop["pitch"]["native"].is_null()));
+        let refused = respond(
+            &state,
+            &Method::Post,
+            &format!("/api/organ/stop/voice?stop={plein_jeu}&footage=4"),
+        );
+        assert_eq!(refused.status_code().0, 400, "a mixture refuses footage");
+        let ok = respond(
+            &state,
+            &Method::Post,
+            &format!("/api/organ/stop/voice?stop={plein_jeu}&cents=-4"),
+        );
+        assert_eq!(ok.status_code().0, 200, "cents still tune a mixture");
+
+        // Neutral values take the rule out of the file again.
+        let reset = respond(&state, &Method::Post, "/api/organ/stop/voice?stop=16&reset=1");
+        assert_eq!(reset.status_code().0, 200);
+        let text = std::fs::read_to_string(&file).expect("reads");
+        assert!(!text.contains("stops = [\"Diapason 8\"]"), "{text}");
+
+        // Re-sourcing is structural: the pull line now names the other
+        // stop, keeps the drawknob's label, and the organ rebuilds.
+        let retargeted = respond(
+            &state,
+            &Method::Post,
+            "/api/organ/stop/source?stop=16&from=s1&manual=Second%20Manual&source_stop=Trompette%208%27",
+        );
+        assert_eq!(retargeted.status_code().0, 200);
+        {
+            let mut state = state.lock().expect("state");
+            assert!(state.pending_load.is_some(), "re-sourcing rebuilds");
+            state.pending_load = None;
+            state.loading = None;
+        }
+        let def: aristide_formats::instrument::Definition =
+            toml::from_str(&std::fs::read_to_string(&file).expect("reads")).expect("parses");
+        let pull = def
+            .stops
+            .iter()
+            .find(|pull| pull.rename.as_deref() == Some("Diapason 8"))
+            .expect("the retargeted pull keeps the label");
+        assert_eq!(pull.stop, "Trompette 8'");
+        assert_eq!(pull.manual.as_deref(), Some("Second Manual"));
+        assert!(
+            !def.stops.iter().any(|pull| pull.stop == "Montre 8'"),
+            "the old pull is gone"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2980,6 +3282,8 @@ mod tests {
             expression_cc: 11,
             composite_path: None,
             setup: Default::default(),
+            provenance: Default::default(),
+            stop_voicing: Default::default(),
             compass_overrides: Vec::new(),
             pending_load: None,
             loading: None,

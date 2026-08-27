@@ -33,6 +33,24 @@ pub struct TremulantSetup {
     pub groups: Vec<u8>,
 }
 
+/// One stop's own `[[voicing.adjust]]` rule — the file fields the
+/// console editor shows and writes back (a rule whose `stops` is
+/// exactly that one stop's name). Pattern rules still apply to the
+/// sound; they just aren't editable per stop.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct StopVoicing {
+    /// Target footage, absent = the stop's native pitch.
+    pub feet: Option<f64>,
+    pub cents: f64,
+    pub gain_db: f64,
+}
+
+impl StopVoicing {
+    pub fn is_neutral(&self) -> bool {
+        *self == StopVoicing::default()
+    }
+}
+
 pub struct PreparedInstrument {
     pub console: Console,
     pub bank: SampleBank,
@@ -46,6 +64,11 @@ pub struct PreparedInstrument {
     pub composite: Option<(PathBuf, instrument::MidiDef)>,
     pub suggested_channels: Vec<Option<u8>>,
     pub setup: Setup,
+    /// Per stop: where it came from — the coordinates per-stop file
+    /// edits address their lines by.
+    pub provenance: std::collections::HashMap<StopId, instrument::StopProvenance>,
+    /// Per stop: its own editable `[[voicing.adjust]]` rule, if any.
+    pub stop_voicing: std::collections::HashMap<StopId, StopVoicing>,
     /// The organ file's `[console.layout]` — empty unless it is a
     /// composite loaded alone, same condition as `composite` above.
     pub layout: std::collections::BTreeMap<String, instrument::PanelPos>,
@@ -212,6 +235,8 @@ pub fn prepare(
     anyhow::ensure!(!paths.is_empty(), "no sample set given");
     let first_path = &paths[0];
     let mut composite_midi: Option<(PathBuf, instrument::MidiDef)> = None;
+    let mut single_provenance: std::collections::HashMap<StopId, instrument::StopProvenance> =
+        std::collections::HashMap::new();
     let mut manual_tuning_defs: Vec<instrument::ManualTuningDef> = Vec::new();
     let mut console_layout: std::collections::BTreeMap<String, instrument::PanelPos> =
         std::collections::BTreeMap::new();
@@ -247,6 +272,14 @@ pub fn prepare(
             );
             if paths.len() == 1 {
                 composite_midi = Some((path.clone(), assembled.midi));
+                // Assembled stops are ids in placement order, so the
+                // provenance vec zips onto them by index.
+                single_provenance = assembled
+                    .provenance
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, prov)| (StopId(index as u32), prov))
+                    .collect();
                 manual_tuning_defs = assembled.manual_tuning;
                 console_layout = assembled.console_layout;
             } else if !assembled.midi.inputs.is_empty()
@@ -346,7 +379,34 @@ pub fn prepare(
     // the first source.
     let sidecar = &sidecars[0];
     let (organ, drawn) = if sources.len() == 1 {
-        let organ = sources.pop().expect("one source").1;
+        let (label, organ) = sources.pop().expect("one source");
+        // A composite already reported where each stop came from; a
+        // bare set standing as itself is its own provenance — each
+        // stop from its own manual, as a division pull would record it.
+        if single_provenance.is_empty() {
+            single_provenance = organ
+                .stops
+                .iter()
+                .map(|stop| {
+                    (
+                        stop.id,
+                        instrument::StopProvenance {
+                            source: label.clone(),
+                            source_manual: organ
+                                .manuals
+                                .iter()
+                                .find(|m| m.id == stop.manual)
+                                .map(|m| m.name.clone())
+                                .unwrap_or_default(),
+                            source_stop: stop.name.clone(),
+                            // The adoption inventory pulls stop by
+                            // stop, so edits look for [[stop]] lines.
+                            via_division: false,
+                        },
+                    )
+                })
+                .collect();
+        }
         setup.pulls = organ
             .manuals
             .iter()
@@ -396,6 +456,13 @@ pub fn prepare(
         }
         setup.pulls = assembled.division_pulls.clone();
         setup.implicit = true;
+        single_provenance = assembled
+            .provenance
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, prov)| (StopId(index as u32), prov))
+            .collect();
         let stop_map = &assembled.stop_map;
         let drawn = if stops.is_empty() {
             per_source_drawn
@@ -725,6 +792,8 @@ pub fn prepare(
     // the same name-pattern rules couplers use. A pattern that matches
     // nothing warns to the console; it never fails the load.
     let mut buses = Vec::new();
+    let mut stop_voicing: std::collections::HashMap<StopId, StopVoicing> =
+        std::collections::HashMap::new();
     {
         let stop_ids: Vec<(aristide_model::StopId, String, usize)> = console
             .stop_states()
@@ -810,22 +879,67 @@ pub fn prepare(
         if !plan.is_empty() {
             console.set_stop_routing(plan);
         }
-        // Voicing trims: level and cents per stop pattern.
-        let mut adjust: std::collections::HashMap<aristide_model::StopId, (f32, f32)> =
+        // Voicing trims: level, cents, and footage per stop pattern.
+        // A `pitch` footage becomes a cents shift against the stop's
+        // own recorded footage, then rides the same fold as `cents`.
+        let mut adjust: std::collections::HashMap<aristide_model::StopId, (f32, f64)> =
             std::collections::HashMap::new();
         for rule in &sidecar.voicing.adjusts {
             let gain = 10f32.powf((rule.gain_db.clamp(-40.0, 20.0) as f32) / 20.0);
-            let ratio = ((rule.cents.clamp(-200.0, 200.0) / 1200.0) as f32).exp2();
+            let cents = rule.cents.clamp(-2400.0, 2400.0);
+            let feet = match &rule.pitch {
+                None => None,
+                Some(spec) => match spec.feet() {
+                    Some(feet) => Some(feet),
+                    None => {
+                        load_warnings
+                            .push(format!("voicing.adjust: {spec:?} names no footage"));
+                        None
+                    }
+                },
+            };
             for pattern in &rule.stops {
                 let matched = aristide_formats::sidecar::match_names(&stop_names, pattern);
                 if matched.is_empty() {
                     load_warnings.push(format!("voicing.adjust: {pattern:?} matches nothing"));
                 }
                 for at in matched {
-                    let entry = adjust.entry(stop_ids[at].0).or_insert((1.0, 1.0));
+                    let footage_cents = match feet {
+                        None => 0.0,
+                        Some(feet) => match console.stop_native_footage(stop_ids[at].0) {
+                            Some(native) => 1200.0 * (native / feet).log2(),
+                            None => {
+                                load_warnings.push(format!(
+                                    "voicing.adjust: {:?} speaks no single footage — \
+                                     pitch {feet} not applied",
+                                    stop_names[at]
+                                ));
+                                0.0
+                            }
+                        },
+                    };
+                    let entry = adjust.entry(stop_ids[at].0).or_insert((1.0, 0.0));
                     entry.0 *= gain;
-                    entry.1 *= ratio;
+                    entry.1 += cents + footage_cents;
                 }
+            }
+            // A rule naming exactly one stop, exactly, is that stop's
+            // own — the one the console editor shows and edits. The
+            // last such rule wins the mirror (the sound still gets
+            // every rule).
+            if let [pattern] = rule.stops.as_slice()
+                && let [at] = aristide_formats::sidecar::match_names(&stop_names, pattern)
+                    .as_slice()
+                && stop_names[*at].eq_ignore_ascii_case(pattern)
+            {
+                stop_voicing.insert(
+                    stop_ids[*at].0,
+                    StopVoicing {
+                        feet,
+                        cents: rule.cents,
+                        gain_db: rule.gain_db,
+                    },
+                );
             }
         }
         if !adjust.is_empty() {
@@ -851,6 +965,8 @@ pub fn prepare(
         composite: composite_midi,
         suggested_channels: suggested,
         setup,
+        provenance: single_provenance,
+        stop_voicing,
         layout: console_layout,
         buses,
         warnings: load_warnings,

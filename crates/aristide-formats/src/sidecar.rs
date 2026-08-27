@@ -164,6 +164,83 @@ pub struct VoicingAdjustDef {
     pub gain_db: f64,
     #[serde(default)]
     pub cents: f64,
+    /// The footage the stop should speak at (`16`, `4`, `"2 2/3"`…),
+    /// against 8' as unison. The shift is priced like tuning: whole
+    /// semitones re-anchor each key to the neighbouring pipe that
+    /// really sounds there (a unit-organ extension, not a tape-speed
+    /// trick); only the sub-semitone remainder is bent. Absent, the
+    /// stop speaks at whatever pitch its samples were cut for.
+    #[serde(default)]
+    pub pitch: Option<FootageSpec>,
+}
+
+/// A stop's footage in a voicing rule: a TOML number (`16`, `2.667`)
+/// or a string with the organ builder's fraction spelling (`"2 2/3"`,
+/// `"5-1/3"`, `"1 3/5"`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum FootageSpec {
+    Number(f64),
+    Text(String),
+}
+
+impl FootageSpec {
+    /// The footage in feet, or None for text that names no footage.
+    pub fn feet(&self) -> Option<f64> {
+        match self {
+            FootageSpec::Number(feet) => (*feet > 0.0).then_some(*feet),
+            FootageSpec::Text(text) => parse_footage(text),
+        }
+    }
+}
+
+/// "16" → 16.0, "2 2/3" → 8/3, "5-1/3" → 16/3, "2.667" → 2.667. The
+/// trailing foot mark (`'` or `′`) is tolerated, as on a stop knob.
+pub fn parse_footage(text: &str) -> Option<f64> {
+    let text = text.trim().trim_end_matches(['\'', '′']).trim();
+    let (whole, frac) = match text.find([' ', '-']) {
+        Some(at) if text[..at].chars().all(|c| c.is_ascii_digit()) && text[at + 1..].contains('/') => {
+            (text[..at].parse::<f64>().ok()?, &text[at + 1..])
+        }
+        _ => (0.0, text),
+    };
+    let value = match frac.split_once('/') {
+        Some((num, den)) => {
+            let num = num.trim().parse::<f64>().ok()?;
+            let den = den.trim().parse::<f64>().ok()?;
+            if den <= 0.0 {
+                return None;
+            }
+            num / den
+        }
+        None => frac.trim().parse::<f64>().ok()?,
+    };
+    let feet = whole + value;
+    (feet.is_finite() && feet > 0.0).then_some(feet)
+}
+
+/// The conventional spelling of a footage: whole feet plain ("8"),
+/// harmonic fractions the way they're engraved ("2 2/3"), anything
+/// else as a decimal.
+pub fn format_footage(feet: f64) -> String {
+    if (feet - feet.round()).abs() < 1e-4 && feet.round() >= 1.0 {
+        return format!("{}", feet.round() as i64);
+    }
+    for den in [3i64, 5, 7, 9, 2, 4, 6, 8] {
+        let scaled = feet * den as f64;
+        if (scaled - scaled.round()).abs() < 1e-3 && scaled.round() >= 1.0 {
+            let num = scaled.round() as i64;
+            let (whole, rem) = (num / den, num % den);
+            return if rem == 0 {
+                format!("{whole}")
+            } else if whole == 0 {
+                format!("{rem}/{den}")
+            } else {
+                format!("{whole} {rem}/{den}")
+            };
+        }
+    }
+    format!("{feet:.2}")
 }
 
 /// How couplers behave at the edges of a division, and any couplers the
@@ -930,5 +1007,36 @@ repitch = true
         // Both noise stops are 20 chars — tied shortest, both selected.
         assert_eq!(match_names(&names, "noise"), vec![1, 3]);
         assert!(match_names(&names, "trompette").is_empty());
+    }
+
+    /// Footage is spoken the way it's engraved: whole feet, or the
+    /// mutation fractions ("2 2/3", "5-1/3"), foot mark tolerated —
+    /// and formatting writes the same spellings back.
+    #[test]
+    fn footage_parses_and_formats_like_a_stop_knob() {
+        assert_eq!(parse_footage("16"), Some(16.0));
+        assert_eq!(parse_footage("8'"), Some(8.0));
+        let quint = parse_footage("2 2/3").expect("nazard");
+        assert!((quint - 8.0 / 3.0).abs() < 1e-9, "{quint}");
+        assert_eq!(parse_footage("5-1/3"), parse_footage("5 1/3"));
+        assert_eq!(parse_footage("2/3"), Some(2.0 / 3.0));
+        assert_eq!(parse_footage("1.6"), Some(1.6));
+        assert_eq!(parse_footage(""), None);
+        assert_eq!(parse_footage("-4"), None);
+        assert_eq!(parse_footage("V"), None);
+
+        assert_eq!(format_footage(8.0), "8");
+        assert_eq!(format_footage(8.0 / 3.0), "2 2/3");
+        assert_eq!(format_footage(16.0 / 3.0), "5 1/3");
+        assert_eq!(format_footage(32.0 / 3.0), "10 2/3");
+        assert_eq!(format_footage(8.0 / 5.0), "1 3/5");
+        assert_eq!(format_footage(2.0 / 3.0), "2/3");
+        for text in ["16", "2 2/3", "1 3/5", "1 1/3"] {
+            assert_eq!(
+                format_footage(parse_footage(text).expect(text)),
+                text,
+                "round-trips"
+            );
+        }
     }
 }

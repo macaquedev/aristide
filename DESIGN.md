@@ -248,7 +248,18 @@ Tremblant knob → rate (Hz), depth (pitch cents — gain and timbre follow
 pressure physically), spin-up, unevenness; engine first, then the file's
 `[tremulant]` section (which, once declared, supersedes a set's own ODF
 tremulants at load — that is what declaring one means). Wave tremulants
-are recorded in their samples and refuse shaping.
+are recorded in their samples and refuse shaping. Every stop is editable in
+place the same way: right-click its drawknob → its name (kept on the pull
+that brought it in — a `[[stop]]` line's `rename`, or a `[[division]]`
+pull's per-stop `rename` map; exact file references follow), its pitch and
+gain (footage + cents + dB, the stop's own exact-name `[[voicing.adjust]]`
+rule — footage re-anchors each key to the pipe really sounding there,
+unit-organ style, with only the sub-semitone remainder bent and rank ends
+filled by repitching; a mixture has no single footage and voices in cents
+alone), and its source (the pull rewritten — a division stop leaves its
+pull via `except` and gets a `[[stop]]` line of its own — label kept;
+structural, a reload). Name and voicing land live, addressed by recorded
+provenance rather than by guessable names.
 Layout edits are *live*, tuning-style — file line plus in-place
 apply, never a reload — because the layout is a console fact throughout:
 duplicate hexes share a key number, a bound Lumatone `.ltn` map's key

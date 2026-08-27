@@ -25,6 +25,8 @@
 //! from = "gib"
 //! manual = "hauptwerk"
 //! on = "Great"        # omit to create a manual named like the source's
+//! except = ["Cymbale*"]                    # pulled minus these stops
+//! rename = { "Montre 8" = "Principal 8" }  # per-stop console names
 //!
 //! [[stop]]            # one stop, surgically
 //! from = "anne"
@@ -258,6 +260,15 @@ pub struct DivisionPull {
     /// Composite manual it lands on; omitted, a new manual is created
     /// with the source manual's name and compass.
     pub on: Option<String>,
+    /// Stops of the division left behind (name patterns) — how the
+    /// console deletes or re-sources one stop of a whole-division pull
+    /// without rewriting the pull as an inventory.
+    #[serde(default)]
+    pub except: Vec<String>,
+    /// Per-stop console names: source stop name → what the drawknob
+    /// says here. Exact names, not patterns — a rename means one stop.
+    #[serde(default)]
+    pub rename: BTreeMap<String, String>,
 }
 
 /// Pull one stop (or every stop a pattern matches) onto a manual.
@@ -439,6 +450,21 @@ pub struct ManualTuningDef {
     pub keymap: Option<String>,
 }
 
+/// Where an assembled stop came from — the coordinates every per-stop
+/// file edit (rename, re-source, delete) needs to find its line again.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StopProvenance {
+    /// The `[sources]` alias (for an implicit combination, the label).
+    pub source: String,
+    /// The source's own manual the stop sat on.
+    pub source_manual: String,
+    /// The source's own name for the stop, before any rename.
+    pub source_stop: String,
+    /// Whether a `[[division]]` pull brought it in (true) or a
+    /// `[[stop]]` line of its own (false).
+    pub via_division: bool,
+}
+
 #[derive(Debug)]
 pub struct Assembled {
     pub organ: Organ,
@@ -454,6 +480,9 @@ pub struct Assembled {
     /// structure in saveable form — a definition file that replays
     /// these pulls rebuilds the same instrument.
     pub division_pulls: Vec<(usize, String, usize)>,
+    /// Per assembled stop, indexed like `organ.stops` (`StopId` order):
+    /// where it came from.
+    pub provenance: Vec<StopProvenance>,
     /// Declared manuals that carry a tuning of their own. Parsing the
     /// temperament is the server's business — the format stays a name.
     pub manual_tuning: Vec<ManualTuningDef>,
@@ -533,6 +562,8 @@ struct Assembly<'a> {
     /// the compass is known.
     hex_defs: Vec<Option<HexDef>>,
     placed: Vec<PlacedStop>,
+    /// Parallel to `placed`: where each stop came from.
+    provenance: Vec<StopProvenance>,
     ranks: Vec<Rank>,
     windchests: Vec<Windchest>,
     enclosures: Vec<Enclosure>,
@@ -564,6 +595,7 @@ pub fn assemble(
         declared: Vec::new(),
         hex_defs: Vec::new(),
         placed: Vec::new(),
+        provenance: Vec::new(),
         ranks: Vec::new(),
         windchests: Vec::new(),
         enclosures: Vec::new(),
@@ -610,7 +642,7 @@ pub fn assemble(
                 assembly.chest_number(source_idx, number);
             }
             for manual_idx in 0..organ.manuals.len() {
-                assembly.pull_division(source_idx, manual_idx, None)?;
+                assembly.pull_division(source_idx, manual_idx, None, &[], &BTreeMap::new())?;
             }
         }
     } else {
@@ -655,9 +687,13 @@ pub fn assemble(
                 // console gesture that raced a rename's rebuild, a
                 // manual since removed) skips with a warning — it must
                 // never brick the organ file.
-                if let Err(err) =
-                    assembly.pull_division(source_idx, manual_idx, pull.on.as_deref())
-                {
+                if let Err(err) = assembly.pull_division(
+                    source_idx,
+                    manual_idx,
+                    pull.on.as_deref(),
+                    &pull.except,
+                    &pull.rename,
+                ) {
                     assembly.warnings.push(format!(
                         "division {:?} from {:?}: {err} — skipped",
                         pull.manual, pull.from
@@ -738,7 +774,7 @@ pub fn assemble(
                 }
             };
             for stop_idx in matches {
-                assembly.place_stop(source_idx, stop_idx, target, rename.clone());
+                assembly.place_stop(source_idx, stop_idx, target, rename.clone(), false);
             }
         }
     }
@@ -813,6 +849,7 @@ pub fn assemble(
         midi: def.midi.clone(),
         stop_map: assembly.stop_map,
         division_pulls: assembly.division_pulls,
+        provenance: assembly.provenance,
         manual_tuning,
         console_layout: def.console.layout.clone(),
         warnings: assembly.warnings,
@@ -1062,6 +1099,8 @@ impl Assembly<'_> {
         source_idx: usize,
         manual_idx: usize,
         on: Option<&str>,
+        except: &[String],
+        renames: &BTreeMap<String, String>,
     ) -> Result<(), InstrumentError> {
         let (alias, organ) = &self.sources[source_idx];
         let source_manual = organ.manuals[manual_idx].clone();
@@ -1100,8 +1139,41 @@ impl Assembly<'_> {
             .filter(|(_, stop)| stop.manual == source_manual.id)
             .map(|(index, _)| index)
             .collect();
-        for stop_idx in stops {
-            self.place_stop(source_idx, stop_idx, target, None);
+        // `except` leaves stops behind; a pattern matching nothing is a
+        // stale line (the stop was renamed at the source, say) and must
+        // warn, never brick.
+        let names: Vec<&str> = stops
+            .iter()
+            .map(|&index| organ.stops[index].name.as_str())
+            .collect();
+        let mut left_behind = HashSet::new();
+        for pattern in except {
+            let matched = sidecar::match_names(&names, pattern);
+            if matched.is_empty() {
+                self.warnings.push(format!(
+                    "division {:?} from {:?}: except {pattern:?} matches nothing",
+                    source_manual.name, alias
+                ));
+            }
+            left_behind.extend(matched);
+        }
+        for (unmatched, _) in renames.iter().filter(|(from, _)| {
+            !names
+                .iter()
+                .enumerate()
+                .any(|(at, name)| *name == from.as_str() && !left_behind.contains(&at))
+        }) {
+            self.warnings.push(format!(
+                "division {:?} from {:?}: rename {unmatched:?} names no pulled stop",
+                source_manual.name, alias
+            ));
+        }
+        for (at, stop_idx) in stops.into_iter().enumerate() {
+            if left_behind.contains(&at) {
+                continue;
+            }
+            let rename = renames.get(&organ.stops[stop_idx].name).cloned();
+            self.place_stop(source_idx, stop_idx, target, rename, true);
         }
         Ok(())
     }
@@ -1112,9 +1184,21 @@ impl Assembly<'_> {
         stop_idx: usize,
         target: usize,
         rename: Option<String>,
+        via_division: bool,
     ) {
         let organ = &self.sources[source_idx].1;
         let stop = &organ.stops[stop_idx];
+        self.provenance.push(StopProvenance {
+            source: self.sources[source_idx].0.clone(),
+            source_manual: organ
+                .manuals
+                .iter()
+                .find(|m| m.id == stop.manual)
+                .map(|m| m.name.clone())
+                .unwrap_or_default(),
+            source_stop: stop.name.clone(),
+            via_division,
+        });
         self.stop_map
             .insert((source_idx, stop.id), StopId(self.placed.len() as u32));
         // Anchoring is by pitch position, not key index: the key that
@@ -1916,11 +2000,15 @@ mod tests {
                 from: "A".into(),
                 manual: "Great".into(),
                 on: Some("Great".into()),
+                except: Vec::new(),
+                rename: BTreeMap::new(),
             },
             DivisionPull {
                 from: "B".into(),
                 manual: "Swell".into(),
                 on: Some("Great".into()),
+                except: Vec::new(),
+                rename: BTreeMap::new(),
             },
         ];
         let built = assemble(&definition, &sources, Vec::new()).expect("assembles");
@@ -1977,6 +2065,8 @@ mod tests {
             from: "A".into(),
             manual: "Swell".into(),
             on: Some("Choir".into()), // likewise gone
+            except: Vec::new(),
+            rename: BTreeMap::new(),
         }];
         let built = assemble(&definition, &sources, Vec::new()).expect("still assembles");
         assert_eq!(built.organ.stops.len(), 1, "the resolvable pull lands");
@@ -1989,6 +2079,81 @@ mod tests {
             built.warnings
         );
         assert!(built.warnings.iter().all(|w| w.contains("skipped")));
+    }
+
+    /// A [[division]] pull can leave stops behind (`except`) and give
+    /// the rest console names of their own (`rename` map) — how the
+    /// console edits one stop of a whole-division pull without
+    /// rewriting the pull as an inventory. Provenance records where
+    /// every assembled stop came from, and how.
+    #[test]
+    fn division_except_and_rename_shape_the_pull() {
+        let sources = vec![("A".to_string(), source("A", "/a"))];
+        let mut definition = def("Trimmed");
+        definition.manuals = vec![manual("Great", Some(36), Some(96))];
+        definition.divisions = vec![
+            DivisionPull {
+                from: "A".into(),
+                manual: "Great".into(),
+                on: Some("Great".into()),
+                except: vec!["Principal".into(), "Ghost".into()],
+                rename: BTreeMap::new(),
+            },
+            DivisionPull {
+                from: "A".into(),
+                manual: "Swell".into(),
+                on: Some("Great".into()),
+                except: Vec::new(),
+                rename: [
+                    ("Hautbois 8".to_string(), "Oboe d'amore".to_string()),
+                    ("Nobody".to_string(), "Nothing".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+            },
+        ];
+        definition.stops = vec![StopPull {
+            from: "A".into(),
+            manual: Some("Great".into()),
+            stop: "Principal 8".into(),
+            on: "Great".into(),
+            rename: None,
+        }];
+        let built = assemble(&definition, &sources, Vec::new()).expect("assembles");
+        let names: Vec<&str> = built.organ.stops.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["Oboe d'amore", "Principal 8"],
+            "excepted stop left behind, renamed stop wears its console name"
+        );
+        assert_eq!(
+            built.provenance[0],
+            StopProvenance {
+                source: "A".into(),
+                source_manual: "Swell".into(),
+                source_stop: "Hautbois 8".into(),
+                via_division: true,
+            }
+        );
+        assert_eq!(
+            built.provenance[1],
+            StopProvenance {
+                source: "A".into(),
+                source_manual: "Great".into(),
+                source_stop: "Principal 8".into(),
+                via_division: false,
+            }
+        );
+        assert!(
+            built.warnings.iter().any(|w| w.contains("except \"Ghost\"")),
+            "a stale except pattern is reported: {:?}",
+            built.warnings
+        );
+        assert!(
+            built.warnings.iter().any(|w| w.contains("\"Nobody\"")),
+            "a rename naming no pulled stop is reported: {:?}",
+            built.warnings
+        );
     }
 
     /// A [[move]] relocates a pulled stop by name after all pulls,
@@ -2006,11 +2171,15 @@ mod tests {
                 from: "A".into(),
                 manual: "Great".into(),
                 on: Some("Great".into()),
+                except: Vec::new(),
+                rename: BTreeMap::new(),
             },
             DivisionPull {
                 from: "A".into(),
                 manual: "Swell".into(),
                 on: Some("Great".into()),
+                except: Vec::new(),
+                rename: BTreeMap::new(),
             },
         ];
         definition.moves = vec![MoveDef {

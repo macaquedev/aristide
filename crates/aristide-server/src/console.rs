@@ -108,10 +108,13 @@ pub struct Console {
     /// sidecar's `[routing]`/`[voicing]` — stamped onto each voice's
     /// spec as it is priced. Stops not named route to bus 0, delay 0.
     stop_routing: HashMap<StopId, (u8, u32)>,
-    /// Per stop: (linear gain, pitch ratio) from the sidecar's
-    /// `[[voicing.adjust]]` — the user's own level/tuning trim,
-    /// stamped like routing.
-    stop_adjust: HashMap<StopId, (f32, f32)>,
+    /// Per stop: (linear gain, pitch shift in cents) from the
+    /// sidecar's `[[voicing.adjust]]` — the user's own level/tuning
+    /// trim. The cents ride the same pricing fold as tuning: whole
+    /// semitones re-anchor keys to neighbouring pipes (a footage
+    /// change is a unit-organ extension, not a tape-speed trick), the
+    /// remainder bends.
+    stop_adjust: HashMap<StopId, (f32, f64)>,
     /// Per manual: the inclusive MIDI note range that manual answers to.
     /// Starts as the sample set's own compass and is widened to the
     /// player's keyboard (see `set_compass`) — a key outside it is
@@ -480,9 +483,83 @@ impl Console {
     }
 
     /// Install the sidecar's per-stop voicing trims (linear gain,
-    /// pitch ratio).
-    pub fn set_stop_adjust(&mut self, adjust: HashMap<StopId, (f32, f32)>) {
+    /// pitch shift in cents).
+    pub fn set_stop_adjust(&mut self, adjust: HashMap<StopId, (f32, f64)>) {
         self.stop_adjust = adjust;
+    }
+
+    /// One stop's trim, live — the console editor's seam. Neutral
+    /// values drop the entry. Applies from the next voice priced; the
+    /// caller re-prices the stop if it should land under held keys.
+    pub fn set_stop_adjust_one(&mut self, stop: StopId, gain: f32, cents: f64) {
+        if gain == 1.0 && cents == 0.0 {
+            self.stop_adjust.remove(&stop);
+        } else {
+            self.stop_adjust.insert(stop, (gain, cents));
+        }
+    }
+
+    /// A stop's current trim (linear gain, cents), neutral if none.
+    pub fn stop_adjust(&self, stop: StopId) -> (f32, f64) {
+        self.stop_adjust.get(&stop).copied().unwrap_or((1.0, 0.0))
+    }
+
+    /// Rename a stop on the live console — a label, nothing sounding
+    /// moves. False if the id names no stop.
+    pub fn rename_stop(&mut self, stop: StopId, name: &str) -> bool {
+        match self.organ.stops.iter_mut().find(|s| s.id == stop) {
+            Some(entry) => {
+                entry.name = name.to_string();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The footage this stop's own samples speak at, before any trim:
+    /// the recorded pitch of the pipe under a key, against the 8'
+    /// unison for that key (the recorded 12-EDO ladder). None for a
+    /// stop whose ranges disagree by more than a quarter tone — a
+    /// mixture speaks several footages and has no single number — or
+    /// whose pipes carry no pitch at all.
+    pub fn stop_native_footage(&self, stop: StopId) -> Option<f64> {
+        let stop = self.organ.stops.iter().find(|s| s.id == stop)?;
+        let manual = self.organ.manuals.iter().find(|m| m.id == stop.manual)?;
+        let mut footage: Option<f64> = None;
+        for range in &stop.ranks {
+            let feet = (0..range.key_count).find_map(|at| {
+                let spec = self.specs.get(&(range.rank, range.first_pipe + at))?;
+                if spec.nominal_hz <= 0.0 {
+                    return None;
+                }
+                let key_midi = manual.first_midi_note as f64 + (range.first_key + at) as f64;
+                let unison = 440.0 * ((key_midi - 69.0) / 12.0).exp2();
+                Some(8.0 * unison / spec.nominal_hz as f64)
+            });
+            let Some(feet) = feet else {
+                continue; // a range of silent placeholders says nothing
+            };
+            match footage {
+                None => footage = Some(feet),
+                Some(seen) if (1200.0 * (seen / feet).log2()).abs() <= 50.0 => {}
+                Some(_) => return None,
+            }
+        }
+        footage
+    }
+
+    /// Re-price one drawn stop under whatever keys are held — how a
+    /// live pitch trim lands without a rebuild. Its voices restart (a
+    /// key re-anchored to another pipe is a different recording, so a
+    /// mid-speech glide can't cover every case): the caller sends the
+    /// stops, then the starts.
+    pub fn reprice_stop(&mut self, stop: StopId) -> (Vec<u64>, Vec<VoiceStart>) {
+        if !self.is_drawn(stop) {
+            return (Vec::new(), Vec::new());
+        }
+        let (stopped, _) = self.set_drawn(stop, false);
+        let (_, starts) = self.set_drawn(stop, true);
+        (stopped, starts)
     }
 
     /// Re-price every held voice under the current tunings and return
@@ -919,9 +996,6 @@ impl Console {
             else {
                 continue;
             };
-            let shift = (deviation / 100.0).round() as i16;
-            let bend_cents = deviation - shift as f64 * 100.0;
-            let bend_ratio = ((bend_cents / 1200.0).exp2()) as f32;
             // Negative below the set's own bottom key: the rank ladder
             // is extrapolated in both directions, so keep the sign.
             let key_index = midi_key - self.organ.manuals[target].first_midi_note as i16;
@@ -932,6 +1006,17 @@ impl Console {
                 {
                     continue;
                 }
+                // The stop's own pitch trim (a footage override, a
+                // fine-tune) folds into the same deviation the tuning
+                // asked for, so a repitched stop re-anchors to the
+                // pipes that really sound there — the octave of an 8'
+                // drawn at 4' comes from the pipes an octave up, not
+                // from doubling the tape speed.
+                let adjust = self.stop_adjust.get(&stop.id).copied();
+                let priced = deviation + adjust.map_or(0.0, |(_, cents)| cents);
+                let shift = (priced / 100.0).round() as i16;
+                let bend_cents = priced - shift as f64 * 100.0;
+                let bend_ratio = ((bend_cents / 1200.0).exp2()) as f32;
                 for range in &stop.ranks {
                     // Coverage is judged at the played key — a divided
                     // register is a decision about the keyboard, not
@@ -955,13 +1040,11 @@ impl Console {
                         spec.bus = bus;
                         spec.delay_frames = delay_frames;
                     }
-                    // The user's voicing trim: level directly, cents
-                    // through the same pitch fold as tuning below.
-                    let adjust = self.stop_adjust.get(&stop.id).copied();
+                    // The user's voicing trim: level directly (the
+                    // cents were folded into `priced` above).
                     if let Some((gain, _)) = adjust {
                         spec.gain *= gain;
                     }
-                    let adjust_ratio = adjust.map_or(1.0, |(_, ratio)| ratio);
                     // Identity at cent resolution: two keys anchored to
                     // the same pipe but bent apart are two virtual
                     // pipes; two keys the scale sends to the same pitch
@@ -975,7 +1058,7 @@ impl Console {
                         deviation,
                         target,
                         ladder_key: midi_key,
-                        spec: self.voiced(spec, ratio * bend_ratio * adjust_ratio),
+                        spec: self.voiced(spec, ratio * bend_ratio),
                     });
                 }
             }
@@ -1991,6 +2074,68 @@ mod tests {
         );
     }
 
+    /// A whole-octave stop trim is an extension, not a tape-speed
+    /// trick: mid-compass it re-anchors each key to the real pipe an
+    /// octave up (rate untouched); past the rank's top the edge pipe
+    /// stands in, repitched — the same borrowing a widened compass
+    /// gets.
+    #[test]
+    fn stop_pitch_shift_reanchors_to_real_pipes() {
+        let mut console = test_console();
+        console.set_drawn(StopId(2), false);
+        let mut adjust = HashMap::new();
+        adjust.insert(StopId(1), (1.0f32, 1200.0));
+        console.set_stop_adjust(adjust);
+        let (starts, _) = console.note_on_manual(0, 60, 64);
+        assert_eq!(starts.len(), 1);
+        assert!(
+            (starts[0].spec.rate - 1.0).abs() < 1e-6,
+            "a real pipe an octave up speaks at its own rate: {}",
+            starts[0].spec.rate
+        );
+        console.note_off_manual(0, 60);
+        // Key 90 wants pipe 66 of a 61-pipe rank: the top pipe (60)
+        // stands in, pulled up the remaining six semitones.
+        let (starts, _) = console.note_on_manual(0, 90, 64);
+        assert_eq!(starts.len(), 1);
+        let expected = (6.0f32 / 12.0).exp2();
+        assert!(
+            (starts[0].spec.rate - expected).abs() < 1e-4,
+            "past the rank's top the edge pipe is repitched: {}",
+            starts[0].spec.rate
+        );
+    }
+
+    /// Native footage is read off the recorded pitches: the pipe under
+    /// a key against that key's 8' unison. Ranges that disagree — a
+    /// mixture — yield no single number.
+    #[test]
+    fn stop_native_footage_reads_the_recorded_pitch() {
+        let mut console = test_console();
+        let ladder = |midi: f64| 440.0 * ((midi - 69.0) / 12.0).exp2();
+        for pipe in 0..61u16 {
+            console.specs.get_mut(&(RankId(1), pipe)).expect("spec").nominal_hz =
+                ladder(36.0 + pipe as f64) as f32; // unison: an 8'
+            console.specs.get_mut(&(RankId(2), pipe)).expect("spec").nominal_hz =
+                ladder(48.0 + pipe as f64) as f32; // an octave up: a 4'
+        }
+        let principal = console.stop_native_footage(StopId(1)).expect("footage");
+        assert!((principal - 8.0).abs() < 1e-3, "{principal}");
+        let octave = console.stop_native_footage(StopId(2)).expect("footage");
+        assert!((octave - 4.0).abs() < 1e-3, "{octave}");
+        console.organ.stops[0].ranks.push(RankRange {
+            rank: RankId(2),
+            first_key: 0,
+            key_count: 61,
+            first_pipe: 0,
+        });
+        assert_eq!(
+            console.stop_native_footage(StopId(1)),
+            None,
+            "a mixture speaks several footages"
+        );
+    }
+
     /// A `[[voicing.adjust]]` trim lands on every voice the stop
     /// prices: level directly, cents through the pitch fold.
     #[test]
@@ -1998,7 +2143,9 @@ mod tests {
         let mut console = test_console();
         console.set_drawn(StopId(2), false);
         let mut adjust = HashMap::new();
-        adjust.insert(StopId(1), (0.5f32, 1.01f32));
+        // 1200·log2(1.01) cents — under half a semitone, so the pipe
+        // stays its own and the whole trim lands as bend.
+        adjust.insert(StopId(1), (0.5f32, 1200.0 * 1.01f64.log2()));
         console.set_stop_adjust(adjust);
         let (starts, _) = console.note_on_manual(0, 60, 127);
         assert_eq!(starts.len(), 1);
@@ -2008,7 +2155,7 @@ mod tests {
             starts[0].spec.gain
         );
         assert!(
-            (starts[0].spec.rate - 1.01).abs() < 1e-6,
+            (starts[0].spec.rate - 1.01).abs() < 1e-4,
             "pitch trim: {}",
             starts[0].spec.rate
         );

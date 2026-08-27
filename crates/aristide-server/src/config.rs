@@ -26,6 +26,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use aristide_formats::instrument;
 use serde::{Deserialize, Serialize};
 
 /// Written above the serialized tables so the file explains itself to
@@ -1485,44 +1486,443 @@ pub fn append_composite_pull(
     write_atomically(path, doc.to_string())
 }
 
-/// Remove the `[[stop]]` pull that brought `stop` in, and any
-/// `[[move]]` lines about it. `on` is the manual the pull named (where
-/// the stop first landed). `Ok(false)` when no pull matches — a stop
-/// that came in as part of a `[[division]]` pull has no line of its
-/// own to remove.
-pub fn remove_composite_stop_pull(path: &Path, stop: &str, on: &str) -> Result<bool, String> {
-    let mut doc = composite_doc(path)?;
-    let Some(stops) = doc.get_mut("stop").and_then(|s| s.as_array_of_tables_mut()) else {
-        return Ok(false);
-    };
+// ---- per-stop edits, addressed by provenance ------------------------
+//
+// The console edits ONE stop; the file speaks in pulls. Provenance
+// (which source, which of its manuals, which of its stops, via a
+// [[stop]] line or a [[division]] pull) is how each edit finds the
+// line that brought the stop in. All of these answer `Ok(false)` when
+// the file holds no such line — a hand-edited file the console
+// shouldn't guess about.
+
+/// The `[[stop]]` line that pulled this provenance in, by index.
+/// `on` breaks ties when the same source stop was pulled twice.
+fn stop_pull_index(
+    stops: &toml_edit::ArrayOfTables,
+    prov: &instrument::StopProvenance,
+    on: &str,
+) -> Option<usize> {
     let named: Vec<usize> = (0..stops.len())
-        .filter(|&i| stops.get(i).is_some_and(|table| field_is(table, "stop", stop)))
+        .filter(|&i| {
+            stops.get(i).is_some_and(|table| {
+                field_is(table, "from", &prov.source)
+                    && field_is(table, "stop", &prov.source_stop)
+                    && table
+                        .get("manual")
+                        .and_then(|value| value.as_str())
+                        .is_none_or(|manual| manual.eq_ignore_ascii_case(&prov.source_manual))
+            })
+        })
         .collect();
-    let landed: Vec<usize> = named
-        .iter()
-        .copied()
-        .filter(|&i| stops.get(i).is_some_and(|table| field_is(table, "on", on)))
-        .collect();
-    let doomed = if !landed.is_empty() {
-        landed
-    } else if named.len() == 1 {
-        named
-    } else {
-        return Ok(false);
-    };
-    let mut index = 0;
-    stops.retain(|_| {
-        let keep = !doomed.contains(&index);
-        index += 1;
-        keep
-    });
-    if stops.is_empty() {
-        doc.remove("stop");
+    match named.as_slice() {
+        [] => None,
+        [one] => Some(*one),
+        several => several
+            .iter()
+            .copied()
+            .find(|&i| stops.get(i).is_some_and(|table| field_is(table, "on", on))),
     }
+}
+
+/// The `[[division]]` line that pulled this provenance in, by index.
+fn division_pull_index(
+    doc: &toml_edit::DocumentMut,
+    prov: &instrument::StopProvenance,
+    on: &str,
+) -> Option<usize> {
+    let divisions = doc.get("division")?.as_array_of_tables()?;
+    let named: Vec<usize> = (0..divisions.len())
+        .filter(|&i| {
+            divisions.get(i).is_some_and(|table| {
+                field_is(table, "from", &prov.source)
+                    && table
+                        .get("manual")
+                        .and_then(|value| value.as_str())
+                        .is_some_and(|pattern| {
+                            !aristide_formats::sidecar::match_names(
+                                &[prov.source_manual.as_str()],
+                                pattern,
+                            )
+                            .is_empty()
+                        })
+            })
+        })
+        .collect();
+    match named.as_slice() {
+        [] => None,
+        [one] => Some(*one),
+        several => several
+            .iter()
+            .copied()
+            .find(|&i| divisions.get(i).is_some_and(|table| field_is(table, "on", on))),
+    }
+}
+
+/// Leave one source stop out of a `[[division]]` pull.
+fn division_except_add(table: &mut toml_edit::Table, source_stop: &str) {
+    let item = table
+        .entry("except")
+        .or_insert(toml_edit::Item::Value(toml_edit::Array::new().into()));
+    if let Some(array) = item.as_value_mut().and_then(|value| value.as_array_mut())
+        && !array
+            .iter()
+            .any(|value| value.as_str().is_some_and(|s| s.eq_ignore_ascii_case(source_stop)))
+    {
+        array.push(source_stop);
+    }
+}
+
+/// Set (or with `to == None` drop) one entry of a `[[division]]`
+/// pull's per-stop `rename` map, whichever TOML spelling it uses.
+fn division_rename_set(table: &mut toml_edit::Table, source_stop: &str, to: Option<&str>) {
+    if to.is_none() && table.get("rename").is_none() {
+        return;
+    }
+    let item = table
+        .entry("rename")
+        .or_insert(toml_edit::Item::Value(toml_edit::InlineTable::new().into()));
+    let mut empty = false;
+    if let Some(inline) = item.as_value_mut().and_then(|value| value.as_inline_table_mut()) {
+        match to {
+            Some(to) => {
+                inline.insert(source_stop, to.into());
+            }
+            None => {
+                inline.remove(source_stop);
+            }
+        }
+        empty = inline.is_empty();
+    } else if let Some(map) = item.as_table_mut() {
+        match to {
+            Some(to) => map[source_stop] = toml_edit::value(to),
+            None => {
+                map.remove(source_stop);
+            }
+        }
+        empty = map.is_empty();
+    }
+    if empty {
+        table.remove("rename");
+    }
+}
+
+/// Rename every exact `from` in a string array (an enclosure's
+/// `stops`, a voicing rule's) — patterns are left alone; only a value
+/// that names the stop exactly follows the rename.
+fn rename_in_string_array(table: &mut toml_edit::Table, key: &str, from: &str, to: &str) {
+    if let Some(array) = table.get_mut(key).and_then(|item| item.as_array_mut()) {
+        for value in array.iter_mut() {
+            if value.as_str().is_some_and(|s| s.eq_ignore_ascii_case(from)) {
+                let decor = value.decor().clone();
+                *value = to.into();
+                *value.decor_mut() = decor;
+            }
+        }
+    }
+}
+
+/// Every `[[voicing.adjust]]` table, mutably.
+fn voicing_adjusts_mut(
+    doc: &mut toml_edit::DocumentMut,
+) -> Option<&mut toml_edit::ArrayOfTables> {
+    doc.get_mut("voicing")?
+        .get_mut("adjust")?
+        .as_array_of_tables_mut()
+}
+
+/// Drop the `[[move]]` lines about a console stop name.
+fn remove_moves_for(doc: &mut toml_edit::DocumentMut, stop: &str) {
     if let Some(moves) = doc.get_mut("move").and_then(|m| m.as_array_of_tables_mut()) {
         moves.retain(|table| !field_is(table, "stop", stop));
         if moves.is_empty() {
             doc.remove("move");
+        }
+    }
+}
+
+/// Rename a stop in a composite file: the pull that brought it in
+/// carries the console name (a `rename` field on its `[[stop]]` line,
+/// or an entry in its `[[division]]` line's `rename` map), and every
+/// exact reference to the old name — `[[move]]` lines, `[[enclosure]]`
+/// member lists, `[[voicing.adjust]]` rules — follows, or the rename
+/// would silently unwire them.
+pub fn rename_composite_stop(
+    path: &Path,
+    prov: &instrument::StopProvenance,
+    on: &str,
+    old: &str,
+    new: &str,
+) -> Result<bool, String> {
+    let mut doc = composite_doc(path)?;
+    if prov.via_division {
+        let Some(index) = division_pull_index(&doc, prov, on) else {
+            return Ok(false);
+        };
+        let table = doc["division"]
+            .as_array_of_tables_mut()
+            .and_then(|tables| tables.get_mut(index))
+            .expect("division line just found");
+        let back_to_source = new.eq_ignore_ascii_case(&prov.source_stop);
+        division_rename_set(table, &prov.source_stop, (!back_to_source).then_some(new));
+    } else {
+        let Some(index) = doc
+            .get("stop")
+            .and_then(|s| s.as_array_of_tables())
+            .and_then(|stops| stop_pull_index(stops, prov, on))
+        else {
+            return Ok(false);
+        };
+        let table = doc["stop"]
+            .as_array_of_tables_mut()
+            .and_then(|tables| tables.get_mut(index))
+            .expect("stop line just found");
+        if new.eq_ignore_ascii_case(&prov.source_stop) {
+            table.remove("rename");
+        } else {
+            set_string_preserving(table, "rename", new);
+        }
+    }
+    for table in tables_mut(&mut doc, "move") {
+        rename_field(table, "stop", old, new);
+    }
+    for table in tables_mut(&mut doc, "enclosure") {
+        rename_in_string_array(table, "stops", old, new);
+    }
+    if let Some(adjusts) = voicing_adjusts_mut(&mut doc) {
+        for table in adjusts.iter_mut() {
+            rename_in_string_array(table, "stops", old, new);
+        }
+    }
+    write_atomically(path, doc.to_string())?;
+    Ok(true)
+}
+
+/// Write (or with everything neutral, remove) a stop's own
+/// `[[voicing.adjust]]` rule — the one whose `stops` is exactly this
+/// stop's console name. Pattern rules are never touched.
+pub fn write_composite_stop_voicing(
+    path: &Path,
+    stop_name: &str,
+    feet: Option<f64>,
+    cents: f64,
+    gain_db: f64,
+) -> Result<(), String> {
+    let mut doc = composite_doc(path)?;
+    let own = |table: &toml_edit::Table| {
+        table
+            .get("stops")
+            .and_then(|item| item.as_array())
+            .is_some_and(|array| {
+                array.len() == 1
+                    && array
+                        .iter()
+                        .next()
+                        .and_then(|value| value.as_str())
+                        .is_some_and(|name| name.eq_ignore_ascii_case(stop_name))
+            })
+    };
+    let neutral = feet.is_none() && cents == 0.0 && gain_db == 0.0;
+    if neutral {
+        if let Some(adjusts) = voicing_adjusts_mut(&mut doc) {
+            adjusts.retain(|table| !own(table));
+            if adjusts.is_empty()
+                && let Some(voicing) = doc.get_mut("voicing").and_then(|v| v.as_table_mut())
+            {
+                voicing.remove("adjust");
+                if voicing.is_empty() {
+                    doc.remove("voicing");
+                }
+            }
+        }
+        return write_atomically(path, doc.to_string());
+    }
+    let voicing = doc
+        .entry("voicing")
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+    let Some(voicing) = voicing.as_table_mut() else {
+        return Err("[voicing] is not a table".into());
+    };
+    voicing.set_implicit(true);
+    let adjusts = voicing
+        .entry("adjust")
+        .or_insert(toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new()));
+    let Some(adjusts) = adjusts.as_array_of_tables_mut() else {
+        return Err("[[voicing.adjust]] is not an array of tables".into());
+    };
+    let index = (0..adjusts.len()).find(|&i| adjusts.get(i).is_some_and(&own));
+    let table = match index {
+        Some(index) => adjusts.get_mut(index).expect("rule just found"),
+        None => {
+            let mut table = toml_edit::Table::new();
+            let mut stops = toml_edit::Array::new();
+            stops.push(stop_name);
+            table["stops"] = toml_edit::value(stops);
+            adjusts.push(table);
+            let last = adjusts.len() - 1;
+            adjusts.get_mut(last).expect("rule just pushed")
+        }
+    };
+    match feet {
+        // Whole feet stay a plain number; a mutation's fraction is
+        // written the way it's engraved ("2 2/3").
+        Some(feet) if (feet - feet.round()).abs() < 1e-4 => {
+            table["pitch"] = toml_edit::value(feet.round() as i64);
+        }
+        Some(feet) => {
+            table["pitch"] = toml_edit::value(aristide_formats::sidecar::format_footage(feet));
+        }
+        None => {
+            table.remove("pitch");
+        }
+    }
+    if cents == 0.0 {
+        table.remove("cents");
+    } else {
+        table["cents"] = toml_edit::value(cents);
+    }
+    if gain_db == 0.0 {
+        table.remove("gain_db");
+    } else {
+        table["gain_db"] = toml_edit::value(gain_db);
+    }
+    write_atomically(path, doc.to_string())
+}
+
+/// Point a console stop at a different source stop, keeping its place
+/// and its label. A `[[stop]]`-pulled stop's own line is rewritten; a
+/// division-pulled stop is excepted from its `[[division]]` line and
+/// pulled afresh by a `[[stop]]` line of its own. Either way the stop
+/// now lands directly on `on`, so its `[[move]]` lines go.
+pub fn retarget_composite_stop(
+    path: &Path,
+    prov: &instrument::StopProvenance,
+    console_name: &str,
+    on: &str,
+    new_from: &str,
+    new_manual: &str,
+    new_stop: &str,
+) -> Result<bool, String> {
+    let mut doc = composite_doc(path)?;
+    if !doc
+        .get("sources")
+        .and_then(|sources| sources.as_table())
+        .is_some_and(|sources| sources.contains_key(new_from))
+    {
+        return Err(format!("{new_from:?} is not a [sources] alias of this organ"));
+    }
+    let keeps_label = !console_name.eq_ignore_ascii_case(new_stop);
+    if prov.via_division {
+        let Some(index) = division_pull_index(&doc, prov, on) else {
+            return Ok(false);
+        };
+        let table = doc["division"]
+            .as_array_of_tables_mut()
+            .and_then(|tables| tables.get_mut(index))
+            .expect("division line just found");
+        division_except_add(table, &prov.source_stop);
+        division_rename_set(table, &prov.source_stop, None);
+        let stops = doc
+            .entry("stop")
+            .or_insert(toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new()));
+        let Some(stops) = stops.as_array_of_tables_mut() else {
+            return Err("[[stop]] is not an array of tables".into());
+        };
+        let mut table = toml_edit::Table::new();
+        table["from"] = toml_edit::value(new_from);
+        table["manual"] = toml_edit::value(new_manual);
+        table["stop"] = toml_edit::value(new_stop);
+        table["on"] = toml_edit::value(on);
+        if keeps_label {
+            table["rename"] = toml_edit::value(console_name);
+        }
+        stops.push(table);
+    } else {
+        let Some(index) = doc
+            .get("stop")
+            .and_then(|s| s.as_array_of_tables())
+            .and_then(|stops| stop_pull_index(stops, prov, on))
+        else {
+            return Ok(false);
+        };
+        let table = doc["stop"]
+            .as_array_of_tables_mut()
+            .and_then(|tables| tables.get_mut(index))
+            .expect("stop line just found");
+        set_string_preserving(table, "from", new_from);
+        set_string_preserving(table, "manual", new_manual);
+        set_string_preserving(table, "stop", new_stop);
+        set_string_preserving(table, "on", on);
+        if keeps_label {
+            set_string_preserving(table, "rename", console_name);
+        } else {
+            table.remove("rename");
+        }
+    }
+    remove_moves_for(&mut doc, console_name);
+    write_atomically(path, doc.to_string())?;
+    Ok(true)
+}
+
+/// Remove a stop from a composite file: delete its own `[[stop]]`
+/// line, or except it from the `[[division]]` pull that brought it in
+/// — plus every line that was about it (`[[move]]`, its own voicing
+/// rule, exact `[[enclosure]]` memberships). `Ok(false)` when no pull
+/// matches.
+pub fn remove_composite_stop(
+    path: &Path,
+    prov: &instrument::StopProvenance,
+    console_name: &str,
+    on: &str,
+) -> Result<bool, String> {
+    let mut doc = composite_doc(path)?;
+    if prov.via_division {
+        let Some(index) = division_pull_index(&doc, prov, on) else {
+            return Ok(false);
+        };
+        let table = doc["division"]
+            .as_array_of_tables_mut()
+            .and_then(|tables| tables.get_mut(index))
+            .expect("division line just found");
+        division_except_add(table, &prov.source_stop);
+        division_rename_set(table, &prov.source_stop, None);
+    } else {
+        let Some(stops) = doc.get_mut("stop").and_then(|s| s.as_array_of_tables_mut()) else {
+            return Ok(false);
+        };
+        let Some(doomed) = stop_pull_index(stops, prov, on) else {
+            return Ok(false);
+        };
+        let mut index = 0;
+        stops.retain(|_| {
+            let keep = index != doomed;
+            index += 1;
+            keep
+        });
+        if stops.is_empty() {
+            doc.remove("stop");
+        }
+    }
+    remove_moves_for(&mut doc, console_name);
+    if let Some(adjusts) = voicing_adjusts_mut(&mut doc) {
+        adjusts.retain(|table| {
+            !table
+                .get("stops")
+                .and_then(|item| item.as_array())
+                .is_some_and(|array| {
+                    array.len() == 1
+                        && array
+                            .iter()
+                            .next()
+                            .and_then(|value| value.as_str())
+                            .is_some_and(|name| name.eq_ignore_ascii_case(console_name))
+                })
+        });
+    }
+    for table in tables_mut(&mut doc, "enclosure") {
+        if let Some(array) = table.get_mut("stops").and_then(|item| item.as_array_mut()) {
+            array.retain(|value| {
+                !value.as_str().is_some_and(|s| s.eq_ignore_ascii_case(console_name))
+            });
         }
     }
     write_atomically(path, doc.to_string())?;
@@ -2311,7 +2711,15 @@ mod tests {
 
         // Deleting the stop's pull also forgets its moves; deleting a
         // manual takes every line landing on it.
-        assert!(remove_composite_stop_pull(&path, "Montre 8", "Hauptwerk").expect("unpulls"));
+        let montre = instrument::StopProvenance {
+            source: "s1".into(),
+            source_manual: "Great".into(),
+            source_stop: "Montre 8".into(),
+            via_division: false,
+        };
+        assert!(
+            remove_composite_stop(&path, &montre, "Montre 8", "Hauptwerk").expect("unpulls")
+        );
         let parsed = def(&path);
         assert!(parsed.stops.is_empty());
         assert!(parsed.moves.is_empty());
@@ -2319,6 +2727,167 @@ mod tests {
         let parsed = def(&path);
         assert_eq!(parsed.manuals.len(), 1);
         assert!(parsed.divisions.is_empty(), "the pull landing on it went too");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The per-stop editors, addressed by provenance: a rename lands
+    /// on the pull that brought the stop in (a `[[stop]]` line's
+    /// `rename` field, a `[[division]]` line's rename map) and every
+    /// exact name reference follows; a voicing rule is one exact-name
+    /// `[[voicing.adjust]]` entry that neutral values remove again;
+    /// retargeting rewrites the pull (excepting a division stop into a
+    /// `[[stop]]` line of its own) while the label stays.
+    #[test]
+    fn per_stop_edits_rewrite_the_pulls() {
+        let dir = std::env::temp_dir().join("aristide-per-stop-edits-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("test dir");
+        let path = dir.join("orgue.toml");
+        std::fs::write(
+            &path,
+            r#"name = "Edits"
+
+[sources]
+anne = "/sets/anne.organ"
+gib = "/sets/gib.organ"
+
+[[manual]]
+name = "Great"
+low = 36
+high = 96
+
+[[division]]
+from = "anne"
+manual = "Hauptwerk"
+on = "Great"
+
+[[stop]]
+from = "gib"
+manual = "Récit"
+stop = "Trompette 8"
+on = "Great"
+
+[[move]]
+stop = "Montre 8"
+from = "Great"
+to = "Great"
+
+[[enclosure]]
+name = "Box"
+stops = ["Montre 8"]
+"#,
+        )
+        .expect("fixture");
+        let def = |path: &Path| -> aristide_formats::instrument::Definition {
+            toml::from_str(&std::fs::read_to_string(path).expect("reads")).expect("parses")
+        };
+        let division_stop = instrument::StopProvenance {
+            source: "anne".into(),
+            source_manual: "Hauptwerk".into(),
+            source_stop: "Montre 8".into(),
+            via_division: true,
+        };
+        let pulled_stop = instrument::StopProvenance {
+            source: "gib".into(),
+            source_manual: "Récit".into(),
+            source_stop: "Trompette 8".into(),
+            via_division: false,
+        };
+
+        // Rename a division-pulled stop: the map entry appears and the
+        // move/enclosure references follow.
+        assert!(
+            rename_composite_stop(&path, &division_stop, "Great", "Montre 8", "Principal 8")
+                .expect("renames")
+        );
+        let parsed = def(&path);
+        assert_eq!(
+            parsed.divisions[0].rename.get("Montre 8").map(String::as_str),
+            Some("Principal 8")
+        );
+        assert_eq!(parsed.moves[0].stop, "Principal 8", "the move followed");
+        assert_eq!(parsed.enclosure_defs[0].stops, ["Principal 8"], "the box followed");
+        // Renaming back to the source name drops the map again.
+        assert!(
+            rename_composite_stop(&path, &division_stop, "Great", "Principal 8", "Montre 8")
+                .expect("renames back")
+        );
+        assert!(def(&path).divisions[0].rename.is_empty());
+
+        // Rename a [[stop]]-pulled stop: its own line carries it.
+        assert!(
+            rename_composite_stop(&path, &pulled_stop, "Great", "Trompette 8", "Tromba")
+                .expect("renames")
+        );
+        assert_eq!(def(&path).stops[0].rename.as_deref(), Some("Tromba"));
+
+        // A voicing rule is created exact-name, updated in place, and
+        // removed again when everything is neutral.
+        write_composite_stop_voicing(&path, "Tromba", Some(16.0 / 3.0), 0.0, -2.0)
+            .expect("voices");
+        let parsed = def(&path);
+        assert_eq!(parsed.voicing.adjusts.len(), 1);
+        assert_eq!(parsed.voicing.adjusts[0].stops, ["Tromba"]);
+        assert_eq!(parsed.voicing.adjusts[0].pitch.as_ref().and_then(|p| p.feet()), Some(16.0 / 3.0));
+        assert_eq!(parsed.voicing.adjusts[0].gain_db, -2.0);
+        write_composite_stop_voicing(&path, "Tromba", None, 3.5, 0.0).expect("revoices");
+        let parsed = def(&path);
+        assert_eq!(parsed.voicing.adjusts.len(), 1, "updated, not duplicated");
+        assert!(parsed.voicing.adjusts[0].pitch.is_none());
+        assert_eq!(parsed.voicing.adjusts[0].cents, 3.5);
+        write_composite_stop_voicing(&path, "Tromba", None, 0.0, 0.0).expect("neutral");
+        assert!(def(&path).voicing.adjusts.is_empty(), "neutral removes the rule");
+        assert!(
+            !std::fs::read_to_string(&path).expect("reads").contains("[voicing"),
+            "an empty section leaves no residue"
+        );
+
+        // Retarget the division stop: excepted from its division and
+        // pulled afresh under its console label.
+        assert!(
+            retarget_composite_stop(
+                &path,
+                &division_stop,
+                "Montre 8",
+                "Great",
+                "gib",
+                "Récit",
+                "Principal 8",
+            )
+            .expect("retargets")
+        );
+        let parsed = def(&path);
+        assert_eq!(parsed.divisions[0].except, ["Montre 8"]);
+        let fresh = parsed
+            .stops
+            .iter()
+            .find(|pull| pull.stop == "Principal 8")
+            .expect("a pull of its own");
+        assert_eq!(fresh.from, "gib");
+        assert_eq!(fresh.rename.as_deref(), Some("Montre 8"), "the label stays");
+        assert!(parsed.moves.is_empty(), "a fresh pull lands directly");
+        assert!(
+            retarget_composite_stop(
+                &path,
+                &division_stop,
+                "Montre 8",
+                "Great",
+                "ghost",
+                "Récit",
+                "X",
+            )
+            .is_err(),
+            "an unknown alias must not poison the file"
+        );
+
+        // Remove the [[stop]]-pulled stop: its line goes.
+        assert!(
+            remove_composite_stop(&path, &pulled_stop, "Tromba", "Great").expect("removes")
+        );
+        assert!(
+            !def(&path).stops.iter().any(|pull| pull.stop == "Trompette 8"),
+            "the pull line is gone"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

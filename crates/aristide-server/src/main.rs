@@ -600,6 +600,14 @@ pub struct State {
     /// How this instrument was put together — what the setup dialog
     /// asks about and what `/api/organ/save` writes to a file.
     pub setup: Setup,
+    /// Per stop: where it came from. The coordinates every per-stop
+    /// file edit — rename, re-source, delete — addresses its file
+    /// lines by.
+    pub provenance: std::collections::HashMap<StopId, instrument::StopProvenance>,
+    /// Per stop: its own `[[voicing.adjust]]` rule (footage, cents,
+    /// gain), mirrored here so the console editor can show and edit
+    /// exactly what the file says.
+    pub stop_voicing: std::collections::HashMap<StopId, load::StopVoicing>,
     /// Per composite manual: a player-declared compass overriding the
     /// set's own. Asked when sets are combined; editable later in
     /// Preferences; saved into the composite file.
@@ -2284,9 +2292,12 @@ impl State {
         Ok(())
     }
 
-    /// Delete a stop: remove the `[[stop]]` line that pulled it in.
-    /// The source still offers it, so the pane can pull it back.
-    pub fn remove_stop(&mut self, stop: StopId) -> Result<(), String> {
+    /// A stop's console name, current manual name, and provenance —
+    /// what every per-stop file edit needs to find its lines.
+    fn stop_coordinates(
+        &self,
+        stop: StopId,
+    ) -> Result<(String, String, instrument::StopProvenance), String> {
         let Control::Organ(console) = &self.control else {
             return Err("no organ is loaded".into());
         };
@@ -2298,11 +2309,164 @@ impl State {
         else {
             return Err("no such stop".into());
         };
-        let path = self.organ_file()?;
-        if !config::remove_composite_stop_pull(&path, &name, &manual_name)? {
+        let Some(prov) = self.provenance.get(&stop).cloned() else {
             return Err(format!(
-                "{name:?} came in as part of a whole division — edit its \
-                 [[division]] line in {}",
+                "where {name:?} came from isn't on record — reload the organ"
+            ));
+        };
+        Ok((name, manual_name, prov))
+    }
+
+    /// Delete a stop: remove the `[[stop]]` line that pulled it in, or
+    /// except it from its `[[division]]` pull. The source still offers
+    /// it, so the pane can pull it back.
+    pub fn remove_stop(&mut self, stop: StopId) -> Result<(), String> {
+        let (name, manual_name, prov) = self.stop_coordinates(stop)?;
+        let path = self.organ_file()?;
+        if !config::remove_composite_stop(&path, &prov, &name, &manual_name)? {
+            return Err(format!(
+                "the pull that brought {name:?} in isn't in {} — it was \
+                 hand-edited; edit it there",
+                path.display()
+            ));
+        }
+        self.reload_organ_file(path);
+        Ok(())
+    }
+
+    /// Rename a stop — a label, so it lands live (no rebuild): the
+    /// console name changes now, the file keeps it, and every exact
+    /// file reference to the old name follows.
+    pub fn rename_stop(&mut self, stop: StopId, new: &str) -> Result<(), String> {
+        let new = new.trim();
+        if new.is_empty() {
+            return Err("the stop needs a name".into());
+        }
+        let (old, manual_name, prov) = self.stop_coordinates(stop)?;
+        if old == new {
+            return Ok(());
+        }
+        let Control::Organ(console) = &self.control else {
+            return Err("no organ is loaded".into());
+        };
+        // Two stops of one name on one manual would leave the file's
+        // name-keyed lines ([[move]], enclosure members) ambiguous.
+        if console
+            .stop_states()
+            .iter()
+            .any(|(id, name, manual, _, _)| {
+                *id != stop && name.eq_ignore_ascii_case(new) && *manual == manual_name
+            })
+        {
+            return Err(format!("{manual_name} already has a stop named {new:?}"));
+        }
+        let path = self.organ_file()?;
+        if !config::rename_composite_stop(&path, &prov, &manual_name, &old, new)? {
+            return Err(format!(
+                "the pull that brought {old:?} in isn't in {} — it was \
+                 hand-edited; edit it there",
+                path.display()
+            ));
+        }
+        let Control::Organ(console) = &mut self.control else {
+            return Err("no organ is loaded".into());
+        };
+        console.rename_stop(stop, new);
+        // Session-side name references follow too, or saving an
+        // implicit combination later would write stale move names.
+        for (moved, ..) in &mut self.setup.moves {
+            if moved.eq_ignore_ascii_case(&old) {
+                *moved = new.to_string();
+            }
+        }
+        Ok(())
+    }
+
+    /// A stop's own voicing — footage, cents, gain — live and in the
+    /// file. Live means now: held keys re-speak the stop at its new
+    /// pitch; nothing rebuilds.
+    pub fn set_stop_voicing(
+        &mut self,
+        stop: StopId,
+        voicing: load::StopVoicing,
+    ) -> Result<(), String> {
+        let (name, _, _) = self.stop_coordinates(stop)?;
+        let Control::Organ(console) = &mut self.control else {
+            return Err("no organ is loaded".into());
+        };
+        let footage_cents = match voicing.feet {
+            None => 0.0,
+            Some(feet) => {
+                if !(feet > 0.0 && feet.is_finite()) {
+                    return Err("footage must be a positive number of feet".into());
+                }
+                let Some(native) = console.stop_native_footage(stop) else {
+                    return Err(format!(
+                        "{name:?} speaks no single footage (a mixture) — \
+                         tune it in cents instead"
+                    ));
+                };
+                1200.0 * (native / feet).log2()
+            }
+        };
+        let gain = 10f32.powf((voicing.gain_db.clamp(-40.0, 20.0) as f32) / 20.0);
+        let cents = voicing.cents.clamp(-2400.0, 2400.0) + footage_cents;
+        console.set_stop_adjust_one(stop, gain, cents);
+        let (stopped, starts) = console.reprice_stop(stop);
+        for handle in stopped {
+            self.engine.send(Command::StopVoice { handle });
+        }
+        for start in starts {
+            self.engine.send(start_command(&start));
+        }
+        if voicing.is_neutral() {
+            self.stop_voicing.remove(&stop);
+        } else {
+            self.stop_voicing.insert(stop, voicing);
+        }
+        // The file write is best-effort like the tuning contract: an
+        // organ without a file still voices live, with a warning that
+        // it won't stick.
+        if let Some(path) = self.composite_path.clone() {
+            config::write_composite_stop_voicing(
+                &path,
+                &name,
+                voicing.feet,
+                voicing.cents,
+                voicing.gain_db,
+            )?;
+        } else {
+            tracing::warn!(
+                "voicing for {name:?} not saved: this organ has no file yet"
+            );
+        }
+        Ok(())
+    }
+
+    /// Point a stop at a different source stop — same drawknob, same
+    /// label, different pipes. Structural: the file's pull lines are
+    /// rewritten and the organ rebuilds.
+    pub fn retarget_stop(
+        &mut self,
+        stop: StopId,
+        from: &str,
+        source_manual: &str,
+        source_stop: &str,
+    ) -> Result<(), String> {
+        let (name, manual_name, prov) = self.stop_coordinates(stop)?;
+        let path = self.organ_file()?;
+        if !config::retarget_composite_stop(
+            &path,
+            &prov,
+            &name,
+            &manual_name,
+            from,
+            source_manual,
+            source_stop,
+        )? {
+            return Err(format!(
+                "the pull that brought {name:?} in isn't in {} — it was \
+                 hand-edited; edit it there",
                 path.display()
             ));
         }
@@ -2557,6 +2721,8 @@ fn main() -> Result<()> {
         expression_cc: 11,
         composite_path: None,
         setup: Setup::default(),
+        provenance: Default::default(),
+        stop_voicing: Default::default(),
         compass_overrides: Vec::new(),
         loading: pending_load.as_ref().map(|_| "loading…".to_string()),
         pending_load,
@@ -2939,6 +3105,8 @@ fn perform_load(
         composite,
         suggested_channels,
         setup,
+        provenance,
+        stop_voicing,
         layout,
         buses,
         warnings,
@@ -3115,6 +3283,8 @@ fn perform_load(
     state.expression_cc = expression_cc;
     state.composite_path = composite.map(|(path, _)| path);
     state.setup = setup;
+    state.provenance = provenance;
+    state.stop_voicing = stop_voicing;
     state.compass_overrides = Vec::new();
     state.layout = layout;
     state.learn = None;
@@ -3870,6 +4040,8 @@ mod tests {
             expression_cc: 11,
             composite_path: None,
             setup: Default::default(),
+            provenance: Default::default(),
+            stop_voicing: Default::default(),
             compass_overrides: Vec::new(),
             pending_load: None,
             loading: None,
