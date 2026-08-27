@@ -816,6 +816,8 @@ pub fn write_composite_midi(path: &Path, organ: Option<&OrganConfig>) -> Result<
 #[derive(Debug, Clone, PartialEq)]
 pub struct ManualTuningFields {
     pub temperament: String,
+    /// Divisions per octave; 12 writes as absence, the file's default.
+    pub edo: u16,
     pub a4_hz: f64,
     pub transpose: i8,
     pub scale: Option<String>,
@@ -960,10 +962,20 @@ pub fn write_composite_manual_tuning(
 /// temperament line (a Scala scale IS the temperament); absent fields
 /// are removed so the file never says two things at once.
 fn write_manual_tuning_fields(table: &mut toml_edit::Table, fields: &ManualTuningFields) {
-    if fields.scale.is_some() {
+    // A scale supersedes both the temperament and the division count;
+    // and at 12 divisions — the file's default — the edo line goes,
+    // while the temperament line goes at any other count (twelve-class
+    // vocabulary means nothing there). The file never says two things
+    // at once.
+    if fields.scale.is_some() || fields.edo != 12 {
         table.remove("temperament");
     } else {
         table["temperament"] = toml_edit::value(fields.temperament.as_str());
+    }
+    if fields.scale.is_some() || fields.edo == 12 {
+        table.remove("edo");
+    } else {
+        table["edo"] = toml_edit::value(fields.edo as i64);
     }
     table["a4_hz"] = toml_edit::value(fields.a4_hz);
     table["transpose"] = toml_edit::value(fields.transpose as i64);
@@ -2186,6 +2198,7 @@ mod tests {
         // and None clears the whole tuning.
         let tuned = |temperament: &str, scale: Option<&str>| ManualTuningFields {
             temperament: temperament.into(),
+            edo: 12,
             a4_hz: 432.0,
             transpose: 0,
             scale: scale.map(str::to_string),
@@ -2206,6 +2219,29 @@ mod tests {
         let parsed = def(&path);
         assert_eq!(parsed.manuals[0].scale, None);
         assert_eq!(parsed.manuals[0].temperament.as_deref(), Some("meantone4"));
+
+        // A division count away from 12 writes an edo line and drops
+        // the temperament (twelve-class vocabulary); back at 12 the
+        // temperament line returns and the edo line goes.
+        assert!(
+            write_composite_manual_tuning(
+                &path,
+                "Grand orgue",
+                Some(ManualTuningFields { edo: 31, ..tuned("meantone4", None) })
+            )
+            .expect("tuning")
+        );
+        let parsed = def(&path);
+        assert_eq!(parsed.manuals[0].edo, Some(31));
+        assert_eq!(parsed.manuals[0].temperament, None, "temperaments are 12-EDO talk");
+        assert!(
+            write_composite_manual_tuning(&path, "Grand orgue", Some(tuned("meantone4", None)))
+                .expect("tuning")
+        );
+        let parsed = def(&path);
+        assert_eq!(parsed.manuals[0].edo, None, "12 is absence");
+        assert_eq!(parsed.manuals[0].temperament.as_deref(), Some("meantone4"));
+
         assert!(write_composite_manual_tuning(&path, "Grand orgue", None).expect("tuning"));
         assert_eq!(def(&path).manuals[0].a4_hz, None);
 

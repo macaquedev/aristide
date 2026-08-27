@@ -206,7 +206,22 @@ fn respond(
                         param(query, "temperament").and_then(crate::tuning::Temperament::parse)
                     {
                         tuning.temperament = t;
-                        // Naming a temperament is leaving the scale.
+                        // Naming a temperament is leaving the scale,
+                        // and temperaments are twelve-class vocabulary.
+                        tuning.scale = None;
+                        tuning.edo = 12;
+                    }
+                    if let Some(edo) = param(query, "edo").and_then(|v| v.parse::<u16>().ok()) {
+                        if !crate::tuning::EDO_RANGE.contains(&edo) {
+                            return Err(format!(
+                                "edo must be {}..{}",
+                                crate::tuning::EDO_RANGE.start(),
+                                crate::tuning::EDO_RANGE.end()
+                            ));
+                        }
+                        // Choosing a division count is leaving the
+                        // scale, the same way naming a temperament is.
+                        tuning.edo = edo;
                         tuning.scale = None;
                     }
                     if let Some(a4) = param(query, "a4").and_then(|v| v.parse::<f64>().ok()) {
@@ -446,14 +461,10 @@ fn respond(
                 .map(|(_, _, first, count, _)| *first as i32 + (*count).max(1) as i32 - 1);
             let mut refit_cols = false;
             if let Some(preset) = param(query, "preset") {
-                let steps = {
-                    let tuning = console.manual_tuning(manual).unwrap_or(console.tuning());
-                    tuning
-                        .scale
-                        .as_ref()
-                        .map(|scale| scale.scale.len().max(1) as u16)
-                        .unwrap_or(12)
-                };
+                let steps = console
+                    .manual_tuning(manual)
+                    .unwrap_or(console.tuning())
+                    .steps_per_octave();
                 let Some((right, upright)) =
                     aristide_model::HexLayout::preset_steps(preset, steps)
                 else {
@@ -1405,8 +1416,9 @@ fn state_json_locked(state: &State) -> String {
                 None => String::new(),
             };
             format!(
-                "\"temperament\":{},\"a4\":{},\"transpose\":{}{scale}",
+                "\"temperament\":{},\"edo\":{},\"a4\":{},\"transpose\":{}{scale}",
                 json_string(tuning.temperament.name()),
+                tuning.edo,
                 tuning.a4_hz,
                 tuning.transpose
             )
@@ -2091,7 +2103,9 @@ mod tests {
         );
         let body = state_json(&state);
         assert!(
-            body.contains("\"manual_tuning\":[{\"idx\":1,\"temperament\":\"meantone4\",\"a4\":415"),
+            body.contains(
+                "\"manual_tuning\":[{\"idx\":1,\"temperament\":\"meantone4\",\"edo\":12,\"a4\":415"
+            ),
             "own tuning shows: {body}"
         );
         assert!(body.contains("\"hidden\":true"), "picked-off coupler shows");
@@ -2101,6 +2115,7 @@ mod tests {
             [aristide_formats::instrument::ManualTuningDef {
                 manual: 1,
                 temperament: Some("meantone4".into()),
+                edo: None,
                 a4_hz: Some(415.0),
                 transpose: Some(0),
                 scale: None,

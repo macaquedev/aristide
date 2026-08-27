@@ -189,6 +189,9 @@ pub struct ManualDef {
     pub low: Option<KeySpec>,
     pub high: Option<KeySpec>,
     pub temperament: Option<String>,
+    /// Divisions per octave of this manual's own (12 is the default
+    /// and the only count where `temperament` means anything).
+    pub edo: Option<u16>,
     pub a4_hz: Option<f64>,
     pub transpose: Option<i8>,
     /// A Scala `.scl` file (path, resolved against the organ file's
@@ -428,6 +431,8 @@ impl Definition {
 pub struct ManualTuningDef {
     pub manual: usize,
     pub temperament: Option<String>,
+    /// Divisions per octave of its own (see `[tuning] edo`).
+    pub edo: Option<u16>,
     pub a4_hz: Option<f64>,
     pub transpose: Option<i8>,
     pub scale: Option<String>,
@@ -785,6 +790,7 @@ pub fn assemble(
         .enumerate()
         .filter(|(_, manual)| {
             manual.temperament.is_some()
+                || manual.edo.is_some()
                 || manual.a4_hz.is_some()
                 || manual.transpose.is_some()
                 || manual.scale.is_some()
@@ -792,6 +798,7 @@ pub fn assemble(
         .map(|(index, manual)| ManualTuningDef {
             manual: index,
             temperament: manual.temperament.clone(),
+            edo: manual.edo,
             a4_hz: manual.a4_hz,
             transpose: manual.transpose,
             scale: manual.scale.clone(),
@@ -1565,6 +1572,7 @@ mod tests {
             low: low.map(KeySpec::Number),
             high: high.map(KeySpec::Number),
             temperament: None,
+            edo: None,
             a4_hz: None,
             transpose: None,
             scale: None,
@@ -2048,6 +2056,7 @@ drop = ["Swell to Great"]
         assert_eq!(
             built.manual_tuning,
             [ManualTuningDef {
+                edo: None,
                 manual: 1,
                 temperament: Some("meantone".to_string()),
                 a4_hz: Some(415.0),

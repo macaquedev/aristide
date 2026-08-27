@@ -619,8 +619,15 @@ export class Console {
     if (!this.dragging.has("gain")) this.el.gain.value = snapshot.gain;
 
     const tuning = snapshot.tuning;
+    // What the readout leads with is whatever actually governs pitch:
+    // an active scale, else a division count away from 12, else the
+    // temperament (absent edo on an old snapshot means 12).
+    const governs = tuning
+      ? tuning.scale?.name ??
+        ((tuning.edo ?? 12) !== 12 ? `${tuning.edo}-EDO` : tuning.temperament)
+      : "";
     this.el.tuning.textContent = tuning
-      ? `${tuning.temperament} · a′ ${tuning.a4.toFixed(0)} Hz` +
+      ? `${governs} · a′ ${tuning.a4.toFixed(0)} Hz` +
         (tuning.transpose ? ` · ${tuning.transpose > 0 ? "+" : ""}${tuning.transpose}` : "")
       : "";
     this.el.tuning.classList.toggle("hidden", !tuning);

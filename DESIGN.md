@@ -240,7 +240,10 @@ apply, never a reload — because the layout is a console fact throughout:
 duplicate hexes share a key number, a bound Lumatone `.ltn` map's key
 colours tint the hexes in the same extended-key numbering its notes land
 in, and *pitch* still comes only from the tuning layer), and
-per-manual tuning (`[[manual]] temperament/a4_hz/transpose`) —
+per-manual tuning (`[[manual]] temperament/edo/a4_hz/transpose` — `edo` is
+divisions per octave, default 12 and written as absence; away from 12 keys
+walk equal steps of 1200/edo cents from a′ and the temperament — twelve-class
+vocabulary — is dormant, so the UIs offer it only at 12) —
 a 415 meantone Positif against a 440 equal Great is one instrument. Tuning is
 physical: a coupled copy sounds the destination division's pipes, so it speaks
 that division's temperament; a division's transpose moves only its own

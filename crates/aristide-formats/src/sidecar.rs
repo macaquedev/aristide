@@ -508,8 +508,13 @@ impl Default for ReverbConfig {
 #[serde(deny_unknown_fields)]
 pub struct TuningConfig {
     /// equal | werckmeister3 | kirnberger3 | meantone4 | pythagorean
+    /// — twelve-class vocabulary, meaningful only when `edo = 12`.
     #[serde(default = "default_temperament")]
     pub temperament: String,
+    /// Equal divisions of the octave the keys walk (12 unless said
+    /// otherwise); away from 12 the temperament is dormant.
+    #[serde(default = "default_edo")]
+    pub edo: u16,
     #[serde(default = "default_a4_hz")]
     pub a4_hz: f64,
     /// Semitones added to incoming keys (a transposer).
@@ -529,6 +534,10 @@ fn default_temperament() -> String {
     "equal".into()
 }
 
+fn default_edo() -> u16 {
+    12
+}
+
 fn default_a4_hz() -> f64 {
     440.0
 }
@@ -537,6 +546,7 @@ impl Default for TuningConfig {
     fn default() -> Self {
         TuningConfig {
             temperament: default_temperament(),
+            edo: default_edo(),
             a4_hz: default_a4_hz(),
             transpose: 0,
             scale: None,

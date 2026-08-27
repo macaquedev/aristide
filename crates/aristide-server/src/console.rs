@@ -2880,6 +2880,7 @@ mod tests {
 
         // Meantone C sits +10.265 cents above equal (a-referenced).
         console.set_tuning(crate::tuning::Tuning {
+            edo: 12,
             temperament: crate::tuning::Temperament::Meantone4,
             scale: None,
             a4_hz: 440.0,
@@ -2896,6 +2897,7 @@ mod tests {
         // Transpose +2: key 60 routes to pipe 62 (rate reflects D's
         // offset, and the sounding pipe index shifts).
         console.set_tuning(crate::tuning::Tuning {
+            edo: 12,
             temperament: crate::tuning::Temperament::Equal,
             scale: None,
             a4_hz: 440.0,
@@ -2920,6 +2922,7 @@ mod tests {
         console.set_manual_tuning(
             1,
             Some(crate::tuning::Tuning {
+                edo: 12,
                 temperament: crate::tuning::Temperament::Meantone4,
                 scale: None,
                 a4_hz: 440.0,
@@ -2943,6 +2946,7 @@ mod tests {
         console.set_manual_tuning(
             0,
             Some(crate::tuning::Tuning {
+                edo: 12,
                 temperament: crate::tuning::Temperament::Equal,
                 scale: None,
                 a4_hz: 440.0,
@@ -2969,6 +2973,7 @@ mod tests {
         }
         let scale = aristide_model::scala::Scale::parse(&scl).expect("parses");
         let tuning = crate::tuning::Tuning {
+            edo: 12,
             temperament: crate::tuning::Temperament::Equal,
             scale: Some(std::sync::Arc::new(crate::tuning::ScaleTuning {
                 scl: "19edo.scl".into(),
@@ -3061,6 +3066,7 @@ mod tests {
         }
         let scale = aristide_model::scala::Scale::parse(&scl).expect("parses");
         let tuning = crate::tuning::Tuning {
+            edo: 12,
             temperament: crate::tuning::Temperament::Equal,
             scale: Some(std::sync::Arc::new(crate::tuning::ScaleTuning {
                 scl: "19edo.scl".into(),
@@ -3138,6 +3144,7 @@ mod tests {
         let scale = aristide_model::scala::Scale::parse(scl).expect("scl parses");
         let mapping = aristide_model::scala::KeyboardMapping::parse(kbm).expect("kbm parses");
         let tuning = crate::tuning::Tuning {
+            edo: 12,
             temperament: crate::tuning::Temperament::Equal,
             scale: Some(std::sync::Arc::new(crate::tuning::ScaleTuning {
                 scl: "whole.scl".into(),

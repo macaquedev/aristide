@@ -152,9 +152,15 @@ impl ScaleTuning {
 #[derive(Debug, Clone)]
 pub struct Tuning {
     pub temperament: Temperament,
+    /// Equal divisions of the octave the keys walk: 12 is the common
+    /// case and the only one where the temperament tables below mean
+    /// anything — they are twelve-class vocabulary, dormant at any
+    /// other count. Away from 12, every key is one step of
+    /// `1200/edo` cents, anchored so key 69 sounds a′.
+    pub edo: u16,
     /// When present, the scale supplies every key's pitch and the
-    /// temperament above is dormant — a Scala scale IS a temperament,
-    /// just one with its own degree count and period.
+    /// temperament and division count above are dormant — a Scala
+    /// scale IS a tuning, with its own degree count and period.
     pub scale: Option<std::sync::Arc<ScaleTuning>>,
     /// Frequency of a′ in Hz (440 = modern concert pitch; 415 baroque,
     /// 465 chorton, …). Under a scale with its own `.kbm` the mapping's
@@ -165,10 +171,15 @@ pub struct Tuning {
     pub transpose: i8,
 }
 
+/// The one legal range for a divisions-per-octave count: 1 (octaves
+/// only) up past 311-EDO, the largest anyone names in practice.
+pub const EDO_RANGE: std::ops::RangeInclusive<u16> = 1..=311;
+
 impl Default for Tuning {
     fn default() -> Self {
         Tuning {
             temperament: Temperament::Equal,
+            edo: 12,
             scale: None,
             a4_hz: 440.0,
             transpose: 0,
@@ -196,11 +207,32 @@ impl Tuning {
             let ladder_hz = 440.0 * (((key as f64) - 69.0) / 12.0).exp2();
             return Some(1200.0 * (hz / ladder_hz).log2());
         }
+        if self.edo != 12 {
+            // Equal steps of 1200/edo cents, a′ on key 69: the same
+            // ladder a generated N-EDO scale with the linear mapping
+            // would give, without the ceremony of a file.
+            let from_a = key as f64 - 69.0;
+            return Some(
+                from_a * (1200.0 / self.edo.max(1) as f64 - 100.0)
+                    + 1200.0 * (self.a4_hz / 440.0).log2(),
+            );
+        }
         let class = (key % 12) as usize;
         Some(
             self.temperament.offsets_cents()[class] as f64
                 + 1200.0 * (self.a4_hz / 440.0).log2(),
         )
+    }
+
+    /// How many keys step one octave under this tuning: the scale's
+    /// degree count when one is loaded, else the declared divisions
+    /// per octave. What layout presets and anything else that thinks
+    /// in "steps" should ask, instead of assuming 12.
+    pub fn steps_per_octave(&self) -> u16 {
+        match &self.scale {
+            Some(scale) => scale.scale.len().max(1) as u16,
+            None => self.edo.max(1),
+        }
     }
 
     /// Keep the linear default mapping anchored to `a4_hz` after an a′
@@ -272,6 +304,29 @@ mod tests {
         tuning.a4_hz = 415.0;
         let expected = (415.0f64 / 440.0) as f32;
         assert!((tuning.rate_multiplier(69) - expected).abs() < 1e-4);
+    }
+
+    /// Away from 12, keys walk 1200/edo cents from a′ on key 69 and
+    /// the temperament tables go dormant; at 12 nothing changes.
+    #[test]
+    fn edo_steps_from_a_and_silences_the_temperament() {
+        let mut tuning = Tuning {
+            edo: 24,
+            temperament: Temperament::Meantone4,
+            ..Tuning::default()
+        };
+        assert_eq!(tuning.deviation_cents(69), Some(0.0), "a′ stays put");
+        assert_eq!(tuning.deviation_cents(70), Some(-50.0), "one 24-EDO step = 50 cents");
+        assert_eq!(tuning.deviation_cents(68), Some(50.0));
+        assert_eq!(tuning.deviation_cents(69 + 24), Some(-1200.0), "24 steps = the octave");
+        assert_eq!(tuning.steps_per_octave(), 24);
+        tuning.edo = 12;
+        assert_ne!(
+            tuning.deviation_cents(70),
+            Some(0.0),
+            "back at 12 the meantone tables speak again"
+        );
+        assert_eq!(tuning.steps_per_octave(), 12);
     }
 
     #[test]

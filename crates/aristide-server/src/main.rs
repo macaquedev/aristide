@@ -1835,6 +1835,7 @@ impl State {
     fn tuning_fields_of(tuning: &tuning::Tuning) -> config::ManualTuningFields {
         config::ManualTuningFields {
             temperament: tuning.temperament.name().to_string(),
+            edo: tuning.edo,
             a4_hz: tuning.a4_hz,
             transpose: tuning.transpose,
             scale: tuning.scale.as_ref().map(|scale| scale.scl.clone()),

@@ -641,6 +641,10 @@ pub fn prepare(
     };
     let mut live_tuning = tuning::Tuning {
         temperament,
+        edo: sidecar
+            .tuning
+            .edo
+            .clamp(*tuning::EDO_RANGE.start(), *tuning::EDO_RANGE.end()),
         scale: None,
         a4_hz: sidecar.tuning.a4_hz.clamp(300.0, 500.0),
         transpose: sidecar.tuning.transpose.clamp(-12, 12),
@@ -667,6 +671,10 @@ pub fn prepare(
             .unwrap_or(live_tuning.temperament);
         let mut own = tuning::Tuning {
             temperament,
+            edo: def
+                .edo
+                .unwrap_or(live_tuning.edo)
+                .clamp(*tuning::EDO_RANGE.start(), *tuning::EDO_RANGE.end()),
             scale: None,
             a4_hz: def.a4_hz.unwrap_or(live_tuning.a4_hz).clamp(300.0, 500.0),
             transpose: def.transpose.unwrap_or(live_tuning.transpose).clamp(-12, 12),
@@ -677,10 +685,11 @@ pub fn prepare(
         tracing::info!(
             "tuning: manual {} plays {} @ a'={} Hz, transpose {:+}",
             def.manual,
-            own.scale
-                .as_ref()
-                .map(|scale| scale.name())
-                .unwrap_or(own.temperament.name()),
+            match &own.scale {
+                Some(scale) => scale.name().to_string(),
+                None if own.edo != 12 => format!("{}-EDO", own.edo),
+                None => own.temperament.name().to_string(),
+            },
             own.a4_hz,
             own.transpose
         );

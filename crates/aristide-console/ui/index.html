@@ -155,6 +155,12 @@
             pitch, apart from the instrument. Everything below reads and
             sets whichever one is picked above.
           </p>
+          <label class="settings-row" id="edo-row">
+            <span class="rail-label">Divisions / octave</span>
+            <span class="stepper"><input id="set-edo" type="number" min="1" max="311" step="1" /></span>
+          </label>
+          <!-- Temperaments are twelve-class vocabulary: the row shows
+               only while the division count is 12. -->
           <label class="settings-row" id="temperament-row">
             <span class="rail-label">Temperament</span>
             <select id="set-temperament">
@@ -495,6 +501,12 @@
           <button class="ghost hidden" type="button" id="editor-tuning-keymap-clear" title="Back to linear">&times;</button>
         </span>
       </div>
+      <label class="settings-row" id="editor-tuning-edo-row">
+        <span class="rail-label">Divisions / octave</span>
+        <span class="stepper"><input id="editor-tuning-edo" type="number" min="1" max="311" step="1" /></span>
+      </label>
+      <!-- Temperaments are twelve-class vocabulary: the row shows only
+           while the division count is 12. -->
       <label class="settings-row" id="editor-tuning-temperament-row">
         <span class="rail-label">Temperament</span>
         <select id="editor-tuning-temperament">

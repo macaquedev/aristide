@@ -133,6 +133,8 @@ export class Editor {
       tuningKeymapClear: root.getElementById("editor-tuning-keymap-clear"),
       tuningTemperamentRow: root.getElementById("editor-tuning-temperament-row"),
       tuningTemperament: root.getElementById("editor-tuning-temperament"),
+      tuningEdoRow: root.getElementById("editor-tuning-edo-row"),
+      tuningEdo: root.getElementById("editor-tuning-edo"),
       tuningA4: root.getElementById("editor-tuning-a4"),
       tuningTranspose: root.getElementById("editor-tuning-transpose"),
       tuningError: root.getElementById("editor-tuning-error"),
@@ -753,6 +755,15 @@ export class Editor {
       this.el.tuningTemperament.blur();
     });
 
+    this.el.tuningEdo.addEventListener("change", () => {
+      if (this.tuningManual == null) return;
+      const edo = Math.min(311, Math.max(1, Math.round(Number(this.el.tuningEdo.value) || 12)));
+      this.el.tuningEdo.value = edo;
+      // Like naming a temperament, choosing a division count leaves
+      // any active scale (the server clears it on this field).
+      this.tuningCommand({ manual: this.tuningManual, edo });
+    });
+
     this.el.tuningA4.addEventListener("change", () => {
       if (this.tuningManual == null) return;
       const a4 = Math.min(500, Math.max(300, Number(this.el.tuningA4.value) || 440));
@@ -830,9 +841,14 @@ export class Editor {
     this.el.tuningReset.classList.toggle("hidden", !own);
     const tuning = own ?? this.lastSnapshot?.tuning;
     if (!tuning) return;
+    // Temperaments are twelve-class vocabulary: the row shows only
+    // while the division count is 12 (absent on an old snapshot = 12).
+    const edo = tuning.edo ?? 12;
+    this.el.tuningTemperamentRow.classList.toggle("hidden", edo !== 12);
     if (this.root.activeElement !== this.el.tuningTemperament) {
       this.el.tuningTemperament.value = tuning.temperament;
     }
+    if (this.root.activeElement !== this.el.tuningEdo) this.el.tuningEdo.value = edo;
     if (this.root.activeElement !== this.el.tuningA4) this.el.tuningA4.value = tuning.a4;
     if (this.root.activeElement !== this.el.tuningTranspose) this.el.tuningTranspose.value = tuning.transpose;
 
@@ -857,12 +873,17 @@ export class Editor {
       }
     }
 
-    // The scale IS the temperament while one is active — the select
-    // stays live (choosing from it is a valid way back out) but reads
-    // as superseded rather than in effect.
+    // The scale IS the tuning while one is active — the temperament
+    // select and the division count stay live (setting either is a
+    // valid way back out) but read as superseded rather than in
+    // effect.
     this.el.tuningTemperamentRow.classList.toggle("tuning-dimmed", !!scale);
+    this.el.tuningEdoRow.classList.toggle("tuning-dimmed", !!scale);
     this.el.tuningTemperament.title = scale
       ? "A scale is active — picking a temperament here leaves it"
+      : "";
+    this.el.tuningEdo.title = scale
+      ? "A scale is active — setting a division count here leaves it"
       : "";
   }
 

@@ -137,6 +137,8 @@ export class Preferences {
       tuningTargetRow: root.getElementById("tuning-target-row"),
       tuningReset: root.getElementById("tuning-reset"),
       temperament: root.getElementById("set-temperament"),
+      edo: root.getElementById("set-edo"),
+      edoRow: root.getElementById("edo-row"),
       a4: root.getElementById("set-a4"),
       temperamentRow: root.getElementById("temperament-row"),
       pitchRow: root.getElementById("pitch-row"),
@@ -760,6 +762,15 @@ export class Preferences {
       this.el.temperament.blur(); // hand the field back to the snapshot
     });
 
+    this.el.edo.addEventListener("change", () => {
+      const edo = Math.min(311, Math.max(1, Math.round(Number(this.el.edo.value) || 12)));
+      this.el.edo.value = edo;
+      const fields = { edo };
+      if (this.tuningTarget != null) fields.manual = this.tuningTarget;
+      this.send(commands.tuning(fields));
+      this.el.edo.blur();
+    });
+
     this.el.a4.addEventListener("change", () => {
       const a4 = Math.min(500, Math.max(300, Number(this.el.a4.value) || 440));
       this.el.a4.value = a4;
@@ -807,9 +818,15 @@ export class Preferences {
       !(this.tuningTarget != null && this.manualTuning.has(this.tuningTarget))
     );
     if (!this.displayed) return;
+    // Temperaments are twelve-class vocabulary: the select only shows
+    // while the division count is 12 (a missing edo on an old snapshot
+    // means 12, the only count there was).
+    const edo = this.displayed.edo ?? 12;
+    this.el.temperamentRow.classList.toggle("hidden", edo !== 12);
     if (this.root.activeElement !== this.el.temperament) {
       this.el.temperament.value = this.displayed.temperament;
     }
+    if (this.root.activeElement !== this.el.edo) this.el.edo.value = edo;
     if (this.root.activeElement !== this.el.a4) this.el.a4.value = this.displayed.a4;
     this.el.transposeValue.textContent =
       this.displayed.transpose > 0 ? `+${this.displayed.transpose}` : `${this.displayed.transpose}`;
@@ -835,7 +852,8 @@ export class Preferences {
     this.manualTuning = new Map((snapshot.manual_tuning ?? []).map((t) => [t.idx, t]));
 
     for (const row of [
-      this.el.tuningTargetRow, this.el.temperamentRow, this.el.pitchRow, this.el.transposeRow,
+      this.el.tuningTargetRow, this.el.temperamentRow, this.el.edoRow,
+      this.el.pitchRow, this.el.transposeRow,
     ]) {
       row.classList.toggle("hidden", !tuning);
     }
