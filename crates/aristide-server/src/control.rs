@@ -203,14 +203,17 @@ pub fn key_note(code: &str) -> Option<u8> {
 /// The four QWERTY rows as a hex-field surface — how the computer
 /// keyboard plays a *microtonal* manual, where the piano mapping above
 /// (naturals and sharps) is the wrong vocabulary. Entries are
-/// `(code, col, row)` with rows counted bottom-up, exactly the
-/// convention of the on-screen hex board: the Z row is board row 0,
-/// A row 1, Q row 2, the digit row 3, and the key each cap sounds is
-/// the manual's own layout asked at that grid position
-/// (`HexLayout::key_at` + the keyboard's shift). The physical stagger
-/// of a keyboard is close enough to a hex grid's that the isomorphic
-/// shapes carry over — under Bosanquet, Q duplicates Z the way the
-/// board's row 2 duplicates its row 0.
+/// `(code, col, row)`: `col` counts within the row, `row` bottom-up
+/// (Z row 0, A row 1, Q row 2, digits row 3).
+///
+/// The key a cap sounds is `HexLayout::key_at_slanted` + the
+/// keyboard's shift — the *left-leaning* reading, because that is the
+/// physical geometry of a keyboard: each row up sits about half a key
+/// left of the one below, with no re-centering. So the cap physically
+/// up-right of another (S from Z) sounds +upright, up-left (A from Z)
+/// sounds upright − right, and isomorphic shapes lie under the
+/// fingers exactly as they lie on the board — under 12-EDO Bosanquet,
+/// W (straight above Z) duplicates it.
 ///
 /// The console UI draws this same table as its legend; keep in step.
 pub const KEYBOARD_GRID: [(&str, u8, u8); 45] = [

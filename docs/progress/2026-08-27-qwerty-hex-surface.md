@@ -4,18 +4,22 @@ The computer keyboard used to speak only piano: two letter rows,
 naturals and sharps — meaningless vocabulary on a microtonal manual.
 Now the mapping follows the manual it addresses. On a hand keyboard,
 nothing changes. On a microtonal manual, all four QWERTY rows become
-a window onto the manual's own hex layout: Z row is board row 0, A
-row 1, Q row 2, digits row 3, and each cap sounds
-`HexLayout::key_at(col, row)` plus the input's shift — the exact
-axial math the on-screen board uses, so isomorphic shapes (and their
-duplicate notes) carry from screen to keyboard cap for hex. Under
-12-EDO Bosanquet, Q sounds the same key as Z, the way board row 2
-duplicates row 0.
+a window onto the manual's own hex layout: Z row is row 0, A row 1,
+Q row 2, digits row 3, and each cap sounds
+`HexLayout::key_at_slanted(col, row)` plus the input's shift.
 
-The physical stagger of a keyboard is close enough to a hex grid's
-for the shapes to feel right; the fourth (digit) row physically leans
-the wrong way, but it's bonus range and bindings still win there
-(`=` bound to octave-up never plays a note).
+*Slanted* is the load-bearing word, and it took one wrong cut to
+learn: the first version reused the on-screen board's
+staggered-rectangle convention (odd rows re-centered), which skews on
+a physical keyboard — QWERTY rows don't re-center, they march
+steadily half a key LEFT going up. Field-tested as "a mess": Q
+sounded below Z, the digit row dropped back down. The slanted
+reading, `anchor + (col − row)·right + row·upright`, matches the
+physical geometry: S (up-right of Z) sounds +upright, A (up-left)
+sounds upright − right, W (straight above Z) their sum — so under
+12-EDO Bosanquet W duplicates Z, and every isomorphic shape lies
+under the fingers exactly as it lies on the board. Bindings still
+win over notes (`=` bound to octave-up never plays).
 
 Mechanics: `control::KEYBOARD_GRID` is the (code, col, row) table —
 the piano `KEYBOARD_ROWS` untouched beside it; `State::key` resolves

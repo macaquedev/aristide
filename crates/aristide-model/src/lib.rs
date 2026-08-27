@@ -105,6 +105,20 @@ impl HexLayout {
         self.anchor as i32 + axial * self.right as i32 + row as i32 * self.upright as i32
     }
 
+    /// The key number a hex sounds on a *left-leaning* grid: rows that
+    /// march half a cell left per row up with no re-centering — the
+    /// physical geometry of QWERTY rows (Z above-left of A above-left
+    /// of Q), unlike the on-screen board's staggered rectangle. `col`
+    /// counts within the row, `row` from the bottom. One cell right
+    /// still advances by `right` and the cell physically up-right by
+    /// `upright`, so isomorphic shapes land under the fingers exactly
+    /// as they lie on the board.
+    pub fn key_at_slanted(&self, col: u8, row: u8) -> i32 {
+        self.anchor as i32
+            + (col as i32 - row as i32) * self.right as i32
+            + row as i32 * self.upright as i32
+    }
+
     /// The layout an undeclared microtonal manual gets: Bosanquet-style
     /// step-vectors (a two-step right, a one-step up-right — the
     /// Lumatone factory layout, in key numbers), five rows, and just
@@ -667,6 +681,22 @@ mod hex_layout_tests {
         // Row 2 re-centers left by one axial column: same key as row 0's
         // start plus two uprights minus one right — a duplicate note.
         assert_eq!(layout.key_at(0, 2), 36);
+    }
+
+    /// The slanted (QWERTY-shaped) reading: no re-centering, each row
+    /// up starts a NW step (upright − right) from the row below, and
+    /// the cell physically up-right of a key is exactly +upright.
+    #[test]
+    fn slanted_keys_follow_the_physical_stagger() {
+        let layout = HexLayout { rows: 5, cols: 8, right: 2, upright: 1, anchor: 36 };
+        assert_eq!(layout.key_at_slanted(0, 0), 36); // Z
+        assert_eq!(layout.key_at_slanted(1, 1), 37, "S, up-right of Z, is +upright");
+        assert_eq!(layout.key_at_slanted(0, 1), 35, "A, up-left of Z, is upright − right");
+        assert_eq!(layout.key_at_slanted(1, 2), 36, "W, straight above Z, duplicates it");
+        // In 31-EDO Bosanquet the same shapes carry: +2 up-right, −3 up-left.
+        let wide = HexLayout { rows: 5, cols: 8, right: 5, upright: 2, anchor: 48 };
+        assert_eq!(wide.key_at_slanted(1, 1) - wide.key_at_slanted(0, 0), 2);
+        assert_eq!(wide.key_at_slanted(0, 1) - wide.key_at_slanted(0, 0), -3);
     }
 
     #[test]

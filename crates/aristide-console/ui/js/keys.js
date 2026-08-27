@@ -32,10 +32,13 @@ const UPPER_BASE = 60;
 const SHARPS = new Set([1, 3, 6, 8, 10]);
 
 /// A microtonal manual reads the keyboard differently: all four rows
-/// as a window onto its own hex grid, rows counted bottom-up exactly
-/// like the on-screen board (Z row = board row 0). Mirrors the
-/// server's `control::KEYBOARD_GRID` — the copy there decides what
-/// sounds, this one only draws — and must stay in step with it.
+/// as a window onto its own hex grid, rows counted bottom-up (Z row =
+/// row 0) and read in the *slanted* stagger a physical keyboard
+/// actually has — each row up sits half a key left of the one below,
+/// no re-centering — so the cap up-right of another sounds +upright,
+/// exactly like the board's hexes. Mirrors the server's
+/// `control::KEYBOARD_GRID` — the copy there decides what sounds,
+/// this one only draws — and must stay in step with it.
 const GRID_ROWS = [
   { row: 3, codes: [
     "Digit1", "Digit2", "Digit3", "Digit4", "Digit5", "Digit6", "Digit7",
@@ -154,8 +157,9 @@ export class PianoKeys {
       const at = GRID.get(code);
       if (!at) return null;
       const [col, row] = at;
-      const axial = col - Math.floor(row / 2);
-      midi = hex.anchor + axial * hex.right + row * hex.upright + this.keyboard.transpose;
+      // The slanted reading (rows lean left going up, like the keys
+      // themselves): HexLayout::key_at_slanted, in the server's terms.
+      midi = hex.anchor + (col - row) * hex.right + row * hex.upright + this.keyboard.transpose;
     } else {
       const offset = OFFSETS.get(code);
       if (offset === undefined) return null;
@@ -250,16 +254,16 @@ export class PianoKeys {
 
     this.caps = new Map();
     // Piano mode shows the two note rows; grid mode all four, each
-    // odd board row nudged half a cap right so the legend staggers
-    // the way the hex board (and the physical keyboard) does.
+    // row down indented half a cap further right — the slant the
+    // physical rows (and the sounding lattice) actually have.
     const rows =
       this.mode === "grid"
-        ? GRID_ROWS.map(({ row, codes }) => ({ codes, shifted: row % 2 === 1 }))
-        : [UPPER, LOWER].map((codes) => ({ codes, shifted: false }));
-    for (const { codes, shifted } of rows) {
+        ? GRID_ROWS.map(({ row, codes }) => ({ codes, indent: 3 - row }))
+        : [UPPER, LOWER].map((codes) => ({ codes, indent: 0 }));
+    for (const { codes, indent } of rows) {
       const line = document.createElement("div");
       line.className = "legend-row";
-      line.classList.toggle("legend-row-shifted", shifted);
+      if (indent) line.style.marginLeft = `${indent * 18}px`;
       for (const code of codes) {
         const key = document.createElement("span");
         key.className = "legend-cap";

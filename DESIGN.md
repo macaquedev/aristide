@@ -104,10 +104,12 @@ bindings. Octave shift belongs to the *input*, not the manual: how wide a
 keyboard is and where it currently sits are facts about the hardware. What a
 key *means* depends on the manual it addresses: on a hand keyboard the two
 letter rows are the usual DAW piano; on a microtonal manual all four rows
-become a window onto the manual's own hex layout (Z row = board row 0, same
-axial math as the on-screen board — `control::KEYBOARD_GRID`), so isomorphic
-shapes carry from screen to QWERTY, and the legend redraws as the staggered
-grid with each cap's key number and its Lumatone map colour.
+become a window onto the manual's own hex layout, read in the slanted
+stagger the physical rows actually have (each row up sits half a key left,
+no re-centering — `control::KEYBOARD_GRID`, `HexLayout::key_at_slanted`).
+The cap up-right of another sounds +upright, so isomorphic shapes lie under
+the fingers exactly as they lie on the board, and the legend redraws as the
+slanted grid with each cap's key number and its Lumatone map colour.
 
 ## Why we will sound better (engine-side quality)
 

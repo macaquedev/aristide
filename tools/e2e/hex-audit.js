@@ -196,7 +196,9 @@ try {
   }
   await d.sleep(800);
   const heldNow = (await state()).manuals[0].held;
-  const expected = [hx.anchor, hx.anchor + hx.right + hx.upright].sort((a, b) => a - b);
+  // The slanted reading: S sits physically up-right of Z, so it sounds
+  // one up-right step (+upright), nothing more.
+  const expected = [hx.anchor, hx.anchor + hx.upright].sort((a, b) => a - b);
   check(
     JSON.stringify(heldNow) === JSON.stringify(expected),
     `computer keyboard: Z and S land on the layout's own lattice (${JSON.stringify(heldNow)} vs ${JSON.stringify(expected)})`

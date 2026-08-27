@@ -884,11 +884,12 @@ impl State {
                 return;
             };
             let landed: Option<i32> = match console.manual_hex(keyboard.manual) {
-                // The grid position asked of the manual's own layout —
-                // the same math as the on-screen board, so the shapes
-                // (and the duplicates) match it cap for hex.
+                // The grid position asked of the manual's own layout,
+                // in the slanted reading that matches how QWERTY rows
+                // physically sit (see control::KEYBOARD_GRID) — so the
+                // board's shapes lie under the fingers unskewed.
                 Some(layout) => grid
-                    .map(|(col, row)| layout.key_at(col, row) + keyboard.transpose as i32),
+                    .map(|(col, row)| layout.key_at_slanted(col, row) + keyboard.transpose as i32),
                 None => piano.map(|note| note as i32 + keyboard.transpose as i32)
                     .filter(|key| (0..=127).contains(key)),
             };
@@ -4386,10 +4387,10 @@ mod tests {
     /// compass it had, and keys pushed past it stay silent.
     #[test]
     /// On a microtonal manual the computer keyboard is a hex surface,
-    /// not a piano: the four rows are a window onto the manual's own
-    /// layout, so caps land where the on-screen hexes do — including
-    /// the duplicates (under Bosanquet, Q sounds the same key as Z,
-    /// the way board row 2 duplicates row 0).
+    /// not a piano: the four rows read as the manual's own layout in
+    /// the slanted, physically-true stagger — S (up-right of Z) is
+    /// +upright, A (up-left) steps down, and under Bosanquet W
+    /// (straight above Z) duplicates it.
     #[test]
     fn the_computer_keyboard_plays_a_hex_manual_isomorphically() {
         let Some((state, manual)) = demo_state("Gamba 8'") else {
@@ -4415,25 +4416,30 @@ mod tests {
 
         state.lock().expect("state").key("KeyZ", true);
         assert_eq!(held_on(&state, manual), vec![anchor], "Z is the board's bottom left");
-        state.lock().expect("state").key("KeyA", true);
         state.lock().expect("state").key("KeyS", true);
         assert_eq!(
             held_on(&state, manual),
-            vec![anchor, anchor + 1, anchor + 3],
-            "A one hex up-right (+upright), S one further right (+right)"
+            vec![anchor, anchor + 1],
+            "S, physically up-right of Z, is one up-right step"
+        );
+        state.lock().expect("state").key("KeyA", true);
+        assert_eq!(
+            held_on(&state, manual),
+            vec![anchor, anchor + 1],
+            "A, up-left of Z, would step below the compass — silent, not wrapped"
         );
         for code in ["KeyZ", "KeyA", "KeyS"] {
             state.lock().expect("state").key(code, false);
         }
         assert!(held_on(&state, manual).is_empty(), "and they all release");
 
-        state.lock().expect("state").key("KeyQ", true);
+        state.lock().expect("state").key("KeyW", true);
         assert_eq!(
             held_on(&state, manual),
             vec![anchor],
-            "Q duplicates Z — two uprights less one right is zero steps"
+            "W, straight above Z, duplicates it — up-left plus up-right is zero"
         );
-        state.lock().expect("state").key("KeyQ", false);
+        state.lock().expect("state").key("KeyW", false);
 
         // The letter rows' piano mapping stays what it is on a hand
         // keyboard: nothing here changed the other manuals' vocabulary.
