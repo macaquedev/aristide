@@ -72,6 +72,10 @@ pub struct PreparedInstrument {
     /// Per stop: its declared knob engraving (`""` = engrave nothing).
     /// Stops absent here engrave the footage they actually speak at.
     pub stop_labels: std::collections::HashMap<StopId, String>,
+    /// The file's `[console.order]` — per manual name, its drawknob
+    /// display order. Empty unless a composite loaded alone declared
+    /// one, same condition as `layout`.
+    pub stop_order: std::collections::BTreeMap<String, Vec<String>>,
     /// The organ file's `[console.layout]` — empty unless it is a
     /// composite loaded alone, same condition as `composite` above.
     pub layout: std::collections::BTreeMap<String, instrument::PanelPos>,
@@ -243,6 +247,8 @@ pub fn prepare(
     let mut stop_labels: std::collections::HashMap<StopId, String> =
         std::collections::HashMap::new();
     let mut manual_tuning_defs: Vec<instrument::ManualTuningDef> = Vec::new();
+    let mut console_order: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
     let mut console_layout: std::collections::BTreeMap<String, instrument::PanelPos> =
         std::collections::BTreeMap::new();
     let mut setup = Setup::default();
@@ -293,6 +299,7 @@ pub fn prepare(
                     .collect();
                 manual_tuning_defs = assembled.manual_tuning;
                 console_layout = assembled.console_layout;
+                console_order = assembled.console_order;
             } else if !assembled.midi.inputs.is_empty()
                 || !assembled.midi.controls.is_empty()
                 || !assembled.manual_tuning.is_empty()
@@ -1003,6 +1010,7 @@ pub fn prepare(
         provenance: single_provenance,
         stop_voicing,
         stop_labels,
+        stop_order: console_order,
         layout: console_layout,
         buses,
         warnings: load_warnings,

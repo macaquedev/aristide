@@ -270,7 +270,16 @@ original, so drop entries and `coupler:` control bindings follow) and its
 full routes (from/to/shift/scope/unison-off). Editing a carried coupler's
 routes materializes it as this organ's own define, the original renamed
 out of the way and dropped (restorable); route edits and the add menu's
-new-coupler form are structural, renames land live.
+new-coupler form are structural, renames land live. The coupler editor
+speaks the coupler's own grammar — "Sounds [Swell] on [Great] at
+[Sub-octave (16′)]" — never the wire's from/to. Jamb layout is the
+player's too: stops drag-reorder within (or into) a division with an
+insertion seam, kept as `[console.order]` (per manual, console stop
+names, display-only — ids, voicing and combinations never move); and a
+jamb's corner grip drags it wider, wrapping the knob rank into columns
+(`w`/`h` on its `[console.layout]` entry — width is what wraps; height
+follows content so nothing ever clips). Both live, the panel-placement
+contract.
 Layout edits are *live*, tuning-style — file line plus in-place
 apply, never a reload — because the layout is a console fact throughout:
 duplicate hexes share a key number, a bound Lumatone `.ltn` map's key

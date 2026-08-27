@@ -363,30 +363,43 @@ pub struct ControlDef {
 
 /// The console canvas's own geometry: `[console.layout]` maps a panel
 /// id (`"keyboard:<manual>"`, `"jamb:<manual>"`, `"couplers"`,
-/// `"shoes"`) to where it sits. Cosmetic only — an organ with no
-/// `[console.layout]` at all, or one missing an entry, still loads and
-/// plays identically; the console just auto-lays-out whatever isn't
-/// placed.
+/// `"shoes"`) to where it sits — and, when the player has resized it,
+/// how big it is (a sized jamb wraps its stops into columns).
+/// `[console.order]` is each division's drawknob order, by console
+/// stop name. Cosmetic only — an organ with none of this, or with
+/// entries that no longer resolve, still loads and plays identically;
+/// the console auto-lays-out whatever isn't placed and shows unlisted
+/// stops after the listed ones.
 ///
 /// ```toml
 /// [console.layout]
 /// "keyboard:Great" = { x = 0.42, y = 0.31 }
-/// "jamb:Great" = { x = 0.02, y = 0.2 }
+/// "jamb:Great" = { x = 0.02, y = 0.2, w = 0.14, h = 0.5 }
+///
+/// [console.order]
+/// "Great" = ["Montre 8", "Bourdon 8", "Prestant 4"]
 /// ```
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConsoleDef {
     #[serde(default)]
     pub layout: BTreeMap<String, PanelPos>,
+    #[serde(default)]
+    pub order: BTreeMap<String, Vec<String>>,
 }
 
-/// One panel's top-left corner, as a fraction of the console canvas
-/// (0..1 on each axis).
+/// One panel's top-left corner — and, once resized, its size — as
+/// fractions of the console canvas (0..1 on each axis). Size absent
+/// means the panel hugs its content, as it always has.
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PanelPos {
     pub x: f32,
     pub y: f32,
+    #[serde(default)]
+    pub w: Option<f32>,
+    #[serde(default)]
+    pub h: Option<f32>,
 }
 
 impl Definition {
@@ -503,6 +516,9 @@ pub struct Assembled {
     /// own file (never merged from a source, unlike everything else
     /// here).
     pub console_layout: BTreeMap<String, PanelPos>,
+    /// The file's `[console.order]`, verbatim — each division's
+    /// drawknob order by console stop name, same cosmetic contract.
+    pub console_order: BTreeMap<String, Vec<String>>,
     pub warnings: Vec<String>,
 }
 
@@ -887,6 +903,7 @@ pub fn assemble(
         pitch_labels: assembly.pitch_labels,
         manual_tuning,
         console_layout: def.console.layout.clone(),
+        console_order: def.console.order.clone(),
         warnings: assembly.warnings,
     })
 }

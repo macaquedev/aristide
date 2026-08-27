@@ -863,25 +863,65 @@ fn respond(
                 _ => bad_request("missing enclosure/stop/in"),
             }
         }
-        // Move a console panel on the canvas: `x`/`y` are normalized
-        // fractions, clamped rather than refused. Cosmetic — this
-        // writes the file but, unlike the edits above, never queues a
-        // rebuild.
+        // Move — and with `w`/`h`, size — a console panel on the
+        // canvas: all four are normalized fractions, clamped rather
+        // than refused (a sized jamb wraps its stops into columns).
+        // Size left out keeps whatever the panel has on record.
+        // Cosmetic — this writes the file but, unlike the edits above,
+        // never queues a rebuild.
         (Method::Post, "/api/organ/panel/place") => {
             let mut state = state.lock().expect("state poisoned");
             if state.loading.is_some() || state.pending_load.is_some() {
                 return bad_request("an organ is already loading");
             }
+            let size = match (
+                param(query, "w").map(|v| v.parse::<f32>()),
+                param(query, "h").map(|v| v.parse::<f32>()),
+            ) {
+                (Some(Ok(w)), Some(Ok(h))) if w.is_finite() && h.is_finite() => {
+                    Some((w, h))
+                }
+                (None, None) => None,
+                _ => return bad_request("w and h must be fractions, both or neither"),
+            };
             match (
                 param(query, "panel").map(unescape),
                 param(query, "x").and_then(|v| v.parse::<f32>().ok()),
                 param(query, "y").and_then(|v| v.parse::<f32>().ok()),
             ) {
-                (Some(panel), Some(x), Some(y)) => match state.place_panel(&panel, x, y) {
-                    Ok(()) => json(state_json_locked(&state)),
-                    Err(err) => bad_request(&err),
-                },
+                (Some(panel), Some(x), Some(y)) => {
+                    match state.place_panel(&panel, x, y, size) {
+                        Ok(()) => json(state_json_locked(&state)),
+                        Err(err) => bad_request(&err),
+                    }
+                }
                 _ => bad_request("missing panel/x/y"),
+            }
+        }
+        // A division's drawknob order, top of the jamb first — display
+        // only, so it lands live like panel placement: no rebuild, no
+        // ids moved, just the snapshot dealing the stops out anew.
+        (Method::Post, "/api/organ/stop/order") => {
+            let mut state = state.lock().expect("state poisoned");
+            if state.loading.is_some() || state.pending_load.is_some() {
+                return bad_request("an organ is already loading");
+            }
+            match (
+                param(query, "manual").and_then(|v| v.parse::<usize>().ok()),
+                param(query, "stops").map(|list| {
+                    list.split(',')
+                        .filter(|part| !part.is_empty())
+                        .map(|part| part.parse::<u32>().map(aristide_model::StopId))
+                        .collect::<Result<Vec<_>, _>>()
+                }),
+            ) {
+                (Some(manual), Some(Ok(stops))) => {
+                    match state.set_stop_order(manual, &stops) {
+                        Ok(()) => json(state_json_locked(&state)),
+                        Err(err) => bad_request(&err),
+                    }
+                }
+                _ => bad_request("missing manual/stops (comma-separated stop ids)"),
             }
         }
         // What every source of this organ offers, for the pane's
@@ -1478,8 +1518,22 @@ fn state_json(state: &Mutex<State>) -> String {
 fn state_json_locked(state: &State) -> String {
     let mut out = String::from("{\"stops\":[");
     if let Control::Organ(console) = &state.control {
+        // The player's drawknob order ([console.order]): listed stops
+        // first in their listed order, the rest after in assembled
+        // order — a stable sort per manual, so a stale name simply
+        // has no effect. The console renders the array as dealt.
+        let mut states = console.stop_states();
+        states.sort_by_key(|(_, name, manual, ..)| {
+            state
+                .stop_order
+                .get(*manual)
+                .and_then(|order| {
+                    order.iter().position(|listed| listed.eq_ignore_ascii_case(name))
+                })
+                .unwrap_or(usize::MAX)
+        });
         let mut first = true;
-        for (id, name, manual, manual_index, drawn) in console.stop_states() {
+        for (id, name, manual, manual_index, drawn) in states {
             if !first {
                 out.push(',');
             }
@@ -1977,8 +2031,14 @@ fn state_json_locked(state: &State) -> String {
             if index > 0 {
                 out.push(',');
             }
+            // Size only when the player set one — absent means the
+            // panel hugs its content, and old clients never look.
+            let size = match (pos.w, pos.h) {
+                (Some(w), Some(h)) => format!(",\"w\":{w},\"h\":{h}"),
+                _ => String::new(),
+            };
             out.push_str(&format!(
-                "{}:{{\"x\":{},\"y\":{}}}",
+                "{}:{{\"x\":{},\"y\":{}{size}}}",
                 json_string(panel),
                 pos.x,
                 pos.y
@@ -2350,6 +2410,7 @@ mod tests {
             provenance,
             stop_voicing: Default::default(),
             stop_labels: Default::default(),
+            stop_order: Default::default(),
             compass_overrides: Vec::new(),
             pending_load: None,
             loading: None,
@@ -3106,6 +3167,111 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Drawknob order and panel size are display facts with the panel-
+    /// placement contract: live (no rebuild), written to the file's
+    /// [console] section, and name-keyed order follows a stop rename.
+    #[test]
+    fn stop_order_and_panel_size_are_live_layout_facts() {
+        let Some(state) = demo_state() else { return };
+        let demo = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testsets/grandorgue-demo/demo.organ");
+        let dir = std::env::temp_dir().join("aristide-order-endpoints-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let organ = aristide_formats::grandorgue::load(&demo).expect("demo parses").organ;
+        let canonical = demo.canonicalize().expect("canonicalizes");
+        let file =
+            crate::config::create_wrapper_organ(&dir, "Order Test", &canonical, &organ, None)
+                .expect("inventory written");
+        state.lock().expect("state").composite_path = Some(file.clone());
+
+        // First Manual's stops in snapshot order; reorder them reversed.
+        let ids = |body: &str| -> Vec<u64> {
+            let value: serde_json::Value = serde_json::from_str(body).expect("valid JSON");
+            value["stops"]
+                .as_array()
+                .expect("stops")
+                .iter()
+                .filter(|stop| stop["midx"] == 1)
+                .map(|stop| stop["id"].as_u64().expect("id"))
+                .collect()
+        };
+        let before = ids(&state_json(&state));
+        let reversed: Vec<String> = before.iter().rev().map(u64::to_string).collect();
+        let ordered = respond(
+            &state,
+            &Method::Post,
+            &format!("/api/organ/stop/order?manual=1&stops={}", reversed.join(",")),
+        );
+        assert_eq!(ordered.status_code().0, 200);
+        assert!(
+            state.lock().expect("state").pending_load.is_none(),
+            "an order is display only — no rebuild"
+        );
+        let after = ids(&state_json(&state));
+        assert_eq!(
+            after,
+            before.iter().rev().copied().collect::<Vec<_>>(),
+            "the snapshot deals the stops out in the new order"
+        );
+        let def: aristide_formats::instrument::Definition =
+            toml::from_str(&std::fs::read_to_string(&file).expect("reads")).expect("parses");
+        let listed = def.console.order.get("First Manual").expect("order written");
+        assert_eq!(listed.len(), before.len());
+
+        // The order is name-keyed; a rename must carry its entry.
+        assert_eq!(listed[0], "Cornett III", "reversed: the last stop leads");
+        let montre = respond(
+            &state,
+            &Method::Post,
+            "/api/organ/stop/rename?stop=16&name=Diapason%208",
+        );
+        assert_eq!(montre.status_code().0, 200);
+        let def: aristide_formats::instrument::Definition =
+            toml::from_str(&std::fs::read_to_string(&file).expect("reads")).expect("parses");
+        let listed = def.console.order.get("First Manual").expect("still ordered");
+        assert!(listed.iter().any(|name| name == "Diapason 8"), "{listed:?}");
+        assert!(listed.iter().all(|name| name != "Montre 8'"));
+        let after_rename = ids(&state_json(&state));
+        assert_eq!(after, after_rename, "the renamed knob kept its place");
+
+        // A stray id refuses — the reorder raced an edit.
+        let stray = respond(
+            &state,
+            &Method::Post,
+            "/api/organ/stop/order?manual=1&stops=0",
+        );
+        assert_eq!(stray.status_code().0, 400, "stop 0 is the Pedal's");
+
+        // Sizing a jamb rides panel placement: w/h in the layout, the
+        // file, and later plain moves keep the size.
+        let sized = respond(
+            &state,
+            &Method::Post,
+            "/api/organ/panel/place?panel=jamb%3AFirst%20Manual&x=0.1&y=0.2&w=0.25&h=0.5",
+        );
+        assert_eq!(sized.status_code().0, 200);
+        let value: serde_json::Value =
+            serde_json::from_str(&state_json(&state)).expect("valid JSON");
+        assert_eq!(value["layout"]["jamb:First Manual"]["w"], 0.25);
+        assert_eq!(value["layout"]["jamb:First Manual"]["h"], 0.5);
+        let moved = respond(
+            &state,
+            &Method::Post,
+            "/api/organ/panel/place?panel=jamb%3AFirst%20Manual&x=0.3&y=0.2",
+        );
+        assert_eq!(moved.status_code().0, 200);
+        let value: serde_json::Value =
+            serde_json::from_str(&state_json(&state)).expect("valid JSON");
+        assert_eq!(value["layout"]["jamb:First Manual"]["x"], 0.3);
+        assert_eq!(
+            value["layout"]["jamb:First Manual"]["h"], 0.5,
+            "a plain move never un-sizes"
+        );
+        let text = std::fs::read_to_string(&file).expect("reads");
+        assert!(text.contains("w = 0.25"), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The per-coupler editors: the snapshot carries every coupler's
     /// routes; a rename lands live (the map, since the demo's couplers
     /// are the set's own) with control bindings following; a routes
@@ -3564,6 +3730,7 @@ mod tests {
             provenance: Default::default(),
             stop_voicing: Default::default(),
             stop_labels: Default::default(),
+            stop_order: Default::default(),
             compass_overrides: Vec::new(),
             pending_load: None,
             loading: None,

@@ -1312,6 +1312,11 @@ pub fn rename_composite_manual(path: &Path, from: &str, to: &str) -> Result<bool
             }
         }
     }
+    if let Some(order) = console_order_mut(&mut doc)
+        && let Some(item) = order.remove(from)
+    {
+        order.insert(to, item);
+    }
     write_atomically(path, doc.to_string())?;
     Ok(true)
 }
@@ -1709,6 +1714,19 @@ pub fn rename_composite_stop(
             rename_in_string_array(table, "stops", old, new);
         }
     }
+    if let Some(order) = console_order_mut(&mut doc) {
+        for (_, item) in order.iter_mut() {
+            if let Some(array) = item.as_array_mut() {
+                for value in array.iter_mut() {
+                    if value.as_str().is_some_and(|v| v.eq_ignore_ascii_case(old)) {
+                        let decor = value.decor().clone();
+                        *value = new.into();
+                        *value.decor_mut() = decor;
+                    }
+                }
+            }
+        }
+    }
     write_atomically(path, doc.to_string())?;
     Ok(true)
 }
@@ -1990,6 +2008,15 @@ pub fn remove_composite_stop(
             array.retain(|value| {
                 !value.as_str().is_some_and(|s| s.eq_ignore_ascii_case(console_name))
             });
+        }
+    }
+    if let Some(order) = console_order_mut(&mut doc) {
+        for (_, item) in order.iter_mut() {
+            if let Some(array) = item.as_array_mut() {
+                array.retain(|value| {
+                    !value.as_str().is_some_and(|s| s.eq_ignore_ascii_case(console_name))
+                });
+            }
         }
     }
     write_atomically(path, doc.to_string())?;
@@ -2344,33 +2371,83 @@ fn console_layout_mut(doc: &mut toml_edit::DocumentMut) -> Option<&mut toml_edit
         .and_then(|layout| layout.as_table_mut())
 }
 
+fn console_order_mut(doc: &mut toml_edit::DocumentMut) -> Option<&mut toml_edit::Table> {
+    doc.get_mut("console")
+        .and_then(|console| console.get_mut("order"))
+        .and_then(|order| order.as_table_mut())
+}
+
 /// Upsert one console panel's canvas position: creates `[console.layout]`
 /// if the file doesn't have it yet, and writes (or replaces) the
 /// panel's quoted key inside it — `"keyboard:Great" = { x = .., y = .. }`.
 /// Purely cosmetic: unlike the structural editors above, nothing calls
 /// this expects a reload — the caller updates the in-memory snapshot
 /// itself.
-pub fn write_composite_panel(path: &Path, panel: &str, x: f32, y: f32) -> Result<(), String> {
+pub fn write_composite_panel(
+    path: &Path,
+    panel: &str,
+    pos: instrument::PanelPos,
+) -> Result<(), String> {
     let mut doc = composite_doc(path)?;
+    let layout = console_section(&mut doc, "layout")?;
+    let mut entry = toml_edit::InlineTable::new();
+    entry.insert("x", (pos.x as f64).into());
+    entry.insert("y", (pos.y as f64).into());
+    if let Some(w) = pos.w {
+        entry.insert("w", (w as f64).into());
+    }
+    if let Some(h) = pos.h {
+        entry.insert("h", (h as f64).into());
+    }
+    layout.insert(panel, toml_edit::Item::Value(toml_edit::Value::InlineTable(entry)));
+    write_atomically(path, doc.to_string())
+}
+
+/// One table under `[console]` (`layout`, `order`), the `[console]`
+/// header itself kept implicit so it never crowds a future key.
+fn console_section<'a>(
+    doc: &'a mut toml_edit::DocumentMut,
+    key: &str,
+) -> Result<&'a mut toml_edit::Table, String> {
     let console = doc
         .entry("console")
         .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
     let Some(console) = console.as_table_mut() else {
         return Err("[console] is not a table".into());
     };
-    // Only "layout" lives under it so far; stay out of the way of a
-    // future `[console]` key of its own by not forcing a header here.
     console.set_implicit(true);
-    let layout = console
-        .entry("layout")
+    let section = console
+        .entry(key)
         .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
-    let Some(layout) = layout.as_table_mut() else {
-        return Err("[console.layout] is not a table".into());
-    };
-    let mut pos = toml_edit::InlineTable::new();
-    pos.insert("x", (x as f64).into());
-    pos.insert("y", (y as f64).into());
-    layout.insert(panel, toml_edit::Item::Value(toml_edit::Value::InlineTable(pos)));
+    section
+        .as_table_mut()
+        .ok_or_else(|| format!("[console.{key}] is not a table"))
+}
+
+/// A division's drawknob order — the console names, top of the jamb
+/// first. An empty list takes the entry (and an emptied section) out,
+/// back to the assembled order.
+pub fn write_composite_stop_order(
+    path: &Path,
+    manual: &str,
+    stops: &[String],
+) -> Result<(), String> {
+    let mut doc = composite_doc(path)?;
+    let order = console_section(&mut doc, "order")?;
+    if stops.is_empty() {
+        order.remove(manual);
+        if order.is_empty()
+            && let Some(console) = doc.get_mut("console").and_then(|c| c.as_table_mut())
+        {
+            console.remove("order");
+        }
+    } else {
+        let mut list = toml_edit::Array::new();
+        for stop in stops {
+            list.push(stop.as_str());
+        }
+        order.insert(manual, toml_edit::value(list));
+    }
     write_atomically(path, doc.to_string())
 }
 
@@ -3012,12 +3089,27 @@ mod tests {
         assert!(write_composite_manual_tuning(&path, "Grand orgue", None).expect("tuning"));
         assert_eq!(def(&path).manuals[0].a4_hz, None);
 
+        // A declared drawknob order rides [console.order], keyed by
+        // manual name — so a manual rename must carry the key.
+        write_composite_stop_order(
+            &path,
+            "Grand orgue",
+            &["Montre 8".to_string(), "Bourdon 16".to_string()],
+        )
+        .expect("orders");
+        assert_eq!(
+            def(&path).console.order.get("Grand orgue").map(Vec::len),
+            Some(2)
+        );
+
         // Rename follows the name everywhere the file says it.
         assert!(rename_composite_manual(&path, "Grand orgue", "Hauptwerk").expect("renames"));
         assert!(!rename_composite_manual(&path, "Ghost", "X").expect("no ghost"));
         let parsed = def(&path);
         assert_eq!(parsed.manuals[0].name, "Hauptwerk");
         assert_eq!(parsed.stops[0].on, "Hauptwerk");
+        assert!(parsed.console.order.contains_key("Hauptwerk"), "the order key moved");
+        assert!(!parsed.console.order.contains_key("Grand orgue"));
         assert_eq!(parsed.moves[0].from, "Hauptwerk");
         assert_eq!(
             parsed.stops[0].manual.as_deref(),

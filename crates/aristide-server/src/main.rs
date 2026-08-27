@@ -611,6 +611,11 @@ pub struct State {
     /// Per stop: its declared knob engraving (`""` = engrave nothing);
     /// stops absent here engrave the footage they actually speak at.
     pub stop_labels: std::collections::HashMap<StopId, String>,
+    /// Per manual name: its declared drawknob order (console stop
+    /// names, top of the jamb first) — the file's `[console.order]`.
+    /// Display only; the snapshot deals stops out in this order and
+    /// names that no longer resolve simply have no effect.
+    pub stop_order: std::collections::BTreeMap<String, Vec<String>>,
     /// Per composite manual: a player-declared compass overriding the
     /// set's own. Asked when sets are combined; editable later in
     /// Preferences; saved into the composite file.
@@ -2400,10 +2405,19 @@ impl State {
         };
         console.rename_stop(stop, new);
         // Session-side name references follow too, or saving an
-        // implicit combination later would write stale move names.
+        // implicit combination later would write stale move names —
+        // and the display order is name-keyed, so it follows or the
+        // renamed knob would fall to the bottom of its jamb.
         for (moved, ..) in &mut self.setup.moves {
             if moved.eq_ignore_ascii_case(&old) {
                 *moved = new.to_string();
+            }
+        }
+        for names in self.stop_order.values_mut() {
+            for name in names.iter_mut() {
+                if name.eq_ignore_ascii_case(&old) {
+                    *name = new.to_string();
+                }
             }
         }
         Ok(())
@@ -2734,12 +2748,20 @@ impl State {
         Ok(())
     }
 
-    /// Move a console panel to a spot on the canvas: `x`/`y` are
-    /// normalized fractions, clamped into `[0, 1]` and rounded to four
-    /// decimals before they're written. Cosmetic geometry only — unlike
+    /// Move (and optionally size) a console panel on the canvas: all
+    /// four are normalized fractions, clamped and rounded to four
+    /// decimals before they're written. Size given as `None` keeps
+    /// whatever size the panel already has on record — a plain move
+    /// never un-sizes a resized jamb. Cosmetic geometry only — unlike
     /// every structural edit above, this never queues a rebuild; the
     /// in-memory layout is updated directly instead.
-    pub fn place_panel(&mut self, panel: &str, x: f32, y: f32) -> Result<(), String> {
+    pub fn place_panel(
+        &mut self,
+        panel: &str,
+        x: f32,
+        y: f32,
+        size: Option<(f32, f32)>,
+    ) -> Result<(), String> {
         if !matches!(self.control, Control::Organ(_)) {
             return Err("no organ is loaded".into());
         }
@@ -2755,10 +2777,58 @@ impl State {
         }
         let path = self.organ_file()?;
         let round4 = |v: f32| (v.clamp(0.0, 1.0) * 10_000.0).round() / 10_000.0;
-        let (x, y) = (round4(x), round4(y));
-        config::write_composite_panel(&path, panel, x, y)?;
-        self.layout
-            .insert(panel.to_string(), instrument::PanelPos { x, y });
+        let kept = self.layout.get(panel);
+        let (w, h) = match size {
+            Some((w, h)) => (
+                Some(round4(w.max(0.02))),
+                Some(round4(h.max(0.02))),
+            ),
+            None => (kept.and_then(|pos| pos.w), kept.and_then(|pos| pos.h)),
+        };
+        let pos = instrument::PanelPos {
+            x: round4(x),
+            y: round4(y),
+            w,
+            h,
+        };
+        config::write_composite_panel(&path, panel, pos)?;
+        self.layout.insert(panel.to_string(), pos);
+        Ok(())
+    }
+
+    /// A division's drawknob order — display only: the file keeps the
+    /// console names top-first, the snapshot deals the stops out in
+    /// that order, and nothing structural moves (ids, voicing,
+    /// combinations all stay put). Live, like panel placement.
+    pub fn set_stop_order(&mut self, manual: usize, stops: &[StopId]) -> Result<(), String> {
+        let Control::Organ(console) = &self.control else {
+            return Err("no organ is loaded".into());
+        };
+        let manual_names = self.manual_names();
+        let Some(manual_name) = manual_names.get(manual).cloned() else {
+            return Err("no such manual".into());
+        };
+        let states = console.stop_states();
+        let mut names = Vec::with_capacity(stops.len());
+        for id in stops {
+            let Some((_, name, ..)) = states
+                .iter()
+                .find(|(existing, _, _, midx, _)| existing == id && *midx == manual)
+            else {
+                return Err(format!(
+                    "the order names a stop that isn't on {manual_name:?} — reordering \
+                     raced an edit; try again"
+                ));
+            };
+            names.push(name.to_string());
+        }
+        let path = self.organ_file()?;
+        config::write_composite_stop_order(&path, &manual_name, &names)?;
+        if names.is_empty() {
+            self.stop_order.remove(&manual_name);
+        } else {
+            self.stop_order.insert(manual_name, names);
+        }
         Ok(())
     }
 
@@ -2934,6 +3004,7 @@ fn main() -> Result<()> {
         provenance: Default::default(),
         stop_voicing: Default::default(),
         stop_labels: Default::default(),
+        stop_order: Default::default(),
         compass_overrides: Vec::new(),
         loading: pending_load.as_ref().map(|_| "loading…".to_string()),
         pending_load,
@@ -3319,6 +3390,7 @@ fn perform_load(
         provenance,
         stop_voicing,
         stop_labels,
+        stop_order,
         layout,
         buses,
         warnings,
@@ -3498,6 +3570,7 @@ fn perform_load(
     state.provenance = provenance;
     state.stop_voicing = stop_voicing;
     state.stop_labels = stop_labels;
+    state.stop_order = stop_order;
     state.compass_overrides = Vec::new();
     state.layout = layout;
     state.learn = None;
@@ -4256,6 +4329,7 @@ mod tests {
             provenance: Default::default(),
             stop_voicing: Default::default(),
             stop_labels: Default::default(),
+            stop_order: Default::default(),
             compass_overrides: Vec::new(),
             pending_load: None,
             loading: None,

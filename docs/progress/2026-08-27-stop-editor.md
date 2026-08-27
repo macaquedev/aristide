@@ -95,3 +95,35 @@ Route edits and the add menu's new-coupler form
 (`/api/organ/coupler/{rename,routes,add}`) are structural rebuilds;
 the snapshot's couplers now carry `routes` with manuals as console
 indexes.
+
+## Third wave: the coupler grammar, reordering, resizable jambs
+
+The first cut of the coupler editor spoke wire vocabulary (from/to/
+shift) — backwards from how couplers are named. Rewritten to the
+coupler's own grammar: **"Sounds [Swell] on [Great] at [Sub-octave
+(16′)]"**, pitch as Unison/Sub-octave/Super-octave with a raw key
+count only under "Other…", scope as "lowest key held (Bass)", unison
+off as "own stops off". The add form speaks the same sentence and
+suggests the conventional name ("16′ Swell to Great") until overtyped.
+
+Jamb layout became the player's:
+
+- **Drag-reorder**: dragging a stop over a jamb division shows an
+  insertion seam beside the nearest knob; dropping deals the rank out
+  anew — same manual is a pure reorder, another manual moves then
+  places. Kept as `[console.order]` (per manual, console stop names) —
+  display only, so it's live like panel placement: the snapshot sorts,
+  ids/voicing/combinations never move, stale names simply have no
+  effect, and the order follows stop and manual renames.
+- **Resizable jambs**: a corner grip (edit mode) drags a jamb wider;
+  the knob rank wraps into as many columns as fit. Width is the
+  load-bearing dimension (`w` on the `[console.layout]` entry, `h`
+  rides along) because a width-driven row wrap grows its height
+  naturally — a height-driven column wrap can't widen its own
+  container (CSS), which is exactly how knobs get clipped. Unsized
+  jambs keep their single column via a one-knob max-width.
+
+Verified end-to-end with real CDP input: a drag reorders and writes
+`[console.order]`, the grip wraps First Manual into three columns with
+nothing clipped and other jambs untouched, and both survive a server
+restart on the edited file.
