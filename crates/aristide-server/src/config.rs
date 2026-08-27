@@ -1573,37 +1573,53 @@ fn division_except_add(table: &mut toml_edit::Table, source_stop: &str) {
 }
 
 /// Set (or with `to == None` drop) one entry of a `[[division]]`
-/// pull's per-stop `rename` map, whichever TOML spelling it uses.
-fn division_rename_set(table: &mut toml_edit::Table, source_stop: &str, to: Option<&str>) {
-    if to.is_none() && table.get("rename").is_none() {
+/// pull's per-stop map (`rename`, `pitch_label`), whichever TOML
+/// spelling the map uses.
+fn division_map_set(table: &mut toml_edit::Table, map: &str, key: &str, to: Option<&str>) {
+    if to.is_none() && table.get(map).is_none() {
         return;
     }
     let item = table
-        .entry("rename")
+        .entry(map)
         .or_insert(toml_edit::Item::Value(toml_edit::InlineTable::new().into()));
     let mut empty = false;
     if let Some(inline) = item.as_value_mut().and_then(|value| value.as_inline_table_mut()) {
         match to {
             Some(to) => {
-                inline.insert(source_stop, to.into());
+                inline.insert(key, to.into());
             }
             None => {
-                inline.remove(source_stop);
+                inline.remove(key);
             }
         }
         empty = inline.is_empty();
-    } else if let Some(map) = item.as_table_mut() {
+    } else if let Some(table) = item.as_table_mut() {
         match to {
-            Some(to) => map[source_stop] = toml_edit::value(to),
+            Some(to) => table[key] = toml_edit::value(to),
             None => {
-                map.remove(source_stop);
+                table.remove(key);
             }
         }
-        empty = map.is_empty();
+        empty = table.is_empty();
     }
     if empty {
-        table.remove("rename");
+        table.remove(map);
     }
+}
+
+/// One entry of a `[[division]]` pull's per-stop map, as written.
+fn division_map_get(table: &toml_edit::Table, map: &str, key: &str) -> Option<String> {
+    let item = table.get(map)?;
+    let value = if let Some(inline) = item.as_value().and_then(|value| value.as_inline_table()) {
+        inline.get(key)?.as_str()
+    } else {
+        item.as_table()?.get(key)?.as_str()
+    };
+    value.map(str::to_string)
+}
+
+fn division_rename_set(table: &mut toml_edit::Table, source_stop: &str, to: Option<&str>) {
+    division_map_set(table, "rename", source_stop, to);
 }
 
 /// Rename every exact `from` in a string array (an enclosure's
@@ -1691,6 +1707,49 @@ pub fn rename_composite_stop(
     if let Some(adjusts) = voicing_adjusts_mut(&mut doc) {
         for table in adjusts.iter_mut() {
             rename_in_string_array(table, "stops", old, new);
+        }
+    }
+    write_atomically(path, doc.to_string())?;
+    Ok(true)
+}
+
+/// Write (or with `None`, remove) a stop's declared knob engraving —
+/// the `pitch_label` field on its `[[stop]]` line, or the entry in its
+/// `[[division]]` line's `pitch_label` map. `""` engraves nothing;
+/// absent, the knob shows the footage the stop actually speaks at.
+pub fn write_composite_stop_pitch_label(
+    path: &Path,
+    prov: &instrument::StopProvenance,
+    on: &str,
+    label: Option<&str>,
+) -> Result<bool, String> {
+    let mut doc = composite_doc(path)?;
+    if prov.via_division {
+        let Some(index) = division_pull_index(&doc, prov, on) else {
+            return Ok(false);
+        };
+        let table = doc["division"]
+            .as_array_of_tables_mut()
+            .and_then(|tables| tables.get_mut(index))
+            .expect("division line just found");
+        division_map_set(table, "pitch_label", &prov.source_stop, label);
+    } else {
+        let Some(index) = doc
+            .get("stop")
+            .and_then(|s| s.as_array_of_tables())
+            .and_then(|stops| stop_pull_index(stops, prov, on))
+        else {
+            return Ok(false);
+        };
+        let table = doc["stop"]
+            .as_array_of_tables_mut()
+            .and_then(|tables| tables.get_mut(index))
+            .expect("stop line just found");
+        match label {
+            Some(label) => set_string_preserving(table, "pitch_label", label),
+            None => {
+                table.remove("pitch_label");
+            }
         }
     }
     write_atomically(path, doc.to_string())?;
@@ -1821,6 +1880,10 @@ pub fn retarget_composite_stop(
             .expect("division line just found");
         division_except_add(table, &prov.source_stop);
         division_rename_set(table, &prov.source_stop, None);
+        // The knob engraving is the drawknob's, not the pull's — it
+        // rides onto the fresh line along with the label.
+        let engraving = division_map_get(table, "pitch_label", &prov.source_stop);
+        division_map_set(table, "pitch_label", &prov.source_stop, None);
         let stops = doc
             .entry("stop")
             .or_insert(toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new()));
@@ -1834,6 +1897,9 @@ pub fn retarget_composite_stop(
         table["on"] = toml_edit::value(on);
         if keeps_label {
             table["rename"] = toml_edit::value(console_name);
+        }
+        if let Some(engraving) = engraving {
+            table["pitch_label"] = toml_edit::value(engraving);
         }
         stops.push(table);
     } else {
@@ -1885,6 +1951,7 @@ pub fn remove_composite_stop(
             .expect("division line just found");
         division_except_add(table, &prov.source_stop);
         division_rename_set(table, &prov.source_stop, None);
+        division_map_set(table, "pitch_label", &prov.source_stop, None);
     } else {
         let Some(stops) = doc.get_mut("stop").and_then(|s| s.as_array_of_tables_mut()) else {
             return Ok(false);
@@ -1927,6 +1994,258 @@ pub fn remove_composite_stop(
     }
     write_atomically(path, doc.to_string())?;
     Ok(true)
+}
+
+// ---- per-coupler edits, addressed by the file itself ----------------
+//
+// Couplers need no recorded provenance: the file says which are its
+// own. A name that matches a `[[couplers.define]]` is this organ's
+// coupler, edited in place. Anything else came in with a source —
+// its console name lives in the `[couplers.rename]` map, and editing
+// its routes MATERIALIZES it: a define with the same routes under the
+// console name, the original dropped (hidden, still restorable) —
+// the coupler twin of excepting a stop out of a division pull.
+
+/// One coupler route as an edit sends it — manual names (the file's
+/// vocabulary), fields as `[[couplers.define.route]]` spells them.
+#[derive(Debug, Clone)]
+pub struct CouplerRouteLine {
+    pub from: String,
+    pub to: Option<String>,
+    pub shift: i16,
+    pub low: Option<u8>,
+    pub high: Option<u8>,
+    pub unison_off: bool,
+    pub scope: aristide_model::CouplerScope,
+    pub repitch: Option<bool>,
+}
+
+/// Defaults are expressed by absence, so a classic one-route coupler
+/// stays the three lines a hand would write.
+fn coupler_route_table(route: &CouplerRouteLine) -> toml_edit::Table {
+    let mut table = toml_edit::Table::new();
+    table["from"] = toml_edit::value(route.from.as_str());
+    if let Some(to) = &route.to {
+        table["to"] = toml_edit::value(to.as_str());
+    }
+    if route.shift != 0 {
+        table["shift"] = toml_edit::value(route.shift as i64);
+    }
+    if let Some(low) = route.low {
+        table["low"] = toml_edit::value(low as i64);
+    }
+    if let Some(high) = route.high {
+        table["high"] = toml_edit::value(high as i64);
+    }
+    if route.unison_off {
+        table["unison_off"] = toml_edit::value(true);
+    }
+    if route.scope != aristide_model::CouplerScope::AllKeys {
+        table["scope"] = toml_edit::value(match route.scope {
+            aristide_model::CouplerScope::Bass => "bass",
+            aristide_model::CouplerScope::Melody => "melody",
+            aristide_model::CouplerScope::AllKeys => unreachable!(),
+        });
+    }
+    if let Some(repitch) = route.repitch {
+        table["repitch"] = toml_edit::value(repitch);
+    }
+    table
+}
+
+/// The `[couplers]` table, created implicit so its arrays and maps
+/// render dotted (`[[couplers.define]]`, `[couplers.rename]`).
+fn couplers_table(doc: &mut toml_edit::DocumentMut) -> Result<&mut toml_edit::Table, String> {
+    let item = doc
+        .entry("couplers")
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+    let Some(table) = item.as_table_mut() else {
+        return Err("[couplers] is not a table".into());
+    };
+    table.set_implicit(true);
+    Ok(table)
+}
+
+fn coupler_define_index(doc: &toml_edit::DocumentMut, name: &str) -> Option<usize> {
+    let defines = doc.get("couplers")?.get("define")?.as_array_of_tables()?;
+    (0..defines.len()).find(|&i| defines.get(i).is_some_and(|table| field_is(table, "name", name)))
+}
+
+fn coupler_defines_mut(
+    doc: &mut toml_edit::DocumentMut,
+) -> Result<&mut toml_edit::ArrayOfTables, String> {
+    let couplers = couplers_table(doc)?;
+    let defines = couplers
+        .entry("define")
+        .or_insert(toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new()));
+    defines
+        .as_array_of_tables_mut()
+        .ok_or_else(|| "[[couplers.define]] is not an array of tables".into())
+}
+
+/// Rename a coupler: a define's own `name` line, or — for one a source
+/// carries in — an entry in the `[couplers.rename]` map (keyed by the
+/// original name, so the map survives however often the label moves).
+/// `[couplers] drop` entries naming it exactly follow.
+pub fn rename_composite_coupler(path: &Path, old: &str, new: &str) -> Result<(), String> {
+    let new = new.trim();
+    if new.is_empty() {
+        return Err("the coupler needs a name".into());
+    }
+    let mut doc = composite_doc(path)?;
+    if let Some(index) = coupler_define_index(&doc, old) {
+        let table = coupler_defines_mut(&mut doc)?
+            .get_mut(index)
+            .expect("define just found");
+        set_string_preserving(table, "name", new);
+    } else {
+        let couplers = couplers_table(&mut doc)?;
+        let item = couplers
+            .entry("rename")
+            .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+        let Some(map) = item.as_table_like_mut() else {
+            return Err("[couplers.rename] is not a table".into());
+        };
+        let original = map
+            .iter()
+            .find(|(_, value)| value.as_str().is_some_and(|v| v.eq_ignore_ascii_case(old)))
+            .map(|(key, _)| key.to_string())
+            .unwrap_or_else(|| old.to_string());
+        if original.eq_ignore_ascii_case(new) {
+            map.remove(&original);
+        } else {
+            map.insert(&original, toml_edit::value(new));
+        }
+        if map.is_empty() {
+            couplers.remove("rename");
+        }
+    }
+    if let Some(drops) = doc
+        .get_mut("couplers")
+        .and_then(|couplers| couplers.get_mut("drop"))
+        .and_then(|item| item.as_array_mut())
+    {
+        for value in drops.iter_mut() {
+            if value.as_str().is_some_and(|v| v.eq_ignore_ascii_case(old)) {
+                let decor = value.decor().clone();
+                *value = new.into();
+                *value.decor_mut() = decor;
+            }
+        }
+    }
+    write_atomically(path, doc.to_string())
+}
+
+/// Replace a coupler's routes. A `[[couplers.define]]` under this name
+/// is rewritten in place; anything else is a source's coupler, which
+/// materializes — same routes (as edited) under the console name, the
+/// original dropped off the console and its rename entry retired.
+pub fn write_composite_coupler_routes(
+    path: &Path,
+    console_name: &str,
+    routes: &[CouplerRouteLine],
+) -> Result<(), String> {
+    if routes.is_empty() {
+        return Err("a coupler needs at least one route".into());
+    }
+    let mut doc = composite_doc(path)?;
+    let define = coupler_define_index(&doc, console_name);
+    if define.is_none() {
+        let couplers = couplers_table(&mut doc)?;
+        let original = couplers
+            .get_mut("rename")
+            .and_then(|item| item.as_table_like_mut())
+            .and_then(|map| {
+                let original = map
+                    .iter()
+                    .find(|(_, value)| {
+                        value.as_str().is_some_and(|v| v.eq_ignore_ascii_case(console_name))
+                    })
+                    .map(|(key, _)| key.to_string());
+                if let Some(key) = &original {
+                    map.remove(key);
+                }
+                original
+            });
+        // A never-renamed original still bears the console name — a
+        // drop entry under that name would hide the new define along
+        // with it, so the original is renamed out of the way first,
+        // legibly ("… (set)" is what the prefs list will show it as).
+        let dropped = match original {
+            Some(original) if !original.eq_ignore_ascii_case(console_name) => original,
+            _ => {
+                let dropped = format!("{console_name} (set)");
+                let item = couplers
+                    .entry("rename")
+                    .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+                let Some(map) = item.as_table_like_mut() else {
+                    return Err("[couplers.rename] is not a table".into());
+                };
+                map.insert(console_name, toml_edit::value(dropped.as_str()));
+                dropped
+            }
+        };
+        if couplers
+            .get("rename")
+            .and_then(|item| item.as_table_like())
+            .is_some_and(|map| map.is_empty())
+        {
+            couplers.remove("rename");
+        }
+        let drops = couplers
+            .entry("drop")
+            .or_insert(toml_edit::Item::Value(toml_edit::Array::new().into()));
+        if let Some(array) = drops.as_value_mut().and_then(|value| value.as_array_mut())
+            && !array
+                .iter()
+                .any(|value| value.as_str().is_some_and(|v| v.eq_ignore_ascii_case(&dropped)))
+        {
+            array.push(dropped.as_str());
+        }
+    }
+    let defines = coupler_defines_mut(&mut doc)?;
+    let mut table = toml_edit::Table::new();
+    table["name"] = toml_edit::value(console_name);
+    let mut route_tables = toml_edit::ArrayOfTables::new();
+    for route in routes {
+        route_tables.push(coupler_route_table(route));
+    }
+    table["route"] = toml_edit::Item::ArrayOfTables(route_tables);
+    match define {
+        Some(index) => *defines.get_mut(index).expect("define just found") = table,
+        None => defines.push(table),
+    }
+    write_atomically(path, doc.to_string())
+}
+
+/// Define a brand-new coupler. Refuses a name a define already holds
+/// — the caller checks the console for clashes with carried couplers.
+pub fn append_composite_coupler(
+    path: &Path,
+    name: &str,
+    routes: &[CouplerRouteLine],
+) -> Result<(), String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("the coupler needs a name".into());
+    }
+    if routes.is_empty() {
+        return Err("a coupler needs at least one route".into());
+    }
+    let mut doc = composite_doc(path)?;
+    if coupler_define_index(&doc, name).is_some() {
+        return Err(format!("this organ already defines a coupler named {name:?}"));
+    }
+    let defines = coupler_defines_mut(&mut doc)?;
+    let mut table = toml_edit::Table::new();
+    table["name"] = toml_edit::value(name);
+    let mut route_tables = toml_edit::ArrayOfTables::new();
+    for route in routes {
+        route_tables.push(coupler_route_table(route));
+    }
+    table["route"] = toml_edit::Item::ArrayOfTables(route_tables);
+    defines.push(table);
+    write_atomically(path, doc.to_string())
 }
 
 /// Define a new (empty) swell box in a composite file. The pane fills
@@ -2821,6 +3140,28 @@ stops = ["Montre 8"]
         );
         assert_eq!(def(&path).stops[0].rename.as_deref(), Some("Tromba"));
 
+        // A knob engraving rides the same lines: a field on a stop
+        // pull, a map entry on a division pull — and the empty string
+        // (engrave nothing) is a value, not an absence.
+        assert!(
+            write_composite_stop_pitch_label(&path, &pulled_stop, "Great", Some("8"))
+                .expect("labels")
+        );
+        assert_eq!(def(&path).stops[0].pitch_label.as_deref(), Some("8"));
+        assert!(
+            write_composite_stop_pitch_label(&path, &division_stop, "Great", Some(""))
+                .expect("labels")
+        );
+        assert_eq!(
+            def(&path).divisions[0].pitch_label.get("Montre 8").map(String::as_str),
+            Some("")
+        );
+        assert!(
+            write_composite_stop_pitch_label(&path, &pulled_stop, "Great", None)
+                .expect("unlabels")
+        );
+        assert!(def(&path).stops[0].pitch_label.is_none());
+
         // A voicing rule is created exact-name, updated in place, and
         // removed again when everything is neutral.
         write_composite_stop_voicing(&path, "Tromba", Some(16.0 / 3.0), 0.0, -2.0)
@@ -2858,6 +3199,10 @@ stops = ["Montre 8"]
         );
         let parsed = def(&path);
         assert_eq!(parsed.divisions[0].except, ["Montre 8"]);
+        assert!(
+            parsed.divisions[0].pitch_label.is_empty(),
+            "the engraving left the division with the stop"
+        );
         let fresh = parsed
             .stops
             .iter()
@@ -2865,6 +3210,7 @@ stops = ["Montre 8"]
             .expect("a pull of its own");
         assert_eq!(fresh.from, "gib");
         assert_eq!(fresh.rename.as_deref(), Some("Montre 8"), "the label stays");
+        assert_eq!(fresh.pitch_label.as_deref(), Some(""), "the engraving rides along");
         assert!(parsed.moves.is_empty(), "a fresh pull lands directly");
         assert!(
             retarget_composite_stop(
@@ -2888,6 +3234,125 @@ stops = ["Montre 8"]
             !def(&path).stops.iter().any(|pull| pull.stop == "Trompette 8"),
             "the pull line is gone"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The per-coupler editors, addressed by the file itself: renames
+    /// land on a define's own name line or in the [couplers.rename]
+    /// map (keyed by the original, however often the label moves);
+    /// editing a carried coupler's routes materializes it as a define
+    /// under the console name with the original dropped; drop entries
+    /// follow renames; a define name can't be defined twice.
+    #[test]
+    fn coupler_edits_rewrite_the_file() {
+        let dir = std::env::temp_dir().join("aristide-coupler-edits-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("test dir");
+        let path = dir.join("orgue.toml");
+        std::fs::write(
+            &path,
+            r#"name = "Coupled"
+
+[sources]
+anne = "/sets/anne.organ"
+
+[[couplers.define]]
+name = "Fourths II/I"
+[[couplers.define.route]]
+from = "Swell"
+to = "Great"
+shift = -5
+"#,
+        )
+        .expect("fixture");
+        let def = |path: &Path| -> aristide_formats::instrument::Definition {
+            toml::from_str(&std::fs::read_to_string(path).expect("reads")).expect("parses")
+        };
+        let route = |from: &str, to: &str, shift: i16| CouplerRouteLine {
+            from: from.into(),
+            to: Some(to.into()),
+            shift,
+            low: None,
+            high: None,
+            unison_off: false,
+            scope: aristide_model::CouplerScope::AllKeys,
+            repitch: None,
+        };
+
+        // Renaming a define rewrites its own name line.
+        rename_composite_coupler(&path, "Fourths II/I", "Quarts").expect("renames");
+        assert_eq!(def(&path).couplers.define[0].name, "Quarts");
+
+        // Renaming a carried coupler goes to the map — and a second
+        // rename moves the same entry (keyed by the original), while
+        // renaming back to the original retires it.
+        rename_composite_coupler(&path, "Swell to Great", "II/I").expect("renames");
+        assert_eq!(
+            def(&path).couplers.rename.get("Swell to Great").map(String::as_str),
+            Some("II/I")
+        );
+        rename_composite_coupler(&path, "II/I", "Récit/G.O.").expect("renames again");
+        let parsed = def(&path);
+        assert_eq!(parsed.couplers.rename.len(), 1, "one entry, moved");
+        assert_eq!(
+            parsed.couplers.rename.get("Swell to Great").map(String::as_str),
+            Some("Récit/G.O.")
+        );
+        rename_composite_coupler(&path, "Récit/G.O.", "Swell to Great").expect("back");
+        assert!(def(&path).couplers.rename.is_empty(), "back to the original = no entry");
+
+        // Editing a define's routes replaces them in place.
+        write_composite_coupler_routes(&path, "Quarts", &[route("Swell", "Great", -7)])
+            .expect("routes");
+        let parsed = def(&path);
+        assert_eq!(parsed.couplers.define.len(), 1);
+        assert_eq!(parsed.couplers.define[0].routes[0].shift, -7);
+
+        // Editing a carried (and renamed) coupler's routes materializes
+        // it: define under the console name, original dropped, map
+        // entry retired.
+        rename_composite_coupler(&path, "Swell to Great", "II/I").expect("renames");
+        write_composite_coupler_routes(&path, "II/I", &[route("Swell", "Great", -12)])
+            .expect("materializes");
+        let parsed = def(&path);
+        assert!(parsed.couplers.rename.is_empty(), "the define carries the name now");
+        assert_eq!(parsed.couplers.drop, ["Swell to Great"], "the original is off the console");
+        let own = parsed
+            .couplers
+            .define
+            .iter()
+            .find(|define| define.name == "II/I")
+            .expect("materialized define");
+        assert_eq!(own.routes[0].shift, -12);
+
+        // A dropped name follows a later rename of a define.
+        rename_composite_coupler(&path, "II/I", "Sub II/I").expect("renames define");
+        assert!(def(&path).couplers.define.iter().any(|d| d.name == "Sub II/I"));
+
+        // Materializing a NEVER-renamed carried coupler: the original
+        // still bears the console name, so it's renamed out of the way
+        // ("… (set)") before it's dropped — a drop entry under the
+        // console name would hide the new define along with it.
+        write_composite_coupler_routes(&path, "Swell to Pedal", &[route("Great", "Great", 12)])
+            .expect("materializes unrenamed");
+        let parsed = def(&path);
+        assert!(parsed.couplers.define.iter().any(|d| d.name == "Swell to Pedal"));
+        assert_eq!(
+            parsed.couplers.rename.get("Swell to Pedal").map(String::as_str),
+            Some("Swell to Pedal (set)")
+        );
+        assert!(
+            parsed.couplers.drop.iter().any(|d| d == "Swell to Pedal (set)"),
+            "the original hides under its out-of-the-way name: {:?}",
+            parsed.couplers.drop
+        );
+
+        // A brand-new coupler appends; a taken define name refuses.
+        append_composite_coupler(&path, "Great sub", &[route("Great", "Great", -12)])
+            .expect("appends");
+        assert!(append_composite_coupler(&path, "great SUB", &[route("Great", "Great", -12)])
+            .is_err());
+        assert_eq!(def(&path).couplers.define.len(), 4);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

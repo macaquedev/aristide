@@ -698,6 +698,96 @@ fn respond(
                 Err(err) => bad_request(&err),
             }
         }
+        // A stop's knob engraving: `label=` is the footage line the
+        // drawknob face shows (empty = engrave nothing), `auto=1` goes
+        // back to showing the footage the stop actually speaks at.
+        // A label, so it lands live — no rebuild.
+        (Method::Post, "/api/organ/stop/label") => {
+            let mut state = state.lock().expect("state poisoned");
+            if state.loading.is_some() || state.pending_load.is_some() {
+                return bad_request("an organ is already loading");
+            }
+            let Some(stop) = param(query, "stop").and_then(|v| v.parse::<u32>().ok()) else {
+                return bad_request("missing stop");
+            };
+            let label = if param(query, "auto").is_some_and(|v| v != "0") {
+                None
+            } else {
+                match param(query, "label").map(unescape) {
+                    Some(label) => Some(label),
+                    None => return bad_request("missing label (or auto=1)"),
+                }
+            };
+            match state.set_stop_pitch_label(aristide_model::StopId(stop), label) {
+                Ok(()) => json(state_json_locked(&state)),
+                Err(err) => bad_request(&err),
+            }
+        }
+        // Rename a coupler — a rocker's engraving, live like a stop
+        // rename; the file keeps it and name-keyed references follow.
+        (Method::Post, "/api/organ/coupler/rename") => {
+            let mut state = state.lock().expect("state poisoned");
+            if state.loading.is_some() || state.pending_load.is_some() {
+                return bad_request("an organ is already loading");
+            }
+            match (
+                param(query, "idx").and_then(|v| v.parse::<usize>().ok()),
+                param(query, "name").map(unescape),
+            ) {
+                (Some(index), Some(name)) => match state.rename_coupler(index, &name) {
+                    Ok(()) => json(state_json_locked(&state)),
+                    Err(err) => bad_request(&err),
+                },
+                _ => bad_request("missing idx/name"),
+            }
+        }
+        // Replace a coupler's routes (`routes=` a JSON array of
+        // {from, to, shift, low, high, unison_off, scope, repitch} —
+        // manuals as console indexes). Structural: a source's coupler
+        // materializes as this organ's own define, and the organ
+        // rebuilds.
+        (Method::Post, "/api/organ/coupler/routes") => {
+            let mut state = state.lock().expect("state poisoned");
+            if state.loading.is_some() || state.pending_load.is_some() {
+                return bad_request("an organ is already loading");
+            }
+            let Some(index) = param(query, "idx").and_then(|v| v.parse::<usize>().ok()) else {
+                return bad_request("missing idx");
+            };
+            let routes: Vec<crate::CouplerRouteEdit> =
+                match param(query, "routes").map(unescape).as_deref().map(serde_json::from_str)
+                {
+                    Some(Ok(routes)) => routes,
+                    Some(Err(err)) => return bad_request(&format!("routes: {err}")),
+                    None => return bad_request("missing routes"),
+                };
+            match state.set_coupler_routes(index, &routes) {
+                Ok(()) => json(state_json_locked(&state)),
+                Err(err) => bad_request(&err),
+            }
+        }
+        // Define a brand-new coupler — same route vocabulary, same
+        // structural contract.
+        (Method::Post, "/api/organ/coupler/add") => {
+            let mut state = state.lock().expect("state poisoned");
+            if state.loading.is_some() || state.pending_load.is_some() {
+                return bad_request("an organ is already loading");
+            }
+            let Some(name) = param(query, "name").map(unescape) else {
+                return bad_request("missing name");
+            };
+            let routes: Vec<crate::CouplerRouteEdit> =
+                match param(query, "routes").map(unescape).as_deref().map(serde_json::from_str)
+                {
+                    Some(Ok(routes)) => routes,
+                    Some(Err(err)) => return bad_request(&format!("routes: {err}")),
+                    None => return bad_request("missing routes"),
+                };
+            match state.add_coupler(&name, &routes) {
+                Ok(()) => json(state_json_locked(&state)),
+                Err(err) => bad_request(&err),
+            }
+        }
         // Point a stop at a different source stop — same drawknob,
         // same label, different pipes. Structural (the pull lines are
         // rewritten), so the organ rebuilds.
@@ -1426,8 +1516,14 @@ fn state_json_locked(state: &State) -> String {
                 voicing.gain_db,
                 state.stop_voicing.contains_key(&id)
             );
+            // The declared knob engraving, only when one is declared —
+            // absent means "engrave the footage the stop speaks at".
+            let label = match state.stop_labels.get(&id) {
+                Some(label) => format!(",\"label\":{}", json_string(label)),
+                None => String::new(),
+            };
             out.push_str(&format!(
-                "{{\"id\":{},\"name\":{},\"manual\":{},\"midx\":{},\"enc\":[{}],\"on\":{}{src}{pitch}}}",
+                "{{\"id\":{},\"name\":{},\"manual\":{},\"midx\":{},\"enc\":[{}],\"on\":{}{src}{pitch}{label}}}",
                 id.0,
                 json_string(name),
                 json_string(manual),
@@ -1447,9 +1543,52 @@ fn state_json_locked(state: &State) -> String {
                 out.push(',');
             }
             first = false;
+            // Routes for the editor popover: manuals as console
+            // indexes, defaults expressed by absence (old clients
+            // never read this field at all).
+            let routes: Vec<String> = console
+                .coupler_route_views(index)
+                .iter()
+                .map(|route| {
+                    let opt = |value: Option<usize>| {
+                        value.map_or("null".to_string(), |v| v.to_string())
+                    };
+                    let mut out = format!(
+                        "{{\"from\":{},\"to\":{},\"shift\":{}",
+                        opt(route.from),
+                        opt(route.to),
+                        route.shift
+                    );
+                    if let Some(low) = route.low {
+                        out.push_str(&format!(",\"low\":{low}"));
+                    }
+                    if let Some(high) = route.high {
+                        out.push_str(&format!(",\"high\":{high}"));
+                    }
+                    if route.unison_off {
+                        out.push_str(",\"unison_off\":true");
+                    }
+                    if route.scope != aristide_model::CouplerScope::AllKeys {
+                        out.push_str(&format!(
+                            ",\"scope\":\"{}\"",
+                            match route.scope {
+                                aristide_model::CouplerScope::Bass => "bass",
+                                aristide_model::CouplerScope::Melody => "melody",
+                                aristide_model::CouplerScope::AllKeys => unreachable!(),
+                            }
+                        ));
+                    }
+                    if let Some(repitch) = route.repitch {
+                        out.push_str(&format!(",\"repitch\":{repitch}"));
+                    }
+                    out.push('}');
+                    out
+                })
+                .collect();
             out.push_str(&format!(
-                "{{\"idx\":{index},\"name\":{},\"on\":{engaged}{}}}",
+                "{{\"idx\":{index},\"name\":{},\"on\":{engaged},\"routes\":[{}]{}}}",
                 json_string(name),
+                routes.join(","),
                 // Present only when off the console, so the common
                 // snapshot stays small and old clients stay right.
                 if available { "" } else { ",\"hidden\":true" }
@@ -2210,6 +2349,7 @@ mod tests {
             setup: Default::default(),
             provenance,
             stop_voicing: Default::default(),
+            stop_labels: Default::default(),
             compass_overrides: Vec::new(),
             pending_load: None,
             loading: None,
@@ -2910,6 +3050,32 @@ mod tests {
         let text = std::fs::read_to_string(&file).expect("reads");
         assert!(!text.contains("stops = [\"Diapason 8\"]"), "{text}");
 
+        // The knob engraving: live like the rename, a value in the
+        // snapshot and a line in the file; auto takes both away again.
+        let labeled = respond(
+            &state,
+            &Method::Post,
+            "/api/organ/stop/label?stop=16&label=8%20Fuss",
+        );
+        assert_eq!(labeled.status_code().0, 200);
+        assert!(
+            state.lock().expect("state").pending_load.is_none(),
+            "an engraving is a label — no rebuild"
+        );
+        assert!(state_json(&state).contains("\"label\":\"8 Fuss\""));
+        let text = std::fs::read_to_string(&file).expect("reads");
+        assert!(text.contains("pitch_label = \"8 Fuss\""), "{text}");
+        let hidden = respond(&state, &Method::Post, "/api/organ/stop/label?stop=16&label=");
+        assert_eq!(hidden.status_code().0, 200);
+        assert!(
+            state_json(&state).contains("\"label\":\"\""),
+            "the empty engraving is a value, not an absence"
+        );
+        let auto = respond(&state, &Method::Post, "/api/organ/stop/label?stop=16&auto=1");
+        assert_eq!(auto.status_code().0, 200);
+        assert!(!state_json(&state).contains("\"label\""));
+        assert!(!std::fs::read_to_string(&file).expect("reads").contains("pitch_label"));
+
         // Re-sourcing is structural: the pull line now names the other
         // stop, keeps the drawknob's label, and the organ rebuilds.
         let retargeted = respond(
@@ -2937,6 +3103,119 @@ mod tests {
             !def.stops.iter().any(|pull| pull.stop == "Montre 8'"),
             "the old pull is gone"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The per-coupler editors: the snapshot carries every coupler's
+    /// routes; a rename lands live (the map, since the demo's couplers
+    /// are the set's own) with control bindings following; a routes
+    /// edit materializes the coupler as this organ's define and
+    /// rebuilds; adding defines a new one and duplicate names refuse.
+    #[test]
+    fn coupler_endpoints_edit_live_and_structurally() {
+        let Some(state) = demo_state() else { return };
+        let demo = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testsets/grandorgue-demo/demo.organ");
+        let dir = std::env::temp_dir().join("aristide-coupler-endpoints-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let organ = aristide_formats::grandorgue::load(&demo).expect("demo parses").organ;
+        let canonical = demo.canonicalize().expect("canonicalizes");
+        let file =
+            crate::config::create_wrapper_organ(&dir, "Coupler Editor", &canonical, &organ, None)
+                .expect("inventory written");
+        state.lock().expect("state").composite_path = Some(file.clone());
+
+        // Every coupler's routes ride the snapshot, manuals as indexes.
+        let value: serde_json::Value =
+            serde_json::from_str(&state_json(&state)).expect("valid JSON");
+        let couplers = value["couplers"].as_array().expect("couplers");
+        let (idx, ii_i) = couplers
+            .iter()
+            .enumerate()
+            .find(|(_, c)| c["name"] == "II/I")
+            .expect("the demo's II/I");
+        let route = &ii_i["routes"][0];
+        assert_eq!(route["from"], 1, "listens on the first manual's keys");
+        assert_eq!(route["to"], 2, "sounds the second manual's stops");
+        assert_eq!(route["shift"], 0);
+
+        // A control binding speaks the coupler's name; the rename must
+        // carry it along or the button would silently unwire.
+        respond(
+            &state,
+            &Method::Post,
+            "/api/control/bind?slot=0&action=coupler%3AII%2FI&device=BCF2000&trigger=cc%2016",
+        );
+        let renamed = respond(
+            &state,
+            &Method::Post,
+            &format!("/api/organ/coupler/rename?idx={idx}&name=R%C3%A9cit%2FG.O."),
+        );
+        assert_eq!(renamed.status_code().0, 200);
+        assert!(
+            state.lock().expect("state").pending_load.is_none(),
+            "a coupler rename is a label — no rebuild"
+        );
+        assert!(state_json(&state).contains("\"name\":\"Récit/G.O.\""));
+        // Adoption inventoried the set's couplers as defines, so the
+        // rename lands on the define's own name line — no map needed.
+        let def: aristide_formats::instrument::Definition =
+            toml::from_str(&std::fs::read_to_string(&file).expect("reads")).expect("parses");
+        assert!(def.couplers.define.iter().any(|d| d.name == "Récit/G.O."), "renamed in place");
+        assert!(def.couplers.rename.is_empty());
+        {
+            let state = state.lock().expect("state");
+            let organ = state.midi_config.organs.get("test organ").expect("wiring");
+            assert_eq!(organ.controls[0].action, "coupler:Récit/G.O.");
+        }
+
+        // Editing its routes rewrites the define in place — and a
+        // rebuild (the materialize path for carried couplers is the
+        // config tests' business; an adopted organ's couplers are all
+        // defines already).
+        let routes = "%5B%7B%22from%22%3A1%2C%22to%22%3A2%2C%22shift%22%3A-12%7D%5D"; // [{"from":1,"to":2,"shift":-12}]
+        let edited = respond(
+            &state,
+            &Method::Post,
+            &format!("/api/organ/coupler/routes?idx={idx}&routes={routes}"),
+        );
+        assert_eq!(edited.status_code().0, 200);
+        {
+            let mut state = state.lock().expect("state");
+            assert!(state.pending_load.is_some(), "a route edit rebuilds");
+            state.pending_load = None;
+            state.loading = None;
+        }
+        let def: aristide_formats::instrument::Definition =
+            toml::from_str(&std::fs::read_to_string(&file).expect("reads")).expect("parses");
+        assert!(def.couplers.drop.is_empty(), "its own define, nothing to drop");
+        let own = def
+            .couplers
+            .define
+            .iter()
+            .find(|d| d.name == "Récit/G.O.")
+            .expect("the edited define");
+        assert_eq!(own.routes[0].shift, -12);
+        assert_eq!(own.routes.len(), 1);
+
+        // A brand-new coupler appends a define; a taken name refuses.
+        let added = respond(
+            &state,
+            &Method::Post,
+            &format!("/api/organ/coupler/add?name=Great%20sub&routes={routes}"),
+        );
+        assert_eq!(added.status_code().0, 200);
+        {
+            let mut state = state.lock().expect("state");
+            state.pending_load = None;
+            state.loading = None;
+        }
+        let dup = respond(
+            &state,
+            &Method::Post,
+            &format!("/api/organ/coupler/add?name=II%2FP&routes={routes}"),
+        );
+        assert_eq!(dup.status_code().0, 400, "a console coupler already owns that name");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3284,6 +3563,7 @@ mod tests {
             setup: Default::default(),
             provenance: Default::default(),
             stop_voicing: Default::default(),
+            stop_labels: Default::default(),
             compass_overrides: Vec::new(),
             pending_load: None,
             loading: None,

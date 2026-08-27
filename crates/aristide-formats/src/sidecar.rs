@@ -6,6 +6,7 @@
 //! mapping. Voicing, tuning, routing, and effects land here as their
 //! engine features arrive (DESIGN.md "Sidecar files").
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -261,6 +262,16 @@ pub struct CouplersConfig {
     /// turn it on — or a single defined route can, below.
     #[serde(default)]
     pub repitch: bool,
+    /// Console names for couplers the sources carry in — the rocker's
+    /// engraving, exact original name → what it says here. A coupler
+    /// this file defines needs no entry (its `define` name is its own).
+    ///
+    /// ```toml
+    /// [couplers.rename]
+    /// "Swell to Great" = "II/I"
+    /// ```
+    #[serde(default)]
+    pub rename: BTreeMap<String, String>,
     /// Couplers of the user's own devising, appended to the set's and
     /// engageable like any other. Each is a named bundle of routes:
     ///

@@ -10,6 +10,21 @@ use aristide_model::{CouplerRoute, CouplerScope, ManualId, Organ, RankId, RankRa
 use crate::bank::VoiceSpec;
 use crate::tuning::Tuning;
 
+/// One coupler route as the console editor sees it: manuals as
+/// console indexes, the target flattened. `to == None` with
+/// `unison_off` is a pure silencing route.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CouplerRouteView {
+    pub from: Option<usize>,
+    pub to: Option<usize>,
+    pub shift: i16,
+    pub low: Option<u8>,
+    pub high: Option<u8>,
+    pub unison_off: bool,
+    pub scope: CouplerScope,
+    pub repitch: Option<bool>,
+}
+
 /// A voice the console wants started, tagged with the handle it will
 /// later be stopped by.
 pub struct VoiceStart {
@@ -502,6 +517,44 @@ impl Console {
     /// A stop's current trim (linear gain, cents), neutral if none.
     pub fn stop_adjust(&self, stop: StopId) -> (f32, f64) {
         self.stop_adjust.get(&stop).copied().unwrap_or((1.0, 0.0))
+    }
+
+    /// Rename a coupler on the live console — a rocker's engraving,
+    /// nothing sounding moves. False if the index names no coupler.
+    pub fn rename_coupler(&mut self, index: usize, name: &str) -> bool {
+        match self.organ.couplers.get_mut(index) {
+            Some(coupler) => {
+                coupler.name = name.to_string();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// A coupler's routes with the manuals resolved to console indexes
+    /// — what the snapshot carries so the editor popover can show and
+    /// edit them. A route whose manual the organ hasn't got reads as
+    /// None (loaders prevent it, but JSON must stay honest).
+    pub fn coupler_route_views(&self, index: usize) -> Vec<CouplerRouteView> {
+        let position =
+            |id: ManualId| self.organ.manuals.iter().position(|manual| manual.id == id);
+        self.organ
+            .couplers
+            .get(index)
+            .map(|coupler| coupler.routes.as_slice())
+            .unwrap_or_default()
+            .iter()
+            .map(|route| CouplerRouteView {
+                from: position(route.from_manual),
+                to: route.target.as_ref().and_then(|t| position(t.manual)),
+                shift: route.target.as_ref().map_or(0, |t| t.key_shift),
+                low: route.low_key,
+                high: route.high_key,
+                unison_off: route.unison_off,
+                scope: route.scope,
+                repitch: route.target.as_ref().and_then(|t| t.repitch),
+            })
+            .collect()
     }
 
     /// Rename a stop on the live console — a label, nothing sounding

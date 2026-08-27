@@ -259,7 +259,18 @@ filled by repitching; a mixture has no single footage and voices in cents
 alone), and its source (the pull rewritten — a division stop leaves its
 pull via `except` and gets a `[[stop]]` line of its own — label kept;
 structural, a reload). Name and voicing land live, addressed by recorded
-provenance rather than by guessable names.
+provenance rather than by guessable names. The drawknob's engraved footage
+line comes from the pitch data, never from parsing the name — per stop it
+can be hidden or replaced with custom text (`pitch_label` beside `rename`
+on the pull lines; adoption keeps the labels the set's names implied only
+insofar as the pipes agree). Couplers get the same treatment: right-click
+a rocker → its name (a `[[couplers.define]]`'s own line, or the
+`[couplers.rename]` map for one a source carries in — keyed by the
+original, so drop entries and `coupler:` control bindings follow) and its
+full routes (from/to/shift/scope/unison-off). Editing a carried coupler's
+routes materializes it as this organ's own define, the original renamed
+out of the way and dropped (restorable); route edits and the add menu's
+new-coupler form are structural, renames land live.
 Layout edits are *live*, tuning-style — file line plus in-place
 apply, never a reload — because the layout is a console fact throughout:
 duplicate hexes share a key number, a bound Lumatone `.ltn` map's key

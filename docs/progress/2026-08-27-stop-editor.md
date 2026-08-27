@@ -63,3 +63,35 @@ the retargeted pull keeps the label. New tests: assembly
 except/rename/provenance, footage parse/format round-trips, config
 writers, re-anchor pricing, native-footage derivation, and the three
 endpoints.
+
+## Second wave: couplers, and the knob face stops trusting names
+
+The drawknob's engraved footage line now comes from the **pitch
+data** (the same derivation the popover shows), never from parsing
+the stop name — and per stop it can be hidden or replaced with custom
+text: `pitch_label` beside `rename` on the pull lines (`""` engraves
+nothing; absent = the footage the stop actually speaks at). Live,
+`/api/organ/stop/label`; the snapshot carries `label` when declared.
+
+Couplers get the whole treatment. Right-click a rocker → its name and
+its full routes (from/to/shift/scope/unison-off; low/high/repitch
+round-trip unedited). The file is the authority on where an edit
+lands — no provenance needed:
+
+- a name matching a `[[couplers.define]]` is this organ's own,
+  edited in place (adoption inventories every set coupler as a
+  define, so on adopted organs everything is directly editable);
+- a coupler a source carries in (a frankenorgan's `[[division]]`
+  pulls) keeps its console name in the new `[couplers.rename]` map,
+  keyed by the original name however often the label moves; editing
+  its routes **materializes** it — a define with the edited routes
+  under the console name, the original renamed out of the way
+  ("… (set)", or a drop under the console name would hide the new
+  define too) and dropped, still restorable from prefs.
+
+Renames land live and ripple everywhere names are load-bearing:
+`[couplers] drop` entries and `coupler:<name>` control bindings.
+Route edits and the add menu's new-coupler form
+(`/api/organ/coupler/{rename,routes,add}`) are structural rebuilds;
+the snapshot's couplers now carry `routes` with manuals as console
+indexes.

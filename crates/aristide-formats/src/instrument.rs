@@ -269,6 +269,11 @@ pub struct DivisionPull {
     /// says here. Exact names, not patterns — a rename means one stop.
     #[serde(default)]
     pub rename: BTreeMap<String, String>,
+    /// Per-stop knob engravings: source stop name → the footage line
+    /// on the drawknob face. `""` engraves nothing; absent, the face
+    /// shows the footage the stop actually speaks at.
+    #[serde(default)]
+    pub pitch_label: BTreeMap<String, String>,
 }
 
 /// Pull one stop (or every stop a pattern matches) onto a manual.
@@ -285,6 +290,10 @@ pub struct StopPull {
     /// New console name; only applied when the pattern matched exactly
     /// one stop.
     pub rename: Option<String>,
+    /// The footage line on the drawknob face; `""` engraves nothing.
+    /// Absent, the face shows the footage the stop actually speaks at.
+    /// Like `rename`, applied only to a single-stop match.
+    pub pitch_label: Option<String>,
 }
 
 /// A swell box of the composite's own devising: a name and the stops
@@ -483,6 +492,9 @@ pub struct Assembled {
     /// Per assembled stop, indexed like `organ.stops` (`StopId` order):
     /// where it came from.
     pub provenance: Vec<StopProvenance>,
+    /// Per assembled stop: its declared knob engraving (the footage
+    /// line), if the pull gave it one. `""` engraves nothing.
+    pub pitch_labels: Vec<Option<String>>,
     /// Declared manuals that carry a tuning of their own. Parsing the
     /// temperament is the server's business — the format stays a name.
     pub manual_tuning: Vec<ManualTuningDef>,
@@ -564,6 +576,8 @@ struct Assembly<'a> {
     placed: Vec<PlacedStop>,
     /// Parallel to `placed`: where each stop came from.
     provenance: Vec<StopProvenance>,
+    /// Parallel to `placed`: declared knob engravings.
+    pitch_labels: Vec<Option<String>>,
     ranks: Vec<Rank>,
     windchests: Vec<Windchest>,
     enclosures: Vec<Enclosure>,
@@ -596,6 +610,7 @@ pub fn assemble(
         hex_defs: Vec::new(),
         placed: Vec::new(),
         provenance: Vec::new(),
+        pitch_labels: Vec::new(),
         ranks: Vec::new(),
         windchests: Vec::new(),
         enclosures: Vec::new(),
@@ -642,7 +657,14 @@ pub fn assemble(
                 assembly.chest_number(source_idx, number);
             }
             for manual_idx in 0..organ.manuals.len() {
-                assembly.pull_division(source_idx, manual_idx, None, &[], &BTreeMap::new())?;
+                assembly.pull_division(
+                    source_idx,
+                    manual_idx,
+                    None,
+                    &[],
+                    &BTreeMap::new(),
+                    &BTreeMap::new(),
+                )?;
             }
         }
     } else {
@@ -693,6 +715,7 @@ pub fn assemble(
                     pull.on.as_deref(),
                     &pull.except,
                     &pull.rename,
+                    &pull.pitch_label,
                 ) {
                     assembly.warnings.push(format!(
                         "division {:?} from {:?}: {err} — skipped",
@@ -759,6 +782,10 @@ pub fn assemble(
                 }
                 _ => None,
             };
+            let pitch_label = match (matches.len(), &pull.pitch_label) {
+                (1, label) => label.clone(),
+                _ => None,
+            };
             // An `on` naming a manual this organ no longer declares is
             // dropped with a warning, not a load failure — the same
             // healing [[move]] got when a raced rename bricked a file
@@ -774,7 +801,14 @@ pub fn assemble(
                 }
             };
             for stop_idx in matches {
-                assembly.place_stop(source_idx, stop_idx, target, rename.clone(), false);
+                assembly.place_stop(
+                    source_idx,
+                    stop_idx,
+                    target,
+                    rename.clone(),
+                    pitch_label.clone(),
+                    false,
+                );
             }
         }
     }
@@ -850,6 +884,7 @@ pub fn assemble(
         stop_map: assembly.stop_map,
         division_pulls: assembly.division_pulls,
         provenance: assembly.provenance,
+        pitch_labels: assembly.pitch_labels,
         manual_tuning,
         console_layout: def.console.layout.clone(),
         warnings: assembly.warnings,
@@ -1101,6 +1136,7 @@ impl Assembly<'_> {
         on: Option<&str>,
         except: &[String],
         renames: &BTreeMap<String, String>,
+        pitch_labels: &BTreeMap<String, String>,
     ) -> Result<(), InstrumentError> {
         let (alias, organ) = &self.sources[source_idx];
         let source_manual = organ.manuals[manual_idx].clone();
@@ -1173,7 +1209,8 @@ impl Assembly<'_> {
                 continue;
             }
             let rename = renames.get(&organ.stops[stop_idx].name).cloned();
-            self.place_stop(source_idx, stop_idx, target, rename, true);
+            let label = pitch_labels.get(&organ.stops[stop_idx].name).cloned();
+            self.place_stop(source_idx, stop_idx, target, rename, label, true);
         }
         Ok(())
     }
@@ -1184,10 +1221,12 @@ impl Assembly<'_> {
         stop_idx: usize,
         target: usize,
         rename: Option<String>,
+        pitch_label: Option<String>,
         via_division: bool,
     ) {
         let organ = &self.sources[source_idx].1;
         let stop = &organ.stops[stop_idx];
+        self.pitch_labels.push(pitch_label);
         self.provenance.push(StopProvenance {
             source: self.sources[source_idx].0.clone(),
             source_manual: organ
@@ -1794,6 +1833,7 @@ mod tests {
             stop: "Hautbois 8".into(),
             on: "Solo".into(),
             rename: None,
+            pitch_label: None,
         }];
         definition.enclosure_defs = vec![EnclosureDef {
             name: "Boîte".into(),
@@ -1838,6 +1878,7 @@ mod tests {
             stop: "Principal 8".into(),
             on: "Solo".into(),
             rename: None,
+            pitch_label: None,
         }];
         definition.enclosure_defs = vec![
             EnclosureDef {
@@ -1913,6 +1954,7 @@ mod tests {
             stop: "Principal 8".into(),
             on: "Solo".into(),
             rename: Some("Montre 8".into()),
+            pitch_label: None,
         }];
         let built = assemble(&definition, &sources, Vec::new()).expect("assembles");
         let organ = &built.organ;
@@ -1943,6 +1985,7 @@ mod tests {
             stop: "Hautbois 8".into(),
             on: "Solo".into(),
             rename: None,
+            pitch_label: None,
         }];
         let built = assemble(&definition, &sources, Vec::new()).expect("assembles");
         let organ = &built.organ;
@@ -1974,6 +2017,7 @@ mod tests {
             stop: "Hautbois 8".into(),
             on: "Solo".into(),
             rename: None,
+            pitch_label: None,
         }];
         let built = assemble(&definition, &sources, Vec::new()).expect("assembles");
         let organ = &built.organ;
@@ -2002,6 +2046,7 @@ mod tests {
                 on: Some("Great".into()),
                 except: Vec::new(),
                 rename: BTreeMap::new(),
+                pitch_label: BTreeMap::new(),
             },
             DivisionPull {
                 from: "B".into(),
@@ -2009,6 +2054,7 @@ mod tests {
                 on: Some("Great".into()),
                 except: Vec::new(),
                 rename: BTreeMap::new(),
+                pitch_label: BTreeMap::new(),
             },
         ];
         let built = assemble(&definition, &sources, Vec::new()).expect("assembles");
@@ -2031,6 +2077,7 @@ mod tests {
             stop: "Principal 8".into(),
             on: "Great".into(),
             rename: None,
+            pitch_label: None,
         }];
         assert!(assemble(&definition, &sources, Vec::new()).is_err());
     }
@@ -2052,6 +2099,7 @@ mod tests {
                 stop: "Principal 8".into(),
                 on: "Great".into(),
                 rename: None,
+                pitch_label: None,
             },
             StopPull {
                 from: "A".into(),
@@ -2059,6 +2107,7 @@ mod tests {
                 stop: "Hautbois 8".into(),
                 on: "First Manual".into(), // renamed since; must not brick
                 rename: None,
+                pitch_label: None,
             },
         ];
         definition.divisions = vec![DivisionPull {
@@ -2067,6 +2116,7 @@ mod tests {
             on: Some("Choir".into()), // likewise gone
             except: Vec::new(),
             rename: BTreeMap::new(),
+            pitch_label: BTreeMap::new(),
         }];
         let built = assemble(&definition, &sources, Vec::new()).expect("still assembles");
         assert_eq!(built.organ.stops.len(), 1, "the resolvable pull lands");
@@ -2098,6 +2148,7 @@ mod tests {
                 on: Some("Great".into()),
                 except: vec!["Principal".into(), "Ghost".into()],
                 rename: BTreeMap::new(),
+                pitch_label: BTreeMap::new(),
             },
             DivisionPull {
                 from: "A".into(),
@@ -2110,6 +2161,7 @@ mod tests {
                 ]
                 .into_iter()
                 .collect(),
+                pitch_label: BTreeMap::new(),
             },
         ];
         definition.stops = vec![StopPull {
@@ -2118,6 +2170,7 @@ mod tests {
             stop: "Principal 8".into(),
             on: "Great".into(),
             rename: None,
+            pitch_label: None,
         }];
         let built = assemble(&definition, &sources, Vec::new()).expect("assembles");
         let names: Vec<&str> = built.organ.stops.iter().map(|s| s.name.as_str()).collect();
@@ -2173,6 +2226,7 @@ mod tests {
                 on: Some("Great".into()),
                 except: Vec::new(),
                 rename: BTreeMap::new(),
+                pitch_label: BTreeMap::new(),
             },
             DivisionPull {
                 from: "A".into(),
@@ -2180,6 +2234,7 @@ mod tests {
                 on: Some("Great".into()),
                 except: Vec::new(),
                 rename: BTreeMap::new(),
+                pitch_label: BTreeMap::new(),
             },
         ];
         definition.moves = vec![MoveDef {

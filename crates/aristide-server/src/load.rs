@@ -69,6 +69,9 @@ pub struct PreparedInstrument {
     pub provenance: std::collections::HashMap<StopId, instrument::StopProvenance>,
     /// Per stop: its own editable `[[voicing.adjust]]` rule, if any.
     pub stop_voicing: std::collections::HashMap<StopId, StopVoicing>,
+    /// Per stop: its declared knob engraving (`""` = engrave nothing).
+    /// Stops absent here engrave the footage they actually speak at.
+    pub stop_labels: std::collections::HashMap<StopId, String>,
     /// The organ file's `[console.layout]` — empty unless it is a
     /// composite loaded alone, same condition as `composite` above.
     pub layout: std::collections::BTreeMap<String, instrument::PanelPos>,
@@ -237,6 +240,8 @@ pub fn prepare(
     let mut composite_midi: Option<(PathBuf, instrument::MidiDef)> = None;
     let mut single_provenance: std::collections::HashMap<StopId, instrument::StopProvenance> =
         std::collections::HashMap::new();
+    let mut stop_labels: std::collections::HashMap<StopId, String> =
+        std::collections::HashMap::new();
     let mut manual_tuning_defs: Vec<instrument::ManualTuningDef> = Vec::new();
     let mut console_layout: std::collections::BTreeMap<String, instrument::PanelPos> =
         std::collections::BTreeMap::new();
@@ -279,6 +284,12 @@ pub fn prepare(
                     .into_iter()
                     .enumerate()
                     .map(|(index, prov)| (StopId(index as u32), prov))
+                    .collect();
+                stop_labels = assembled
+                    .pitch_labels
+                    .into_iter()
+                    .enumerate()
+                    .filter_map(|(index, label)| Some((StopId(index as u32), label?)))
                     .collect();
                 manual_tuning_defs = assembled.manual_tuning;
                 console_layout = assembled.console_layout;
@@ -462,6 +473,13 @@ pub fn prepare(
             .cloned()
             .enumerate()
             .map(|(index, prov)| (StopId(index as u32), prov))
+            .collect();
+        stop_labels = assembled
+            .pitch_labels
+            .iter()
+            .cloned()
+            .enumerate()
+            .filter_map(|(index, label)| Some((StopId(index as u32), label?)))
             .collect();
         let stop_map = &assembled.stop_map;
         let drawn = if stops.is_empty() {
@@ -764,6 +782,23 @@ pub fn prepare(
         console.set_manual_tuning(def.manual, Some(own));
     }
     console.set_coupler_repitch(sidecar.couplers.repitch);
+    // Console names for carried couplers ([couplers.rename]): applied
+    // before the drop pass, so drop entries written by the console
+    // (which speak current names) mean what they say at load too.
+    for (original, name) in &sidecar.couplers.rename {
+        let index = console
+            .coupler_states()
+            .iter()
+            .position(|(_, existing, _, _)| existing.eq_ignore_ascii_case(original));
+        match index {
+            Some(index) => {
+                console.rename_coupler(index, name);
+            }
+            None => load_warnings.push(format!(
+                "couplers.rename: no coupler named {original:?}"
+            )),
+        }
+    }
     // Couplers this instrument takes off its console — they stay
     // restorable from the Organ preferences.
     {
@@ -967,6 +1002,7 @@ pub fn prepare(
         setup,
         provenance: single_provenance,
         stop_voicing,
+        stop_labels,
         layout: console_layout,
         buses,
         warnings: load_warnings,

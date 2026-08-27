@@ -608,6 +608,9 @@ pub struct State {
     /// gain), mirrored here so the console editor can show and edit
     /// exactly what the file says.
     pub stop_voicing: std::collections::HashMap<StopId, load::StopVoicing>,
+    /// Per stop: its declared knob engraving (`""` = engrave nothing);
+    /// stops absent here engrave the footage they actually speak at.
+    pub stop_labels: std::collections::HashMap<StopId, String>,
     /// Per composite manual: a player-declared compass overriding the
     /// set's own. Asked when sets are combined; editable later in
     /// Preferences; saved into the composite file.
@@ -643,6 +646,30 @@ pub struct LoadRequest {
     /// Queued by the command line: a failure should exit the process,
     /// as a bad CLI path always has, not leave a silent server running.
     pub initial: bool,
+}
+
+/// One coupler route as the console editor sends it (the JSON the
+/// /api/organ/coupler/routes endpoint carries): manuals as console
+/// indexes, defaults by absence — the wire twin of the snapshot's
+/// route objects.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CouplerRouteEdit {
+    pub from: Option<usize>,
+    #[serde(default)]
+    pub to: Option<usize>,
+    #[serde(default)]
+    pub shift: i16,
+    #[serde(default)]
+    pub low: Option<u8>,
+    #[serde(default)]
+    pub high: Option<u8>,
+    #[serde(default)]
+    pub unison_off: bool,
+    #[serde(default)]
+    pub scope: Option<String>,
+    #[serde(default)]
+    pub repitch: Option<bool>,
 }
 
 /// The provenance of the loaded instrument.
@@ -2443,6 +2470,189 @@ impl State {
         Ok(())
     }
 
+    /// A stop's knob engraving — the footage line on the drawknob
+    /// face. `None` goes back to showing the footage the stop actually
+    /// speaks at; `Some("")` engraves nothing; anything else is the
+    /// text itself. A label, so it lands live: map now, file line now,
+    /// no rebuild.
+    pub fn set_stop_pitch_label(
+        &mut self,
+        stop: StopId,
+        label: Option<String>,
+    ) -> Result<(), String> {
+        let (name, manual_name, prov) = self.stop_coordinates(stop)?;
+        let path = self.organ_file()?;
+        if !config::write_composite_stop_pitch_label(&path, &prov, &manual_name, label.as_deref())?
+        {
+            return Err(format!(
+                "the pull that brought {name:?} in isn't in {} — it was \
+                 hand-edited; edit it there",
+                path.display()
+            ));
+        }
+        match label {
+            Some(label) => {
+                self.stop_labels.insert(stop, label);
+            }
+            None => {
+                self.stop_labels.remove(&stop);
+            }
+        }
+        Ok(())
+    }
+
+    /// Rename a coupler — a rocker's engraving, so it lands live: the
+    /// console name changes now, the file keeps it (a define's own
+    /// name line, or the [couplers.rename] map for one a source
+    /// carries in), and name-keyed references — drop entries, control
+    /// bindings — follow.
+    pub fn rename_coupler(&mut self, index: usize, new: &str) -> Result<(), String> {
+        let new = new.trim();
+        if new.is_empty() {
+            return Err("the coupler needs a name".into());
+        }
+        let Control::Organ(console) = &self.control else {
+            return Err("no organ is loaded".into());
+        };
+        let Some(old) = console
+            .coupler_states()
+            .get(index)
+            .map(|(_, name, _, _)| name.to_string())
+        else {
+            return Err("no such coupler".into());
+        };
+        if old == new {
+            return Ok(());
+        }
+        // Couplers are addressed by name everywhere the file speaks of
+        // them; two rockers with one engraving would be unaddressable.
+        if console
+            .coupler_states()
+            .iter()
+            .enumerate()
+            .any(|(at, (_, name, _, _))| at != index && name.eq_ignore_ascii_case(new))
+        {
+            return Err(format!("this organ already has a coupler named {new:?}"));
+        }
+        let path = self.organ_file()?;
+        config::rename_composite_coupler(&path, &old, new)?;
+        let Control::Organ(console) = &mut self.control else {
+            return Err("no organ is loaded".into());
+        };
+        console.rename_coupler(index, new);
+        // Control bindings speak coupler names ("coupler:II/I"); they
+        // follow the rename or the button would silently unwire.
+        let action = format!("coupler:{old}");
+        if let Some(organ) = self.midi_config.organs.get_mut(&self.organ_key) {
+            for control in &mut organ.controls {
+                if control.action.eq_ignore_ascii_case(&action) {
+                    control.action = format!("coupler:{new}");
+                }
+            }
+        }
+        self.persist();
+        Ok(())
+    }
+
+    /// Replace a coupler's routes — structural, so the file's lines
+    /// are rewritten (a source's coupler materializes as a define of
+    /// this organ's own) and the organ rebuilds. Routes arrive with
+    /// manuals as console indexes; the file speaks names.
+    pub fn set_coupler_routes(
+        &mut self,
+        index: usize,
+        routes: &[CouplerRouteEdit],
+    ) -> Result<(), String> {
+        let Control::Organ(console) = &self.control else {
+            return Err("no organ is loaded".into());
+        };
+        let Some(name) = console
+            .coupler_states()
+            .get(index)
+            .map(|(_, name, _, _)| name.to_string())
+        else {
+            return Err("no such coupler".into());
+        };
+        let lines = self.coupler_route_lines(routes)?;
+        let path = self.organ_file()?;
+        config::write_composite_coupler_routes(&path, &name, &lines)?;
+        self.reload_organ_file(path);
+        Ok(())
+    }
+
+    /// Define a brand-new coupler and rebuild. Same route vocabulary
+    /// as `set_coupler_routes`.
+    pub fn add_coupler(&mut self, name: &str, routes: &[CouplerRouteEdit]) -> Result<(), String> {
+        let name = name.trim();
+        let Control::Organ(console) = &self.control else {
+            return Err("no organ is loaded".into());
+        };
+        if console
+            .coupler_states()
+            .iter()
+            .any(|(_, existing, _, _)| existing.eq_ignore_ascii_case(name))
+        {
+            return Err(format!("this organ already has a coupler named {name:?}"));
+        }
+        let lines = self.coupler_route_lines(routes)?;
+        let path = self.organ_file()?;
+        config::append_composite_coupler(&path, name, &lines)?;
+        self.reload_organ_file(path);
+        Ok(())
+    }
+
+    /// Route tuples from the API (from, to, shift, low, high,
+    /// unison_off, scope, repitch — manuals as console indexes) into
+    /// the file's vocabulary. A route must listen somewhere, and must
+    /// either couple somewhere or silence (a route doing neither is a
+    /// dead line the editor shouldn't write).
+    fn coupler_route_lines(
+        &self,
+        routes: &[CouplerRouteEdit],
+    ) -> Result<Vec<config::CouplerRouteLine>, String> {
+        let names = self.manual_names();
+        let manual = |index: Option<usize>| -> Result<Option<String>, String> {
+            match index {
+                None => Ok(None),
+                Some(index) => names
+                    .get(index)
+                    .cloned()
+                    .map(Some)
+                    .ok_or_else(|| "no such manual".to_string()),
+            }
+        };
+        routes
+            .iter()
+            .map(|route| {
+                let Some(from) = manual(route.from)? else {
+                    return Err("a route needs a manual to listen on".into());
+                };
+                let to = manual(route.to)?;
+                if to.is_none() && !route.unison_off {
+                    return Err(
+                        "a route must couple somewhere or silence (unison off)".into()
+                    );
+                }
+                let scope = match route.scope.as_deref().unwrap_or("all-keys") {
+                    "all-keys" => aristide_model::CouplerScope::AllKeys,
+                    "bass" => aristide_model::CouplerScope::Bass,
+                    "melody" => aristide_model::CouplerScope::Melody,
+                    other => return Err(format!("{other:?} is not a coupler scope")),
+                };
+                Ok(config::CouplerRouteLine {
+                    from,
+                    to,
+                    shift: route.shift,
+                    low: route.low,
+                    high: route.high,
+                    unison_off: route.unison_off,
+                    scope,
+                    repitch: route.repitch,
+                })
+            })
+            .collect()
+    }
+
     /// Point a stop at a different source stop — same drawknob, same
     /// label, different pipes. Structural: the file's pull lines are
     /// rewritten and the organ rebuilds.
@@ -2723,6 +2933,7 @@ fn main() -> Result<()> {
         setup: Setup::default(),
         provenance: Default::default(),
         stop_voicing: Default::default(),
+        stop_labels: Default::default(),
         compass_overrides: Vec::new(),
         loading: pending_load.as_ref().map(|_| "loading…".to_string()),
         pending_load,
@@ -3107,6 +3318,7 @@ fn perform_load(
         setup,
         provenance,
         stop_voicing,
+        stop_labels,
         layout,
         buses,
         warnings,
@@ -3285,6 +3497,7 @@ fn perform_load(
     state.setup = setup;
     state.provenance = provenance;
     state.stop_voicing = stop_voicing;
+    state.stop_labels = stop_labels;
     state.compass_overrides = Vec::new();
     state.layout = layout;
     state.learn = None;
@@ -4042,6 +4255,7 @@ mod tests {
             setup: Default::default(),
             provenance: Default::default(),
             stop_voicing: Default::default(),
+            stop_labels: Default::default(),
             compass_overrides: Vec::new(),
             pending_load: None,
             loading: None,
