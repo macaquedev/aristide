@@ -1644,6 +1644,15 @@ impl Console {
         }
     }
 
+    /// Test-only: redeclare a manual's kind on the live organ, so
+    /// state tests reach the microtonal paths without a file reload.
+    #[cfg(test)]
+    pub fn force_manual_kind(&mut self, manual: usize, kind: aristide_model::ManualKind) {
+        if let Some(declared) = self.organ.manuals.get_mut(manual) {
+            declared.kind = kind;
+        }
+    }
+
     /// The hex-field layout a microtonal manual draws with: the
     /// declared one, or the default derived from the (possibly
     /// widened) compass. `None` for the other kinds — they have no

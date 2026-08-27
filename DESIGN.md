@@ -101,7 +101,13 @@ the scripting layer that will eventually write bindings (M6).
 The computer keyboard is an input like any other under this scheme — a device
 named `Computer keyboard`, assigned to a manual, with its own transpose and
 bindings. Octave shift belongs to the *input*, not the manual: how wide a
-keyboard is and where it currently sits are facts about the hardware.
+keyboard is and where it currently sits are facts about the hardware. What a
+key *means* depends on the manual it addresses: on a hand keyboard the two
+letter rows are the usual DAW piano; on a microtonal manual all four rows
+become a window onto the manual's own hex layout (Z row = board row 0, same
+axial math as the on-screen board — `control::KEYBOARD_GRID`), so isomorphic
+shapes carry from screen to QWERTY, and the legend redraws as the staggered
+grid with each cap's key number and its Lumatone map colour.
 
 ## Why we will sound better (engine-side quality)
 

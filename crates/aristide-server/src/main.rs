@@ -864,23 +864,36 @@ impl State {
             }
             return;
         }
-        let Some(note) = control::key_note(code) else {
+        // What a code means depends on the manual it addresses: a hand
+        // keyboard reads the two letter rows as a piano; a microtonal
+        // manual reads all four rows as a window onto its own hex grid
+        // (see control::KEYBOARD_GRID). Both resolved up front — the
+        // keyboard may drive one of each.
+        let piano = control::key_note(code);
+        let grid = control::key_grid(code);
+        if piano.is_none() && grid.is_none() {
             return;
-        };
+        }
         // The keyboard may drive more than one manual — a confirmed
         // "keep both" — and each assignment carries its own shift.
         for keyboard in self.keyboard.clone() {
-            let Ok(key) = u8::try_from(note as i16 + keyboard.transpose as i16) else {
-                continue;
-            };
-            if key > 127 {
-                continue;
-            }
             let State {
                 engine, control, ..
             } = &mut *self;
             let Control::Organ(console) = control else {
                 return;
+            };
+            let landed: Option<i32> = match console.manual_hex(keyboard.manual) {
+                // The grid position asked of the manual's own layout —
+                // the same math as the on-screen board, so the shapes
+                // (and the duplicates) match it cap for hex.
+                Some(layout) => grid
+                    .map(|(col, row)| layout.key_at(col, row) + keyboard.transpose as i32),
+                None => piano.map(|note| note as i32 + keyboard.transpose as i32)
+                    .filter(|key| (0..=127).contains(key)),
+            };
+            let Some(key) = landed.and_then(|key| u16::try_from(key).ok()) else {
+                continue;
             };
             if pressed {
                 // The compass rule, exactly as MIDI routing applies it: a
@@ -896,7 +909,7 @@ impl State {
                 // A clicked key has no velocity; full, as GO's
                 // on-screen console sends.
                 let (starts, retriggered) =
-                    console.note_on_manual(keyboard.manual, u16::from(key), 127);
+                    console.note_on_manual(keyboard.manual, key, 127);
                 for handle in retriggered {
                     engine.send(Command::StopVoice { handle });
                 }
@@ -905,7 +918,7 @@ impl State {
                 }
             } else {
                 let (stopped, starts) =
-                    console.note_off_manual(keyboard.manual, u16::from(key));
+                    console.note_off_manual(keyboard.manual, key);
                 for handle in stopped {
                     engine.send(Command::StopVoice { handle });
                 }
@@ -4371,6 +4384,68 @@ mod tests {
     /// computer keyboard's never does. Two QWERTY rows are not a
     /// console: however it is assigned or shifted, the manual keeps the
     /// compass it had, and keys pushed past it stay silent.
+    #[test]
+    /// On a microtonal manual the computer keyboard is a hex surface,
+    /// not a piano: the four rows are a window onto the manual's own
+    /// layout, so caps land where the on-screen hexes do — including
+    /// the duplicates (under Bosanquet, Q sounds the same key as Z,
+    /// the way board row 2 duplicates row 0).
+    #[test]
+    fn the_computer_keyboard_plays_a_hex_manual_isomorphically() {
+        let Some((state, manual)) = demo_state("Gamba 8'") else {
+            return;
+        };
+        {
+            let mut locked = state.lock().expect("state poisoned");
+            let Control::Organ(console) = &mut locked.control else {
+                panic!("an organ is loaded");
+            };
+            console.force_manual_kind(manual, aristide_model::ManualKind::Microtonal);
+        }
+        assert!(bind_computer(&state, manual));
+        let layout = {
+            let locked = state.lock().expect("state poisoned");
+            let Control::Organ(console) = &locked.control else {
+                panic!("an organ is loaded");
+            };
+            console.manual_hex(manual).expect("a microtonal manual has a layout")
+        };
+        let anchor = layout.anchor;
+        assert_eq!((layout.right, layout.upright), (2, 1), "the derived Bosanquet default");
+
+        state.lock().expect("state").key("KeyZ", true);
+        assert_eq!(held_on(&state, manual), vec![anchor], "Z is the board's bottom left");
+        state.lock().expect("state").key("KeyA", true);
+        state.lock().expect("state").key("KeyS", true);
+        assert_eq!(
+            held_on(&state, manual),
+            vec![anchor, anchor + 1, anchor + 3],
+            "A one hex up-right (+upright), S one further right (+right)"
+        );
+        for code in ["KeyZ", "KeyA", "KeyS"] {
+            state.lock().expect("state").key(code, false);
+        }
+        assert!(held_on(&state, manual).is_empty(), "and they all release");
+
+        state.lock().expect("state").key("KeyQ", true);
+        assert_eq!(
+            held_on(&state, manual),
+            vec![anchor],
+            "Q duplicates Z — two uprights less one right is zero steps"
+        );
+        state.lock().expect("state").key("KeyQ", false);
+
+        // The letter rows' piano mapping stays what it is on a hand
+        // keyboard: nothing here changed the other manuals' vocabulary.
+        let hand = manual - 1;
+        assert!(bind_computer(&state, hand));
+        state.lock().expect("state").key("Comma", true);
+        assert!(
+            held_on(&state, hand).contains(&60),
+            "comma is still middle C on the hand keyboard"
+        );
+    }
+
     #[test]
     fn the_computer_keyboard_never_rescales_a_manual() {
         let Some((state, manual)) = demo_state("Gamba 8'") else {

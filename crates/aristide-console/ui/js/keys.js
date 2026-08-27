@@ -31,9 +31,40 @@ const UPPER_BASE = 60;
 
 const SHARPS = new Set([1, 3, 6, 8, 10]);
 
+/// A microtonal manual reads the keyboard differently: all four rows
+/// as a window onto its own hex grid, rows counted bottom-up exactly
+/// like the on-screen board (Z row = board row 0). Mirrors the
+/// server's `control::KEYBOARD_GRID` — the copy there decides what
+/// sounds, this one only draws — and must stay in step with it.
+const GRID_ROWS = [
+  { row: 3, codes: [
+    "Digit1", "Digit2", "Digit3", "Digit4", "Digit5", "Digit6", "Digit7",
+    "Digit8", "Digit9", "Digit0", "Minus", "Equal",
+  ] },
+  { row: 2, codes: [
+    "KeyQ", "KeyW", "KeyE", "KeyR", "KeyT", "KeyY", "KeyU", "KeyI",
+    "KeyO", "KeyP", "BracketLeft", "BracketRight",
+  ] },
+  { row: 1, codes: [
+    "KeyA", "KeyS", "KeyD", "KeyF", "KeyG", "KeyH", "KeyJ", "KeyK",
+    "KeyL", "Semicolon", "Quote",
+  ] },
+  { row: 0, codes: [
+    "KeyZ", "KeyX", "KeyC", "KeyV", "KeyB", "KeyN", "KeyM", "Comma",
+    "Period", "Slash",
+  ] },
+];
+const GRID = new Map();
+for (const { row, codes } of GRID_ROWS) {
+  codes.forEach((code, col) => GRID.set(code, [col, row]));
+}
+
 /// "KeyZ" -> "Z", "Digit2" -> "2", punctuation spelled as its glyph.
 function cap(code) {
-  const punctuation = { Comma: ",", Period: ".", Semicolon: ";", Slash: "/" };
+  const punctuation = {
+    Comma: ",", Period: ".", Semicolon: ";", Slash: "/", Quote: "'",
+    BracketLeft: "[", BracketRight: "]", Minus: "-", Equal: "=",
+  };
   return punctuation[code] ?? code.replace(/^(Key|Digit)/, "");
 }
 
@@ -60,6 +91,7 @@ export class PianoKeys {
     this.bound = new Set(); // key codes the player has bound to an action
     this.learning = false; // Preferences is waiting to be taught a control
     this.target = null; // the manual notes go to
+    this.mode = "piano"; // "piano" | "grid" — the legend's shape, from the target's kind
     this.signature = null;
     this.el = { panel: root.getElementById("keys-legend") };
     this.buildLegend();
@@ -82,7 +114,7 @@ export class PianoKeys {
     this.learning = snapshot.control_learning != null;
 
     const signature = JSON.stringify([
-      snapshot.manuals.map((m) => [m.idx, m.name, m.first_key, m.key_count]),
+      snapshot.manuals.map((m) => [m.idx, m.name, m.first_key, m.key_count, m.hex, m.colors]),
       snapshot.keyboard ?? null,
     ]);
     if (signature === this.signature) return;
@@ -93,15 +125,42 @@ export class PianoKeys {
     this.keyboard = snapshot.keyboard ?? null;
     this.target =
       snapshot.manuals.find((m) => m.idx === this.keyboard?.manual) ?? null;
+    // A microtonal manual turns the legend into the hex grid; the
+    // legend's shape follows the target, so it rebuilds on a change.
+    const mode = this.target?.hex ? "grid" : "piano";
+    if (mode !== this.mode) {
+      this.mode = mode;
+      this.buildLegend();
+    }
     this.paintLegend();
   }
 
-  /// The MIDI note a code plays right now, or null if it is unbound, the
-  /// keyboard is unassigned, or the note falls outside its manual.
+  /// Whether a code is the server's to hear as a note right now — the
+  /// piano rows on a hand keyboard, the four grid rows on a hex one.
+  playable(code) {
+    return this.target?.hex ? GRID.has(code) : OFFSETS.has(code);
+  }
+
+  /// The manual key a code plays right now, or null if it is unbound,
+  /// the keyboard is unassigned, or the key falls outside its manual.
+  /// On a hex manual this is the board's own math (see console.js's
+  /// hexKeys): the grid position walked along the layout's two
+  /// step-vectors from its anchor.
   noteFor(code) {
-    const offset = OFFSETS.get(code);
-    if (offset === undefined || !this.target || !this.keyboard) return null;
-    const midi = offset + this.keyboard.transpose;
+    if (!this.target || !this.keyboard) return null;
+    const hex = this.target.hex;
+    let midi;
+    if (hex) {
+      const at = GRID.get(code);
+      if (!at) return null;
+      const [col, row] = at;
+      const axial = col - Math.floor(row / 2);
+      midi = hex.anchor + axial * hex.right + row * hex.upright + this.keyboard.transpose;
+    } else {
+      const offset = OFFSETS.get(code);
+      if (offset === undefined) return null;
+      midi = offset + this.keyboard.transpose;
+    }
     const first = this.target.first_key;
     if (midi < first || midi >= first + this.target.key_count) return null;
     return midi;
@@ -144,7 +203,7 @@ export class PianoKeys {
       // Every key the server has a use for goes to it: the note rows,
       // anything bound to an action, and — while Preferences is waiting
       // to be taught — whatever the player presses next.
-      if (!this.learning && !OFFSETS.has(event.code) && !this.bound.has(event.code)) {
+      if (!this.learning && !this.playable(event.code) && !this.bound.has(event.code)) {
         return;
       }
       event.preventDefault(); // "/" opens WebKit's quick find otherwise
@@ -190,10 +249,18 @@ export class PianoKeys {
     panel.append(head);
 
     this.caps = new Map();
-    for (const row of [UPPER, LOWER]) {
+    // Piano mode shows the two note rows; grid mode all four, each
+    // odd board row nudged half a cap right so the legend staggers
+    // the way the hex board (and the physical keyboard) does.
+    const rows =
+      this.mode === "grid"
+        ? GRID_ROWS.map(({ row, codes }) => ({ codes, shifted: row % 2 === 1 }))
+        : [UPPER, LOWER].map((codes) => ({ codes, shifted: false }));
+    for (const { codes, shifted } of rows) {
       const line = document.createElement("div");
       line.className = "legend-row";
-      for (const code of row) {
+      line.classList.toggle("legend-row-shifted", shifted);
+      for (const code of codes) {
         const key = document.createElement("span");
         key.className = "legend-cap";
         const label = document.createElement("b");
@@ -218,11 +285,18 @@ export class PianoKeys {
   /// only reported here — it is assigned in Preferences → MIDI, the
   /// same place as every other device.
   paintLegend() {
+    const grid = this.mode === "grid";
     for (const [code, { key, note }] of this.caps) {
       const midi = this.noteFor(code);
-      key.classList.toggle("sharp", SHARPS.has(OFFSETS.get(code) % 12));
+      key.classList.toggle("sharp", !grid && SHARPS.has(OFFSETS.get(code) % 12));
       key.classList.toggle("out", midi === null);
-      note.textContent = midi === null ? "—" : keyName(midi);
+      // Hex keys aren't 12-EDO notes, so their caps carry the raw key
+      // number — and the manual's map colours, where a bound Lumatone
+      // .ltn provides them, the same tint the on-screen hexes wear.
+      note.textContent = midi === null ? "—" : grid ? String(midi) : keyName(midi);
+      const color = grid && midi != null ? this.target?.colors?.[midi] : null;
+      key.classList.toggle("tinted", !!color);
+      if (color) key.style.setProperty("--cap-color", color);
     }
     this.el.plays.textContent = this.target
       ? `plays ${this.target.name}`

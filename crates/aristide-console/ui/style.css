@@ -1717,6 +1717,12 @@ input[type="range"]:hover::-webkit-slider-thumb { filter: brightness(1.15); }
 .legend-cap.sharp { background: var(--key-black); border-color: #ffffff0d; }
 .legend-cap.sharp b { color: var(--text-dim); }
 
+/* Hex-grid mode: odd board rows sit half a cap right, like the board
+   itself; a cap whose key wears a Lumatone map colour wears it too. */
+.legend-row-shifted { margin-left: 17px; }
+.legend-cap.tinted { background: var(--cap-color); }
+.legend-cap.tinted b, .legend-cap.tinted i { color: #14161a; }
+
 /* past the end of the manual's compass */
 .legend-cap.out { opacity: 0.35; }
 

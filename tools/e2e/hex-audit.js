@@ -185,6 +185,31 @@ try {
     "the snapshot agrees with the form"
   );
 
+  // ---- computer keyboard as a hex surface ----------------------------
+  await post(`/api/midi/bind?manual=0&slot=0&device=${encodeURIComponent("Computer keyboard")}`);
+  await d.navigate(`http://127.0.0.1:${UI_PORT}/index.html?server=${S}`);
+  await d.sleep(2000);
+  snap = await state();
+  const hx = snap.manuals[0].hex;
+  for (const code of ["KeyZ", "KeyS"]) {
+    await d.eval(`window.dispatchEvent(new KeyboardEvent('keydown', { code: ${JSON.stringify(code)} }))`);
+  }
+  await d.sleep(800);
+  const heldNow = (await state()).manuals[0].held;
+  const expected = [hx.anchor, hx.anchor + hx.right + hx.upright].sort((a, b) => a - b);
+  check(
+    JSON.stringify(heldNow) === JSON.stringify(expected),
+    `computer keyboard: Z and S land on the layout's own lattice (${JSON.stringify(heldNow)} vs ${JSON.stringify(expected)})`
+  );
+  const legendRows = await d.eval(`(() => {
+    document.getElementById('keys-legend').classList.remove('hidden');
+    return document.querySelectorAll('#keys-legend .legend-row').length;
+  })()`);
+  check(legendRows === 4, `legend shows the four grid rows (${legendRows})`);
+  for (const code of ["KeyZ", "KeyS"]) {
+    await d.eval(`window.dispatchEvent(new KeyboardEvent('keyup', { code: ${JSON.stringify(code)} }))`);
+  }
+
   // ---- colours -------------------------------------------------------
   const port = (snap.midi?.ports ?? []).find((p) => !p.virtual);
   if (!port) {

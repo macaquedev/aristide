@@ -200,6 +200,44 @@ pub fn key_note(code: &str) -> Option<u8> {
         .map(|(_, note)| *note)
 }
 
+/// The four QWERTY rows as a hex-field surface — how the computer
+/// keyboard plays a *microtonal* manual, where the piano mapping above
+/// (naturals and sharps) is the wrong vocabulary. Entries are
+/// `(code, col, row)` with rows counted bottom-up, exactly the
+/// convention of the on-screen hex board: the Z row is board row 0,
+/// A row 1, Q row 2, the digit row 3, and the key each cap sounds is
+/// the manual's own layout asked at that grid position
+/// (`HexLayout::key_at` + the keyboard's shift). The physical stagger
+/// of a keyboard is close enough to a hex grid's that the isomorphic
+/// shapes carry over — under Bosanquet, Q duplicates Z the way the
+/// board's row 2 duplicates its row 0.
+///
+/// The console UI draws this same table as its legend; keep in step.
+pub const KEYBOARD_GRID: [(&str, u8, u8); 45] = [
+    ("KeyZ", 0, 0), ("KeyX", 1, 0), ("KeyC", 2, 0), ("KeyV", 3, 0),
+    ("KeyB", 4, 0), ("KeyN", 5, 0), ("KeyM", 6, 0), ("Comma", 7, 0),
+    ("Period", 8, 0), ("Slash", 9, 0),
+    ("KeyA", 0, 1), ("KeyS", 1, 1), ("KeyD", 2, 1), ("KeyF", 3, 1),
+    ("KeyG", 4, 1), ("KeyH", 5, 1), ("KeyJ", 6, 1), ("KeyK", 7, 1),
+    ("KeyL", 8, 1), ("Semicolon", 9, 1), ("Quote", 10, 1),
+    ("KeyQ", 0, 2), ("KeyW", 1, 2), ("KeyE", 2, 2), ("KeyR", 3, 2),
+    ("KeyT", 4, 2), ("KeyY", 5, 2), ("KeyU", 6, 2), ("KeyI", 7, 2),
+    ("KeyO", 8, 2), ("KeyP", 9, 2), ("BracketLeft", 10, 2), ("BracketRight", 11, 2),
+    ("Digit1", 0, 3), ("Digit2", 1, 3), ("Digit3", 2, 3), ("Digit4", 3, 3),
+    ("Digit5", 4, 3), ("Digit6", 5, 3), ("Digit7", 6, 3), ("Digit8", 7, 3),
+    ("Digit9", 8, 3), ("Digit0", 9, 3), ("Minus", 10, 3), ("Equal", 11, 3),
+];
+
+/// The grid position a computer key holds on a hex-field manual, if
+/// any. Bindings still win before this is ever asked (`=` bound to
+/// octave-up never plays a note).
+pub fn key_grid(code: &str) -> Option<(u8, u8)> {
+    KEYBOARD_GRID
+        .iter()
+        .find(|(key, _, _)| *key == code)
+        .map(|(_, col, row)| (*col, *row))
+}
+
 /// The span the rows cover — the computer keyboard's own compass, the
 /// way a MIDI keyboard's is the width of its keys.
 pub fn keyboard_compass() -> (u8, u8) {
