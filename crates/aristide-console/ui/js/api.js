@@ -187,6 +187,28 @@ export const commands = {
   organStopSource: (id, from, sourceManual, sourceStop) =>
     `/api/organ/stop/source?stop=${id}&from=${encodeURIComponent(from)}` +
     `&manual=${encodeURIComponent(sourceManual)}&source_stop=${encodeURIComponent(sourceStop)}`,
+  // A stop's engraved footage line, live — no rebuild, the same
+  // partial-update contract as organStopVoice. `fields.label` is the
+  // exact text to engrave (an empty string engraves nothing, so the
+  // name stands alone); `fields.auto: 1` goes back to engraving
+  // whatever footage the stop actually speaks at.
+  organStopLabel: (id, fields) => `/api/organ/stop/label?${new URLSearchParams({ stop: id, ...fields })}`,
+  // A coupler's own name, live — no rebuild. 400s on a clash with a
+  // sibling coupler's name.
+  organCouplerRename: (idx, name) => `/api/organ/coupler/rename?idx=${idx}&name=${encodeURIComponent(name)}`,
+  // Replaces a coupler's routes outright: structural, the same rebuild
+  // contract as the manual/pull family above — the file rewrites and
+  // the organ rebuilds. `routes` is an array of objects using the same
+  // field names the snapshot's own `couplers[].routes` carries
+  // (from/to as manual indexes, shift, and the optional low/high/
+  // unison_off/scope/repitch); `to: null` silences the coupled notes
+  // rather than sounding them on another manual.
+  organCouplerRoutes: (idx, routes) =>
+    `/api/organ/coupler/routes?idx=${idx}&routes=${encodeURIComponent(JSON.stringify(routes))}`,
+  // Adds a new coupler outright — same route vocabulary and the same
+  // structural-edit contract as organCouplerRoutes.
+  organCouplerAdd: (name, routes) =>
+    `/api/organ/coupler/add?name=${encodeURIComponent(name)}&routes=${encodeURIComponent(JSON.stringify(routes))}`,
 };
 
 /// Start the client. Calls `onState(snapshot)` for every fresh snapshot,

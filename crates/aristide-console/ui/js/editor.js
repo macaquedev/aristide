@@ -13,7 +13,7 @@
 // is called on every poll, the same as Preferences and the other panels.
 
 import { commands } from "./api.js";
-import { keyName, parseKeyName } from "./pitch.js";
+import { formatFootage, keyName, parseKeyName } from "./pitch.js";
 
 // What the native add-source dialog offers. Narrower than the picker's
 // filter: a source must be a sample set — the server refuses another
@@ -31,42 +31,6 @@ const KEYBOARD_KINDS = [
   ["pedal", "Pedalboard"],
   ["microtonal", "Microtonal keyboard"],
 ];
-
-/// Footages the organ world writes as fractions, feet paired with the
-/// label — in the order the stop popover's own datalist offers them.
-/// `formatFootage` uses the same table (extended a fourth-foot lower)
-/// to snap a computed value back to its familiar name.
-const STANDARD_FOOTAGES = [
-  [32, "32"],
-  [16, "16"],
-  [32 / 3, "10 2/3"],
-  [8, "8"],
-  [32 / 5, "6 2/5"],
-  [16 / 3, "5 1/3"],
-  [4, "4"],
-  [16 / 5, "3 1/5"],
-  [8 / 3, "2 2/3"],
-  [2, "2"],
-  [8 / 5, "1 3/5"],
-  [4 / 3, "1 1/3"],
-  [1, "1"],
-  [4 / 5, "4/5"],
-  [2 / 3, "2/3"],
-  [1 / 2, "1/2"],
-];
-
-/// A footage in feet, written the way the organ world writes it. A rank
-/// is never built to land exactly on 5.333' — it's "5 1/3" tuned a hair
-/// sharp or flat — so a value within 60 cents (a quarter-semitone) of a
-/// standard footage snaps to that name; anything further off isn't
-/// really that footage any more; it's shown as plain feet instead.
-function formatFootage(feet) {
-  if (feet == null) return "";
-  for (const [candidate, label] of STANDARD_FOOTAGES) {
-    if (Math.abs(1200 * Math.log2(feet / candidate)) < 60) return label;
-  }
-  return feet.toFixed(2);
-}
 
 /// Swallows the click a suppressed drag would otherwise leave behind —
 /// a drag that crossed the threshold must not also toggle the drawknob
@@ -103,6 +67,13 @@ export class Editor {
     this.tremOpen = null; // trem idx the shape popover is open for, or null
     this.stopOpen = null; // stop id the stop-editor popover is open for, or null
     this.stopSrcOpen = false; // the stop popover's own source-picker subview is showing
+    this.couplerOpen = null; // coupler idx the route-editor popover is open for, or null
+    // The open coupler's routes, edited locally: cloned from the
+    // snapshot the moment the popover opens and never re-synced from a
+    // later poll while it's up (see openCouplerForm/syncCouplerForm) —
+    // every routes change rebuilds the organ, and "Apply routes" is the
+    // only thing that ever posts them, once, as a whole.
+    this.couplerRoutes = null;
     this.tuningBrowseKind = null; // "scale" | "keymap" | null — the tuning form's own file browser
     this.tuningBrowseDir = null;
     this.tuningBrowseParent = null;
@@ -208,6 +179,24 @@ export class Editor {
       stopSrcView: root.getElementById("editor-stop-src-view"),
       stopSrcList: root.getElementById("editor-stop-src-list"),
       stopSrcCancel: root.getElementById("editor-stop-src-cancel"),
+      stopLabelMode: root.getElementById("editor-stop-label-mode"),
+      stopLabelText: root.getElementById("editor-stop-label-text"),
+      coupler: root.getElementById("editor-coupler"),
+      couplerForm: root.getElementById("editor-coupler-form"),
+      couplerTitle: root.getElementById("editor-coupler-title"),
+      couplerName: root.getElementById("editor-coupler-name"),
+      couplerRoutesBox: root.getElementById("editor-coupler-routes"),
+      couplerRouteAdd: root.getElementById("editor-coupler-route-add"),
+      couplerApply: root.getElementById("editor-coupler-apply"),
+      couplerError: root.getElementById("editor-coupler-error"),
+      couplerClose: root.getElementById("editor-coupler-close"),
+      addCoupler: root.getElementById("editor-add-coupler"),
+      addCouplerForm: root.getElementById("editor-add-coupler-form"),
+      addCouplerName: root.getElementById("editor-add-coupler-name"),
+      addCouplerFrom: root.getElementById("editor-add-coupler-from"),
+      addCouplerTo: root.getElementById("editor-add-coupler-to"),
+      addCouplerShift: root.getElementById("editor-add-coupler-shift"),
+      addCouplerCancel: root.getElementById("editor-add-coupler-cancel"),
       hex: root.getElementById("editor-hex"),
       hexTitle: root.getElementById("editor-hex-title"),
       hexReset: root.getElementById("editor-hex-reset"),
@@ -228,6 +217,7 @@ export class Editor {
     this.wireHexForm();
     this.wireTremForm();
     this.wireStopForm();
+    this.wireCouplerForm();
     this.wireCanvas();
   }
 
@@ -303,6 +293,7 @@ export class Editor {
     this.closeHexForm();
     this.closeTremForm();
     this.closeStopForm();
+    this.closeCouplerForm();
   }
 
   // A double-click on a locked canvas is someone reaching for the add
@@ -377,6 +368,7 @@ export class Editor {
     if (this.hexManual != null) this.syncHexForm();
     if (this.tremOpen != null) this.syncTremForm();
     if (this.stopOpen != null) this.syncStopForm();
+    if (this.couplerOpen != null) this.syncCouplerForm();
   }
 
   /// Called by Console right after every structural rebuild (see its
@@ -395,6 +387,7 @@ export class Editor {
     this.wireTremKnob();
     this.wireCheekRename();
     this.wireKeyboardContextMenu();
+    this.wireCouplerContextMenus();
     this.wirePanelMoves(snapshot);
     this.addDivisionButtons(snapshot);
     this.placePending(snapshot);
@@ -500,6 +493,26 @@ export class Editor {
           return;
         }
         this.openKeyboardMenu(idx, event.clientX, event.clientY);
+      });
+    }
+  }
+
+  /// Right-click a coupler rocker in edit mode opens its route editor —
+  /// the same reach-through-the-lock contract as the stop and keyboard
+  /// context menus. The cancel piston's `data-key` is "cancel", not
+  /// "coupler-N", so the selector already leaves it out.
+  wireCouplerContextMenus() {
+    for (const rocker of this.root.querySelectorAll('.rocker[data-key^="coupler-"]')) {
+      const idx = Number(rocker.dataset.key.slice("coupler-".length));
+      rocker.title = "Right-click to edit this coupler.";
+      rocker.addEventListener("contextmenu", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (!this.unlocked && !event.ctrlKey) {
+          this.nudgeUnlock();
+          return;
+        }
+        this.openCouplerForm(idx, event.clientX, event.clientY);
       });
     }
   }
@@ -646,6 +659,7 @@ export class Editor {
   }
 
   openDivisionMenu(idx, anchor) {
+    this.closeCouplerForm();
     const menu = this.el.divisionMenu;
     menu.replaceChildren();
     this.buildDivisionMenuItems(menu, idx);
@@ -752,6 +766,7 @@ export class Editor {
     this.closeAdd();
     this.closeDivisionMenu();
     this.closeTuningForm();
+    this.closeCouplerForm();
     const menu = this.el.keyboardMenu;
     menu.replaceChildren();
     this.buildKeyboardMenuItems(menu, idx);
@@ -897,6 +912,7 @@ export class Editor {
     this.closeDivisionMenu();
     this.closeKeyboardMenu();
     this.closeHexForm();
+    this.closeCouplerForm();
     this.tuningManual = idx;
     this.hideTuningError();
     this.closeTuningBrowse();
@@ -1071,6 +1087,7 @@ export class Editor {
     this.closeKeyboardMenu();
     this.closeTuningForm();
     this.closeHexForm();
+    this.closeCouplerForm();
     this.tremOpen = trem.idx;
     this.hideTremError();
     this.syncTremForm();
@@ -1167,6 +1184,26 @@ export class Editor {
       if (this.stopOpen == null) return;
       this.stopCommand(commands.organStopVoice(this.stopOpen, { reset: 1 }));
     });
+
+    this.el.stopLabelMode.addEventListener("change", () => {
+      if (this.stopOpen == null) return;
+      const mode = this.el.stopLabelMode.value;
+      this.el.stopLabelText.classList.toggle("hidden", mode !== "custom");
+      if (mode === "auto") {
+        this.stopCommand(commands.organStopLabel(this.stopOpen, { auto: 1 }));
+      } else if (mode === "none") {
+        this.stopCommand(commands.organStopLabel(this.stopOpen, { label: "" }));
+      } else {
+        // "custom" posts nothing yet — reveal the text field and let
+        // the player type the engraving; it commits on its own change.
+        this.el.stopLabelText.focus();
+      }
+    });
+
+    this.el.stopLabelText.addEventListener("change", () => {
+      if (this.stopOpen == null) return;
+      this.stopCommand(commands.organStopLabel(this.stopOpen, { label: this.el.stopLabelText.value }));
+    });
   }
 
   openStopForm(id, x, y) {
@@ -1176,6 +1213,7 @@ export class Editor {
     this.closeTuningForm();
     this.closeHexForm();
     this.closeTremForm();
+    this.closeCouplerForm();
     this.stopOpen = id;
     this.hideStopError();
     this.closeStopSrcView();
@@ -1222,6 +1260,14 @@ export class Editor {
 
     if (this.root.activeElement !== this.el.stopCents) this.el.stopCents.value = pitch.cents ?? 0;
     if (this.root.activeElement !== this.el.stopGain) this.el.stopGain.value = pitch.gain ?? 0;
+
+    // label absent = auto, "" = hidden, anything else = that exact text.
+    const labelMode = stop.label == null ? "auto" : stop.label === "" ? "none" : "custom";
+    if (this.root.activeElement !== this.el.stopLabelMode) this.el.stopLabelMode.value = labelMode;
+    this.el.stopLabelText.classList.toggle("hidden", labelMode !== "custom");
+    if (labelMode === "custom" && this.root.activeElement !== this.el.stopLabelText) {
+      this.el.stopLabelText.value = stop.label;
+    }
 
     const src = stop.src;
     this.el.stopSrc.textContent = src
@@ -1321,6 +1367,208 @@ export class Editor {
     }
   }
 
+  // ---- the coupler-route popover: right-click any coupler rocker ----------
+  //
+  // A rename posts live, field by field, the stop popover's own
+  // contract. But a routes change always rebuilds the organ (the file's
+  // coupler line is rewritten outright), so the route table edits a
+  // local working copy — cloned once when the popover opens — and only
+  // "Apply routes" ever posts it, as a whole. Later polls, while the
+  // popover is open, refresh the title and name but deliberately leave
+  // the working copy alone; reopening the popover re-clones it fresh.
+
+  wireCouplerForm() {
+    this.el.couplerClose.addEventListener("click", () => this.closeCouplerForm());
+    // Every field commits its own way (name on change, routes only on
+    // Apply) — Enter in the name field must not also reload the page.
+    this.el.couplerForm.addEventListener("submit", (event) => event.preventDefault());
+
+    this.el.couplerName.addEventListener("change", () => {
+      if (this.couplerOpen == null) return;
+      const coupler = this.lastSnapshot?.couplers.find((c) => c.idx === this.couplerOpen);
+      const name = this.el.couplerName.value.trim();
+      if (!coupler || !name || name === coupler.name) return;
+      this.couplerCommand(commands.organCouplerRename(this.couplerOpen, name));
+    });
+
+    this.el.couplerRouteAdd.addEventListener("click", () => {
+      if (!this.couplerRoutes) return;
+      this.couplerRoutes.push({ from: 0, to: 0, shift: 0 });
+      this.renderCouplerRoutes();
+    });
+
+    this.el.couplerApply.addEventListener("click", () => {
+      if (this.couplerOpen == null || !this.couplerRoutes) return;
+      this.couplerCommand(commands.organCouplerRoutes(this.couplerOpen, this.couplerRoutes));
+    });
+  }
+
+  openCouplerForm(idx, x, y) {
+    const coupler = this.lastSnapshot?.couplers.find((c) => c.idx === idx);
+    if (!coupler) return;
+    this.closeAdd();
+    this.closeDivisionMenu();
+    this.closeKeyboardMenu();
+    this.closeTuningForm();
+    this.closeHexForm();
+    this.closeTremForm();
+    this.closeStopForm();
+    this.couplerOpen = idx;
+    this.hideCouplerError();
+    this.couplerRoutes = structuredClone(coupler.routes ?? []);
+    this.renderCouplerRoutes();
+    this.el.couplerTitle.textContent = coupler.name;
+    if (this.root.activeElement !== this.el.couplerName) this.el.couplerName.value = coupler.name;
+    this.el.coupler.classList.remove("hidden");
+    this.positionPopover(this.el.coupler, x, y);
+  }
+
+  closeCouplerForm() {
+    this.couplerOpen = null;
+    this.couplerRoutes = null;
+    this.el.coupler.classList.add("hidden");
+    this.hideCouplerError();
+  }
+
+  /// Refreshes only the title and (unless focused) the name field from
+  /// the snapshot — the routes stay the local working copy untouched
+  /// (see the section header above). A coupler that vanished (removed
+  /// from elsewhere) takes its popover with it.
+  syncCouplerForm() {
+    const coupler = this.lastSnapshot?.couplers.find((c) => c.idx === this.couplerOpen);
+    if (!coupler) {
+      this.closeCouplerForm();
+      return;
+    }
+    this.el.couplerTitle.textContent = coupler.name;
+    if (this.root.activeElement !== this.el.couplerName) this.el.couplerName.value = coupler.name;
+  }
+
+  /// Rebuilds the route blocks from `this.couplerRoutes` — the local
+  /// working copy, never the snapshot directly. Each route gets a
+  /// compact two-line block; fields this form doesn't expose (low/high/
+  /// repitch) are left on the route object untouched, so Apply round-
+  /// trips them.
+  renderCouplerRoutes() {
+    const container = this.el.couplerRoutesBox;
+    container.replaceChildren();
+    const manuals = this.lastSnapshot?.manuals ?? [];
+    const manualOptions = (select, includeNone) => {
+      select.replaceChildren();
+      if (includeNone) {
+        const none = document.createElement("option");
+        none.value = "";
+        none.textContent = "(none — silence only)";
+        select.append(none);
+      }
+      for (const manual of manuals) {
+        const opt = document.createElement("option");
+        opt.value = manual.idx;
+        opt.textContent = manual.name;
+        select.append(opt);
+      }
+    };
+
+    this.couplerRoutes.forEach((route, i) => {
+      const block = document.createElement("div");
+      block.className = "coupler-route";
+
+      const line1 = document.createElement("div");
+      line1.className = "coupler-route-row";
+
+      const fromSelect = document.createElement("select");
+      manualOptions(fromSelect, false);
+      fromSelect.value = route.from ?? "";
+      fromSelect.addEventListener("change", () => {
+        route.from = fromSelect.value === "" ? null : Number(fromSelect.value);
+      });
+
+      const toSelect = document.createElement("select");
+      manualOptions(toSelect, true);
+      toSelect.value = route.to == null ? "" : route.to;
+      toSelect.addEventListener("change", () => {
+        route.to = toSelect.value === "" ? null : Number(toSelect.value);
+      });
+
+      const shiftInput = document.createElement("input");
+      shiftInput.type = "number";
+      shiftInput.min = "-24";
+      shiftInput.max = "24";
+      shiftInput.step = "1";
+      shiftInput.value = route.shift ?? 0;
+      shiftInput.addEventListener("change", () => {
+        const value = Number(shiftInput.value);
+        route.shift = Number.isFinite(value) ? value : 0;
+      });
+
+      line1.append(fromSelect, toSelect, shiftInput);
+
+      const line2 = document.createElement("div");
+      line2.className = "coupler-route-row";
+
+      const scopeSelect = document.createElement("select");
+      for (const [value, text] of [["", "All keys"], ["bass", "Bass"], ["melody", "Melody"]]) {
+        const opt = document.createElement("option");
+        opt.value = value;
+        opt.textContent = text;
+        scopeSelect.append(opt);
+      }
+      scopeSelect.value = route.scope ?? "";
+      scopeSelect.addEventListener("change", () => {
+        if (scopeSelect.value) route.scope = scopeSelect.value;
+        else delete route.scope;
+      });
+
+      const unisonLabel = document.createElement("label");
+      const unisonCheck = document.createElement("input");
+      unisonCheck.type = "checkbox";
+      unisonCheck.checked = !!route.unison_off;
+      unisonCheck.addEventListener("change", () => {
+        if (unisonCheck.checked) route.unison_off = true;
+        else delete route.unison_off;
+      });
+      unisonLabel.append(unisonCheck, document.createTextNode(" unison off"));
+
+      line2.append(scopeSelect, unisonLabel);
+
+      if (this.couplerRoutes.length > 1) {
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "ghost coupler-route-remove";
+        remove.title = "Remove this route";
+        remove.textContent = "×";
+        remove.addEventListener("click", () => {
+          this.couplerRoutes.splice(i, 1);
+          this.renderCouplerRoutes();
+        });
+        line2.append(remove);
+      }
+
+      block.append(line1, line2);
+      container.append(block);
+    });
+  }
+
+  /// Sends a coupler field update directly (not through the app-wide
+  /// `send()`), so a 400's reason lands in this popover rather than the
+  /// global status strip — the same local-fetch idiom `stopCommand` uses.
+  async couplerCommand(query) {
+    this.hideCouplerError();
+    const { ok, error } = await this.organCommandResult(query);
+    if (error != null) this.showCouplerError(error);
+    return ok;
+  }
+
+  showCouplerError(text) {
+    this.el.couplerError.textContent = text;
+    this.el.couplerError.classList.remove("hidden");
+  }
+
+  hideCouplerError() {
+    this.el.couplerError.classList.add("hidden");
+    this.el.couplerError.textContent = "";
+  }
+
   // ---- the hex-layout popover: a microtonal manual's isomorphic grid ------
   //
   // Two step-vectors (right, up-right, in key-number steps), the grid
@@ -1367,6 +1615,7 @@ export class Editor {
     this.closeDivisionMenu();
     this.closeKeyboardMenu();
     this.closeTuningForm();
+    this.closeCouplerForm();
     this.hexManual = idx;
     this.hideHexError();
     this.syncHexForm();
@@ -1984,6 +2233,7 @@ export class Editor {
       this.el.hex,
       this.el.trem,
       this.el.stop,
+      this.el.coupler,
     ]) {
       el.addEventListener("click", (event) => event.stopPropagation());
     }
@@ -1995,6 +2245,7 @@ export class Editor {
       this.closeHexForm();
       this.closeTremForm();
       this.closeStopForm();
+      this.closeCouplerForm();
     });
     window.addEventListener("keydown", (event) => {
       if (event.key !== "Escape") return;
@@ -2005,11 +2256,13 @@ export class Editor {
       this.closeHexForm();
       this.closeTremForm();
       this.closeStopForm();
+      this.closeCouplerForm();
     });
   }
 
   openAddMenu(x, y) {
     this.closeDivisionMenu();
+    this.closeCouplerForm();
     this.addAnchor = { x, y };
     this.closeAddPanels();
     this.el.add.classList.remove("hidden");
@@ -2034,6 +2287,7 @@ export class Editor {
     this.el.addMenu.classList.add("hidden");
     this.el.addManualForm.classList.add("hidden");
     this.el.addEncForm.classList.add("hidden");
+    this.el.addCouplerForm.classList.add("hidden");
     this.el.addSourceForm.classList.add("hidden");
   }
 
@@ -2042,9 +2296,11 @@ export class Editor {
     this.el.addPedal.addEventListener("click", () => this.openManualForm("pedal"));
     this.el.addMicrotonal.addEventListener("click", () => this.openManualForm("microtonal"));
     this.el.addEnc.addEventListener("click", () => this.openEncForm());
+    this.el.addCoupler.addEventListener("click", () => this.openCouplerAddForm());
     this.el.addSource.addEventListener("click", () => this.openSourceForm());
     this.el.addManualCancel.addEventListener("click", () => this.closeAdd());
     this.el.addEncCancel.addEventListener("click", () => this.closeAdd());
+    this.el.addCouplerCancel.addEventListener("click", () => this.closeAdd());
     this.el.addSourceCancel.addEventListener("click", () => this.closeAdd());
 
     this.el.addManualForm.addEventListener("submit", (event) => {
@@ -2071,6 +2327,19 @@ export class Editor {
       const name = this.el.addEncName.value.trim();
       if (!name) return;
       this.organCommand(commands.organEnclosureAdd(name)).then((ok) => ok && this.closeAdd());
+    });
+
+    this.el.addCouplerForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const name = this.el.addCouplerName.value.trim();
+      if (!name) return;
+      const from = Number(this.el.addCouplerFrom.value);
+      const to = Number(this.el.addCouplerTo.value);
+      const shift = Math.min(24, Math.max(-24, Math.round(Number(this.el.addCouplerShift.value) || 0)));
+      if (!Number.isFinite(from) || !Number.isFinite(to)) return;
+      this.organCommand(commands.organCouplerAdd(name, [{ from, to, shift }])).then(
+        (ok) => ok && this.closeAdd()
+      );
     });
 
     this.el.addSourceAdd.addEventListener("click", () => {
@@ -2140,6 +2409,25 @@ export class Editor {
     this.el.addEncForm.classList.remove("hidden");
     if (this.addAnchor) this.positionPopover(this.el.add, this.addAnchor.x, this.addAnchor.y);
     requestAnimationFrame(() => this.el.addEncName.focus());
+  }
+
+  openCouplerAddForm() {
+    this.closeAddPanels();
+    this.el.addCouplerForm.classList.remove("hidden");
+    this.el.addCouplerName.value = "";
+    this.el.addCouplerShift.value = 0;
+    const manuals = this.lastSnapshot?.manuals ?? [];
+    for (const select of [this.el.addCouplerFrom, this.el.addCouplerTo]) {
+      select.replaceChildren();
+      for (const manual of manuals) {
+        const opt = document.createElement("option");
+        opt.value = manual.idx;
+        opt.textContent = manual.name;
+        select.append(opt);
+      }
+    }
+    if (this.addAnchor) this.positionPopover(this.el.add, this.addAnchor.x, this.addAnchor.y);
+    requestAnimationFrame(() => this.el.addCouplerName.focus());
   }
 
   openSourceForm() {

@@ -237,4 +237,31 @@ export function applyHarnessHooks({ prefs, editor }) {
       }
     }, 400);
   }
+
+  // A coupler rocker, found by its numeric idx (matching its data-key)
+  // or by its rail text — either is handy from a screenshot script that
+  // only knows one of them.
+  function findCouplerRocker(ref) {
+    const rockers = [...document.querySelectorAll('.rocker[data-key^="coupler-"]')];
+    const byIdx = rockers.find((r) => r.dataset.key === `coupler-${ref}`);
+    if (byIdx) return byIdx;
+    return rockers.find((r) => r.querySelector(".tab")?.textContent === ref);
+  }
+
+  // The coupler-route popover, via a right-click on its rocker.
+  const couplerFormParam = params.get("couplerForm"); // a coupler idx or name
+  if (couplerFormParam != null) {
+    setTimeout(() => {
+      editor.unlock();
+      const rocker = findCouplerRocker(couplerFormParam);
+      if (!rocker) return;
+      const rect = rocker.getBoundingClientRect();
+      rocker.dispatchEvent(
+        new MouseEvent("contextmenu", {
+          bubbles: true, cancelable: true,
+          clientX: rect.left + 10, clientY: rect.top + 10,
+        })
+      );
+    }, 400);
+  }
 }

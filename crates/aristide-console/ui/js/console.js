@@ -15,6 +15,7 @@
 // is the editor's job (editor.js); this file only draws and places.
 
 import { commands } from "./api.js";
+import { formatFootage } from "./pitch.js";
 
 const SHARPS = new Set([1, 3, 6, 8, 10]);
 const isSharp = (midi) => SHARPS.has(midi % 12);
@@ -35,6 +36,24 @@ function splitLabel(name) {
     return [name.slice(0, at), name.slice(at + 1)];
   }
   return [name, ""];
+}
+
+/// A stop drawknob's two engraved lines, from data rather than parsed
+/// out of the name. `stop.label` carries the contract: absent means
+/// auto — engrave whatever footage the stop actually speaks at right
+/// now (its own override if voiced, else its native pitch); `""` means
+/// engrave nothing below the name, so the name stands alone on one
+/// line; any other string is engraved verbatim. A mixture speaks no
+/// single footage, and an old server sends no pitch at all — both fall
+/// back to splitLabel's guess from the name text, same as before this
+/// existed.
+function stopFace(stop) {
+  if (stop.label === "") return [stop.name, ""];
+  if (stop.label != null) return [splitLabel(stop.name)[0], stop.label];
+  const effective = stop.pitch ? (stop.pitch.footage ?? stop.pitch.native) : null;
+  return effective != null
+    ? [splitLabel(stop.name)[0], `${formatFootage(effective)}'`]
+    : splitLabel(stop.name);
 }
 
 export class Console {
@@ -86,7 +105,7 @@ export class Console {
     this.root.body.classList.toggle("no-organ", !snapshot.organ);
     const signature = JSON.stringify([
       snapshot.organ,
-      snapshot.stops.map((s) => [s.id, s.name, s.manual]),
+      snapshot.stops.map((s) => [s.id, s.name, s.manual, ...stopFace(s)]),
       snapshot.couplers.map((c) => [c.name, !!c.hidden]),
       snapshot.manuals.map((m) => [m.name, m.first_key, m.key_count, m.kind, m.hex, m.colors]),
       // No organ (the picker's start-empty state) sends no enclosures
@@ -218,7 +237,7 @@ export class Console {
       column.append(head);
       for (const stop of stops) {
         column.append(this.drawknob(stop.name, `stop-${stop.id}`, (on) =>
-          this.send(commands.stop(stop.id, on))
+          this.send(commands.stop(stop.id, on)), stopFace(stop)
         ));
       }
       body.append(column);
@@ -274,11 +293,16 @@ export class Console {
     }
   }
 
-  drawknob(name, key, flip) {
+  /// `lines`, when given, is the `[nameLine, footageLine]` pair to
+  /// engrave — see `stopFace` — so a stop's face comes from its data
+  /// rather than being re-derived from its name here. Omitted (every
+  /// non-stop knob, e.g. the Tremblant), it falls back to splitting the
+  /// name the old way.
+  drawknob(name, key, flip, lines) {
     const knob = document.createElement("button");
     knob.className = "knob";
     knob.dataset.key = key;
-    const [line, foot] = splitLabel(name);
+    const [line, foot] = lines ?? splitLabel(name);
     const face = document.createElement("span");
     face.className = "face";
     const label = document.createElement("span");

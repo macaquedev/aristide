@@ -5,6 +5,42 @@
 const NOTE_NAMES = ["C", "C♯", "D", "E♭", "E", "F", "F♯", "G", "A♭", "A", "B♭", "B"];
 const LETTER_SEMITONES = { c: 0, d: 2, e: 4, f: 5, g: 7, a: 9, b: 11 };
 
+/// Footages the organ world writes as fractions, feet paired with the
+/// label — in the order the stop popover's own datalist offers them.
+/// `formatFootage` uses the same table (extended a fourth-foot lower)
+/// to snap a computed value back to its familiar name.
+export const STANDARD_FOOTAGES = [
+  [32, "32"],
+  [16, "16"],
+  [32 / 3, "10 2/3"],
+  [8, "8"],
+  [32 / 5, "6 2/5"],
+  [16 / 3, "5 1/3"],
+  [4, "4"],
+  [16 / 5, "3 1/5"],
+  [8 / 3, "2 2/3"],
+  [2, "2"],
+  [8 / 5, "1 3/5"],
+  [4 / 3, "1 1/3"],
+  [1, "1"],
+  [4 / 5, "4/5"],
+  [2 / 3, "2/3"],
+  [1 / 2, "1/2"],
+];
+
+/// A footage in feet, written the way the organ world writes it. A rank
+/// is never built to land exactly on 5.333' — it's "5 1/3" tuned a hair
+/// sharp or flat — so a value within 60 cents (a quarter-semitone) of a
+/// standard footage snaps to that name; anything further off isn't
+/// really that footage any more; it's shown as plain feet instead.
+export function formatFootage(feet) {
+  if (feet == null) return "";
+  for (const [candidate, label] of STANDARD_FOOTAGES) {
+    if (Math.abs(1200 * Math.log2(feet / candidate)) < 60) return label;
+  }
+  return feet.toFixed(2);
+}
+
 /// MIDI note number in scientific pitch notation, the naming every
 /// sample set's documentation uses: middle C (60) is C4.
 export function keyName(key) {

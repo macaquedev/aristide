@@ -370,6 +370,7 @@
       <button class="menu-item" id="editor-add-pedal"><span>Pedalboard&hellip;</span></button>
       <button class="menu-item" id="editor-add-microtonal"><span>Microtonal keyboard&hellip;</span></button>
       <button class="menu-item" id="editor-add-enc"><span>Swell box&hellip;</span></button>
+      <button class="menu-item" id="editor-add-coupler"><span>Coupler&hellip;</span></button>
       <button class="menu-item" id="editor-add-source"><span>Sample set&hellip;</span></button>
     </div>
     <form class="editor-add-form hidden" id="editor-add-manual-form">
@@ -388,6 +389,26 @@
       <span class="editor-add-form-actions">
         <button class="ghost" type="submit">Add</button>
         <button class="ghost" type="button" id="editor-add-enc-cancel">Cancel</button>
+      </span>
+    </form>
+    <form class="editor-add-form hidden" id="editor-add-coupler-form">
+      <input id="editor-add-coupler-name" type="text" placeholder="Swell to Great" autocomplete="off" spellcheck="false" />
+      <label class="settings-row">
+        <span class="rail-label">From</span>
+        <select id="editor-add-coupler-from"></select>
+      </label>
+      <label class="settings-row">
+        <span class="rail-label">To</span>
+        <select id="editor-add-coupler-to"></select>
+      </label>
+      <label class="settings-row">
+        <span class="rail-label">Shift</span>
+        <span class="stepper"><input id="editor-add-coupler-shift" type="number" min="-24" max="24" step="1" value="0" /></span>
+      </label>
+      <p class="pane-note">&minus;12 sub-octave &middot; 0 unison &middot; +12 super-octave</p>
+      <span class="editor-add-form-actions">
+        <button class="ghost" type="submit">Add</button>
+        <button class="ghost" type="button" id="editor-add-coupler-cancel">Cancel</button>
       </span>
     </form>
     <div class="editor-add-form hidden" id="editor-add-source-form">
@@ -546,6 +567,16 @@
         <span class="stepper"><input id="editor-stop-gain" type="number" min="-40" max="20" step="0.5" /> dB</span>
       </label>
       <div class="settings-row">
+        <span class="rail-label">Engraving</span>
+        <select id="editor-stop-label-mode">
+          <option value="auto">Footage</option>
+          <option value="none">Hidden</option>
+          <option value="custom">Custom&hellip;</option>
+        </select>
+      </div>
+      <input id="editor-stop-label-text" type="text" autocomplete="off" spellcheck="false"
+        placeholder="Engraved text" class="hidden" />
+      <div class="settings-row">
         <span class="rail-label">Source</span>
         <span class="tuning-scale-value">
           <span class="tuning-scale-name" id="editor-stop-src"></span>
@@ -566,6 +597,29 @@
         <button class="ghost" type="button" id="editor-stop-src-cancel">Cancel</button>
       </span>
     </div>
+  </div>
+
+  <!-- The coupler-route popover: right-click any coupler rocker in edit
+       mode. The name posts live, field by field, the stop popover's own
+       contract — but every routes change rebuilds the organ, so the
+       route table edits a local copy and only "Apply routes" posts it,
+       once, as a whole. -->
+  <div class="editor-add hidden" id="editor-coupler">
+    <form class="editor-add-form" id="editor-coupler-form">
+      <span class="editor-tuning-head">
+        <span class="rail-label" id="editor-coupler-title">Coupler</span>
+      </span>
+      <input id="editor-coupler-name" type="text" autocomplete="off" spellcheck="false" placeholder="Name" />
+      <div id="editor-coupler-routes" class="coupler-routes"></div>
+      <span class="editor-add-form-actions">
+        <button class="ghost" type="button" id="editor-coupler-route-add">Add route</button>
+        <button class="ghost" type="button" id="editor-coupler-apply">Apply routes</button>
+      </span>
+      <p class="organ-edit-error hidden" id="editor-coupler-error"></p>
+      <span class="editor-add-form-actions">
+        <button class="ghost" type="button" id="editor-coupler-close">Close</button>
+      </span>
+    </form>
   </div>
 
   <!-- The per-manual tuning popover, opened from the keyboard menu above.
