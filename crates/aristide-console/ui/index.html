@@ -413,6 +413,58 @@
        or open the tuning form below. Contents are built by editor.js. -->
   <div class="editor-add hidden" id="editor-keyboard-menu"></div>
 
+  <!-- The microtonal hex-layout popover, opened from the keyboard menu
+       above. The two step-vectors are what make the board isomorphic:
+       key numbers advance by "right" per hex rightward and "up-right"
+       per hex up-rightward. Presets fill the pair from the classic
+       layouts, derived server-side against the manual's own
+       steps-per-octave. Edits are structural — the keyboard redraws —
+       the same contract as changing the kind. -->
+  <div class="editor-add hidden" id="editor-hex">
+    <form class="editor-add-form" id="editor-hex-form">
+      <span class="editor-tuning-head">
+        <span class="rail-label" id="editor-hex-title">Hex layout</span>
+        <button class="ghost" type="button" id="editor-hex-reset"
+                title="Back to the layout derived from the compass">Default</button>
+      </span>
+      <div class="settings-row">
+        <span class="rail-label">Preset</span>
+        <span class="hex-presets">
+          <button class="ghost" type="button" id="editor-hex-preset-bosanquet"
+                  data-preset="bosanquet">Bosanquet</button>
+          <button class="ghost" type="button" id="editor-hex-preset-wicki"
+                  data-preset="wicki-hayden">Wicki&ndash;Hayden</button>
+          <button class="ghost" type="button" id="editor-hex-preset-harmonic"
+                  data-preset="harmonic-table">Harmonic</button>
+        </span>
+      </div>
+      <label class="settings-row">
+        <span class="rail-label">Step right</span>
+        <span class="stepper"><input id="editor-hex-right" type="number" min="-99" max="99" step="1" /></span>
+      </label>
+      <label class="settings-row">
+        <span class="rail-label">Step up-right</span>
+        <span class="stepper"><input id="editor-hex-upright" type="number" min="-99" max="99" step="1" /></span>
+      </label>
+      <label class="settings-row">
+        <span class="rail-label">Rows</span>
+        <span class="stepper"><input id="editor-hex-rows" type="number" min="1" max="24" step="1" /></span>
+      </label>
+      <label class="settings-row">
+        <span class="rail-label">Columns</span>
+        <span class="stepper"><input id="editor-hex-cols" type="number" min="1" max="48" step="1" /></span>
+      </label>
+      <label class="settings-row">
+        <span class="rail-label">Bottom-left key</span>
+        <span class="stepper"><input id="editor-hex-anchor" type="text" size="6" /></span>
+      </label>
+      <p class="organ-edit-error hidden" id="editor-hex-error"></p>
+      <span class="editor-add-form-actions">
+        <button class="ghost" type="button" id="editor-hex-close">Close</button>
+      </span>
+    </form>
+  </div>
+
   <!-- The per-manual tuning popover, opened from the keyboard menu above.
        Seeded from the snapshot's effective tuning for that manual;
        applies live, field by field — no rebuild. A Scala scale, when

@@ -62,6 +62,106 @@ impl ManualKind {
     }
 }
 
+/// The isomorphic layout of a microtonal manual's hex field. Like the
+/// kind it belongs to, this is a console fact — which key number each
+/// hex addresses — not a sounding one: pitch still comes from the
+/// tuning layer, per key number.
+///
+/// The parameterization is the one every generalized keyboard since
+/// Bosanquet shares (and the one the Terpstra web app and Lumatone
+/// editor expose): two step-vectors over a hex grid. Moving one hex
+/// right advances the key number by `right`; one hex up-right by
+/// `upright`; the third axis, up-left, is their difference. Every
+/// named layout — Bosanquet/Wilson, Wicki–Hayden, the harmonic
+/// table — is a choice of that pair. Distinct hexes may land on the
+/// same key number: that is isomorphic boards' duplicate notes, not
+/// an error, and they sound (and light) as one key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HexLayout {
+    /// Hex rows, counted bottom-up (pitch conventionally rises upward).
+    pub rows: u8,
+    /// Hexes per row. Odd rows sit half a hex right of even ones, so
+    /// the board reads as a staggered rectangle, Lumatone-fashion.
+    pub cols: u8,
+    /// Key-number step for one hex to the right.
+    pub right: i16,
+    /// Key-number step for one hex up and to the right.
+    pub upright: i16,
+    /// Key number of the bottom-left hex.
+    pub anchor: u16,
+}
+
+impl HexLayout {
+    pub const MAX_ROWS: u8 = 24;
+    pub const MAX_COLS: u8 = 48;
+
+    /// The key number a hex sounds: `col` counts hexes from the row's
+    /// left edge, `row` from the bottom. Rows re-center every other
+    /// row (the axial column is `col - row/2`), which is what keeps a
+    /// staggered rectangle isomorphic instead of a leaning
+    /// parallelogram.
+    pub fn key_at(&self, col: u8, row: u8) -> i32 {
+        let axial = col as i32 - (row as i32) / 2;
+        self.anchor as i32 + axial * self.right as i32 + row as i32 * self.upright as i32
+    }
+
+    /// The layout an undeclared microtonal manual gets: Bosanquet-style
+    /// step-vectors (a two-step right, a one-step up-right — the
+    /// Lumatone factory layout, in key numbers), five rows, and just
+    /// enough columns to reach the top of the compass from the bottom.
+    pub fn default_for(first_key: u16, key_count: u16) -> HexLayout {
+        let mut layout = HexLayout {
+            rows: 5,
+            cols: 1,
+            right: 2,
+            upright: 1,
+            anchor: first_key,
+        };
+        layout.fit_cols(first_key as i32 + key_count.max(1) as i32 - 1);
+        layout
+    }
+
+    /// Widen the board until some hex reaches key `top` — how a layout
+    /// with everything but its column count settled gets sized to a
+    /// compass. Capped at [`MAX_COLS`](Self::MAX_COLS): step-vectors
+    /// that never climb (both non-positive) simply get the full width.
+    pub fn fit_cols(&mut self, top: i32) {
+        self.cols = self.cols.max(1);
+        while self.cols < Self::MAX_COLS && self.highest_key() < top {
+            self.cols += 1;
+        }
+    }
+
+    fn highest_key(&self) -> i32 {
+        (0..self.rows)
+            .map(|row| self.key_at(self.cols - 1, row))
+            .max()
+            .unwrap_or(self.anchor as i32)
+    }
+
+    /// The step-vector pair of a named layout, derived rather than
+    /// tabulated: with `steps` tuning steps to the octave and `fifth`
+    /// the nearest approximation of 3:2 among them, every classic
+    /// layout is a combination of octaves and fifths. Bosanquet walks
+    /// whole tones (two fifths less an octave) right and chromas
+    /// (seven fifths less four octaves) up-right; Wicki–Hayden keeps
+    /// the whole tone but climbs by whole fifths; the harmonic table
+    /// pairs the major third (four fifths less two octaves) with the
+    /// fifth, so triads sit in a cluster. In 12-EDO these come out
+    /// (2,1), (2,7) and (4,7); in 31-EDO (5,2), (5,18) and (10,18).
+    pub fn preset_steps(name: &str, steps: u16) -> Option<(i16, i16)> {
+        let steps = steps.max(1) as f64;
+        let fifth = (steps * 1.5f64.log2()).round() as i16;
+        let octave = steps as i16;
+        match name {
+            "bosanquet" => Some((2 * fifth - octave, 7 * fifth - 4 * octave)),
+            "wicki-hayden" => Some((2 * fifth - octave, fifth)),
+            "harmonic-table" => Some((4 * fifth - 2 * octave, fifth)),
+            _ => None,
+        }
+    }
+}
+
 /// A keyboard (or pedalboard). "Manual" is used inclusively, as GO does.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manual {
@@ -73,6 +173,11 @@ pub struct Manual {
     pub key_count: u16,
     #[serde(default)]
     pub kind: ManualKind,
+    /// A microtonal manual's declared hex-field layout; `None` leaves
+    /// the console to derive [`HexLayout::default_for`]. Meaningless
+    /// (and ignored) on the other kinds.
+    #[serde(default)]
+    pub hex: Option<HexLayout>,
 }
 
 impl Manual {
@@ -534,5 +639,43 @@ impl Organ {
             hops = hops.checked_sub(1)?;
         }
         Some(pipe)
+    }
+}
+
+#[cfg(test)]
+mod hex_layout_tests {
+    use super::HexLayout;
+
+    #[test]
+    fn presets_derive_from_the_fifth() {
+        assert_eq!(HexLayout::preset_steps("bosanquet", 12), Some((2, 1)));
+        assert_eq!(HexLayout::preset_steps("wicki-hayden", 12), Some((2, 7)));
+        assert_eq!(HexLayout::preset_steps("harmonic-table", 12), Some((4, 7)));
+        assert_eq!(HexLayout::preset_steps("bosanquet", 31), Some((5, 2)));
+        assert_eq!(HexLayout::preset_steps("wicki-hayden", 31), Some((5, 18)));
+        assert_eq!(HexLayout::preset_steps("harmonic-table", 31), Some((10, 18)));
+        assert_eq!(HexLayout::preset_steps("bosanquet", 19), Some((3, 1)));
+        assert_eq!(HexLayout::preset_steps("qwerty", 12), None);
+    }
+
+    #[test]
+    fn keys_walk_the_two_step_vectors() {
+        let layout = HexLayout { rows: 5, cols: 8, right: 2, upright: 1, anchor: 36 };
+        assert_eq!(layout.key_at(0, 0), 36);
+        assert_eq!(layout.key_at(1, 0), 38);
+        assert_eq!(layout.key_at(0, 1), 37); // up-right from the anchor
+        // Row 2 re-centers left by one axial column: same key as row 0's
+        // start plus two uprights minus one right — a duplicate note.
+        assert_eq!(layout.key_at(0, 2), 36);
+    }
+
+    #[test]
+    fn default_covers_the_compass() {
+        let layout = HexLayout::default_for(36, 61);
+        assert_eq!((layout.right, layout.upright, layout.anchor), (2, 1, 36));
+        assert!(layout.highest_key() >= 96);
+        assert!(layout.cols <= HexLayout::MAX_COLS);
+        // A one-key manual still gets a board, just a narrow one.
+        assert_eq!(HexLayout::default_for(60, 1).cols, 1);
     }
 }

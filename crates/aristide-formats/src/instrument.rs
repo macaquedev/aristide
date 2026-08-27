@@ -59,8 +59,8 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use aristide_model::{
-    Coupler, Enclosure, Manual, ManualId, ManualKind, Organ, PipeSource, Rank, RankId, RankRange,
-    Stop, StopId, Windchest,
+    Coupler, Enclosure, HexLayout, Manual, ManualId, ManualKind, Organ, PipeSource, Rank, RankId,
+    RankRange, Stop, StopId, Windchest,
 };
 
 use crate::sidecar::{self, KeySpec, Sidecar};
@@ -197,6 +197,40 @@ pub struct ManualDef {
     /// Its `.kbm` keyboard mapping; omitted, keys map linearly onto
     /// successive degrees with a′ anchored at `a4_hz`.
     pub keymap: Option<String>,
+    /// A microtonal manual's hex-field layout (`hex = { rows = 5,
+    /// right = 2, upright = 1, ... }`). Fields left out follow the
+    /// derived default; the whole table left out means the default.
+    pub hex: Option<HexDef>,
+}
+
+/// The isomorphic layout of a `kind = "microtonal"` manual's hex
+/// field, as declared — every field optional, settled against the
+/// manual's compass once that compass is known (see `resolve_hex`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HexDef {
+    pub rows: Option<u8>,
+    pub cols: Option<u8>,
+    /// Key-number steps for one hex to the right / up-right — the two
+    /// generators that make the board isomorphic (Bosanquet's whole
+    /// tone and chroma, Wicki–Hayden's whole tone and fifth, …).
+    pub right: Option<i16>,
+    pub upright: Option<i16>,
+    /// Key of the bottom-left hex: a number or a note name ("C2").
+    pub anchor: Option<KeySpec>,
+}
+
+impl HexDef {
+    /// A source manual's already-settled layout, carried whole.
+    fn from_layout(layout: HexLayout) -> HexDef {
+        HexDef {
+            rows: Some(layout.rows),
+            cols: Some(layout.cols),
+            right: Some(layout.right),
+            upright: Some(layout.upright),
+            anchor: Some(KeySpec::Number(layout.anchor as i64)),
+        }
+    }
 }
 
 /// Move one stop between manuals, after all pulls: the stop named on
@@ -490,6 +524,9 @@ struct Assembly<'a> {
     manuals: Vec<Manual>,
     /// Per manual: the file-declared compass, if any.
     declared: Vec<Option<(u8, u8)>>,
+    /// Per manual: the declared hex layout, settled in `finish` once
+    /// the compass is known.
+    hex_defs: Vec<Option<HexDef>>,
     placed: Vec<PlacedStop>,
     ranks: Vec<Rank>,
     windchests: Vec<Windchest>,
@@ -520,6 +557,7 @@ pub fn assemble(
         division_pulls: Vec::new(),
         manuals: Vec::new(),
         declared: Vec::new(),
+        hex_defs: Vec::new(),
         placed: Vec::new(),
         ranks: Vec::new(),
         windchests: Vec::new(),
@@ -545,7 +583,7 @@ pub fn assemble(
                 ManualKind::Manual
             }),
         };
-        assembly.create_manual(manual.name.clone(), compass, kind);
+        assembly.create_manual(manual.name.clone(), compass, kind, manual.hex.clone());
     }
     if !def.declares() {
         // Nothing declared: every source contributes everything —
@@ -911,6 +949,64 @@ fn declared_compass(manual: &ManualDef) -> Result<Option<(u8, u8)>, InstrumentEr
     }
 }
 
+/// Settle a declared hex layout against its manual's settled compass:
+/// absent fields follow [`HexLayout::default_for`], out-of-range
+/// dimensions clamp with a warning — a wild number must not brick the
+/// organ. Columns left undeclared are fitted to the compass under
+/// whatever step-vectors were chosen.
+fn resolve_hex(
+    def: &HexDef,
+    manual: &str,
+    first_key: u16,
+    key_count: u16,
+    warnings: &mut Vec<String>,
+) -> HexLayout {
+    let mut layout = HexLayout::default_for(first_key, key_count);
+    let clamped = |what: &str, value: i64, max: i64, warnings: &mut Vec<String>| {
+        let kept = value.clamp(1, max);
+        if kept != value {
+            warnings.push(format!(
+                "manual {manual:?}: hex {what} {value} is outside 1..{max} — using {kept}"
+            ));
+        }
+        kept as u8
+    };
+    if let Some(right) = def.right {
+        layout.right = right;
+    }
+    if let Some(upright) = def.upright {
+        layout.upright = upright;
+    }
+    if let Some(anchor) = &def.anchor {
+        let note = match anchor {
+            // Numbers pass through u16-wide: a widened manual's keys
+            // run past MIDI's 127 and the anchor may follow.
+            KeySpec::Number(n) => u16::try_from(*n).ok(),
+            KeySpec::Name(name) => sidecar::parse_note_name(name).map(u16::from),
+        };
+        match note {
+            Some(note) => layout.anchor = note,
+            None => warnings.push(format!(
+                "manual {manual:?}: hex anchor {anchor:?} is not a key — \
+                 using the compass bottom"
+            )),
+        }
+    }
+    if let Some(rows) = def.rows {
+        layout.rows = clamped("rows", rows as i64, HexLayout::MAX_ROWS as i64, warnings);
+    }
+    match def.cols {
+        Some(cols) => {
+            layout.cols = clamped("cols", cols as i64, HexLayout::MAX_COLS as i64, warnings);
+        }
+        None => {
+            layout.cols = 1;
+            layout.fit_cols(first_key as i32 + key_count.max(1) as i32 - 1);
+        }
+    }
+    layout
+}
+
 impl Assembly<'_> {
     fn source(&self, alias: &str) -> Result<usize, InstrumentError> {
         self.sources
@@ -919,7 +1015,13 @@ impl Assembly<'_> {
             .ok_or_else(|| invalid(format!("{alias:?} is not a [sources] alias")))
     }
 
-    fn create_manual(&mut self, name: String, declared: Option<(u8, u8)>, kind: ManualKind) -> usize {
+    fn create_manual(
+        &mut self,
+        name: String,
+        declared: Option<(u8, u8)>,
+        kind: ManualKind,
+        hex: Option<HexDef>,
+    ) -> usize {
         let index = self.manuals.len();
         self.manuals.push(Manual {
             id: ManualId(index as u32),
@@ -928,8 +1030,10 @@ impl Assembly<'_> {
             first_midi_note: 36,
             key_count: 61,
             kind,
+            hex: None, // settled with the compass, from `hex_defs`
         });
         self.declared.push(declared);
+        self.hex_defs.push(hex);
         index
     }
 
@@ -971,7 +1075,12 @@ impl Assembly<'_> {
                 let low = source_manual.first_midi_note;
                 let high =
                     (low as i32 + source_manual.key_count as i32 - 1).clamp(0, 127) as u8;
-                self.create_manual(name, Some((low, high)), source_manual.kind)
+                self.create_manual(
+                    name,
+                    Some((low, high)),
+                    source_manual.kind,
+                    source_manual.hex.map(HexDef::from_layout),
+                )
             }
         };
         self.division_map[source_idx].insert(source_manual.id, target);
@@ -1236,6 +1345,15 @@ impl Assembly<'_> {
             };
             manual.first_midi_note = low;
             manual.key_count = (high as i32 - low as i32 + 1) as u16;
+            if let Some(def) = &self.hex_defs[index] {
+                manual.hex = Some(resolve_hex(
+                    def,
+                    &manual.name,
+                    low as u16,
+                    manual.key_count,
+                    &mut self.warnings,
+                ));
+            }
         }
         let stops = self
             .placed
@@ -1341,6 +1459,7 @@ mod tests {
                     first_midi_note: 36,
                     key_count: 61,
                     kind: Default::default(),
+                    hex: None,
                 },
                 Manual {
                     id: ManualId(1),
@@ -1348,6 +1467,7 @@ mod tests {
                     first_midi_note: 36,
                     key_count: 61,
                     kind: Default::default(),
+                    hex: None,
                 },
             ],
             stops: vec![
@@ -1449,6 +1569,7 @@ mod tests {
             transpose: None,
             scale: None,
             keymap: None,
+            hex: None,
         }
     }
 
@@ -1499,6 +1620,56 @@ mod tests {
             "the typo is reported: {:?}",
             built.warnings
         );
+    }
+
+    /// A declared hex layout settles against the compass: absent
+    /// fields follow the derived default (columns fitted to the
+    /// declared step-vectors), note-named anchors parse, and wild
+    /// dimensions clamp with a warning instead of failing the load.
+    #[test]
+    fn hex_layouts_settle_and_clamp() {
+        let mut definition = def("Hexes");
+        definition.manuals = vec![
+            ManualDef {
+                kind: Some("microtonal".into()),
+                hex: Some(HexDef {
+                    rows: None,
+                    cols: None,
+                    right: Some(2),
+                    upright: Some(7),
+                    anchor: Some(KeySpec::Name("C2".into())),
+                }),
+                ..manual("Wicki", Some(36), Some(96))
+            },
+            ManualDef {
+                kind: Some("microtonal".into()),
+                hex: Some(HexDef {
+                    rows: Some(200),
+                    cols: Some(9),
+                    right: None,
+                    upright: None,
+                    anchor: None,
+                }),
+                ..manual("Wild", Some(36), Some(96))
+            },
+            manual("Plain", Some(36), Some(96)),
+        ];
+        let built = assemble(&definition, &[], Vec::new()).expect("assembles");
+        let wicki = built.organ.manuals[0].hex.expect("declared layout kept");
+        assert_eq!((wicki.rows, wicki.right, wicki.upright), (5, 2, 7));
+        assert_eq!(wicki.anchor, 36, "C2 parses as a key number");
+        assert!(
+            wicki.key_at(wicki.cols - 1, wicki.rows - 1) >= 96,
+            "columns fitted to reach the compass top: {wicki:?}"
+        );
+        let wild = built.organ.manuals[1].hex.expect("clamped, not dropped");
+        assert_eq!((wild.rows, wild.cols), (HexLayout::MAX_ROWS, 9));
+        assert!(
+            built.warnings.iter().any(|warning| warning.contains("hex rows")),
+            "the clamp is reported: {:?}",
+            built.warnings
+        );
+        assert_eq!(built.organ.manuals[2].hex, None, "no declaration, no layout");
     }
 
     /// Declaring a manual makes the file explicit: sources contribute

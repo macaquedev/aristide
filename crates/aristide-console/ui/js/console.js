@@ -88,7 +88,7 @@ export class Console {
       snapshot.organ,
       snapshot.stops.map((s) => [s.id, s.name, s.manual]),
       snapshot.couplers.map((c) => [c.name, !!c.hidden]),
-      snapshot.manuals.map((m) => [m.name, m.first_key, m.key_count]),
+      snapshot.manuals.map((m) => [m.name, m.first_key, m.key_count, m.kind, m.hex]),
       // No organ (the picker's start-empty state) sends no enclosures
       // at all — same as an organ without a swell box.
       (snapshot.enclosures ?? []).filter((e) => e.displayed).map((e) => e.name),
@@ -366,21 +366,44 @@ export class Console {
 
   /// A Terpstra/Lumatone-style hex-grid key field: no naturals or
   /// sharps — that split is 12-EDO vocabulary, and this keyboard
-  /// deliberately carries none. Keys run chromatically left to right in
-  /// two interlocked rows (even indices bottom, odd top); the column
-  /// step and the flat-top hex shape (see the CSS) are chosen together
-  /// so consecutive keys tile edge-to-edge with no gap or overlap,
-  /// reading as one continuous diagonal rank.
+  /// deliberately carries none. The snapshot's `hex` layout says what
+  /// the grid means: `rows` × `cols` hexes, the key number advancing
+  /// by `right` per hex rightward and `upright` per hex up-rightward
+  /// from `anchor` at the bottom left — the two generators that make
+  /// the board isomorphic. Odd rows sit half a hex right of even ones
+  /// (each row re-centers, so the board reads as a staggered rectangle
+  /// rather than a leaning parallelogram); rows count bottom-up, pitch
+  /// rising toward the upper right. Distinct hexes can carry the same
+  /// key number — isomorphic boards' duplicate notes — and since held
+  /// state is matched by `data-midi`, they light together. Hexes whose
+  /// key falls outside the compass render dead: present, dimmed,
+  /// unplayable, so the board's shape never depends on the compass.
   hexKeys(keys, manual, last) {
-    keys.style.setProperty("--hex-count", manual.key_count);
-    let i = 0;
-    for (let midi = manual.first_key; midi < last; midi++, i++) {
-      const key = document.createElement("div");
-      key.className = `key hex ${i % 2 === 0 ? "hex-bottom" : "hex-top"}`;
-      key.dataset.midi = midi;
-      key.style.setProperty("--col", i);
-      this.wireKey(key, manual.idx, midi);
-      keys.append(key);
+    const hex = manual.hex ?? {
+      rows: 1,
+      cols: manual.key_count,
+      right: 1,
+      upright: 0,
+      anchor: manual.first_key,
+    };
+    keys.style.setProperty("--hex-rows", hex.rows);
+    keys.style.setProperty("--hex-cols", hex.cols);
+    for (let row = 0; row < hex.rows; row++) {
+      for (let col = 0; col < hex.cols; col++) {
+        const key = document.createElement("div");
+        key.className = "key hex";
+        const axial = col - Math.floor(row / 2);
+        const midi = hex.anchor + axial * hex.right + row * hex.upright;
+        key.style.setProperty("--hx", col + (row % 2) * 0.5);
+        key.style.setProperty("--hy", hex.rows - 1 - row);
+        if (midi < manual.first_key || midi >= last) {
+          key.classList.add("dead");
+        } else {
+          key.dataset.midi = midi;
+          this.wireKey(key, manual.idx, midi);
+        }
+        keys.append(key);
+      }
     }
   }
 

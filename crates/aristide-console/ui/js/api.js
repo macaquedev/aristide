@@ -106,6 +106,13 @@ export const commands = {
   // changes and the organ rebuilds, same contract as the family above.
   organManualKind: (manual, kind) =>
     `/api/organ/manual/kind?manual=${manual}&kind=${encodeURIComponent(kind)}`,
+  // A microtonal manual's hex-field layout. `fields` carries any of
+  // rows/cols/right/upright/anchor (numbers), preset (a classic
+  // layout's name — the server derives its step-vectors against the
+  // manual's steps-per-octave), or reset=1 (back to the derived
+  // default). Unnamed fields keep their current values.
+  organManualHex: (manual, fields) =>
+    `/api/organ/manual/hex?${new URLSearchParams({ manual, ...fields })}`,
   // `to` is the index the manual should end up at.
   organManualOrder: (manual, to) => `/api/organ/manual/order?manual=${manual}&to=${to}`,
   // Adds a sample set as a source the organ can pull from, without

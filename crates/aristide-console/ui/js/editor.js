@@ -13,7 +13,7 @@
 // is called on every poll, the same as Preferences and the other panels.
 
 import { commands } from "./api.js";
-import { parseKeyName } from "./pitch.js";
+import { keyName, parseKeyName } from "./pitch.js";
 
 // What the native add-source dialog offers. Narrower than the picker's
 // filter: a source must be a sample set — the server refuses another
@@ -63,6 +63,7 @@ export class Editor {
     this.addAnchor = null; // where the add popover was opened, in px
     this.addKind = "manual"; // "manual" | "pedal" | "microtonal" — the add-manual form's target
     this.tuningManual = null; // manual idx the tuning popover is open for, or null
+    this.hexManual = null; // manual idx the hex-layout popover is open for, or null
     this.tuningBrowseKind = null; // "scale" | "keymap" | null — the tuning form's own file browser
     this.tuningBrowseDir = null;
     this.tuningBrowseParent = null;
@@ -143,6 +144,16 @@ export class Editor {
       tuningBrowseError: root.getElementById("editor-tuning-browse-error"),
       tuningBrowseList: root.getElementById("editor-tuning-browse-list"),
       tuningBrowseCancel: root.getElementById("editor-tuning-browse-cancel"),
+      hex: root.getElementById("editor-hex"),
+      hexTitle: root.getElementById("editor-hex-title"),
+      hexReset: root.getElementById("editor-hex-reset"),
+      hexRight: root.getElementById("editor-hex-right"),
+      hexUpright: root.getElementById("editor-hex-upright"),
+      hexRows: root.getElementById("editor-hex-rows"),
+      hexCols: root.getElementById("editor-hex-cols"),
+      hexAnchor: root.getElementById("editor-hex-anchor"),
+      hexError: root.getElementById("editor-hex-error"),
+      hexClose: root.getElementById("editor-hex-close"),
     };
 
     this.wireLock();
@@ -150,6 +161,7 @@ export class Editor {
     this.wireRemoveConfirm();
     this.wireAdd();
     this.wireTuningForm();
+    this.wireHexForm();
     this.wireCanvas();
   }
 
@@ -222,6 +234,7 @@ export class Editor {
     this.closeDivisionMenu();
     this.closeKeyboardMenu();
     this.closeTuningForm();
+    this.closeHexForm();
   }
 
   // A double-click on a locked canvas is someone reaching for the add
@@ -293,6 +306,7 @@ export class Editor {
     }
 
     if (this.tuningManual != null) this.syncTuningForm();
+    if (this.hexManual != null) this.syncHexForm();
   }
 
   /// Called by Console right after every structural rebuild (see its
@@ -679,6 +693,22 @@ export class Editor {
 
     menu.append(document.createElement("hr"));
 
+    // A hex field is a microtonal-manual fact; the other kinds have
+    // no layout to offer. Kept above "Change tuning…" so the tuning
+    // item stays the menu's last (harness-hooks.js counts on that).
+    if (currentKind === "microtonal") {
+      const hex = document.createElement("button");
+      hex.className = "menu-item";
+      hex.innerHTML = "<span>Hex layout&hellip;</span>";
+      hex.addEventListener("click", (event) => {
+        event.stopPropagation();
+        const rect = menu.getBoundingClientRect();
+        this.closeKeyboardMenu();
+        this.openHexForm(idx, rect.left, rect.top);
+      });
+      menu.append(hex);
+    }
+
     const tuning = document.createElement("button");
     tuning.className = "menu-item";
     tuning.innerHTML = "<span>Change tuning&hellip;</span>";
@@ -766,6 +796,7 @@ export class Editor {
     this.closeAdd();
     this.closeDivisionMenu();
     this.closeKeyboardMenu();
+    this.closeHexForm();
     this.tuningManual = idx;
     this.hideTuningError();
     this.closeTuningBrowse();
@@ -873,6 +904,112 @@ export class Editor {
   hideTuningError() {
     this.el.tuningError.classList.add("hidden");
     this.el.tuningError.textContent = "";
+  }
+
+  // ---- the hex-layout popover: a microtonal manual's isomorphic grid ------
+  //
+  // Two step-vectors (right, up-right, in key-number steps), the grid
+  // size, and the bottom-left key. Every field posts on change —
+  // structural, so the keyboard redraws and the next snapshot echoes
+  // back what the server settled on (a preset refits the width, wild
+  // values clamp), keeping the form honest the same way the tuning
+  // popover is.
+
+  wireHexForm() {
+    this.el.hexClose.addEventListener("click", () => this.closeHexForm());
+    this.el.hexReset.addEventListener("click", () => this.hexCommand({ reset: 1 }));
+    for (const button of this.el.hex.querySelectorAll("[data-preset]")) {
+      button.addEventListener("click", () => this.hexCommand({ preset: button.dataset.preset }));
+    }
+    for (const [field, input] of [
+      ["right", this.el.hexRight],
+      ["upright", this.el.hexUpright],
+      ["rows", this.el.hexRows],
+      ["cols", this.el.hexCols],
+    ]) {
+      input.addEventListener("change", () => {
+        if (this.hexManual == null) return;
+        const value = Number(input.value);
+        if (Number.isInteger(value)) this.hexCommand({ [field]: value });
+      });
+    }
+    this.el.hexAnchor.addEventListener("change", () => {
+      if (this.hexManual == null) return;
+      // A note name ("C2") or a raw key number — numbers past MIDI's
+      // 127 are legal on a widened manual, so they pass through.
+      const text = this.el.hexAnchor.value.trim();
+      const key = parseKeyName(text) ?? (/^\d+$/.test(text) ? Number(text) : null);
+      if (key == null || key > 65535) {
+        this.showHexError(`${text || "(empty)"} does not name a key`);
+        return;
+      }
+      this.hexCommand({ anchor: key });
+    });
+  }
+
+  openHexForm(idx, x, y) {
+    this.closeAdd();
+    this.closeDivisionMenu();
+    this.closeKeyboardMenu();
+    this.closeTuningForm();
+    this.hexManual = idx;
+    this.hideHexError();
+    this.syncHexForm();
+    this.el.hex.classList.remove("hidden");
+    this.positionPopover(this.el.hex, x, y);
+  }
+
+  closeHexForm() {
+    this.hexManual = null;
+    this.el.hex.classList.add("hidden");
+    this.hideHexError();
+  }
+
+  /// Refills the form from the snapshot's effective layout — on open
+  /// and on every poll, so the server's settling (clamps, refits,
+  /// another session's edit) lands in the fields. A manual that
+  /// stopped being microtonal takes its popover with it.
+  syncHexForm() {
+    const idx = this.hexManual;
+    const manual = this.lastSnapshot?.manuals.find((m) => m.idx === idx);
+    if (!manual?.hex) {
+      this.closeHexForm();
+      return;
+    }
+    this.el.hexTitle.textContent = `${manual.name} · hex layout`;
+    const fields = [
+      [this.el.hexRight, manual.hex.right],
+      [this.el.hexUpright, manual.hex.upright],
+      [this.el.hexRows, manual.hex.rows],
+      [this.el.hexCols, manual.hex.cols],
+      [
+        this.el.hexAnchor,
+        manual.hex.anchor <= 127 ? keyName(manual.hex.anchor) : String(manual.hex.anchor),
+      ],
+    ];
+    for (const [input, value] of fields) {
+      if (this.root.activeElement !== input) input.value = value;
+    }
+  }
+
+  async hexCommand(fields) {
+    if (this.hexManual == null) return false;
+    this.hideHexError();
+    const { ok, error } = await this.organCommandResult(
+      commands.organManualHex(this.hexManual, fields)
+    );
+    if (error != null) this.showHexError(error);
+    return ok;
+  }
+
+  showHexError(text) {
+    this.el.hexError.textContent = text;
+    this.el.hexError.classList.remove("hidden");
+  }
+
+  hideHexError() {
+    this.el.hexError.classList.add("hidden");
+    this.el.hexError.textContent = "";
   }
 
   // ---- the tuning popover's own file browser: picks a .scl or .kbm --------
@@ -1424,7 +1561,13 @@ export class Editor {
       });
     }
     // Popovers close on a click anywhere outside themselves.
-    for (const el of [this.el.add, this.el.divisionMenu, this.el.keyboardMenu, this.el.tuning]) {
+    for (const el of [
+      this.el.add,
+      this.el.divisionMenu,
+      this.el.keyboardMenu,
+      this.el.tuning,
+      this.el.hex,
+    ]) {
       el.addEventListener("click", (event) => event.stopPropagation());
     }
     window.addEventListener("click", () => {
@@ -1432,6 +1575,7 @@ export class Editor {
       this.closeDivisionMenu();
       this.closeKeyboardMenu();
       this.closeTuningForm();
+      this.closeHexForm();
     });
     window.addEventListener("keydown", (event) => {
       if (event.key !== "Escape") return;
@@ -1439,6 +1583,7 @@ export class Editor {
       this.closeDivisionMenu();
       this.closeKeyboardMenu();
       this.closeTuningForm();
+      this.closeHexForm();
     });
   }
 

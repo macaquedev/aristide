@@ -1121,6 +1121,8 @@ input[type="range"]:hover::-webkit-slider-thumb { filter: brightness(1.15); }
 .editor-tuning-head .ghost { align-self: flex-end; padding: 3px 8px; font-size: 9px; }
 .editor-add-form select { width: 100%; }
 .editor-add-form .settings-row .rail-label { flex: 0 0 auto; }
+.hex-presets { display: flex; gap: 6px; flex-wrap: wrap; }
+.hex-presets .ghost { padding: 3px 8px; font-size: 9px; }
 
 .editor-add-browse { display: flex; flex-direction: column; gap: 6px; }
 .editor-add-browse-head { display: flex; align-items: center; gap: 8px; }
@@ -2064,30 +2066,37 @@ body.editing .division-add { display: block; }
 .keyboard.pedal .key.sharp { height: 55%; }
 
 /* Terpstra/Lumatone-style hex field: one uniform key shape, no
-   natural/sharp split — every key is the same tone, chromatically. Two
-   interlocked rows (odd keys top, even keys bottom); the column step
-   (3/4 of a hex's width) matches this flat-top hexagon's own corner
-   cut, so neighbors tile edge to edge with no gap or overlap. */
-.keyboard.microtonal { --hex-w: 32px; --hex-h: 30px; }
+   natural/sharp split — every key is the same tone. A pointy-top
+   hexagon so keys run in horizontal rows like the boards they imitate:
+   the row step (3/4 of a hex's height) matches the corner cut, so
+   adjacent rows interlock edge to edge; odd rows sit half a hex to the
+   right (see console.js's hexKeys, which sets --hx/--hy per key and
+   --hex-rows/--hex-cols on the field). Keys outside the compass render
+   dead — the board keeps its shape, they just don't play. */
+.keyboard.microtonal { --hex-w: 30px; --hex-h: 34px; }
 .keyboard.microtonal .keys {
-  width: calc((var(--hex-count) - 1) * var(--hex-w) * 0.75 + var(--hex-w));
-  height: calc(var(--hex-h) * 1.5);
+  width: calc((var(--hex-cols) + 0.5) * var(--hex-w));
+  height: calc((var(--hex-rows) - 1) * var(--hex-h) * 0.75 + var(--hex-h));
 }
 
 .key.hex {
   width: var(--hex-w);
   height: var(--hex-h);
-  left: calc(var(--col) * var(--hex-w) * 0.75);
-  clip-path: polygon(25% 0%, 75% 0%, 100% 50%, 75% 100%, 25% 100%, 0% 50%);
+  left: calc(var(--hx) * var(--hex-w));
+  top: calc(var(--hy) * var(--hex-h) * 0.75);
+  clip-path: polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%);
   background: var(--key-white);
   border: 1px solid #00000030;
 }
-.key.hex-top { top: 0; }
-.key.hex-bottom { top: calc(var(--hex-h) / 2); }
 .key.hex.held { background: var(--accent); }
+.key.hex.dead {
+  background: #303236;
+  cursor: default;
+  pointer-events: none;
+}
 
-body[data-density="compact"] .keyboard.microtonal { --hex-w: 27px; --hex-h: 25px; }
-body[data-density="spacious"] .keyboard.microtonal { --hex-w: 37px; --hex-h: 34px; }
+body[data-density="compact"] .keyboard.microtonal { --hex-w: 25px; --hex-h: 28px; }
+body[data-density="spacious"] .keyboard.microtonal { --hex-w: 35px; --hex-h: 40px; }
 
 /* ---- swell shoes: vertical faders ------------------------------------- */
 

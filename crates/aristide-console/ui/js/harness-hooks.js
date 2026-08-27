@@ -134,6 +134,22 @@ export function applyHarnessHooks({ prefs, editor }) {
     }, 400);
   }
 
+  // One step into the keyboard menu: the microtonal hex-layout form,
+  // found by its label — it only exists on microtonal manuals.
+  const kbdHexParam = params.get("kbdHexForm"); // a manual name or idx
+  if (kbdHexParam != null) {
+    setTimeout(() => {
+      editor.unlock();
+      const board = findKeyboardBoard(kbdHexParam);
+      if (board) rightClick(board);
+      setTimeout(() => {
+        [...document.querySelectorAll("#editor-keyboard-menu .menu-item")]
+          .find((item) => item.textContent.includes("Hex layout"))
+          ?.click();
+      }, 200);
+    }, 400);
+  }
+
   const kbdTuningParam = params.get("kbdTuning"); // a manual name or idx
   if (kbdTuningParam != null) {
     setTimeout(() => {

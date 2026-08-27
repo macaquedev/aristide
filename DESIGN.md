@@ -230,8 +230,13 @@ whole structure (manuals declared/renamed/reordered/removed, sources added,
 stops pulled and unpulled — the pane's editor, each edit a line in the file
 followed by a reload), each keyboard's declared kind
 (`[[manual]] kind = manual/pedal/microtonal` — never deduced; "microtonal"
-draws a Terpstra-style hex key field, a console fact whose *pitch* still
-comes from the tuning layer until M6's Scala/key-mapping work), and
+draws a Terpstra/Lumatone-style hex key field whose isomorphic layout is the
+manual's `hex = { rows, cols, right, upright, anchor }` — the classic
+two-step-vector parameterization, editable from the keyboard's context menu
+with Bosanquet/Wicki–Hayden/harmonic-table presets derived against the
+manual's own steps-per-octave; absent, a Bosanquet default is fitted to the
+compass. A console fact throughout: duplicate hexes share a key number and
+*pitch* still comes only from the tuning layer), and
 per-manual tuning (`[[manual]] temperament/a4_hz/transpose`) —
 a 415 meantone Positif against a 440 equal Great is one instrument. Tuning is
 physical: a coupled copy sounds the destination division's pipes, so it speaks

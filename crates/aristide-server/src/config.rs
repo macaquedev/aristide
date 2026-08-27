@@ -995,6 +995,32 @@ pub fn write_composite_manual_kind(
     })
 }
 
+/// Write (or, with `None`, remove) one declared manual's hex-field
+/// layout in a composite file, as an inline `hex = { ... }` table.
+/// Absence means "derive the default", so a reset reads as a plain
+/// microtonal manual again. `Ok(false)` when the file declares no
+/// such manual.
+pub fn write_composite_manual_hex(
+    path: &Path,
+    manual: &str,
+    layout: Option<aristide_model::HexLayout>,
+) -> Result<bool, String> {
+    edit_composite_manual(path, manual, |table| match layout {
+        None => {
+            table.remove("hex");
+        }
+        Some(layout) => {
+            let mut hex = toml_edit::InlineTable::new();
+            hex.insert("rows", (layout.rows as i64).into());
+            hex.insert("cols", (layout.cols as i64).into());
+            hex.insert("right", (layout.right as i64).into());
+            hex.insert("upright", (layout.upright as i64).into());
+            hex.insert("anchor", (layout.anchor as i64).into());
+            table["hex"] = toml_edit::value(hex);
+        }
+    })
+}
+
 /// Apply one edit to a named `[[manual]]` table of a composite file,
 /// comment-preservingly. `Ok(false)` when no such manual is declared.
 fn edit_composite_manual(
@@ -1690,6 +1716,7 @@ mod tests {
                     first_midi_note: 36,
                     key_count: 32,
                     kind: aristide_model::ManualKind::Pedal,
+                    hex: None,
                 },
                 Manual {
                     id: ManualId(1),
@@ -1697,6 +1724,7 @@ mod tests {
                     first_midi_note: 36,
                     key_count: 61,
                     kind: Default::default(),
+                    hex: None,
                 },
             ],
             stops: vec![
@@ -2135,6 +2163,23 @@ mod tests {
         );
         assert_eq!(def(&path).manuals[0].kind, None);
         assert!(!write_composite_manual_kind(&path, "Ghost", ManualKind::Pedal).expect("ghost"));
+
+        // A hex layout writes as one inline table; removal restores
+        // the derived default by absence, and a ghost manual is Ok(false).
+        let layout = aristide_model::HexLayout {
+            rows: 5,
+            cols: 17,
+            right: 2,
+            upright: 7,
+            anchor: 36,
+        };
+        assert!(write_composite_manual_hex(&path, "Grand orgue", Some(layout)).expect("hex"));
+        let hex = def(&path).manuals[0].hex.clone().expect("hex parsed back");
+        assert_eq!((hex.rows, hex.cols), (Some(5), Some(17)));
+        assert_eq!((hex.right, hex.upright), (Some(2), Some(7)));
+        assert!(write_composite_manual_hex(&path, "Grand orgue", None).expect("hex off"));
+        assert!(def(&path).manuals[0].hex.is_none());
+        assert!(!write_composite_manual_hex(&path, "Ghost", None).expect("ghost"));
 
         // A scale replaces the temperament line (a Scala scale IS the
         // temperament); naming a temperament again drops the scale,

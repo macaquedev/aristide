@@ -454,6 +454,8 @@ impl Builder<'_> {
                 } else {
                     ManualKind::Manual
                 },
+                // GO has no generalized-keyboard concept.
+                hex: None,
             });
             // MIDI note of logical key 1 (see notes §2) — the pitch origin
             // that old-style stops derive their rank numbering from.

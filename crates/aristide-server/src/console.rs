@@ -1633,6 +1633,24 @@ impl Console {
         self.organ.manuals.get(manual).map(|m| m.kind).unwrap_or_default()
     }
 
+    /// The hex-field layout a microtonal manual draws with: the
+    /// declared one, or the default derived from the (possibly
+    /// widened) compass. `None` for the other kinds — they have no
+    /// hex field.
+    pub fn manual_hex(&self, manual: usize) -> Option<aristide_model::HexLayout> {
+        let declared = self.organ.manuals.get(manual)?;
+        if declared.kind != aristide_model::ManualKind::Microtonal {
+            return None;
+        }
+        Some(declared.hex.unwrap_or_else(|| {
+            let (low, high) = self.compass[manual];
+            aristide_model::HexLayout::default_for(
+                low.clamp(0, 127) as u16,
+                (high - low + 1).max(1) as u16,
+            )
+        }))
+    }
+
     /// Which enclosures a stop's own pipes sit in (indices into the
     /// snapshot's enclosure list): its ranges' ranks → their chests →
     /// the boxes those chests are inside. Borrowed pipes stand with
@@ -1742,6 +1760,7 @@ mod tests {
                 first_midi_note: 36,
                 key_count: 61,
                     kind: Default::default(),
+                    hex: None,
             }],
             stops: vec![
                 Stop {
@@ -1815,6 +1834,30 @@ mod tests {
             }
         }
         Console::new(organ, specs, vec![StopId(1), StopId(2)], 48_000.0)
+    }
+
+    /// The hex layout is a microtonal-manual fact: other kinds have
+    /// none, an undeclared microtonal manual gets the compass-derived
+    /// default, and a declared layout passes through untouched.
+    #[test]
+    fn manual_hex_follows_kind_and_declaration() {
+        let console = test_console();
+        assert_eq!(console.manual_hex(0), None, "hand keyboards have no hex field");
+
+        let mut console = test_console();
+        console.organ.manuals[0].kind = aristide_model::ManualKind::Microtonal;
+        let derived = console.manual_hex(0).expect("derived default");
+        assert_eq!(derived, aristide_model::HexLayout::default_for(36, 61));
+
+        let declared = aristide_model::HexLayout {
+            rows: 7,
+            cols: 12,
+            right: 2,
+            upright: 7,
+            anchor: 48,
+        };
+        console.organ.manuals[0].hex = Some(declared);
+        assert_eq!(console.manual_hex(0), Some(declared));
     }
 
     fn attack(
@@ -2096,6 +2139,7 @@ mod tests {
                     first_midi_note: 36,
                     key_count: 32,
                     kind: Default::default(),
+                    hex: None,
                 },
                 Manual {
                     id: ManualId(2),
@@ -2103,6 +2147,7 @@ mod tests {
                     first_midi_note: 36,
                     key_count: 61,
                     kind: Default::default(),
+                    hex: None,
                 },
             ],
             stops: vec![
@@ -2452,6 +2497,7 @@ mod tests {
             first_midi_note: 36,
             key_count: 61,
                     kind: Default::default(),
+                    hex: None,
         };
         let stop = |id: u32, manual: u32, rank: u32| Stop {
             id: StopId(id),

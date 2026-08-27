@@ -2029,6 +2029,29 @@ impl State {
         Ok(())
     }
 
+    /// Redeclare a microtonal manual's hex-field layout (`None` resets
+    /// to the derived default). Structural, like the kind: the console
+    /// redraws the keyboard, so the file line is followed by a reload.
+    pub fn set_manual_hex(
+        &mut self,
+        manual: usize,
+        layout: Option<aristide_model::HexLayout>,
+    ) -> Result<(), String> {
+        let names = self.manual_names();
+        let Some(name) = names.get(manual) else {
+            return Err("no such manual".into());
+        };
+        let path = self.organ_file()?;
+        if !config::write_composite_manual_hex(&path, name, layout)? {
+            return Err(format!(
+                "{} has no [[manual]] named {name:?} — it wasn't declared by this file",
+                path.display()
+            ));
+        }
+        self.reload_organ_file(path);
+        Ok(())
+    }
+
     pub fn rename_manual(&mut self, manual: usize, name: &str) -> Result<(), String> {
         let names = self.manual_names();
         let Some(old) = names.get(manual) else {

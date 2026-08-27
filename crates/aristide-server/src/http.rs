@@ -414,6 +414,116 @@ fn respond(
                 _ => bad_request("missing manual/kind (manual, pedal or microtonal)"),
             }
         }
+        // A microtonal manual's hex-field layout. Fields given override
+        // the current effective layout; `preset=` fills the two
+        // step-vectors from a named classic layout, derived against the
+        // manual's own steps-per-octave; `reset=1` removes the
+        // declaration so the derived default returns.
+        (Method::Post, "/api/organ/manual/hex") => {
+            let mut state = state.lock().expect("state poisoned");
+            if state.loading.is_some() || state.pending_load.is_some() {
+                return bad_request("an organ is already loading");
+            }
+            let Some(manual) = param(query, "manual").and_then(|v| v.parse::<usize>().ok())
+            else {
+                return bad_request("missing manual");
+            };
+            if param(query, "reset").is_some_and(|v| v != "0") {
+                return match state.set_manual_hex(manual, None) {
+                    Ok(()) => json(state_json_locked(&state)),
+                    Err(err) => bad_request(&err),
+                };
+            }
+            let Control::Organ(console) = &state.control else {
+                return bad_request("no organ");
+            };
+            let Some(mut layout) = console.manual_hex(manual) else {
+                return bad_request("not a microtonal manual — no hex field to lay out");
+            };
+            let compass_top = console
+                .manual_states()
+                .get(manual)
+                .map(|(_, _, first, count, _)| *first as i32 + (*count).max(1) as i32 - 1);
+            let mut refit_cols = false;
+            if let Some(preset) = param(query, "preset") {
+                let steps = {
+                    let tuning = console.manual_tuning(manual).unwrap_or(console.tuning());
+                    tuning
+                        .scale
+                        .as_ref()
+                        .map(|scale| scale.scale.len().max(1) as u16)
+                        .unwrap_or(12)
+                };
+                let Some((right, upright)) =
+                    aristide_model::HexLayout::preset_steps(preset, steps)
+                else {
+                    return bad_request(
+                        "preset must be bosanquet, wicki-hayden or harmonic-table",
+                    );
+                };
+                layout.right = right;
+                layout.upright = upright;
+                // New step-vectors change how far the board reaches, so
+                // its width is refitted unless this call pins it.
+                refit_cols = true;
+            }
+            for (name, slot) in [("right", &mut layout.right), ("upright", &mut layout.upright)]
+            {
+                if let Some(text) = param(query, name) {
+                    match text.parse::<i16>() {
+                        Ok(value) => {
+                            *slot = value;
+                            refit_cols = true;
+                        }
+                        Err(_) => return bad_request(&format!("{name} must be a whole number")),
+                    }
+                }
+            }
+            if let Some(text) = param(query, "anchor") {
+                match text.parse::<u16>() {
+                    Ok(value) => layout.anchor = value,
+                    Err(_) => return bad_request("anchor must be a key number"),
+                }
+            }
+            if let Some(text) = param(query, "rows") {
+                match text.parse::<i64>() {
+                    Ok(value) if (1..=aristide_model::HexLayout::MAX_ROWS as i64).contains(&value) => {
+                        layout.rows = value as u8;
+                    }
+                    _ => {
+                        return bad_request(&format!(
+                            "rows must be 1..{}",
+                            aristide_model::HexLayout::MAX_ROWS
+                        ));
+                    }
+                }
+            }
+            match param(query, "cols") {
+                Some(text) => match text.parse::<i64>() {
+                    Ok(value)
+                        if (1..=aristide_model::HexLayout::MAX_COLS as i64).contains(&value) =>
+                    {
+                        layout.cols = value as u8;
+                    }
+                    _ => {
+                        return bad_request(&format!(
+                            "cols must be 1..{}",
+                            aristide_model::HexLayout::MAX_COLS
+                        ));
+                    }
+                },
+                None => {
+                    if refit_cols && let Some(top) = compass_top {
+                        layout.cols = 1;
+                        layout.fit_cols(top);
+                    }
+                }
+            }
+            match state.set_manual_hex(manual, Some(layout)) {
+                Ok(()) => json(state_json_locked(&state)),
+                Err(err) => bad_request(&err),
+            }
+        }
         (Method::Post, "/api/organ/manual/rename") => {
             let mut state = state.lock().expect("state poisoned");
             if state.loading.is_some() || state.pending_load.is_some() {
@@ -1176,8 +1286,17 @@ fn state_json_locked(state: &State) -> String {
             }
             first = false;
             let held: Vec<String> = held.iter().map(|k| k.to_string()).collect();
+            // Microtonal manuals carry their effective hex layout —
+            // declared or derived, the console just draws it.
+            let hex = match console.manual_hex(idx) {
+                Some(hex) => format!(
+                    ",\"hex\":{{\"rows\":{},\"cols\":{},\"right\":{},\"upright\":{},\"anchor\":{}}}",
+                    hex.rows, hex.cols, hex.right, hex.upright, hex.anchor
+                ),
+                None => String::new(),
+            };
             out.push_str(&format!(
-                "{{\"idx\":{idx},\"name\":{},\"first_key\":{first_key},\"key_count\":{key_count},\"pedal\":{},\"kind\":\"{}\",\"held\":[{}]}}",
+                "{{\"idx\":{idx},\"name\":{},\"first_key\":{first_key},\"key_count\":{key_count},\"pedal\":{},\"kind\":\"{}\"{hex},\"held\":[{}]}}",
                 json_string(name),
                 console.manual_pedal(idx),
                 console.manual_kind(idx).as_str(),
@@ -2333,6 +2452,16 @@ mod tests {
 
         let dup = respond(&state, &Method::Post, "/api/organ/manual/add?name=solo");
         assert_eq!(dup.status_code().0, 400, "duplicate names are refused");
+
+        // A hex layout belongs to microtonal manuals only; a reset
+        // (remove the declaration) needs no console rebuild first.
+        let hex = respond(&state, &Method::Post, "/api/organ/manual/hex?manual=1&right=2");
+        assert_eq!(hex.status_code().0, 400, "hand keyboards have no hex field");
+        let hex = respond(&state, &Method::Post, "/api/organ/manual/hex?manual=1&reset=1");
+        assert_eq!(hex.status_code().0, 200);
+        settle(&state);
+        let hex = respond(&state, &Method::Post, "/api/organ/manual/hex?manual=99&reset=1");
+        assert_eq!(hex.status_code().0, 400, "unknown manuals are refused");
 
         let renamed = respond(
             &state,
