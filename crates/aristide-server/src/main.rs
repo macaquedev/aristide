@@ -675,6 +675,8 @@ pub struct CouplerRouteEdit {
     pub scope: Option<String>,
     #[serde(default)]
     pub repitch: Option<bool>,
+    #[serde(default)]
+    pub own_pipes: bool,
 }
 
 /// The provenance of the loaded instrument.
@@ -2515,6 +2517,36 @@ impl State {
         Ok(())
     }
 
+    /// Declare whether a stop speaks pipes of its own (doubling pipes
+    /// other stops sound) or shares them — the default, and what a
+    /// real unit action does. Lands live (held keys re-derive, no
+    /// rebuild) and is kept in the organ file.
+    pub fn set_stop_own_pipes(&mut self, stop: StopId, own: bool) -> Result<(), String> {
+        let (name, manual_name, prov) = self.stop_coordinates(stop)?;
+        let path = self.organ_file()?;
+        if !config::write_composite_stop_own_pipes(&path, &prov, &manual_name, own)? {
+            return Err(format!(
+                "the pull that brought {name:?} in isn't in {} — it was \
+                 hand-edited; edit it there",
+                path.display()
+            ));
+        }
+        let State {
+            engine, control, ..
+        } = &mut *self;
+        let Control::Organ(console) = control else {
+            return Err("no organ is loaded".into());
+        };
+        let (stopped, starts) = console.set_stop_own_pipes(stop, own);
+        for handle in stopped {
+            engine.send(Command::StopVoice { handle });
+        }
+        for start in starts {
+            engine.send(start_command(&start));
+        }
+        Ok(())
+    }
+
     /// Rename a coupler — a rocker's engraving, so it lands live: the
     /// console name changes now, the file keeps it (a define's own
     /// name line, or the [couplers.rename] map for one a source
@@ -2662,6 +2694,7 @@ impl State {
                     unison_off: route.unison_off,
                     scope,
                     repitch: route.repitch,
+                    own_pipes: route.own_pipes,
                 })
             })
             .collect()

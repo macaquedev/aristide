@@ -62,6 +62,21 @@ re-derives what each held key should sound and diffs. GO's Bass/Melody picks
 and cent-offset routes are deferred — the latter breaks pipe-speaks-once and
 belongs with per-pipe addressing (M6).
 
+**A pipe speaks once (locked, default; 2026-08-27):** the refcount identity of
+a voice is the *physical* pipe — borrow chains followed to the pipe that
+actually sounds — plus the pitch it is asked to sound, at cent resolution.
+However many stops, unit-organ borrows, duplexes and couplers demand the same
+pipe at the same pitch, they hold one voice between them, as the real action
+would (a second voice would sum the identical recording coherently, +6 dB).
+The same physical pipe *repitched* two ways is two virtual pipes and both
+speak — an out-of-range C# and D both stood in for by top C still make a
+second. The opt-out is per coupler route (`own_pipes = true` on a
+`[[couplers.define.route]]`) and per stop (`own_pipes` on a `[[stop]]` pull or
+a `[[division]]` pull's per-stop map): an own-pipes route or stop speaks an
+independent virtual set of pipes and deliberately doubles — which also makes
+a unison self-coupler a doubler instead of a no-op. Both toggles are in the
+console editors and land live under held keys.
+
 **Couplers never repitch (locked, default):** repitching fills in what the
 *player's keyboard* can reach; a coupler is not a keyboard. A coupled note
 sounds only a pipe the division it lands on actually has — a 16' coupler

@@ -186,6 +186,7 @@ export class Editor {
       stopSrcCancel: root.getElementById("editor-stop-src-cancel"),
       stopLabelMode: root.getElementById("editor-stop-label-mode"),
       stopLabelText: root.getElementById("editor-stop-label-text"),
+      stopOwnPipes: root.getElementById("editor-stop-own-pipes"),
       coupler: root.getElementById("editor-coupler"),
       couplerForm: root.getElementById("editor-coupler-form"),
       couplerTitle: root.getElementById("editor-coupler-title"),
@@ -1265,6 +1266,11 @@ export class Editor {
       if (this.stopOpen == null) return;
       this.stopCommand(commands.organStopLabel(this.stopOpen, { label: this.el.stopLabelText.value }));
     });
+
+    this.el.stopOwnPipes.addEventListener("change", () => {
+      if (this.stopOpen == null) return;
+      this.stopCommand(commands.organStopOwnPipes(this.stopOpen, this.el.stopOwnPipes.checked));
+    });
   }
 
   openStopForm(id, x, y) {
@@ -1329,6 +1335,8 @@ export class Editor {
     if (labelMode === "custom" && this.root.activeElement !== this.el.stopLabelText) {
       this.el.stopLabelText.value = stop.label;
     }
+
+    this.el.stopOwnPipes.checked = !!stop.own_pipes;
 
     const src = stop.src;
     this.el.stopSrc.textContent = src
@@ -1705,7 +1713,21 @@ export class Editor {
       });
       unisonLabel.append(unisonCheck, document.createTextNode(" own stops off"));
 
-      how.append(scopeSelect, unisonLabel);
+      const ownPipesLabel = document.createElement("label");
+      ownPipesLabel.title =
+        "Speak an independent set of pipes — copies double pipes already " +
+        "sounding instead of sharing them";
+      const ownPipesCheck = document.createElement("input");
+      ownPipesCheck.type = "checkbox";
+      ownPipesCheck.checked = !!route.own_pipes;
+      ownPipesCheck.addEventListener("change", () => {
+        if (ownPipesCheck.checked) route.own_pipes = true;
+        else delete route.own_pipes;
+        this.scheduleCouplerApply();
+      });
+      ownPipesLabel.append(ownPipesCheck, document.createTextNode(" own pipes"));
+
+      how.append(scopeSelect, unisonLabel, ownPipesLabel);
 
       if (this.couplerRoutes.length > 1) {
         const remove = document.createElement("button");

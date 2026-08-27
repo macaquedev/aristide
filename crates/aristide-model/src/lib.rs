@@ -368,6 +368,10 @@ fn is_true(value: &bool) -> bool {
     *value
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 impl Pipe {
     /// The pipe's own samples, if it has any (borrowed/silent pipes don't).
     pub fn samples(&self) -> Option<(&[AttackSample], &[ReleaseSample])> {
@@ -442,6 +446,14 @@ pub struct Stop {
     pub name: String,
     pub manual: ManualId,
     pub ranks: Vec<RankRange>,
+    /// Whether this stop speaks pipes of its own instead of sharing.
+    /// By default two stops that reach the same physical pipe at the
+    /// same pitch (unit-organ borrowing, duplexed ranks) hold ONE
+    /// voice between them, as the real action would. `true` gives the
+    /// stop an independent (virtual) set of pipes, so it doubles what
+    /// other stops already sound.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub own_pipes: bool,
 }
 
 /// A swell box / expression enclosure: a shuttered chamber whose
@@ -523,6 +535,14 @@ pub struct CouplerTarget {
     /// route is tone the instrument can't otherwise make (a 16' from
     /// an 8' rank's bottom octave). `None` = the console-wide default.
     pub repitch: Option<bool>,
+    /// Whether this route's copies speak pipes of their own instead of
+    /// sharing. By default a copy that reaches a pipe already speaking
+    /// at the same pitch merely holds it — one pipe, one voice, as a
+    /// unit organ's action works. `true` gives the route an independent
+    /// (virtual) set of pipes, so its copies double what other routes
+    /// or keys already sound.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub own_pipes: bool,
 }
 
 /// Which source keys a route listens to. The classic coupler hears
@@ -603,6 +623,7 @@ impl Coupler {
                     manual: to,
                     key_shift,
                     repitch: None,
+                    own_pipes: false,
                 }),
             }],
         }

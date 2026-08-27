@@ -202,6 +202,12 @@ export const commands = {
   // name stands alone); `fields.auto: 1` goes back to engraving
   // whatever footage the stop actually speaks at.
   organStopLabel: (id, fields) => `/api/organ/stop/label?${new URLSearchParams({ stop: id, ...fields })}`,
+  // A stop's own-pipes flag, live — no rebuild. Off (the default) merges
+  // this stop's pipes with any other route/stop already sounding them;
+  // on, this stop always speaks its own independent set, doubling what's
+  // already sounding.
+  organStopOwnPipes: (id, own) =>
+    `/api/organ/stop/own_pipes?stop=${id}&own=${own ? 1 : 0}`,
   // A coupler's own name, live — no rebuild. 400s on a clash with a
   // sibling coupler's name.
   organCouplerRename: (idx, name) => `/api/organ/coupler/rename?idx=${idx}&name=${encodeURIComponent(name)}`,

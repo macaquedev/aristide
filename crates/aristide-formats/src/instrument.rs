@@ -274,6 +274,12 @@ pub struct DivisionPull {
     /// shows the footage the stop actually speaks at.
     #[serde(default)]
     pub pitch_label: BTreeMap<String, String>,
+    /// Per-stop pipe sharing: source stop name → whether the stop
+    /// speaks pipes of its own (`true` doubles pipes other stops
+    /// already sound instead of sharing them). Absent, the source's
+    /// own declaration (almost always shared) stands.
+    #[serde(default)]
+    pub own_pipes: BTreeMap<String, bool>,
 }
 
 /// Pull one stop (or every stop a pattern matches) onto a manual.
@@ -294,6 +300,10 @@ pub struct StopPull {
     /// Absent, the face shows the footage the stop actually speaks at.
     /// Like `rename`, applied only to a single-stop match.
     pub pitch_label: Option<String>,
+    /// Whether the stop speaks pipes of its own: `true` doubles pipes
+    /// other stops already sound instead of sharing them. Absent, the
+    /// source's own declaration (almost always shared) stands.
+    pub own_pipes: Option<bool>,
 }
 
 /// A swell box of the composite's own devising: a name and the stops
@@ -563,6 +573,23 @@ pub fn load(path: &Path) -> Result<Assembled, InstrumentError> {
     assemble(&def, &sources, warnings)
 }
 
+/// The per-stop knobs a pull may set on top of what the source stop
+/// declares: a console rename, a drawknob engraving, pipe sharing.
+#[derive(Default)]
+struct StopOverrides {
+    rename: Option<String>,
+    pitch_label: Option<String>,
+    own_pipes: Option<bool>,
+}
+
+/// A [[division]] pull's per-stop override maps, keyed by source stop
+/// name.
+struct DivisionOverrides<'a> {
+    rename: &'a BTreeMap<String, String>,
+    pitch_label: &'a BTreeMap<String, String>,
+    own_pipes: &'a BTreeMap<String, bool>,
+}
+
 /// A stop placed but not yet fixed to a compass: its ranges anchor to
 /// absolute MIDI notes (what the source keys meant), and only once
 /// every manual's compass is settled do they become key indices again.
@@ -570,6 +597,7 @@ struct PlacedStop {
     name: String,
     manual: usize,
     ranges: Vec<PlacedRange>,
+    own_pipes: bool,
 }
 
 struct PlacedRange {
@@ -672,15 +700,13 @@ pub fn assemble(
             for number in numbers {
                 assembly.chest_number(source_idx, number);
             }
+            let none = DivisionOverrides {
+                rename: &BTreeMap::new(),
+                pitch_label: &BTreeMap::new(),
+                own_pipes: &BTreeMap::new(),
+            };
             for manual_idx in 0..organ.manuals.len() {
-                assembly.pull_division(
-                    source_idx,
-                    manual_idx,
-                    None,
-                    &[],
-                    &BTreeMap::new(),
-                    &BTreeMap::new(),
-                )?;
+                assembly.pull_division(source_idx, manual_idx, None, &[], &none)?;
             }
         }
     } else {
@@ -730,8 +756,11 @@ pub fn assemble(
                     manual_idx,
                     pull.on.as_deref(),
                     &pull.except,
-                    &pull.rename,
-                    &pull.pitch_label,
+                    &DivisionOverrides {
+                        rename: &pull.rename,
+                        pitch_label: &pull.pitch_label,
+                        own_pipes: &pull.own_pipes,
+                    },
                 ) {
                     assembly.warnings.push(format!(
                         "division {:?} from {:?}: {err} — skipped",
@@ -821,8 +850,11 @@ pub fn assemble(
                     source_idx,
                     stop_idx,
                     target,
-                    rename.clone(),
-                    pitch_label.clone(),
+                    StopOverrides {
+                        rename: rename.clone(),
+                        pitch_label: pitch_label.clone(),
+                        own_pipes: pull.own_pipes,
+                    },
                     false,
                 );
             }
@@ -1152,8 +1184,7 @@ impl Assembly<'_> {
         manual_idx: usize,
         on: Option<&str>,
         except: &[String],
-        renames: &BTreeMap<String, String>,
-        pitch_labels: &BTreeMap<String, String>,
+        overrides: &DivisionOverrides,
     ) -> Result<(), InstrumentError> {
         let (alias, organ) = &self.sources[source_idx];
         let source_manual = organ.manuals[manual_idx].clone();
@@ -1210,7 +1241,7 @@ impl Assembly<'_> {
             }
             left_behind.extend(matched);
         }
-        for (unmatched, _) in renames.iter().filter(|(from, _)| {
+        for (unmatched, _) in overrides.rename.iter().filter(|(from, _)| {
             !names
                 .iter()
                 .enumerate()
@@ -1225,9 +1256,13 @@ impl Assembly<'_> {
             if left_behind.contains(&at) {
                 continue;
             }
-            let rename = renames.get(&organ.stops[stop_idx].name).cloned();
-            let label = pitch_labels.get(&organ.stops[stop_idx].name).cloned();
-            self.place_stop(source_idx, stop_idx, target, rename, label, true);
+            let name = &organ.stops[stop_idx].name;
+            let overrides = StopOverrides {
+                rename: overrides.rename.get(name).cloned(),
+                pitch_label: overrides.pitch_label.get(name).cloned(),
+                own_pipes: overrides.own_pipes.get(name).copied(),
+            };
+            self.place_stop(source_idx, stop_idx, target, overrides, true);
         }
         Ok(())
     }
@@ -1237,13 +1272,12 @@ impl Assembly<'_> {
         source_idx: usize,
         stop_idx: usize,
         target: usize,
-        rename: Option<String>,
-        pitch_label: Option<String>,
+        overrides: StopOverrides,
         via_division: bool,
     ) {
         let organ = &self.sources[source_idx].1;
         let stop = &organ.stops[stop_idx];
-        self.pitch_labels.push(pitch_label);
+        self.pitch_labels.push(overrides.pitch_label);
         self.provenance.push(StopProvenance {
             source: self.sources[source_idx].0.clone(),
             source_manual: organ
@@ -1272,7 +1306,7 @@ impl Assembly<'_> {
                 ));
                 36
             });
-        let name = rename.unwrap_or_else(|| stop.name.clone());
+        let name = overrides.rename.unwrap_or_else(|| stop.name.clone());
         let ranges = stop
             .ranks
             .clone()
@@ -1288,6 +1322,7 @@ impl Assembly<'_> {
             name,
             manual: target,
             ranges,
+            own_pipes: overrides.own_pipes.unwrap_or(stop.own_pipes),
         });
     }
 
@@ -1540,6 +1575,7 @@ impl Assembly<'_> {
                     name: placed.name.clone(),
                     manual: ManualId(placed.manual as u32),
                     ranks,
+                    own_pipes: placed.own_pipes,
                 }
             })
             .collect();
@@ -1622,6 +1658,7 @@ mod tests {
                     id: StopId(10),
                     name: "Principal 8".into(),
                     manual: ManualId(0),
+                    own_pipes: false,
                     ranks: vec![RankRange {
                         rank: RankId(1),
                         first_key: 0,
@@ -1633,6 +1670,7 @@ mod tests {
                     id: StopId(11),
                     name: "Hautbois 8".into(),
                     manual: ManualId(1),
+                    own_pipes: false,
                     ranks: vec![RankRange {
                         rank: RankId(2),
                         first_key: 0,
@@ -1839,6 +1877,46 @@ mod tests {
     /// shared with non-member ranks (here the Hautbois' borrow donor)
     /// is split, and the donor — whose pipes stand outside the box —
     /// keeps speaking unenclosed.
+    /// `own_pipes` on a pull overrides the source stop's declaration;
+    /// absent, the source's own (default shared) stands.
+    #[test]
+    fn own_pipes_rides_a_stop_pull() {
+        let sources = vec![("A".to_string(), source("A", "/a"))];
+        let mut definition = def("Owned");
+        definition.manuals = vec![manual("Solo", None, None)];
+        definition.stops = vec![
+            StopPull {
+                from: "A".into(),
+                manual: None,
+                stop: "Hautbois 8".into(),
+                on: "Solo".into(),
+                rename: None,
+                pitch_label: None,
+                own_pipes: Some(true),
+            },
+            StopPull {
+                from: "A".into(),
+                manual: None,
+                stop: "Principal 8".into(),
+                on: "Solo".into(),
+                rename: None,
+                pitch_label: None,
+                own_pipes: None,
+            },
+        ];
+        let built = assemble(&definition, &sources, Vec::new()).expect("assembles");
+        let stop = |name: &str| {
+            built
+                .organ
+                .stops
+                .iter()
+                .find(|s| s.name == name)
+                .expect("stop placed")
+        };
+        assert!(stop("Hautbois 8").own_pipes);
+        assert!(!stop("Principal 8").own_pipes);
+    }
+
     #[test]
     fn a_defined_enclosure_splits_shared_chests() {
         let sources = vec![("A".to_string(), source("A", "/a"))];
@@ -1851,6 +1929,7 @@ mod tests {
             on: "Solo".into(),
             rename: None,
             pitch_label: None,
+            own_pipes: None,
         }];
         definition.enclosure_defs = vec![EnclosureDef {
             name: "Boîte".into(),
@@ -1896,6 +1975,7 @@ mod tests {
             on: "Solo".into(),
             rename: None,
             pitch_label: None,
+            own_pipes: None,
         }];
         definition.enclosure_defs = vec![
             EnclosureDef {
@@ -1972,6 +2052,7 @@ mod tests {
             on: "Solo".into(),
             rename: Some("Montre 8".into()),
             pitch_label: None,
+            own_pipes: None,
         }];
         let built = assemble(&definition, &sources, Vec::new()).expect("assembles");
         let organ = &built.organ;
@@ -2003,6 +2084,7 @@ mod tests {
             on: "Solo".into(),
             rename: None,
             pitch_label: None,
+            own_pipes: None,
         }];
         let built = assemble(&definition, &sources, Vec::new()).expect("assembles");
         let organ = &built.organ;
@@ -2035,6 +2117,7 @@ mod tests {
             on: "Solo".into(),
             rename: None,
             pitch_label: None,
+            own_pipes: None,
         }];
         let built = assemble(&definition, &sources, Vec::new()).expect("assembles");
         let organ = &built.organ;
@@ -2064,6 +2147,7 @@ mod tests {
                 except: Vec::new(),
                 rename: BTreeMap::new(),
                 pitch_label: BTreeMap::new(),
+            own_pipes: BTreeMap::new(),
             },
             DivisionPull {
                 from: "B".into(),
@@ -2072,6 +2156,7 @@ mod tests {
                 except: Vec::new(),
                 rename: BTreeMap::new(),
                 pitch_label: BTreeMap::new(),
+            own_pipes: BTreeMap::new(),
             },
         ];
         let built = assemble(&definition, &sources, Vec::new()).expect("assembles");
@@ -2095,6 +2180,7 @@ mod tests {
             on: "Great".into(),
             rename: None,
             pitch_label: None,
+            own_pipes: None,
         }];
         assert!(assemble(&definition, &sources, Vec::new()).is_err());
     }
@@ -2117,6 +2203,7 @@ mod tests {
                 on: "Great".into(),
                 rename: None,
                 pitch_label: None,
+            own_pipes: None,
             },
             StopPull {
                 from: "A".into(),
@@ -2125,6 +2212,7 @@ mod tests {
                 on: "First Manual".into(), // renamed since; must not brick
                 rename: None,
                 pitch_label: None,
+            own_pipes: None,
             },
         ];
         definition.divisions = vec![DivisionPull {
@@ -2134,6 +2222,7 @@ mod tests {
             except: Vec::new(),
             rename: BTreeMap::new(),
             pitch_label: BTreeMap::new(),
+            own_pipes: BTreeMap::new(),
         }];
         let built = assemble(&definition, &sources, Vec::new()).expect("still assembles");
         assert_eq!(built.organ.stops.len(), 1, "the resolvable pull lands");
@@ -2166,6 +2255,7 @@ mod tests {
                 except: vec!["Principal".into(), "Ghost".into()],
                 rename: BTreeMap::new(),
                 pitch_label: BTreeMap::new(),
+            own_pipes: BTreeMap::new(),
             },
             DivisionPull {
                 from: "A".into(),
@@ -2179,6 +2269,7 @@ mod tests {
                 .into_iter()
                 .collect(),
                 pitch_label: BTreeMap::new(),
+            own_pipes: BTreeMap::new(),
             },
         ];
         definition.stops = vec![StopPull {
@@ -2188,6 +2279,7 @@ mod tests {
             on: "Great".into(),
             rename: None,
             pitch_label: None,
+            own_pipes: None,
         }];
         let built = assemble(&definition, &sources, Vec::new()).expect("assembles");
         let names: Vec<&str> = built.organ.stops.iter().map(|s| s.name.as_str()).collect();
@@ -2244,6 +2336,7 @@ mod tests {
                 except: Vec::new(),
                 rename: BTreeMap::new(),
                 pitch_label: BTreeMap::new(),
+            own_pipes: BTreeMap::new(),
             },
             DivisionPull {
                 from: "A".into(),
@@ -2252,6 +2345,7 @@ mod tests {
                 except: Vec::new(),
                 rename: BTreeMap::new(),
                 pitch_label: BTreeMap::new(),
+            own_pipes: BTreeMap::new(),
             },
         ];
         definition.moves = vec![MoveDef {

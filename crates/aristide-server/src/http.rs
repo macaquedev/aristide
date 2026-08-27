@@ -723,6 +723,26 @@ fn respond(
                 Err(err) => bad_request(&err),
             }
         }
+        // Whether a stop speaks pipes of its own (`own=1` doubles
+        // pipes other stops already sound) or shares them (`own=0`,
+        // the default and what a real unit action does). Lands live —
+        // held keys re-derive — and is kept in the organ file.
+        (Method::Post, "/api/organ/stop/own_pipes") => {
+            let mut state = state.lock().expect("state poisoned");
+            if state.loading.is_some() || state.pending_load.is_some() {
+                return bad_request("an organ is already loading");
+            }
+            let Some(stop) = param(query, "stop").and_then(|v| v.parse::<u32>().ok()) else {
+                return bad_request("missing stop");
+            };
+            let Some(own) = param(query, "own").map(|v| v != "0") else {
+                return bad_request("missing own");
+            };
+            match state.set_stop_own_pipes(aristide_model::StopId(stop), own) {
+                Ok(()) => json(state_json_locked(&state)),
+                Err(err) => bad_request(&err),
+            }
+        }
         // Rename a coupler — a rocker's engraving, live like a stop
         // rename; the file keeps it and name-keyed references follow.
         (Method::Post, "/api/organ/coupler/rename") => {
@@ -1576,8 +1596,15 @@ fn state_json_locked(state: &State) -> String {
                 Some(label) => format!(",\"label\":{}", json_string(label)),
                 None => String::new(),
             };
+            // Present only when the stop speaks pipes of its own —
+            // shared (absent) is the default and the organ norm.
+            let own_pipes = if console.stop_own_pipes(id) {
+                ",\"own_pipes\":true"
+            } else {
+                ""
+            };
             out.push_str(&format!(
-                "{{\"id\":{},\"name\":{},\"manual\":{},\"midx\":{},\"enc\":[{}],\"on\":{}{src}{pitch}{label}}}",
+                "{{\"id\":{},\"name\":{},\"manual\":{},\"midx\":{},\"enc\":[{}],\"on\":{}{src}{pitch}{label}{own_pipes}}}",
                 id.0,
                 json_string(name),
                 json_string(manual),
@@ -1634,6 +1661,9 @@ fn state_json_locked(state: &State) -> String {
                     }
                     if let Some(repitch) = route.repitch {
                         out.push_str(&format!(",\"repitch\":{repitch}"));
+                    }
+                    if route.own_pipes {
+                        out.push_str(",\"own_pipes\":true");
                     }
                     out.push('}');
                     out

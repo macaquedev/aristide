@@ -537,6 +537,7 @@ impl Builder<'_> {
                             manual: ManualId(coupler_section.int("DestinationManual")? as u32),
                             key_shift: coupler_section.int("DestinationKeyshift")? as i16,
                             repitch: None,
+                            own_pipes: false,
                         }),
                     }],
                 });
@@ -636,6 +637,7 @@ impl Builder<'_> {
             name,
             manual,
             ranks: Vec::new(),
+            own_pipes: false,
         };
 
         if referenced_ranks > 0 {

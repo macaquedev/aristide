@@ -287,9 +287,10 @@ pub struct CouplersConfig {
     ///
     /// A coupler may carry several routes (a 16' that transposes the
     /// bottom octave instead of doubling it is two), and a route may
-    /// set `unison_off`, `repitch`, and `scope` (`"bass"`/`"melody"`
-    /// for the intelligent couplers that follow only the lowest/highest
-    /// held key).
+    /// set `unison_off`, `repitch`, `own_pipes` (speak an independent
+    /// set of pipes instead of sharing ones already sounding), and
+    /// `scope` (`"bass"`/`"melody"` for the intelligent couplers that
+    /// follow only the lowest/highest held key).
     #[serde(default, rename = "define")]
     pub define: Vec<CouplerDef>,
     /// Couplers taken off the console, by name pattern — the set (or a
@@ -339,6 +340,12 @@ pub struct RouteDef {
     /// Let this route repitch pipes the destination hasn't got (and so
     /// reach past its compass); omit to follow `[couplers] repitch`.
     pub repitch: Option<bool>,
+    /// Give this route's copies pipes of their own. By default a copy
+    /// landing on a pipe already speaking at that pitch holds the SAME
+    /// pipe (one voice, as a real action would); `own_pipes = true`
+    /// makes the route double it instead.
+    #[serde(default)]
+    pub own_pipes: bool,
 }
 
 /// A key in a route definition: a raw MIDI note number or a name.
@@ -447,6 +454,7 @@ fn resolve_coupler(
                 manual: manual(to)?,
                 key_shift: route.shift,
                 repitch: route.repitch,
+                own_pipes: route.own_pipes,
             }),
             None => None,
         };
@@ -962,6 +970,7 @@ shift = -12
 high = 59
 unison_off = true
 repitch = true
+own_pipes = true
 "#;
         let sidecar: Sidecar = toml::from_str(text).expect("parses");
         let (couplers, warnings) = resolve_couplers(&two_manual_organ(), &sidecar.couplers.define);
@@ -981,6 +990,8 @@ repitch = true
         assert_eq!(sixteen.routes.len(), 2);
         assert!(sixteen.routes[1].unison_off);
         assert_eq!(sixteen.routes[1].target.as_ref().unwrap().repitch, Some(true));
+        assert!(sixteen.routes[1].target.as_ref().unwrap().own_pipes);
+        assert!(!sixteen.routes[0].target.as_ref().unwrap().own_pipes);
     }
 
     #[test]
@@ -996,6 +1007,7 @@ repitch = true
                 unison_off: false,
                 scope: aristide_model::CouplerScope::AllKeys,
                 repitch: None,
+                own_pipes: false,
             }],
         }];
         let (couplers, warnings) = resolve_couplers(&two_manual_organ(), &defs);

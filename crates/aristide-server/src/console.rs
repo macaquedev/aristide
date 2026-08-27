@@ -5,7 +5,9 @@
 
 use std::collections::HashMap;
 
-use aristide_model::{CouplerRoute, CouplerScope, ManualId, Organ, RankId, RankRange, StopId};
+use aristide_model::{
+    CouplerRoute, CouplerScope, ManualId, Organ, PipeSource, RankId, RankRange, StopId,
+};
 
 use crate::bank::VoiceSpec;
 use crate::tuning::Tuning;
@@ -23,6 +25,7 @@ pub struct CouplerRouteView {
     pub unison_off: bool,
     pub scope: CouplerScope,
     pub repitch: Option<bool>,
+    pub own_pipes: bool,
 }
 
 /// A voice the console wants started, tagged with the handle it will
@@ -47,6 +50,39 @@ struct Landing {
     /// hasn't got (16' tone off the bottom of an 8' rank), so it
     /// reaches past the compass; a normal route stays inside it.
     bounded: bool,
+    /// The pipe-sharing lane this landing speaks in: 0 for the played
+    /// key and ordinary routes (one organ, pipes shared), a coupler's
+    /// own lane for `own_pipes` routes — their copies double instead
+    /// of merging (see [`PipeKey`]).
+    lane: u32,
+}
+
+/// The refcount identity of one virtual pipe: WHERE the sound comes
+/// from — the physical pipe, borrow chains followed — and WHAT it is
+/// asked to sound — the offset from its recording, at whole-cent
+/// resolution. However many keys, stops and couplers demand the same
+/// physical pipe at the same pitch, they hold ONE voice between them
+/// (a pipe cannot speak twice); the same physical pipe repitched two
+/// ways is two different virtual pipes, and both speak — an out-of-
+/// range C# and D both stood in for by top C still make a second.
+///
+/// `route_lane`/`stop_lane` carve deliberate exceptions: an
+/// `own_pipes` coupler route or stop speaks in a lane of its own, so
+/// its demands never merge with the shared organ's (or another
+/// lane's) — the opt-in doubling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct PipeKey {
+    rank: RankId,
+    pipe: u16,
+    /// Sounded offset from the pipe's recording in cents: whole
+    /// semitones of standing in for a missing neighbour plus the
+    /// tuning's sub-semitone bend.
+    cents: i32,
+    /// 0 = shared; else 1 + the coupler index whose `own_pipes` route
+    /// carried the demand.
+    route_lane: u32,
+    /// 0 = shared; else 1 + the id of the `own_pipes` stop sounding it.
+    stop_lane: u32,
 }
 
 pub struct Console {
@@ -88,14 +124,13 @@ pub struct Console {
     /// the stop that engaged them (so retiring a stop can release
     /// them). `percussive` voices are excluded (they stop themselves).
     ///
-    /// Pipes here (and in `last_pipe_voice` / `speaking`) are *nominal*
-    /// indices — the rank-ladder position a key demands, which is the
-    /// physical pipe whenever the rank has it and a position past its
-    /// ends (or in a hole) when a neighbour is repitched to stand in.
-    /// Identity by nominal position is what lets two keys borrow the
-    /// same physical pipe at two pitches simultaneously, while the same
-    /// pitch reached by several routes still merges into one voice.
-    sounding: HashMap<(usize, u16), Vec<(StopId, RankId, i32)>>,
+    /// Pipes here (and in `last_pipe_voice` / `speaking`) are
+    /// [`PipeKey`]s — the physical pipe plus the pitch it is asked to
+    /// sound. That is what lets two keys borrow the same physical pipe
+    /// at two pitches simultaneously, while the same pipe at the same
+    /// pitch — however many stops, borrows and couplers reach it —
+    /// merges into one voice.
+    sounding: HashMap<(usize, u16), Vec<(StopId, PipeKey)>>,
     /// The velocity each held key was struck with — a stop drawn
     /// mid-hold prices its new voices at the press it joins, not at
     /// some fresh default.
@@ -105,14 +140,14 @@ pub struct Console {
     /// re-speaks, so a pipe can never overlap itself at full level.
     /// (Repitched borrowings at other pitches don't count as "itself":
     /// different rates aren't phase-coherent, so they may overlap.)
-    last_pipe_voice: HashMap<(RankId, i32), u64>,
+    last_pipe_voice: HashMap<PipeKey, u64>,
     /// Each speaking pipe's voice handle and how many holders (keys,
     /// couplers) currently demand it. A pipe speaks ONCE no matter how
     /// many routes reach it — starting a second voice on the same pipe
     /// sums the identical recording coherently (+6 dB), and on release
     /// the phase aligner makes both tails coherent too: the release
     /// comes out LOUDER than the chord (the octave-coupled F-major pop).
-    speaking: HashMap<(RankId, i32), Speaking>,
+    speaking: HashMap<PipeKey, Speaking>,
     /// Engine output rate; frequency-derived voice parameters have to be
     /// recomputed against it when a pipe is repitched.
     device_rate: f32,
@@ -142,7 +177,7 @@ pub struct Console {
     /// When each pipe (at a sounded identity) last fully released —
     /// what "re-speaks within N ms" is measured against for the
     /// fast-repetition re-attack samples.
-    last_released: HashMap<(RankId, i32), std::time::Instant>,
+    last_released: HashMap<PipeKey, std::time::Instant>,
     /// Wave-tremulant state per engine wind group, as a bitmask —
     /// which recording variant (`wave_tremulant`) a chest's pipes
     /// should currently prefer.
@@ -150,6 +185,11 @@ pub struct Console {
     /// Attack-selection tie-break state (GO randomizes among equally
     /// specific candidates so repetition doesn't machine-gun one file).
     rng: u32,
+    /// Borrowed pipe → the physical pipe its chain ends at. What
+    /// [`PipeKey`] identities resolve through, so a borrowing rank and
+    /// its donor demand the SAME pipe, not two. Pipes absent here are
+    /// their own physical selves.
+    physical: HashMap<(RankId, u16), (RankId, u16)>,
 }
 
 /// One speaking pipe's voice, with the pitch bookkeeping live retuning
@@ -186,11 +226,12 @@ impl Speaking {
 #[derive(Debug, Clone, Copy)]
 struct KeyVoice {
     stop: StopId,
+    /// The range's rank and pipe index in it — the key for the
+    /// pipe-level tables (attack options); `key` is the refcount
+    /// identity, borrow chains resolved.
     rank: RankId,
-    /// Physical pipe index in the rank — the key for the pipe-level
-    /// tables (attack options); `identity` is the *sounded* position.
     pipe: u16,
-    identity: i32,
+    key: PipeKey,
     deviation: f64,
     target: usize,
     ladder_key: i16,
@@ -256,7 +297,9 @@ impl Console {
             last_released: HashMap::new(),
             wave_trems: 0,
             rng: 0x2F6E2B1,
+            physical: HashMap::new(),
         };
+        console.physical = physical_alias(&console.organ);
         console.classify_noises();
         // Noise stops must never be part of the registration.
         let noise_stops = console.noise_stops.clone();
@@ -553,8 +596,39 @@ impl Console {
                 unison_off: route.unison_off,
                 scope: route.scope,
                 repitch: route.target.as_ref().and_then(|t| t.repitch),
+                own_pipes: route.target.as_ref().is_some_and(|t| t.own_pipes),
             })
             .collect()
+    }
+
+    /// Whether a stop speaks pipes of its own (doubling pipes other
+    /// stops sound) rather than sharing them — see [`PipeKey`].
+    pub fn stop_own_pipes(&self, stop: StopId) -> bool {
+        self.organ
+            .stops
+            .iter()
+            .find(|s| s.id == stop)
+            .is_some_and(|s| s.own_pipes)
+    }
+
+    /// Redeclare a stop's pipe sharing, live: held keys re-derive at
+    /// once, so a voice merges into the pipe it now shares (or an own
+    /// lane's copy starts). Returns (handles to stop, voices to start)
+    /// like the other live re-derivations.
+    pub fn set_stop_own_pipes(&mut self, stop: StopId, own: bool) -> (Vec<u64>, Vec<VoiceStart>) {
+        let Some(entry) = self.organ.stops.iter_mut().find(|s| s.id == stop) else {
+            return (Vec::new(), Vec::new());
+        };
+        if entry.own_pipes == own {
+            return (Vec::new(), Vec::new());
+        }
+        entry.own_pipes = own;
+        let mut stops = Vec::new();
+        let mut starts = Vec::new();
+        self.recouple_held_keys(&mut stops, &mut starts);
+        stops.sort_unstable();
+        stops.dedup();
+        (stops, starts)
     }
 
     /// Rename a stop on the live console — a label, nothing sounding
@@ -629,7 +703,7 @@ impl Console {
     /// was (note-off still finds it); a pipe several keys share
     /// follows the holder that started it.
     pub fn retune_held(&mut self) -> Vec<(u64, f32)> {
-        let voices: Vec<((RankId, i32), usize, i16)> = self
+        let voices: Vec<(PipeKey, usize, i16)> = self
             .speaking
             .iter()
             .map(|(&at, voice)| (at, voice.target, voice.ladder_key))
@@ -668,8 +742,8 @@ impl Console {
         let Some(holds) = self.sounding.get(&(manual_index, key)).cloned() else {
             return updates;
         };
-        for (_, rank, pipe) in holds {
-            let Some(voice) = self.speaking.get_mut(&(rank, pipe)) else {
+        for (_, held) in holds {
+            let Some(voice) = self.speaking.get_mut(&held) else {
                 continue;
             };
             if (voice.bend - cents).abs() < 1e-3 {
@@ -728,11 +802,12 @@ impl Console {
                     midi_key: midi_key.saturating_add(target.key_shift),
                     fill: repitch,
                     bounded: !repitch,
+                    lane: if target.own_pipes { engaged as u32 + 1 } else { 0 },
                 };
-                match copies
-                    .iter_mut()
-                    .find(|c| (c.manual, c.midi_key) == (landing.manual, landing.midi_key))
-                {
+                match copies.iter_mut().find(|c| {
+                    (c.manual, c.midi_key, c.lane)
+                        == (landing.manual, landing.midi_key, landing.lane)
+                }) {
                     // Two routes onto the same note speak one pipe; if
                     // either may fill or escape the compass, the
                     // landing may.
@@ -751,14 +826,15 @@ impl Console {
                 midi_key,
                 fill: true,
                 bounded: true,
+                lane: 0,
             });
         }
-        // A copy that lands exactly on the played key adds nothing.
-        landings.extend(
-            copies
-                .into_iter()
-                .filter(|c| unison_off || (c.manual, c.midi_key) != (manual, midi_key)),
-        );
+        // A copy that lands exactly on the played key adds nothing —
+        // unless it speaks pipes of its own, which is precisely a
+        // deliberate unison doubler.
+        landings.extend(copies.into_iter().filter(|c| {
+            unison_off || c.lane != 0 || (c.manual, c.midi_key) != (manual, midi_key)
+        }));
         landings
     }
 
@@ -991,10 +1067,10 @@ impl Console {
     ///
     /// `only` restricts the walk to one stop (drawing it mid-hold).
     ///
-    /// Each entry's `identity` is the voice's identity for refcounting:
-    /// the nominal pipe index of `pipe_for`, not the physical pipe that
-    /// happens to sound it. `cents` is the exact pitch target on the
-    /// nominal-cents ladder (identity is this, rounded) — what live
+    /// Each entry's `key` is the voice's identity for refcounting: the
+    /// physical pipe (borrow chains followed) plus the cent-resolution
+    /// pitch it is asked to sound — see [`PipeKey`]. `deviation` is
+    /// the exact tuning deviation the pitch was priced at — what live
     /// retuning diffs against.
     fn voices_for_key(
         &self,
@@ -1023,6 +1099,7 @@ impl Console {
                 midi_key,
                 fill,
                 bounded,
+                lane,
             } = landing;
             let Some(target) = self
                 .organ
@@ -1098,16 +1175,28 @@ impl Console {
                     if let Some((gain, _)) = adjust {
                         spec.gain *= gain;
                     }
-                    // Identity at cent resolution: two keys anchored to
-                    // the same pipe but bent apart are two virtual
-                    // pipes; two keys the scale sends to the same pitch
-                    // are one (an organ pipe speaks once).
-                    let identity = nominal * 100 + bend_cents.round() as i32;
+                    // Identity at cent resolution on the PHYSICAL pipe:
+                    // two keys anchored to the same pipe but bent apart
+                    // are two virtual pipes; the same pipe at the same
+                    // pitch — through any stop, borrow or coupler — is
+                    // one (an organ pipe speaks once).
+                    let (phys_rank, phys_pipe) = self
+                        .physical
+                        .get(&(range.rank, pipe))
+                        .copied()
+                        .unwrap_or((range.rank, pipe));
+                    let key = PipeKey {
+                        rank: phys_rank,
+                        pipe: phys_pipe,
+                        cents: (nominal - pipe as i32) * 100 + bend_cents.round() as i32,
+                        route_lane: lane,
+                        stop_lane: if stop.own_pipes { stop.id.0 + 1 } else { 0 },
+                    };
                     voices.push(KeyVoice {
                         stop: stop.id,
                         rank: range.rank,
                         pipe,
-                        identity,
+                        key,
                         deviation,
                         target,
                         ladder_key: midi_key,
@@ -1158,7 +1247,7 @@ impl Console {
         let trem_on = self.wave_trem_engaged(voice.spec.group);
         let since_ms = self
             .last_released
-            .get(&(voice.rank, voice.identity))
+            .get(&voice.key)
             .map(|at| at.elapsed().as_millis().min(u128::from(u32::MAX)) as u32);
         let eligible = |option: &crate::bank::AttackOption| {
             option.wave_tremulant.is_none_or(|wants| wants == trem_on)
@@ -1245,12 +1334,12 @@ impl Console {
             return (Vec::new(), Vec::new());
         }
         let mut retriggered = Vec::new();
-        for (_, rank, pipe) in self
+        for (_, held) in self
             .sounding
             .remove(&(manual_index, key))
             .unwrap_or_default()
         {
-            if let Some(handle) = self.release_pipe(rank, pipe) {
+            if let Some(handle) = self.release_pipe(held) {
                 retriggered.push(handle);
             }
         }
@@ -1269,7 +1358,7 @@ impl Console {
                 });
                 continue;
             }
-            held.push((voice.stop, voice.rank, voice.identity));
+            held.push((voice.stop, voice.key));
             self.hold_pipe(&voice, &mut starts, &mut retriggered);
         }
         // Track the key even when no stops are drawn: the UI lights it,
@@ -1295,12 +1384,12 @@ impl Console {
     pub fn note_off_manual(&mut self, manual_index: usize, key: u16) -> (Vec<u64>, Vec<VoiceStart>) {
         self.held_velocity.remove(&(manual_index, key));
         let mut released = Vec::new();
-        for (_, rank, pipe) in self
+        for (_, held) in self
             .sounding
             .remove(&(manual_index, key))
             .unwrap_or_default()
         {
-            if let Some(handle) = self.release_pipe(rank, pipe) {
+            if let Some(handle) = self.release_pipe(held) {
                 released.push(handle);
             }
         }
@@ -1323,7 +1412,7 @@ impl Console {
         starts: &mut Vec<VoiceStart>,
         expedited: &mut Vec<u64>,
     ) {
-        let at = (voice.rank, voice.identity);
+        let at = voice.key;
         match self.speaking.get_mut(&at) {
             Some(speaking) => speaking.holders += 1,
             None => {
@@ -1354,16 +1443,15 @@ impl Console {
 
     /// One holder lets go of a pipe; the voice stops only when the
     /// last holder does.
-    fn release_pipe(&mut self, rank: RankId, pipe: i32) -> Option<u64> {
-        let voice = self.speaking.get_mut(&(rank, pipe))?;
+    fn release_pipe(&mut self, at: PipeKey) -> Option<u64> {
+        let voice = self.speaking.get_mut(&at)?;
         voice.holders -= 1;
         if voice.holders == 0 {
             let handle = voice.handle;
-            self.speaking.remove(&(rank, pipe));
+            self.speaking.remove(&at);
             // The re-attack clock: fast-repetition attack variants are
             // selected against how long ago the pipe stopped speaking.
-            self.last_released
-                .insert((rank, pipe), std::time::Instant::now());
+            self.last_released.insert(at, std::time::Instant::now());
             Some(handle)
         } else {
             None
@@ -1394,11 +1482,11 @@ impl Console {
             return (expedited, starts);
         }
         self.drawn.retain(|&id| id != stop);
-        let mut to_release: Vec<(RankId, i32)> = Vec::new();
+        let mut to_release: Vec<PipeKey> = Vec::new();
         for entries in self.sounding.values_mut() {
-            entries.retain(|&(owner, rank, pipe)| {
+            entries.retain(|&(owner, held)| {
                 if owner == stop {
-                    to_release.push((rank, pipe));
+                    to_release.push(held);
                     false
                 } else {
                     true
@@ -1406,8 +1494,8 @@ impl Console {
             });
         }
         let mut released = Vec::new();
-        for (rank, pipe) in to_release {
-            if let Some(handle) = self.release_pipe(rank, pipe) {
+        for held in to_release {
+            if let Some(handle) = self.release_pipe(held) {
                 released.push(handle);
             }
         }
@@ -1437,7 +1525,7 @@ impl Console {
                 if voice.spec.percussive {
                     continue;
                 }
-                new_entries.push((voice.stop, voice.rank, voice.identity));
+                new_entries.push((voice.stop, voice.key));
                 self.hold_pipe(&voice, starts, &mut expedited);
             }
             if !new_entries.is_empty() {
@@ -1637,7 +1725,7 @@ impl Console {
                 // Each sounding entry holds one refcount, so match
                 // multiset-style: a demand already held is kept, not
                 // restarted.
-                let entry = (voice.stop, voice.rank, voice.identity);
+                let entry = (voice.stop, voice.key);
                 match remaining.iter().position(|&e| e == entry) {
                     Some(at) => {
                         remaining.swap_remove(at);
@@ -1646,11 +1734,11 @@ impl Console {
                     None => to_start.push(voice),
                 }
             }
-            for &(_, rank, pipe) in &remaining {
-                stops.extend(self.release_pipe(rank, pipe));
+            for &(_, held) in &remaining {
+                stops.extend(self.release_pipe(held));
             }
             for voice in to_start {
-                entries.push((voice.stop, voice.rank, voice.identity));
+                entries.push((voice.stop, voice.key));
                 self.hold_pipe(&voice, starts, stops);
             }
             self.sounding.insert((manual_index, key), entries);
@@ -1849,6 +1937,38 @@ impl Console {
 
 }
 
+/// Every borrowed pipe resolved to the physical pipe its chain ends
+/// at. Dangling references resolve to the last pipe the chain reached
+/// (the spec table won't have it either, so nothing sounds); the hop
+/// cap mirrors [`Organ::sounding_pipe`]'s cycle guard.
+fn physical_alias(organ: &Organ) -> HashMap<(RankId, u16), (RankId, u16)> {
+    let total_pipes: usize = organ.ranks.iter().map(|r| r.pipes.len()).sum();
+    let mut map = HashMap::new();
+    for rank in &organ.ranks {
+        for (index, pipe) in rank.pipes.iter().enumerate() {
+            if !matches!(pipe.source, PipeSource::Borrowed(_)) {
+                continue;
+            }
+            let mut at = aristide_model::PipeRef {
+                rank: rank.id,
+                pipe: index as u16,
+            };
+            let mut hops = total_pipes + 1;
+            while let Some(PipeSource::Borrowed(next)) =
+                organ.pipe(at).map(|p| &p.source)
+            {
+                if hops == 0 {
+                    break;
+                }
+                hops -= 1;
+                at = *next;
+            }
+            map.insert((rank.id, index as u16), (at.rank, at.pipe));
+        }
+    }
+    map
+}
+
 /// "Montre 8' stop noise" → "Montre 8'"; "I/P coupler stop noise" → "I/P".
 fn strip_noise_suffix(name: &str) -> String {
     let lower = name.to_lowercase();
@@ -1929,6 +2049,7 @@ mod tests {
                         key_count: 61,
                         first_pipe: 0,
                     }],
+                    own_pipes: false,
                 },
                 Stop {
                     id: StopId(2),
@@ -1940,6 +2061,7 @@ mod tests {
                         key_count: 61,
                         first_pipe: 0,
                     }],
+                    own_pipes: false,
                 },
             ],
             ranks: (1..=2)
@@ -2381,6 +2503,7 @@ mod tests {
                         key_count: 32,
                         first_pipe: 0,
                     }],
+                    own_pipes: false,
                 },
                 Stop {
                     id: StopId(2),
@@ -2392,6 +2515,7 @@ mod tests {
                         key_count: 61,
                         first_pipe: 12,
                     }],
+                    own_pipes: false,
                 },
             ],
             ranks: vec![Rank {
@@ -2729,6 +2853,7 @@ mod tests {
                 key_count: 61,
                 first_pipe: 0,
             }],
+            own_pipes: false,
         };
         let rank = |id: u32| Rank {
             id: RankId(id),
@@ -2808,6 +2933,7 @@ mod tests {
                     manual: ManualId(2),
                     key_shift: -5,
                     repitch: None,
+                    own_pipes: false,
                 }),
             }],
         });
@@ -2840,6 +2966,7 @@ mod tests {
                 manual: ManualId(1),
                 key_shift: -12,
                 repitch,
+                own_pipes: false,
             })
         };
         console.organ.couplers.push(aristide_model::Coupler {
@@ -2963,6 +3090,7 @@ mod tests {
                     manual: ManualId(2),
                     key_shift: 0,
                     repitch: None,
+                    own_pipes: false,
                 }),
             }],
         });
@@ -3026,6 +3154,7 @@ mod tests {
                     manual: ManualId(2),
                     key_shift: 0,
                     repitch: None,
+                    own_pipes: false,
                 }),
             }],
         });
@@ -3438,6 +3567,215 @@ mod tests {
         // Every started voice eventually stopped exactly once.
         assert!(console.note_off_manual(0, 60).0.is_empty());
         assert!(console.note_off_manual(0, 72).0.is_empty());
+    }
+
+    /// A rank borrowed whole onto another manual, the unit-organ way:
+    /// rank 2's pipes are `Borrowed` references into rank 1, and (as
+    /// the bank loader does) their specs are the donor's copied.
+    fn borrowed_console(borrower_owns_pipes: bool) -> Console {
+        let manual = |id: u32, name: &str| Manual {
+            id: ManualId(id),
+            name: name.into(),
+            first_midi_note: 36,
+            key_count: 61,
+            kind: Default::default(),
+            hex: None,
+        };
+        let stop = |id: u32, manual: u32, rank: u32, own_pipes: bool| Stop {
+            id: StopId(id),
+            name: format!("stop {id}"),
+            manual: ManualId(manual),
+            ranks: vec![RankRange {
+                rank: RankId(rank),
+                first_key: 0,
+                key_count: 61,
+                first_pipe: 0,
+            }],
+            own_pipes,
+        };
+        let pipe = |source: PipeSource| Pipe {
+            nominal_frequency_hz: 440.0,
+            pitch_tuning_cents: 0.0,
+            pitch_correction_cents: 0.0,
+            gain_db: 0.0,
+            midi_key_number: None,
+            midi_pitch_fraction_cents: None,
+            accepts_retuning: true,
+            source,
+        };
+        let organ = Organ {
+            name: "B".into(),
+            base_path: Default::default(),
+            manuals: vec![manual(1, "Great"), manual(2, "Swell")],
+            stops: vec![
+                stop(1, 1, 1, false),
+                stop(2, 2, 2, borrower_owns_pipes),
+            ],
+            ranks: vec![
+                Rank {
+                    id: RankId(1),
+                    name: "donor".into(),
+                    windchest: 1,
+                    velocity_volume: Default::default(),
+                    pipes: (0..61).map(|_| pipe(PipeSource::Silent)).collect(),
+                },
+                Rank {
+                    id: RankId(2),
+                    name: "borrower".into(),
+                    windchest: 1,
+                    velocity_volume: Default::default(),
+                    pipes: (0..61u16)
+                        .map(|at| {
+                            pipe(PipeSource::Borrowed(aristide_model::PipeRef {
+                                rank: RankId(1),
+                                pipe: at,
+                            }))
+                        })
+                        .collect(),
+                },
+            ],
+            couplers: vec![],
+            enclosures: vec![],
+            windchests: vec![],
+            tremulants: vec![],
+        };
+        let mut specs = HashMap::new();
+        for rank in 1..=2u32 {
+            for pipe in 0..61u16 {
+                specs.insert(
+                    (RankId(rank), pipe),
+                    VoiceSpec {
+                        sample: 0,
+                        rate: 1.0,
+                        gain: 1.0,
+                        velocity: Default::default(),
+                        percussive: false,
+                        group: 0,
+                        wind_weight: 1.0,
+                        brightness: 0.0,
+                        nominal_hz: 440.0,
+                        enclosure: aristide_engine::enclosure::ENCLOSURE_NONE,
+                        bus: 0,
+                        delay_frames: 0,
+                    },
+                );
+            }
+        }
+        Console::new(organ, specs, vec![StopId(1), StopId(2)], 48_000.0)
+    }
+
+    /// THE unit-organ rule: a rank borrowed onto another manual is the
+    /// same pipes, not a copy of them. The same note demanded from
+    /// both places speaks ONE pipe — starting a second voice would sum
+    /// the identical recording coherently (+6 dB).
+    #[test]
+    fn borrowed_rank_shares_one_pipe_with_its_donor() {
+        let mut console = borrowed_console(false);
+        let (first, _) = console.note_on_manual(0, 60, 127);
+        assert_eq!(first.len(), 1, "the donor stop speaks");
+        let (second, _) = console.note_on_manual(1, 60, 127);
+        assert!(
+            second.is_empty(),
+            "the borrowing stop holds the pipe already speaking, it \
+             does not double it"
+        );
+        assert!(
+            console.note_off_manual(0, 60).0.is_empty(),
+            "the Swell key still holds the shared pipe"
+        );
+        assert_eq!(
+            console.note_off_manual(1, 60).0.len(),
+            1,
+            "the last holder stops it"
+        );
+    }
+
+    /// The same physical pipe REPITCHED two ways is not the same pipe:
+    /// an out-of-range C# and D both stood in for by the top pipe must
+    /// still sound as two, and neither merges with the donor's own
+    /// at-pitch voice either.
+    #[test]
+    fn repitched_borrows_stay_separate_voices() {
+        let mut console = borrowed_console(false);
+        console.set_compass(1, 36, 101);
+
+        let (at_pitch, _) = console.note_on_manual(0, 96, 127); // donor top pipe, as recorded
+        assert_eq!(at_pitch.len(), 1);
+        let (csharp, _) = console.note_on_manual(1, 101, 127); // same pipe +5 semitones
+        assert_eq!(csharp.len(), 1, "another pitch is another virtual pipe");
+        let (d, _) = console.note_on_manual(1, 100, 127); // same pipe +4 semitones
+        assert_eq!(d.len(), 1, "and so is a third");
+        let semis =
+            |starts: &[VoiceStart]| starts[0].spec.rate.log2() * 12.0;
+        assert!((semis(&csharp) - 5.0).abs() < 1e-3);
+        assert!((semis(&d) - 4.0).abs() < 1e-3);
+    }
+
+    /// `own_pipes` on the borrowing stop is the opt-out: it speaks an
+    /// independent (virtual) set of pipes and doubles the donor.
+    #[test]
+    fn an_own_pipes_stop_doubles_its_donor() {
+        let mut console = borrowed_console(true);
+        let (first, _) = console.note_on_manual(0, 60, 127);
+        assert_eq!(first.len(), 1);
+        let (second, _) = console.note_on_manual(1, 60, 127);
+        assert_eq!(second.len(), 1, "the own-pipes stop starts its own voice");
+        assert_eq!(console.note_off_manual(0, 60).0.len(), 1);
+        assert_eq!(console.note_off_manual(1, 60).0.len(), 1);
+    }
+
+    /// Toggling a stop's pipe sharing lands on held keys at once, like
+    /// every other console change: the opt-out splits a shared pipe
+    /// into a second voice, opting back in folds it home.
+    #[test]
+    fn stop_own_pipes_toggles_live_under_held_keys() {
+        let mut console = borrowed_console(false);
+        console.note_on_manual(0, 60, 127);
+        assert!(console.note_on_manual(1, 60, 127).0.is_empty());
+        let (stopped, started) = console.set_stop_own_pipes(StopId(2), true);
+        assert!(stopped.is_empty(), "the donor still holds the shared pipe");
+        assert_eq!(started.len(), 1, "the stop's own copy starts");
+        let (stopped, started) = console.set_stop_own_pipes(StopId(2), false);
+        assert_eq!(stopped.len(), 1, "the copy folds back into the shared pipe");
+        assert!(started.is_empty());
+    }
+
+    /// `own_pipes` on a coupler route: its copies stop merging with
+    /// direct presses — including a unison self-coupler, which becomes
+    /// a deliberate doubler instead of a no-op.
+    #[test]
+    fn an_own_pipes_coupler_route_doubles() {
+        let mut console = coupled_console();
+        console.organ.couplers.push(aristide_model::Coupler {
+            name: "I/I doubler".into(),
+            routes: vec![aristide_model::CouplerRoute {
+                from_manual: ManualId(1),
+                low_key: None,
+                high_key: None,
+                unison_off: false,
+                scope: Default::default(),
+                target: Some(aristide_model::CouplerTarget {
+                    manual: ManualId(1),
+                    key_shift: 0,
+                    repitch: None,
+                    own_pipes: true,
+                }),
+            }],
+        });
+        let index = console.organ.couplers.len() - 1;
+
+        let (starts, _) = console.note_on_manual(0, 60, 127);
+        assert_eq!(starts.len(), 1, "without the coupler, one voice");
+        console.note_off_manual(0, 60);
+
+        console.set_coupler(index, true);
+        let (starts, _) = console.note_on_manual(0, 60, 127);
+        assert_eq!(
+            starts.len(),
+            2,
+            "the own-pipes unison copy doubles the played key"
+        );
+        assert_eq!(console.note_off_manual(0, 60).0.len(), 2);
     }
 
     #[test]

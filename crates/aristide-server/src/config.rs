@@ -1612,6 +1612,16 @@ fn division_map_set(table: &mut toml_edit::Table, map: &str, key: &str, to: Opti
     }
 }
 
+/// One entry of a `[[division]]` pull's per-stop boolean map.
+fn division_map_get_bool(table: &toml_edit::Table, map: &str, key: &str) -> Option<bool> {
+    let item = table.get(map)?;
+    if let Some(inline) = item.as_value().and_then(|value| value.as_inline_table()) {
+        inline.get(key)?.as_bool()
+    } else {
+        item.as_table()?.get(key)?.as_bool()
+    }
+}
+
 /// One entry of a `[[division]]` pull's per-stop map, as written.
 fn division_map_get(table: &toml_edit::Table, map: &str, key: &str) -> Option<String> {
     let item = table.get(map)?;
@@ -1774,6 +1784,86 @@ pub fn write_composite_stop_pitch_label(
     Ok(true)
 }
 
+/// Set (or with `to == None` drop) one entry of a `[[division]]`
+/// pull's per-stop *boolean* map (`own_pipes`) — the bool twin of
+/// [`division_map_set`].
+fn division_map_set_bool(table: &mut toml_edit::Table, map: &str, key: &str, to: Option<bool>) {
+    if to.is_none() && table.get(map).is_none() {
+        return;
+    }
+    let item = table
+        .entry(map)
+        .or_insert(toml_edit::Item::Value(toml_edit::InlineTable::new().into()));
+    let mut empty = false;
+    if let Some(inline) = item.as_value_mut().and_then(|value| value.as_inline_table_mut()) {
+        match to {
+            Some(to) => {
+                inline.insert(key, to.into());
+            }
+            None => {
+                inline.remove(key);
+            }
+        }
+        empty = inline.is_empty();
+    } else if let Some(table) = item.as_table_mut() {
+        match to {
+            Some(to) => table[key] = toml_edit::value(to),
+            None => {
+                table.remove(key);
+            }
+        }
+        empty = table.is_empty();
+    }
+    if empty {
+        table.remove(map);
+    }
+}
+
+/// Write (or with `None`/`false`, remove — shared is the default) a
+/// stop's pipe-sharing declaration: the `own_pipes` field on its
+/// `[[stop]]` line, or the entry in its `[[division]]` line's
+/// `own_pipes` map.
+pub fn write_composite_stop_own_pipes(
+    path: &Path,
+    prov: &instrument::StopProvenance,
+    on: &str,
+    own: bool,
+) -> Result<bool, String> {
+    let mut doc = composite_doc(path)?;
+    // `false` is the default, so it is spelled by absence.
+    let own = own.then_some(true);
+    if prov.via_division {
+        let Some(index) = division_pull_index(&doc, prov, on) else {
+            return Ok(false);
+        };
+        let table = doc["division"]
+            .as_array_of_tables_mut()
+            .and_then(|tables| tables.get_mut(index))
+            .expect("division line just found");
+        division_map_set_bool(table, "own_pipes", &prov.source_stop, own);
+    } else {
+        let Some(index) = doc
+            .get("stop")
+            .and_then(|s| s.as_array_of_tables())
+            .and_then(|stops| stop_pull_index(stops, prov, on))
+        else {
+            return Ok(false);
+        };
+        let table = doc["stop"]
+            .as_array_of_tables_mut()
+            .and_then(|tables| tables.get_mut(index))
+            .expect("stop line just found");
+        match own {
+            Some(own) => table["own_pipes"] = toml_edit::value(own),
+            None => {
+                table.remove("own_pipes");
+            }
+        }
+    }
+    write_atomically(path, doc.to_string())?;
+    Ok(true)
+}
+
 /// Write (or with everything neutral, remove) a stop's own
 /// `[[voicing.adjust]]` rule — the one whose `stops` is exactly this
 /// stop's console name. Pattern rules are never touched.
@@ -1899,9 +1989,12 @@ pub fn retarget_composite_stop(
         division_except_add(table, &prov.source_stop);
         division_rename_set(table, &prov.source_stop, None);
         // The knob engraving is the drawknob's, not the pull's — it
-        // rides onto the fresh line along with the label.
+        // rides onto the fresh line along with the label. So does the
+        // pipe-sharing declaration.
         let engraving = division_map_get(table, "pitch_label", &prov.source_stop);
         division_map_set(table, "pitch_label", &prov.source_stop, None);
+        let owns = division_map_get_bool(table, "own_pipes", &prov.source_stop);
+        division_map_set_bool(table, "own_pipes", &prov.source_stop, None);
         let stops = doc
             .entry("stop")
             .or_insert(toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new()));
@@ -1918,6 +2011,9 @@ pub fn retarget_composite_stop(
         }
         if let Some(engraving) = engraving {
             table["pitch_label"] = toml_edit::value(engraving);
+        }
+        if owns == Some(true) {
+            table["own_pipes"] = toml_edit::value(true);
         }
         stops.push(table);
     } else {
@@ -2045,6 +2141,7 @@ pub struct CouplerRouteLine {
     pub unison_off: bool,
     pub scope: aristide_model::CouplerScope,
     pub repitch: Option<bool>,
+    pub own_pipes: bool,
 }
 
 /// Defaults are expressed by absence, so a classic one-route coupler
@@ -2076,6 +2173,9 @@ fn coupler_route_table(route: &CouplerRouteLine) -> toml_edit::Table {
     }
     if let Some(repitch) = route.repitch {
         table["repitch"] = toml_edit::value(repitch);
+    }
+    if route.own_pipes {
+        table["own_pipes"] = toml_edit::value(true);
     }
     table
 }
@@ -2573,12 +2673,14 @@ mod tests {
                     name: "Subbass 16".into(),
                     manual: ManualId(0),
                     ranks: Vec::new(),
+                    own_pipes: false,
                 },
                 Stop {
                     id: StopId(1),
                     name: "Montre 8".into(),
                     manual: ManualId(1),
                     ranks: Vec::new(),
+                    own_pipes: false,
                 },
             ],
             couplers: vec![Coupler::simple("Great to Pedal", ManualId(1), ManualId(0), 0)],
@@ -3254,6 +3356,33 @@ stops = ["Montre 8"]
         );
         assert!(def(&path).stops[0].pitch_label.is_none());
 
+        // Pipe sharing rides the same lines, and shared (false) is
+        // spelled by absence.
+        assert!(
+            write_composite_stop_own_pipes(&path, &pulled_stop, "Great", true)
+                .expect("declares")
+        );
+        assert_eq!(def(&path).stops[0].own_pipes, Some(true));
+        assert!(
+            write_composite_stop_own_pipes(&path, &division_stop, "Great", true)
+                .expect("declares")
+        );
+        assert_eq!(
+            def(&path).divisions[0].own_pipes.get("Montre 8").copied(),
+            Some(true)
+        );
+        assert!(
+            write_composite_stop_own_pipes(&path, &pulled_stop, "Great", false)
+                .expect("shares again")
+        );
+        assert!(def(&path).stops[0].own_pipes.is_none());
+        assert!(
+            !std::fs::read_to_string(&path)
+                .expect("reads")
+                .contains("own_pipes = false"),
+            "the default is absence, not a false line"
+        );
+
         // A voicing rule is created exact-name, updated in place, and
         // removed again when everything is neutral.
         write_composite_stop_voicing(&path, "Tromba", Some(16.0 / 3.0), 0.0, -2.0)
@@ -3303,6 +3432,11 @@ stops = ["Montre 8"]
         assert_eq!(fresh.from, "gib");
         assert_eq!(fresh.rename.as_deref(), Some("Montre 8"), "the label stays");
         assert_eq!(fresh.pitch_label.as_deref(), Some(""), "the engraving rides along");
+        assert_eq!(fresh.own_pipes, Some(true), "the pipe sharing rides along");
+        assert!(
+            parsed.divisions[0].own_pipes.is_empty(),
+            "and left the division with the stop"
+        );
         assert!(parsed.moves.is_empty(), "a fresh pull lands directly");
         assert!(
             retarget_composite_stop(
@@ -3369,6 +3503,7 @@ shift = -5
             unison_off: false,
             scope: aristide_model::CouplerScope::AllKeys,
             repitch: None,
+            own_pipes: false,
         };
 
         // Renaming a define rewrites its own name line.
