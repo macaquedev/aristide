@@ -64,6 +64,7 @@ export class Editor {
     this.addKind = "manual"; // "manual" | "pedal" | "microtonal" — the add-manual form's target
     this.tuningManual = null; // manual idx the tuning popover is open for, or null
     this.hexManual = null; // manual idx the hex-layout popover is open for, or null
+    this.tremOpen = null; // trem idx the shape popover is open for, or null
     this.tuningBrowseKind = null; // "scale" | "keymap" | null — the tuning form's own file browser
     this.tuningBrowseDir = null;
     this.tuningBrowseParent = null;
@@ -146,6 +147,14 @@ export class Editor {
       tuningBrowseError: root.getElementById("editor-tuning-browse-error"),
       tuningBrowseList: root.getElementById("editor-tuning-browse-list"),
       tuningBrowseCancel: root.getElementById("editor-tuning-browse-cancel"),
+      trem: root.getElementById("editor-trem"),
+      tremTitle: root.getElementById("editor-trem-title"),
+      tremRate: root.getElementById("editor-trem-rate"),
+      tremDepth: root.getElementById("editor-trem-depth"),
+      tremRamp: root.getElementById("editor-trem-ramp"),
+      tremWobble: root.getElementById("editor-trem-wobble"),
+      tremError: root.getElementById("editor-trem-error"),
+      tremClose: root.getElementById("editor-trem-close"),
       hex: root.getElementById("editor-hex"),
       hexTitle: root.getElementById("editor-hex-title"),
       hexReset: root.getElementById("editor-hex-reset"),
@@ -164,6 +173,7 @@ export class Editor {
     this.wireAdd();
     this.wireTuningForm();
     this.wireHexForm();
+    this.wireTremForm();
     this.wireCanvas();
   }
 
@@ -237,6 +247,7 @@ export class Editor {
     this.closeKeyboardMenu();
     this.closeTuningForm();
     this.closeHexForm();
+    this.closeTremForm();
   }
 
   // A double-click on a locked canvas is someone reaching for the add
@@ -309,6 +320,7 @@ export class Editor {
 
     if (this.tuningManual != null) this.syncTuningForm();
     if (this.hexManual != null) this.syncHexForm();
+    if (this.tremOpen != null) this.syncTremForm();
   }
 
   /// Called by Console right after every structural rebuild (see its
@@ -323,6 +335,7 @@ export class Editor {
     this.wireStopDrags(snapshot);
     this.wireCheekDrags(snapshot);
     this.wireShoeDrags(snapshot);
+    this.wireTremKnob();
     this.wireCheekRename();
     this.wireKeyboardContextMenu();
     this.wirePanelMoves(snapshot);
@@ -925,6 +938,108 @@ export class Editor {
   hideTuningError() {
     this.el.tuningError.classList.add("hidden");
     this.el.tuningError.textContent = "";
+  }
+
+  // ---- the tremulant-shape popover: right-click the Tremblant knob --------
+  //
+  // A tremulant is a valve venting the wind, so its shape is spoken in
+  // wind terms: rate, pitch depth in cents (gain and timbre follow
+  // pressure physically), spin-up, unevenness. Every field posts on
+  // change — live on the engine, written to the organ file's
+  // [tremulant] section — and the next poll echoes what the server
+  // settled, the tuning popover's contract.
+
+  /// The Tremblant knob doubles as the tremulant's editor: right-click
+  /// while unlocked (or ctrl through the lock) opens the shape popover.
+  /// Wave tremulants offer no shape, so the gesture stays silent then.
+  wireTremKnob() {
+    const knob = this.root.querySelector('[data-key="trem"]');
+    if (!knob) return;
+    knob.addEventListener("contextmenu", (event) => {
+      if (!(this.unlocked || event.ctrlKey)) return;
+      if (!this.shapeableTrem()) return;
+      event.preventDefault();
+      event.stopPropagation();
+      this.openTremForm(event.clientX, event.clientY);
+    });
+  }
+
+  wireTremForm() {
+    this.el.tremClose.addEventListener("click", () => this.closeTremForm());
+    for (const [field, input] of [
+      ["rate", this.el.tremRate],
+      ["depth", this.el.tremDepth],
+      ["ramp", this.el.tremRamp],
+      ["wobble", this.el.tremWobble],
+    ]) {
+      input.addEventListener("change", () => {
+        if (this.tremOpen == null) return;
+        const value = Number(input.value);
+        if (!Number.isFinite(value)) return;
+        this.tremCommand({ idx: this.tremOpen, [field]: value });
+      });
+    }
+  }
+
+  /// The first shapeable tremulant — wave trems are recorded in their
+  /// samples and offer nothing to edit.
+  shapeableTrem() {
+    return (this.lastSnapshot?.trems ?? []).find((t) => !t.wave) ?? null;
+  }
+
+  openTremForm(x, y) {
+    const trem = this.shapeableTrem();
+    if (!trem) return;
+    this.closeAdd();
+    this.closeDivisionMenu();
+    this.closeKeyboardMenu();
+    this.closeTuningForm();
+    this.closeHexForm();
+    this.tremOpen = trem.idx;
+    this.hideTremError();
+    this.syncTremForm();
+    this.el.trem.classList.remove("hidden");
+    this.positionPopover(this.el.trem, x, y);
+  }
+
+  closeTremForm() {
+    this.tremOpen = null;
+    this.el.trem.classList.add("hidden");
+    this.hideTremError();
+  }
+
+  syncTremForm() {
+    const trem = (this.lastSnapshot?.trems ?? []).find((t) => t.idx === this.tremOpen);
+    if (!trem || trem.wave) {
+      this.closeTremForm();
+      return;
+    }
+    this.el.tremTitle.textContent = trem.name;
+    for (const [input, value] of [
+      [this.el.tremRate, trem.rate],
+      [this.el.tremDepth, trem.depth],
+      [this.el.tremRamp, trem.ramp],
+      [this.el.tremWobble, trem.wobble],
+    ]) {
+      if (this.root.activeElement !== input) input.value = value;
+    }
+  }
+
+  async tremCommand(fields) {
+    this.hideTremError();
+    const { ok, error } = await this.organCommandResult(commands.tremParams(fields));
+    if (error != null) this.showTremError(error);
+    return ok;
+  }
+
+  showTremError(text) {
+    this.el.tremError.textContent = text;
+    this.el.tremError.classList.remove("hidden");
+  }
+
+  hideTremError() {
+    this.el.tremError.classList.add("hidden");
+    this.el.tremError.textContent = "";
   }
 
   // ---- the hex-layout popover: a microtonal manual's isomorphic grid ------
@@ -1588,6 +1703,7 @@ export class Editor {
       this.el.keyboardMenu,
       this.el.tuning,
       this.el.hex,
+      this.el.trem,
     ]) {
       el.addEventListener("click", (event) => event.stopPropagation());
     }
@@ -1597,6 +1713,7 @@ export class Editor {
       this.closeKeyboardMenu();
       this.closeTuningForm();
       this.closeHexForm();
+      this.closeTremForm();
     });
     window.addEventListener("keydown", (event) => {
       if (event.key !== "Escape") return;
@@ -1605,6 +1722,7 @@ export class Editor {
       this.closeKeyboardMenu();
       this.closeTuningForm();
       this.closeHexForm();
+      this.closeTremForm();
     });
   }
 

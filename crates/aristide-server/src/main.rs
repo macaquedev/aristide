@@ -277,6 +277,11 @@ pub struct TremControl {
     pub wave: bool,
     pub groups: Vec<u8>,
     pub engaged: bool,
+    /// The synth tremulant's live shape (meaningless for wave trems —
+    /// their undulation is recorded in the samples). Kept here so the
+    /// console can show and edit it; every change goes straight to the
+    /// engine and into the organ file's `[tremulant]` section.
+    pub params: aristide_engine::wind::TremulantParams,
 }
 
 /// One assignment as the MIDI callback sees it: already resolved to a
@@ -1494,6 +1499,46 @@ impl State {
         for index in 0..self.trems.len() {
             self.set_tremulant_at(index, on);
         }
+    }
+
+    /// Reshape one synth tremulant, live — the tuning contract: the
+    /// engine gets the new valve immediately (engaged or not), and the
+    /// change lands in the organ file's `[tremulant]` section when the
+    /// organ has a file, in the file's own vocabulary (rate in Hz,
+    /// depth in pitch cents). A wave tremulant's undulation is
+    /// recorded in its samples — nothing to shape.
+    pub fn set_tremulant_shape(
+        &mut self,
+        index: usize,
+        params: aristide_engine::wind::TremulantParams,
+    ) -> Result<(), String> {
+        let Some(trem) = self.trems.get_mut(index) else {
+            return Err("no such tremulant".into());
+        };
+        if trem.wave {
+            return Err(
+                "this tremulant is recorded in the samples (wave) — nothing to shape".into(),
+            );
+        }
+        trem.params = params;
+        for &group in &trem.groups.clone() {
+            self.engine.send(Command::SetTremulantParams { group, params });
+        }
+        if let Some(path) = self.composite_path.clone() {
+            let kp = aristide_engine::wind::WindParams::default().pitch_exponent as f64;
+            let depth_cents = 1200.0 * kp * (1.0 + params.depth as f64).log2();
+            match config::write_composite_tremulant(
+                &path,
+                params.rate_hz as f64,
+                depth_cents,
+                params.ramp_seconds as f64,
+                params.wobble as f64 * 100.0,
+            ) {
+                Ok(()) => {}
+                Err(err) => tracing::warn!("tremulant shape not saved: {err}"),
+            }
+        }
+        Ok(())
     }
 
     /// Engage or release one tremulant, with the switch noise.
@@ -3038,6 +3083,7 @@ fn perform_load(
             wave: setup.wave,
             groups: setup.groups,
             engaged: false,
+            params: setup.params,
         });
     }
 
@@ -3816,6 +3862,7 @@ mod tests {
                 wave: false,
                 groups: vec![0],
                 engaged: false,
+                params: Default::default(),
             }],
             setter_armed: false,
             master_gain: 0.178,

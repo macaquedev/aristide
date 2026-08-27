@@ -1137,6 +1137,43 @@ fn respond(
             }
             json(state_json_locked(&state))
         }
+        // Reshape a synth tremulant, live: rate in Hz, depth in pitch
+        // cents, ramp in seconds, wobble (irregularity) in percent.
+        // Fields given override the current shape; `idx` defaults to
+        // the first shapeable (non-wave) tremulant.
+        (Method::Post, "/api/trem/params") => {
+            let mut state = state.lock().expect("state poisoned");
+            let index = match param(query, "idx").and_then(|v| v.parse::<usize>().ok()) {
+                Some(index) => index,
+                None => match state.trems.iter().position(|t| !t.wave) {
+                    Some(index) => index,
+                    None => return bad_request("this organ has no shapeable tremulant"),
+                },
+            };
+            let Some(trem) = state.trems.get(index) else {
+                return bad_request("no such tremulant");
+            };
+            let mut params = trem.params;
+            if let Some(rate) = param(query, "rate").and_then(|v| v.parse::<f32>().ok()) {
+                params.rate_hz = rate.clamp(0.5, 12.0);
+            }
+            if let Some(cents) = param(query, "depth").and_then(|v| v.parse::<f64>().ok()) {
+                let kp =
+                    aristide_engine::wind::WindParams::default().pitch_exponent as f64;
+                params.depth =
+                    (2f64.powf(cents.clamp(0.0, 30.0) / (1200.0 * kp)) - 1.0) as f32;
+            }
+            if let Some(ramp) = param(query, "ramp").and_then(|v| v.parse::<f32>().ok()) {
+                params.ramp_seconds = ramp.clamp(0.05, 3.0);
+            }
+            if let Some(pct) = param(query, "wobble").and_then(|v| v.parse::<f32>().ok()) {
+                params.wobble = (pct / 100.0).clamp(0.0, 0.25);
+            }
+            match state.set_tremulant_shape(index, params) {
+                Ok(()) => json(state_json_locked(&state)),
+                Err(err) => bad_request(&err),
+            }
+        }
         (Method::Post, "/api/enclosure") => {
             let index = param(query, "idx").and_then(|v| v.parse::<usize>().ok());
             let value = param(query, "v").and_then(|v| v.parse::<f32>().ok());
@@ -1342,8 +1379,24 @@ fn state_json_locked(state: &State) -> String {
         if index > 0 {
             out.push(',');
         }
+        // A synth tremulant carries its live shape (depth back in the
+        // file's pitch-cents vocabulary); a wave tremulant is recorded
+        // in the samples and only says so.
+        let shape = if trem.wave {
+            ",\"wave\":true".to_string()
+        } else {
+            let kp = aristide_engine::wind::WindParams::default().pitch_exponent as f64;
+            let cents = 1200.0 * kp * (1.0 + trem.params.depth as f64).log2();
+            format!(
+                ",\"rate\":{:.1},\"depth\":{:.1},\"ramp\":{:.2},\"wobble\":{:.0}",
+                trem.params.rate_hz,
+                cents,
+                trem.params.ramp_seconds,
+                trem.params.wobble * 100.0
+            )
+        };
         out.push_str(&format!(
-            "{{\"idx\":{index},\"name\":{},\"on\":{}}}",
+            "{{\"idx\":{index},\"name\":{},\"on\":{}{shape}}}",
             json_string(&trem.name),
             trem.engaged
         ));
@@ -1991,6 +2044,7 @@ mod tests {
                 wave: false,
                 groups: vec![0, 1],
                 engaged: false,
+                params: Default::default(),
             }],
             setter_armed: false,
             master_gain: 0.178,
@@ -2450,6 +2504,35 @@ mod tests {
 
         respond(&state, &Method::Post, "/api/control/bind?slot=0&action=nonsense");
         assert!(state_json(&state).contains("\"controls\":[]"), "refused");
+    }
+
+    /// The tremulant shape edits live and lands in the snapshot in the
+    /// file's vocabulary (Hz, cents); a wave tremulant refuses — its
+    /// undulation is recorded in the samples.
+    #[test]
+    fn tremulant_shape_edits_live() {
+        let Some(state) = demo_state() else { return };
+        let shaped = respond(
+            &state,
+            &Method::Post,
+            "/api/trem/params?rate=3.5&depth=15&ramp=1.2&wobble=6",
+        );
+        assert_eq!(shaped.status_code().0, 200);
+        let body = state_json(&state);
+        assert!(
+            body.contains("\"rate\":3.5") && body.contains("\"depth\":15.0"),
+            "snapshot carries the new shape: {body}"
+        );
+        {
+            let mut state = state.lock().expect("state poisoned");
+            assert!(
+                (state.trems[0].params.rate_hz - 3.5).abs() < 1e-6,
+                "the live control changed"
+            );
+            state.trems[0].wave = true;
+        }
+        let refused = respond(&state, &Method::Post, "/api/trem/params?rate=5");
+        assert_eq!(refused.status_code().0, 400, "wave tremulants have no shape");
     }
 
     /// The organ-pane editor endpoints against a real inventory file:

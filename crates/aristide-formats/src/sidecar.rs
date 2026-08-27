@@ -598,17 +598,35 @@ pub struct Tremulant {
     /// Peak pitch swing in cents.
     #[serde(default = "default_trem_depth_cents")]
     pub depth_cents: f64,
+    /// Engage/disengage ramp in seconds — the beater spinning up.
+    #[serde(default = "default_trem_ramp_s")]
+    pub ramp_s: f64,
+    /// Cycle-to-cycle irregularity in percent: how far rate and depth
+    /// wander from nominal. 0 is machine-perfect (and sounds it).
+    #[serde(default = "default_trem_wobble_pct")]
+    pub wobble_pct: f64,
     /// 1-based ODF windchest numbers the tremulant acts on; empty = all.
     #[serde(default)]
     pub chests: Vec<u32>,
 }
 
+// Church defaults: a calm beater — moderate rate, a gentle ±9 cents,
+// an unhurried spin-up, and the slight unevenness every real one has.
+// (Theatre tremulants run deeper; the knobs are live in the console.)
 fn default_trem_rate_hz() -> f64 {
-    5.0
+    4.6
 }
 
 fn default_trem_depth_cents() -> f64 {
-    12.0
+    9.0
+}
+
+fn default_trem_ramp_s() -> f64 {
+    0.9
+}
+
+fn default_trem_wobble_pct() -> f64 {
+    8.0
 }
 
 impl Default for Tremulant {
@@ -616,6 +634,8 @@ impl Default for Tremulant {
         Tremulant {
             rate_hz: default_trem_rate_hz(),
             depth_cents: default_trem_depth_cents(),
+            ramp_s: default_trem_ramp_s(),
+            wobble_pct: default_trem_wobble_pct(),
             chests: Vec::new(),
         }
     }

@@ -38,6 +38,9 @@ export const commands = {
   // a manual drops that division's own tuning and goes back to sharing
   // the instrument's.
   tuning: (fields) => `/api/tuning?${new URLSearchParams(fields)}`,
+  // A synth tremulant's shape, live: rate (Hz), depth (pitch cents),
+  // ramp (s), wobble (%). Named fields override the current shape.
+  tremParams: (fields) => `/api/trem/params?${new URLSearchParams(fields)}`,
   enclosure: (idx, value) => `/api/enclosure?idx=${idx}&v=${value}`,
   // Input routing, manual first: this manual listens to that input.
   // `slot` numbers a manual's inputs; one past the end adds another.

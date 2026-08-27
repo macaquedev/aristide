@@ -486,7 +486,8 @@ pub fn prepare(
             params: aristide_engine::wind::TremulantParams {
                 rate_hz: declared.rate_hz.clamp(0.5, 12.0) as f32,
                 depth: (2f64.powf(depth_cents / (1200.0 * kp)) - 1.0) as f32,
-                ..Default::default()
+                ramp_seconds: declared.ramp_s.clamp(0.05, 3.0) as f32,
+                wobble: (declared.wobble_pct / 100.0).clamp(0.0, 0.25) as f32,
             },
             groups: if declared.chests.is_empty() {
                 (0..max_groups as u8).collect()

@@ -47,6 +47,23 @@ voice of a flue tremulant. In the ensemble recording the 5 Hz line no
 longer dominates the envelope at all: pipes undulate diversely
 instead of pumping as one fader.
 
+## Follow-up, same day: church defaults, and the knobs go live
+
+The defaults calmed to a church beater — 4.6 Hz, ±9 cents, 0.9 s
+spin-up, 8 % unevenness (`[tremulant]` sidecar defaults; a GO set's
+own ODF tremulants keep their author's numbers). And the shape is now
+editable, on the tuning contract: right-click the Tremblant knob in
+edit mode → Rate (Hz), Depth (pitch cents), Spin-up (s), Unevenness
+(%). Every field goes to the engine immediately
+(`State::set_tremulant_shape` → `SetTremulantParams` per chest) and
+into the organ file's `[tremulant]` section
+(`config::write_composite_tremulant`, `chests` line preserved); the
+snapshot's `trems[]` carries the live shape in the same vocabulary,
+and the sidecar grew `ramp_s` and `wobble_pct` to hold it. Wave
+tremulants refuse — their undulation is recorded in the samples.
+Verified on the rig: an edited 3.8 Hz shows up in the recorded
+envelope at 3.89 Hz (wander included), and the file round-trips.
+
 A false lead worth remembering: the first ensemble analysis showed a
 dominant ~1 Hz envelope line that survived every fix — it turned out
 to be the *test chord* (an F pedal under C–E–G, near-coincident

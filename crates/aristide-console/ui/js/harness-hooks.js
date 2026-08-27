@@ -134,6 +134,22 @@ export function applyHarnessHooks({ prefs, editor }) {
     }, 400);
   }
 
+  // The tremulant-shape popover, via a right-click on the trem knob.
+  if (params.has("tremForm")) {
+    setTimeout(() => {
+      editor.unlock();
+      const knob = document.querySelector('[data-key="trem"]');
+      if (!knob) return;
+      const rect = knob.getBoundingClientRect();
+      knob.dispatchEvent(
+        new MouseEvent("contextmenu", {
+          bubbles: true, cancelable: true,
+          clientX: rect.left + 10, clientY: rect.top + 10,
+        })
+      );
+    }, 600);
+  }
+
   // One step into the keyboard menu: the microtonal hex-layout form,
   // found by its label — it only exists on microtonal manuals.
   const kbdHexParam = params.get("kbdHexForm"); // a manual name or idx

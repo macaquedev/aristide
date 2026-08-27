@@ -1007,6 +1007,38 @@ pub fn write_composite_manual_kind(
     })
 }
 
+/// Write the organ file's `[tremulant]` section — the hand-declared
+/// synth tremulant, in the sidecar's own vocabulary (Hz, pitch cents,
+/// seconds, percent). Creates the table when the file has none;
+/// preserves an existing `chests` line, since the console edits the
+/// shape, not the wind plan. Note: a declared `[tremulant]` supersedes
+/// a sample set's own ODF tremulants at load — declaring one is what
+/// this edit means.
+pub fn write_composite_tremulant(
+    path: &Path,
+    rate_hz: f64,
+    depth_cents: f64,
+    ramp_s: f64,
+    wobble_pct: f64,
+) -> Result<(), String> {
+    let text =
+        std::fs::read_to_string(path).map_err(|err| format!("{}: {err}", path.display()))?;
+    let mut doc: toml_edit::DocumentMut =
+        text.parse().map_err(|err| format!("{}: {err}", path.display()))?;
+    let table = doc
+        .entry("tremulant")
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+    let Some(table) = table.as_table_mut() else {
+        return Err("[tremulant] is not a table".into());
+    };
+    let round = |v: f64, places: f64| (v * places).round() / places;
+    table["rate_hz"] = toml_edit::value(round(rate_hz, 10.0));
+    table["depth_cents"] = toml_edit::value(round(depth_cents, 10.0));
+    table["ramp_s"] = toml_edit::value(round(ramp_s, 100.0));
+    table["wobble_pct"] = toml_edit::value(round(wobble_pct, 10.0));
+    write_atomically(path, doc.to_string())
+}
+
 /// Write (or, with `None`, remove) one declared manual's hex-field
 /// layout in a composite file, as an inline `hex = { ... }` table.
 /// Absence means "derive the default", so a reset reads as a plain
@@ -2175,6 +2207,22 @@ mod tests {
         );
         assert_eq!(def(&path).manuals[0].kind, None);
         assert!(!write_composite_manual_kind(&path, "Ghost", ManualKind::Pedal).expect("ghost"));
+
+        // The tremulant shape writes into [tremulant] in the sidecar's
+        // vocabulary, creating the table when absent and preserving an
+        // existing wind plan (chests).
+        std::fs::write(
+            &path,
+            std::fs::read_to_string(&path).expect("reads") + "\n[tremulant]\nchests = [1, 2]\n",
+        )
+        .expect("appends");
+        write_composite_tremulant(&path, 3.5, 15.0, 1.2, 6.0).expect("tremulant");
+        let text = std::fs::read_to_string(&path).expect("reads");
+        assert!(text.contains("rate_hz = 3.5"), "{text}");
+        assert!(text.contains("depth_cents = 15.0"), "{text}");
+        assert!(text.contains("ramp_s = 1.2"), "{text}");
+        assert!(text.contains("wobble_pct = 6.0"), "{text}");
+        assert!(text.contains("chests = [1, 2]"), "the wind plan survives: {text}");
 
         // A hex layout writes as one inline table; removal restores
         // the derived default by absence, and a ghost manual is Ok(false).

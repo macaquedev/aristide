@@ -243,7 +243,13 @@ manual's `hex = { rows, cols, right, upright, anchor }` — the classic
 two-step-vector parameterization, editable from the keyboard's context menu
 with Bosanquet/Wicki–Hayden/harmonic-table presets derived against the
 manual's own steps-per-octave; absent, a Bosanquet default is fitted to the
-compass. Layout edits are *live*, tuning-style — file line plus in-place
+compass. The synth tremulant's shape is editable the same live way: right-click the
+Tremblant knob → rate (Hz), depth (pitch cents — gain and timbre follow
+pressure physically), spin-up, unevenness; engine first, then the file's
+`[tremulant]` section (which, once declared, supersedes a set's own ODF
+tremulants at load — that is what declaring one means). Wave tremulants
+are recorded in their samples and refuse shaping.
+Layout edits are *live*, tuning-style — file line plus in-place
 apply, never a reload — because the layout is a console fact throughout:
 duplicate hexes share a key number, a bound Lumatone `.ltn` map's key
 colours tint the hexes in the same extended-key numbering its notes land

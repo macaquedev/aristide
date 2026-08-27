@@ -471,6 +471,42 @@
     </form>
   </div>
 
+  <!-- The tremulant-shape popover: right-click the Tremblant knob in
+       edit mode. A tremulant is a valve venting the wind, so its shape
+       is spoken in wind terms: beat rate, pitch depth in cents (gain
+       and timbre follow pressure physically), the beater's spin-up,
+       and how unevenly it runs. Edits are live — engine first, then
+       the organ file's [tremulant] section. -->
+  <div class="editor-add hidden" id="editor-trem">
+    <form class="editor-add-form" id="editor-trem-form">
+      <span class="editor-tuning-head">
+        <span class="rail-label" id="editor-trem-title">Tremulant</span>
+      </span>
+      <label class="settings-row">
+        <span class="rail-label">Rate</span>
+        <span class="stepper"><input id="editor-trem-rate" type="number" min="0.5" max="12" step="0.1" /> Hz</span>
+      </label>
+      <label class="settings-row">
+        <span class="rail-label">Depth</span>
+        <span class="stepper"><input id="editor-trem-depth" type="number" min="0" max="30" step="0.5" /> cents</span>
+      </label>
+      <label class="settings-row">
+        <span class="rail-label">Spin-up</span>
+        <span class="stepper"><input id="editor-trem-ramp" type="number" min="0.05" max="3" step="0.05" /> s</span>
+      </label>
+      <label class="settings-row">
+        <span class="rail-label">Unevenness</span>
+        <span class="stepper"><input id="editor-trem-wobble" type="number" min="0" max="25" step="1" /> %</span>
+      </label>
+      <p class="pane-note">Depth is the pitch swing; loudness and
+        timbre breathe with it, the way wind pressure moves all three.</p>
+      <p class="organ-edit-error hidden" id="editor-trem-error"></p>
+      <span class="editor-add-form-actions">
+        <button class="ghost" type="button" id="editor-trem-close">Close</button>
+      </span>
+    </form>
+  </div>
+
   <!-- The per-manual tuning popover, opened from the keyboard menu above.
        Seeded from the snapshot's effective tuning for that manual;
        applies live, field by field — no rebuild. A Scala scale, when
