@@ -92,8 +92,8 @@ route over an 8' rank's bottom octave; non-repitching couplers stay bounded
 by the compass rule above.
 
 **Whose keyboard (locked):** the compass is the *player's* keyboard, not the set's.
-Each MIDI input carries the range it was measured at — Preferences → MIDI learns it
-from two key presses — and a manual answers to the union of its inputs' ranges,
+Each MIDI input carries the range it was measured at — a keyboard's MIDI popover
+learns it from two key presses — and a manual answers to the union of its inputs' ranges,
 defaulting to the set's own compass until something is measured. Notes outside are
 silent, as above; keys *inside* it that the set has no pipe for are filled by
 repitching the nearest pipe the rank does have, with no ceiling on the interval. A
@@ -307,9 +307,26 @@ vocabulary — is dormant, so the UIs offer it only at 12) —
 a 415 meantone Positif against a 440 equal Great is one instrument. Tuning is
 physical: a coupled copy sounds the destination division's pipes, so it speaks
 that division's temperament; a division's transpose moves only its own
-keyboard. When several sets load ad hoc, the console opens its Organ setup to
-ask how they go together, and saving writes the composite file that from then
-on owns the instrument.
+keyboard. When several sets load ad hoc, the console offers its save-as popover
+once — the combination has no file yet, and saving writes the composite file
+that from then on owns the instrument.
+
+**Two scopes, two surfaces (locked 2026-08-28):** user preferences and organ
+settings never share a surface. The Preferences dialog (Aristide menu, Ctrl+,)
+is the *player's* — appearance today, per-machine audio settings tomorrow —
+local to the installation and sending no organ command, ever. Every organ fact
+is edited on the console and lands in the organ's file: panel-anchored facts by
+right-click on their panel (a keyboard's MIDI input, compass, kind, tuning, hex
+layout; a stop's or coupler's editor, each with a quick piston row), organ-wide
+anchorless facts as popovers off the Organ menu (whole-instrument Tuning — also
+the bar's tuning readout — Room & noises, the flat Bindings list). Wiring is
+organ-scoped throughout: an unwired keyboard wears a "silent — no input" badge
+that opens its MIDI popover; hidden couplers restore from the add menu. The
+menu bar reads as the scopes read — Aristide = the app and the player, the
+organ-name menu = this organ's file, Organ = the instrument. Instrument-wide
+tuning, reverb wet and noises persist into the file (`[tuning]`, `[reverb]
+wet`, `[noises]` — sliders live-apply while dragging and persist on release),
+so an organ sounds tomorrow as it was left today.
 
 Organs load at runtime, never implicitly (locked 2026-08-18): the server
 starts organ-less and the console opens on a picker — the `[[library]]` in the
