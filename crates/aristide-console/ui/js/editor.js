@@ -13,7 +13,7 @@
 // is called on every poll, the same as the other panels.
 
 import { commands } from "./api.js";
-import { formatFootage, keyName, parseKeyName } from "./pitch.js";
+import { formatFootage, keyName, parseFootage, parseKeyName, splitFootageName } from "./pitch.js";
 import {
   buildManualInputs,
   buildControlsList,
@@ -74,6 +74,9 @@ export class Editor {
     this.tremOpen = null; // trem idx the shape popover is open for, or null
     this.stopOpen = null; // stop id the stop-editor popover is open for, or null
     this.stopSrcOpen = false; // the stop popover's own source-picker subview is showing
+    this.stopLabelSync = null; // {id, base, relabel}: the pending rename-offer's answer
+    this.stopLabelSyncDeclined = new Set(); // stop ids whose offer was declined — don't nag again
+
     this.couplerOpen = null; // coupler idx the route-editor popover is open for, or null
     // The open coupler's routes, edited locally and auto-applied:
     // every change posts the whole array through a coalescing queue
@@ -208,6 +211,10 @@ export class Editor {
       stopSrcCancel: root.getElementById("editor-stop-src-cancel"),
       stopLabelMode: root.getElementById("editor-stop-label-mode"),
       stopLabelText: root.getElementById("editor-stop-label-text"),
+      stopLabelSync: root.getElementById("editor-stop-label-sync"),
+      stopLabelSyncText: root.getElementById("editor-stop-label-sync-text"),
+      stopLabelSyncYes: root.getElementById("editor-stop-label-sync-yes"),
+      stopLabelSyncNo: root.getElementById("editor-stop-label-sync-no"),
       stopOwnPipes: root.getElementById("editor-stop-own-pipes"),
       stopDelete: root.getElementById("editor-stop-delete"),
       coupler: root.getElementById("editor-coupler"),
@@ -2070,13 +2077,17 @@ export class Editor {
       const stop = this.lastSnapshot?.stops.find((s) => s.id === this.stopOpen);
       const name = this.el.stopName.value.trim();
       if (!stop || !name || name === stop.name) return;
+      // A hand-typed name supersedes any pending rename offer.
+      this.hideStopLabelSync();
       this.stopCommand(commands.organStopRename(this.stopOpen, name));
     });
 
-    this.el.stopFootage.addEventListener("change", () => {
+    this.el.stopFootage.addEventListener("change", async () => {
       if (this.stopOpen == null) return;
+      const stop = this.lastSnapshot?.stops.find((s) => s.id === this.stopOpen);
       const text = this.el.stopFootage.value.trim();
-      this.stopCommand(commands.organStopVoice(this.stopOpen, { footage: text || "native" }));
+      const ok = await this.stopCommand(commands.organStopVoice(this.stopOpen, { footage: text || "native" }));
+      if (ok && stop) this.offerStopLabelSync(stop, text);
     });
 
     this.el.stopCents.addEventListener("change", () => {
@@ -2093,9 +2104,31 @@ export class Editor {
       this.stopCommand(commands.organStopVoice(this.stopOpen, { gain }));
     });
 
-    this.el.stopReset.addEventListener("click", () => {
+    this.el.stopReset.addEventListener("click", async () => {
       if (this.stopOpen == null) return;
-      this.stopCommand(commands.organStopVoice(this.stopOpen, { reset: 1 }));
+      const stop = this.lastSnapshot?.stops.find((s) => s.id === this.stopOpen);
+      const ok = await this.stopCommand(commands.organStopVoice(this.stopOpen, { reset: 1 }));
+      if (ok && stop) this.offerStopLabelSync(stop, "native");
+    });
+
+    // The rename offer's answers (see offerStopLabelSync). Yes renames
+    // the stop to its name minus the footage tail — the server's
+    // rename carries every file reference along — and, if a custom or
+    // hidden engraving was set, returns it to auto so the knob face
+    // reads the footage off the real pitch from now on. No remembers
+    // the refusal for this stop so later edits don't nag.
+    this.el.stopLabelSyncYes.addEventListener("click", async () => {
+      const pending = this.stopLabelSync;
+      this.hideStopLabelSync();
+      if (!pending || pending.id !== this.stopOpen) return;
+      const ok = await this.stopCommand(commands.organStopRename(pending.id, pending.base));
+      if (ok && pending.relabel) {
+        this.stopCommand(commands.organStopLabel(pending.id, { auto: 1 }));
+      }
+    });
+    this.el.stopLabelSyncNo.addEventListener("click", () => {
+      if (this.stopLabelSync) this.stopLabelSyncDeclined.add(this.stopLabelSync.id);
+      this.hideStopLabelSync();
     });
 
     this.el.stopLabelMode.addEventListener("change", () => {
@@ -2136,6 +2169,7 @@ export class Editor {
     this.stopOpen = id;
     this.stopPistonsSignature = null;
     this.hideStopError();
+    this.hideStopLabelSync();
     this.closeStopSrcView();
     this.syncStopForm();
     this.el.stop.classList.remove("hidden");
@@ -2146,6 +2180,7 @@ export class Editor {
     this.stopOpen = null;
     this.el.stop.classList.add("hidden");
     this.hideStopError();
+    this.hideStopLabelSync();
     this.closeStopSrcView();
   }
 
@@ -2225,6 +2260,45 @@ export class Editor {
     const { ok, error } = await this.organCommandResult(query);
     if (error != null) this.showStopError(error);
     return ok;
+  }
+
+  /// After a footage edit lands: if the stop's *name* still carries a
+  /// footage tail that no longer reads as what the stop now speaks
+  /// ("Montre 8'" revoiced to 16'), offer to move the footage out of
+  /// the name. The knob face is already honest — auto engraving strips
+  /// the name's tail and writes the real pitch — but the name itself
+  /// would keep saying 8' in the popover title, piston bindings and
+  /// stop lists. Yes renames to the bare name and returns a custom or
+  /// hidden engraving to auto, so the footage is thereafter inferred
+  /// from the pitch alone; the answer machinery is in wireStopForm.
+  /// `text` is the footage the edit sent — "native" or the field's text.
+  offerStopLabelSync(stop, text) {
+    this.hideStopLabelSync();
+    if (this.stopLabelSyncDeclined.has(stop.id)) return;
+    const split = splitFootageName(stop.name);
+    if (!split) return;
+    const feet =
+      !text || /^native$/i.test(text) ? stop.pitch?.native : parseFootage(text);
+    if (feet == null || formatFootage(feet) === formatFootage(split.feet)) return;
+    this.stopLabelSync = { id: stop.id, base: split.base, relabel: stop.label != null };
+    const em = (words) => {
+      const el = document.createElement("em");
+      el.textContent = words;
+      return el;
+    };
+    this.el.stopLabelSyncText.replaceChildren(
+      "The name still says ",
+      em(`${split.tail}`),
+      " — rename the stop ",
+      em(split.base),
+      ` and engrave the ${formatFootage(feet)}' it now speaks?`
+    );
+    this.el.stopLabelSync.classList.remove("hidden");
+  }
+
+  hideStopLabelSync() {
+    this.stopLabelSync = null;
+    this.el.stopLabelSync.classList.add("hidden");
   }
 
   showStopError(text) {

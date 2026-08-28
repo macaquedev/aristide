@@ -41,6 +41,55 @@ export function formatFootage(feet) {
   return feet.toFixed(2);
 }
 
+/// "16" → 16, "2 2/3" → 8/3, "5-1/3" → 16/3, "2.667" → 2.667 — the
+/// server's sidecar footage grammar, mirrored so the console can
+/// reason about footage text it is about to send without a round
+/// trip. A trailing foot mark (' or ′) is tolerated, as on a knob.
+/// Returns feet as a number, or null when the text names no footage.
+export function parseFootage(text) {
+  let s = String(text).trim().replace(/['′]+$/, "").trim();
+  let whole = 0;
+  const mixed = /^(\d+)[ -](\S*\/\S*)$/.exec(s);
+  if (mixed) {
+    whole = Number(mixed[1]);
+    s = mixed[2];
+  }
+  let value;
+  const frac = s.split("/");
+  if (frac.length === 2) {
+    const num = Number(frac[0].trim());
+    const den = Number(frac[1].trim());
+    if (frac[0].trim() === "" || !Number.isFinite(num) || !(den > 0)) return null;
+    value = num / den;
+  } else {
+    value = Number(s);
+    if (s === "" || !Number.isFinite(value)) return null;
+  }
+  const feet = whole + value;
+  return Number.isFinite(feet) && feet > 0 ? feet : null;
+}
+
+/// "Montre 8'" → { base: "Montre", tail: "8'", feet: 8 }. Sample sets
+/// routinely engrave the footage into the stop's name itself; this is
+/// how the console notices, so a footage edit can offer to move that
+/// tail out of the name and let the knob engrave the real pitch. The
+/// tail is the last word — or last two, for a mixed fraction like
+/// "2 2/3" — when it reads as a footage. Roman-numeral tails (mixture
+/// rank counts) don't parse and stay put; so does a name that is
+/// nothing but a footage, since stripping it would leave no name.
+export function splitFootageName(name) {
+  if (parseFootage(name) != null) return null; // the whole name is a footage
+  const tokens = String(name).trim().split(/\s+/);
+  for (const take of [2, 1]) {
+    if (tokens.length <= take) continue;
+    const tail = tokens.slice(-take).join(" ");
+    if (!/^\d/.test(tail)) continue;
+    const feet = parseFootage(tail);
+    if (feet != null) return { base: tokens.slice(0, -take).join(" "), tail, feet };
+  }
+  return null;
+}
+
 /// MIDI note number in scientific pitch notation, the naming every
 /// sample set's documentation uses: middle C (60) is C4.
 export function keyName(key) {
