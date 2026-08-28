@@ -1961,6 +1961,23 @@ impl State {
         }
     }
 
+    /// Persist the instrument-wide tuning — a discrete field commit on
+    /// the console, not a slider drag — into the organ's top-level
+    /// `[tuning]` table, when it has a file. Unlike a manual's own
+    /// tuning there is no "no such manual" to fail on: the table either
+    /// exists already or gains one.
+    pub fn persist_tuning(&mut self) {
+        let Control::Organ(console) = &self.control else {
+            return;
+        };
+        let fields = Self::tuning_fields_of(&console.tuning());
+        if let Some(path) = self.composite_path.clone()
+            && let Err(err) = config::write_composite_tuning(&path, &fields)
+        {
+            tracing::warn!("tuning not saved: {err}");
+        }
+    }
+
     pub fn tune_manual(&mut self, manual: usize, tuning: Option<tuning::Tuning>) -> bool {
         let names = self.manual_names();
         if manual >= names.len() {

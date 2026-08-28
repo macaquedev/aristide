@@ -1040,6 +1040,55 @@ pub fn write_composite_tremulant(
     write_atomically(path, doc.to_string())
 }
 
+/// Write the organ file's top-level `[tuning]` table — the
+/// whole-instrument temperament/EDO/a′/transpose/scale the console
+/// edits directly (as opposed to one manual's own override, which
+/// lives on its `[[manual]]` table). Same absence rules as a manual's
+/// tuning: a scale supersedes the temperament and the division count,
+/// and 12 EDO is the file's default so it is never written.
+pub fn write_composite_tuning(path: &Path, fields: &ManualTuningFields) -> Result<(), String> {
+    let mut doc = composite_doc(path)?;
+    let table = doc
+        .entry("tuning")
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+    let Some(table) = table.as_table_mut() else {
+        return Err("[tuning] is not a table".into());
+    };
+    write_manual_tuning_fields(table, fields);
+    write_atomically(path, doc.to_string())
+}
+
+/// Set `wet` in an existing `[reverb]` table. An organ file with none —
+/// no impulse response, nothing to wet — is left exactly as it is
+/// rather than growing a `[reverb]` section that would otherwise mean
+/// nothing to the loader.
+pub fn write_composite_reverb_wet(path: &Path, wet: f64) -> Result<(), String> {
+    let mut doc = composite_doc(path)?;
+    let Some(item) = doc.get_mut("reverb") else {
+        return Ok(());
+    };
+    let Some(table) = item.as_table_mut() else {
+        return Err("[reverb] is not a table".into());
+    };
+    table["wet"] = toml_edit::value(wet);
+    write_atomically(path, doc.to_string())
+}
+
+/// Write the organ file's `[noises]` table — drawstop thumps, coupler
+/// clacks, the blower — creating it when the file has none.
+pub fn write_composite_noises(path: &Path, enabled: bool, volume: f64) -> Result<(), String> {
+    let mut doc = composite_doc(path)?;
+    let table = doc
+        .entry("noises")
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+    let Some(table) = table.as_table_mut() else {
+        return Err("[noises] is not a table".into());
+    };
+    table["enabled"] = toml_edit::value(enabled);
+    table["volume"] = toml_edit::value(volume);
+    write_atomically(path, doc.to_string())
+}
+
 /// Write (or, with `None`, remove) one declared manual's hex-field
 /// layout in a composite file, as an inline `hex = { ... }` table.
 /// Absence means "derive the default", so a reset reads as a plain
@@ -4018,6 +4067,174 @@ device = "Keys"
             "a coupler with no surviving routes goes with its manual"
         );
         assert!(def.midi.inputs.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The three whole-instrument settings the console commits without
+    /// naming a manual: tuning, reverb wet, and the operating noises.
+    /// Round-trips through the sidecar's own types, and follows the
+    /// same absence rules a manual's own tuning does — a scale
+    /// supersedes the temperament and the division count, and 12 EDO
+    /// (the file's default) is never written.
+    #[test]
+    fn write_composite_tuning_reverb_and_noises_round_trip() {
+        let dir = std::env::temp_dir().join("aristide-instrument-settings-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = create_blank_organ(&dir, "Atelier").expect("creates");
+
+        let def = |path: &Path| -> aristide_formats::instrument::Definition {
+            toml::from_str(&std::fs::read_to_string(path).expect("reads")).expect("parses")
+        };
+
+        // A blank organ has neither table yet; noises and tuning grow
+        // one, reverb refuses to (there is no IR to wet).
+        write_composite_tuning(
+            &path,
+            &ManualTuningFields {
+                temperament: "meantone4".into(),
+                edo: 12,
+                a4_hz: 415.0,
+                transpose: -2,
+                scale: None,
+                keymap: None,
+            },
+        )
+        .expect("tuning");
+        write_composite_noises(&path, false, 0.4).expect("noises");
+        write_composite_reverb_wet(&path, 0.6).expect("reverb wet is a no-op without [reverb]");
+
+        let parsed = def(&path);
+        assert_eq!(parsed.tuning.temperament, "meantone4");
+        assert_eq!(parsed.tuning.edo, 12, "the default divisions, absent from the file");
+        assert_eq!(parsed.tuning.a4_hz, 415.0);
+        assert_eq!(parsed.tuning.transpose, -2);
+        assert_eq!(parsed.tuning.scale, None);
+        assert!(!parsed.noises.enabled);
+        assert_eq!(parsed.noises.volume, 0.4);
+        assert_eq!(parsed.reverb.wet, 0.25, "no [reverb] table, so the default wet stands");
+        let text = std::fs::read_to_string(&path).expect("reads");
+        assert!(!text.contains("[reverb]"), "wet must not create a table: {text}");
+
+        // A scale supersedes the temperament and the division count;
+        // an EDO away from 12 drops the (12-EDO) temperament line.
+        write_composite_tuning(
+            &path,
+            &ManualTuningFields {
+                temperament: "equal".into(),
+                edo: 31,
+                a4_hz: 440.0,
+                transpose: 0,
+                scale: Some("19edo.scl".into()),
+                keymap: Some("19edo.kbm".into()),
+            },
+        )
+        .expect("tuning");
+        let parsed = def(&path);
+        assert_eq!(parsed.tuning.scale.as_deref(), Some("19edo.scl"));
+        assert_eq!(parsed.tuning.keymap.as_deref(), Some("19edo.kbm"));
+        assert_eq!(parsed.tuning.edo, 12, "a scale supersedes the division count too");
+        assert_eq!(parsed.tuning.temperament, "equal", "the file's default, absent");
+
+        write_composite_tuning(
+            &path,
+            &ManualTuningFields {
+                temperament: "werckmeister3".into(),
+                edo: 19,
+                a4_hz: 440.0,
+                transpose: 0,
+                scale: None,
+                keymap: None,
+            },
+        )
+        .expect("tuning");
+        let parsed = def(&path);
+        assert_eq!(parsed.tuning.scale, None, "naming a division count drops the scale");
+        assert_eq!(parsed.tuning.edo, 19);
+        assert_eq!(
+            parsed.tuning.temperament, "equal",
+            "temperaments are 12-EDO vocabulary, dormant away from it"
+        );
+
+        // Now that [reverb] exists, wet writes into it.
+        let mut doc: toml_edit::DocumentMut =
+            std::fs::read_to_string(&path).expect("reads").parse().expect("parses");
+        let mut reverb = toml_edit::Table::new();
+        reverb["ir"] = toml_edit::value("hall.wav");
+        doc["reverb"] = toml_edit::Item::Table(reverb);
+        std::fs::write(&path, doc.to_string()).expect("writes");
+        write_composite_reverb_wet(&path, 0.6).expect("reverb wet");
+        let parsed = def(&path);
+        assert_eq!(parsed.reverb.wet, 0.6);
+        assert_eq!(parsed.reverb.ir, "hall.wav", "wet must not disturb the ir line");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The three writers touch only their own lines: a hand-authored
+    /// file's comments and unrelated sections survive every edit.
+    #[test]
+    fn instrument_settings_writers_preserve_comments() {
+        let dir = std::env::temp_dir().join("aristide-instrument-settings-comments-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("creates dir");
+        let path = dir.join("organ.toml");
+        std::fs::write(
+            &path,
+            r#"# hand-made
+name = "Atelier"
+
+[sources]
+s1 = "village.organ"
+
+# concert pitch, a shade low
+[tuning]
+temperament = "equal"
+a4_hz = 415.0
+
+# a real IR, not synthetic
+[reverb]
+ir = "hall.wav"
+wet = 0.25
+
+# thumps and clacks
+[noises]
+enabled = true
+volume = 0.7
+"#,
+        )
+        .expect("writes");
+
+        write_composite_tuning(
+            &path,
+            &ManualTuningFields {
+                temperament: "meantone4".into(),
+                edo: 12,
+                a4_hz: 440.0,
+                transpose: 0,
+                scale: None,
+                keymap: None,
+            },
+        )
+        .expect("tuning");
+        write_composite_reverb_wet(&path, 0.5).expect("reverb wet");
+        write_composite_noises(&path, false, 0.3).expect("noises");
+
+        let text = std::fs::read_to_string(&path).expect("reads");
+        assert!(text.contains("# hand-made"), "{text}");
+        assert!(text.contains("# concert pitch, a shade low"), "{text}");
+        assert!(text.contains("# a real IR, not synthetic"), "{text}");
+        assert!(text.contains("# thumps and clacks"), "{text}");
+        assert!(text.contains(r#"ir = "hall.wav""#), "reverb writer leaves ir alone: {text}");
+        assert!(text.contains(r#"s1 = "village.organ""#));
+
+        let def: aristide_formats::instrument::Definition =
+            toml::from_str(&text).expect("parses");
+        assert_eq!(def.tuning.temperament, "meantone4");
+        assert_eq!(def.tuning.a4_hz, 440.0);
+        assert_eq!(def.reverb.wet, 0.5);
+        assert!(!def.noises.enabled);
+        assert_eq!(def.noises.volume, 0.3);
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

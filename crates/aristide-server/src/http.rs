@@ -108,6 +108,15 @@ fn respond(
         (Method::Post, "/api/noises") => {
             {
                 let mut state = state.lock().expect("state poisoned");
+                let persist = param(query, "persist") == Some("1");
+                // A persist writes the organ's file; mid-rebuild that
+                // file is about to be replaced out from under the
+                // write, so refuse like every file-writing edit does.
+                // A live-only change stays welcome throughout.
+                if persist && (state.loading.is_some() || state.pending_load.is_some()) {
+                    return bad_request("an organ is already loading");
+                }
+                let composite_path = state.composite_path.clone();
                 let State {
                     engine, control, ..
                 } = &mut *state;
@@ -121,6 +130,16 @@ fn respond(
                     }
                     for handle in console.set_noises(enabled, volume) {
                         engine.send(Command::KillVoice { handle });
+                    }
+                    // The clamp lives in set_noises; read it back so the
+                    // file never disagrees with what is actually sounding.
+                    let (enabled, volume) = console.noises();
+                    if persist
+                        && let Some(path) = composite_path
+                        && let Err(err) =
+                            crate::config::write_composite_noises(&path, enabled, volume as f64)
+                    {
+                        tracing::warn!("noises not saved: {err}");
                     }
                 }
             }
@@ -175,9 +194,24 @@ fn respond(
                 Some(wet) if (0.0..=2.0).contains(&wet) => {
                     {
                         let mut state = state.lock().expect("state poisoned");
+                        // Same file-writing guard as /api/noises: a
+                        // persist mid-rebuild is refused, a live-only
+                        // change is not.
+                        if param(query, "persist") == Some("1")
+                            && (state.loading.is_some() || state.pending_load.is_some())
+                        {
+                            return bad_request("an organ is already loading");
+                        }
                         if state.reverb_wet.is_some() {
                             state.reverb_wet = Some(wet);
                             state.engine.send(Command::SetReverbWet { wet });
+                            if param(query, "persist") == Some("1")
+                                && let Some(path) = state.composite_path.clone()
+                                && let Err(err) =
+                                    crate::config::write_composite_reverb_wet(&path, wet as f64)
+                            {
+                                tracing::warn!("reverb wet not saved: {err}");
+                            }
                         }
                     }
                     json(state_json(state))
@@ -188,6 +222,13 @@ fn respond(
         (Method::Post, "/api/tuning") => {
             {
                 let mut state = state.lock().expect("state poisoned");
+                // A whole-instrument commit writes the file's top-level
+                // [tuning]; mid-rebuild the file is about to be replaced
+                // out from under that write, so refuse exactly as the
+                // organ-pane editor's own file-writing edits do.
+                if state.loading.is_some() || state.pending_load.is_some() {
+                    return bad_request("an organ is already loading");
+                }
                 // With `manual`, the update tunes that one division
                 // apart from the instrument (starting from what it
                 // effectively plays now); `reset=1` returns it to the
@@ -273,6 +314,10 @@ fn respond(
                                 Err(err) => return bad_request(&err),
                             }
                         }
+                        // Discrete field commits, not slider drags —
+                        // every successful whole-instrument change is
+                        // worth a write, no persist flag needed.
+                        state.persist_tuning();
                     }
                 }
                 // Live drift: the change lands on sounding voices as a
@@ -2803,6 +2848,92 @@ mod tests {
             moved.manual, saved.organ.manuals[target].id,
             "the move replays from the file"
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Three settings the console commits without naming a manual.
+    /// Instrument-wide tuning always writes through — those are field
+    /// commits, not slider drags; reverb wet and noises only write when
+    /// asked with `persist=1`, and are otherwise live-only exactly as
+    /// before. Reverb also proves the "no [reverb] table, no write"
+    /// rule at the endpoint, not just the writer: the demo set's own
+    /// sidecar keeps reverb off, so its saved file never grows one.
+    #[test]
+    fn tuning_reverb_and_noises_persist_when_the_organ_has_a_file() {
+        let Some(state) = demo_state() else { return };
+        let path = std::env::temp_dir().join("aristide-instrument-settings-endpoint-test.toml");
+        let _ = std::fs::remove_file(&path);
+        {
+            let mut state = state.lock().expect("state poisoned");
+            let names: Vec<String> = state.manual_names();
+            state.setup.sources = vec![(
+                "Demo".into(),
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../testsets/grandorgue-demo/demo.organ"),
+            )];
+            state.setup.pulls = names
+                .iter()
+                .enumerate()
+                .map(|(index, name)| (0, name.clone(), index))
+                .collect();
+            state.setup.implicit = true;
+        }
+        respond(
+            &state,
+            &Method::Post,
+            &format!(
+                "/api/organ/save?path={}",
+                path.display().to_string().replace('/', "%2F")
+            ),
+        );
+
+        // Whole-instrument tuning: no persist flag exists for it, and
+        // none is needed — every successful commit lands in the file.
+        respond(&state, &Method::Post, "/api/tuning?temperament=meantone&a4=415");
+        assert!(
+            state_json(&state).contains("\"tuning\":{\"temperament\":\"meantone4\",\"edo\":12,\"a4\":415"),
+            "live tuning shows: {}",
+            state_json(&state)
+        );
+        let saved = aristide_formats::instrument::load(&path).expect("reloads");
+        assert_eq!(saved.sidecar.tuning.temperament, "meantone4");
+        assert_eq!(saved.sidecar.tuning.a4_hz, 415.0);
+
+        // Reverb without persist=1 stays live-only.
+        respond(&state, &Method::Post, "/api/reverb?wet=0.6");
+        assert!(state_json(&state).contains("\"reverb\":0.6"));
+        let saved = aristide_formats::instrument::load(&path).expect("reloads");
+        assert_eq!(saved.sidecar.reverb.wet, 0.25, "unpersisted, the default stands");
+
+        // With persist=1, the demo set's sidecar declares no [reverb]
+        // (it is recorded wet already), so the file grows none either —
+        // wet has nothing to mean without an impulse response.
+        respond(&state, &Method::Post, "/api/reverb?wet=0.7&persist=1");
+        let text = std::fs::read_to_string(&path).expect("reads");
+        assert!(!text.contains("[reverb]"), "no ir, so persist writes nothing: {text}");
+
+        // Noises without persist=1 stays live-only; with it, the file
+        // gains a [noises] table (there was none before — the demo set
+        // is silent on the point, so the loader's defaults applied).
+        respond(&state, &Method::Post, "/api/noises?on=0&vol=0.3");
+        assert!(state_json(&state).contains("\"noises\":{\"on\":false,\"vol\":0.3}"));
+        let saved = aristide_formats::instrument::load(&path).expect("reloads");
+        assert!(saved.sidecar.noises.enabled, "unpersisted, the default stands");
+
+        respond(&state, &Method::Post, "/api/noises?on=0&vol=0.3&persist=1");
+        let saved = aristide_formats::instrument::load(&path).expect("reloads");
+        assert!(!saved.sidecar.noises.enabled);
+        // The query parses as f32; persisted as f64, only that much
+        // precision survives.
+        assert_eq!(saved.sidecar.noises.volume, 0.3_f32 as f64);
+
+        // Mid-rebuild, the whole-instrument write refuses rather than
+        // race the file the rebuild is about to replace.
+        state.lock().expect("state poisoned").loading = Some("rebuilding…".into());
+        let response = respond(&state, &Method::Post, "/api/tuning?a4=430");
+        assert_eq!(response.status_code().0, 400, "refuses while loading");
+        state.lock().expect("state poisoned").loading = None;
+
         let _ = std::fs::remove_file(&path);
     }
 
