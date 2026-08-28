@@ -106,8 +106,10 @@ export class Console {
     const signature = JSON.stringify([
       snapshot.organ,
       snapshot.stops.map((s) => [s.id, s.name, s.manual, ...stopFace(s)]),
-      snapshot.couplers.map((c) => [c.name, !!c.hidden]),
-      snapshot.manuals.map((m) => [m.name, m.first_key, m.key_count, m.kind, m.hex, m.colors]),
+      // A coupler's jamb seat (midx) is structure: seating one moves
+      // its control from the rail into a division's knob rank.
+      snapshot.couplers.map((c) => [c.name, !!c.hidden, c.midx ?? null]),
+      snapshot.manuals.map((m) => [m.name, m.first_key, m.key_count, m.kind, m.hex, m.colors, m.rank]),
       // No organ (the picker's start-empty state) sends no enclosures
       // at all — same as an organ without a swell box.
       (snapshot.enclosures ?? []).filter((e) => e.displayed).map((e) => e.name),
@@ -219,13 +221,17 @@ export class Console {
     }
 
     // One jamb panel per division, empty divisions included — an empty
-    // jamb is where a new manual's first stop gets added.
+    // jamb is where a new manual's first stop gets added. The rank is
+    // the snapshot's token order: stops and seated couplers
+    // interleaved, exactly as the organ file lists them.
     let lastColumn = null;
     for (const manual of snapshot.manuals) {
       const stops = byManual.get(manual.idx) ?? [];
+      const stopById = new Map(stops.map((s) => [s.id, s]));
+      const rank = manual.rank ?? stops.map((s) => `s${s.id}`);
       const body = this.panel(`jamb:${manual.name}`, "jamb", `${manual.name} · stops`);
       const jambPanel = body.parentElement;
-      jambPanel.classList.toggle("empty", !stops.length);
+      jambPanel.classList.toggle("empty", !rank.length);
       const column = document.createElement("div");
       column.className = "division";
       column.dataset.division = manual.idx;
@@ -241,10 +247,17 @@ export class Console {
       // the rank wraps into columns.
       const knobs = document.createElement("div");
       knobs.className = "division-knobs";
-      for (const stop of stops) {
-        knobs.append(this.drawknob(stop.name, `stop-${stop.id}`, (on) =>
-          this.send(commands.stop(stop.id, on)), stopFace(stop)
-        ));
+      for (const token of rank) {
+        if (token.startsWith("s")) {
+          const stop = stopById.get(Number(token.slice(1)));
+          if (!stop) continue;
+          knobs.append(this.drawknob(stop.name, `stop-${stop.id}`, (on) =>
+            this.send(commands.stop(stop.id, on)), stopFace(stop)
+          ));
+        } else if (token.startsWith("c")) {
+          const coupler = snapshot.couplers.find((c) => c.idx === Number(token.slice(1)));
+          if (coupler) knobs.append(this.couplerKnob(coupler));
+        }
       }
       column.append(knobs);
       body.append(column);
@@ -257,8 +270,9 @@ export class Console {
     const rail = document.createElement("div");
     rail.className = "coupler-rail";
     // A coupler taken off the console (see the Organ tab) is disengaged,
-    // not deleted — it simply doesn't get a tablet on the rail.
-    for (const coupler of snapshot.couplers.filter((c) => !c.hidden)) {
+    // not deleted — it simply doesn't get a tablet on the rail. One
+    // seated in a jamb (midx) wears a drawknob there instead.
+    for (const coupler of snapshot.couplers.filter((c) => !c.hidden && c.midx == null)) {
       const rocker = document.createElement("button");
       rocker.className = "rocker";
       rocker.dataset.key = `coupler-${coupler.idx}`;
@@ -328,6 +342,17 @@ export class Console {
       knob.classList.toggle("on", on); // optimistic
       flip(on);
     });
+    return knob;
+  }
+
+  /// A coupler seated in a jamb wears a drawknob like the stops around
+  /// it — same click to engage, same right-click to edit; only the
+  /// engraving style says its job.
+  couplerKnob(coupler) {
+    const knob = this.drawknob(coupler.name, `coupler-${coupler.idx}`, (on) =>
+      this.send(commands.coupler(coupler.idx, on))
+    );
+    knob.classList.add("coupler");
     return knob;
   }
 
@@ -534,11 +559,19 @@ export class Console {
     // the auto-laid panels seat themselves over the columns it grew.
     for (const [id, el] of this.panels) {
       if (el.dataset.dragging) continue;
+      const sized = placed[id]?.w != null;
+      // A sized keyboard scales its keys to the recorded width (see
+      // --kb-scale in style.css) rather than taking a width style —
+      // the panel keeps hugging the (scaled) content, so keys are
+      // never clipped or orphaned in space.
+      if (id.startsWith("keyboard:")) {
+        this.scaleKeyboard(el, sized ? placed[id].w * W : null);
+        continue;
+      }
       // A player-sized panel: the dragged width is what wraps a
       // jamb's knobs into columns; height always follows the content,
       // so nothing is ever clipped. (`h` still rides the layout for
       // symmetry; only the width is load-bearing today.)
-      const sized = placed[id]?.w != null;
       el.classList.toggle("sized", sized);
       el.style.width = sized ? `${Math.round(placed[id].w * W)}px` : "";
     }
@@ -551,6 +584,27 @@ export class Console {
       el.style.left = `${Math.round(pos.x)}px`;
       el.style.top = `${Math.round(pos.y)}px`;
     }
+  }
+
+  /// Scales a keyboard panel's keys so the panel comes out `targetPx`
+  /// wide (null = natural size). The chrome around the keys — cheek,
+  /// padding — doesn't scale, so the factor is solved against the key
+  /// field alone; --kb-scale multiplies the key-geometry vars in
+  /// style.css. Clamped: a keyboard shrunk past legibility or blown
+  /// past the canvas helps nobody.
+  scaleKeyboard(el, targetPx) {
+    const keys = el.querySelector(".keys");
+    if (!keys) return;
+    const current = parseFloat(el.style.getPropertyValue("--kb-scale")) || 1;
+    if (targetPx == null) {
+      if (current !== 1) el.style.removeProperty("--kb-scale");
+      return;
+    }
+    const chrome = el.offsetWidth - keys.offsetWidth;
+    const natural = keys.offsetWidth / current;
+    if (!(natural > 0)) return;
+    const scale = Math.max(0.35, Math.min(3, (targetPx - chrome) / natural));
+    el.style.setProperty("--kb-scale", scale.toFixed(4));
   }
 
   /// The classic console, derived rather than hard-coded: coupler rail
@@ -648,10 +702,15 @@ export class Console {
       const board = this.root.querySelector(`.keyboard[data-manual="${manual.idx}"]`);
       if (!board) continue;
       const held = new Set(manual.held);
+      // Keys an engaged coupler is pulling down — the mechanical-
+      // action view, drawn dipped but quieter than a played key.
+      const coupled = new Set(manual.coupled ?? []);
       for (const key of board.querySelectorAll(".key")) {
         // Keys the local pointer is holding stay lit regardless.
         const midi = Number(key.dataset.midi);
-        key.classList.toggle("held", held.has(midi) || key.classList.contains("pressed"));
+        const down = held.has(midi) || key.classList.contains("pressed");
+        key.classList.toggle("held", down);
+        key.classList.toggle("coupled", !down && coupled.has(midi));
       }
     }
 
@@ -679,8 +738,12 @@ export class Console {
   }
 
   setToggle(key, on) {
-    const control = this.root.querySelector(`[data-key="${key}"]`);
-    if (control) control.classList.toggle("on", on);
+    // All matches, not the first: a coupler seated in a jamb and its
+    // rail tablet never coexist today, but nothing should break if a
+    // control ever wears two faces.
+    for (const control of this.root.querySelectorAll(`[data-key="${key}"]`)) {
+      control.classList.toggle("on", on);
+    }
   }
 
   // ---- menu bar ------------------------------------------------------

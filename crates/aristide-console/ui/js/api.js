@@ -154,10 +154,13 @@ export const commands = {
     `/api/organ/panel/place?panel=${encodeURIComponent(panel)}&x=${x.toFixed(4)}&y=${y.toFixed(4)}` +
     (size ? `&w=${size.w.toFixed(4)}&h=${size.h.toFixed(4)}` : ""),
   // A division's drawknob order, top of the jamb first — display only
-  // and live like panel placement: the snapshot deals the stops out
-  // anew, nothing structural moves.
-  organStopOrder: (manual, stops) =>
-    `/api/organ/stop/order?manual=${manual}&stops=${stops.join(",")}`,
+  // and live like panel placement: the snapshot deals the rank out
+  // anew, nothing structural moves. `items` is the snapshot's own rank
+  // vocabulary: "s<id>" stops and "c<idx>" couplers — a coupler listed
+  // here is seated in this division's jamb instead of on the rail, and
+  // a coupler has one seat, so listing it unseats it everywhere else.
+  organRankOrder: (manual, items) =>
+    `/api/organ/stop/order?manual=${manual}&items=${items.join(",")}`,
   // Takes a coupler off the console (keep=0) or restores it (keep=1) —
   // distinct from the rail's own on/off, which only engages a coupler
   // that's already on the console.
@@ -224,6 +227,21 @@ export const commands = {
   // structural-edit contract as organCouplerRoutes.
   organCouplerAdd: (name, routes) =>
     `/api/organ/coupler/add?name=${encodeURIComponent(name)}&routes=${encodeURIComponent(JSON.stringify(routes))}`,
+  // Deletes a coupler outright: one this organ's file defines is
+  // removed (structural, rebuilds); a source's is taken off the
+  // console instead, restorable from the Organ preferences.
+  organCouplerRemove: (idx) => `/api/organ/coupler/remove?idx=${idx}`,
+  // Links (on=1) or unlinks two couplers so they move together — one
+  // action wearing several rockers. Live, no rebuild.
+  organCouplerLink: (idx, withIdx, on) =>
+    `/api/organ/coupler/link?idx=${idx}&with=${withIdx}&on=${on ? 1 : 0}`,
+  // One coupler's coupled-keys display override: "auto" follows the
+  // organ default, "never"/"always" pin it. Display only, live.
+  organCouplerKeys: (idx, mode) =>
+    `/api/organ/coupler/keys?idx=${idx}&mode=${encodeURIComponent(mode)}`,
+  // The organ-wide coupled-keys default: whether engaged couplers pull
+  // the coupled keys down on screen. Display only, live.
+  organCoupledKeys: (on) => `/api/organ/coupled_keys?on=${on ? 1 : 0}`,
 };
 
 /// Start the client. Calls `onState(snapshot)` for every fresh snapshot,

@@ -600,6 +600,8 @@
       </div>
       <p class="organ-edit-error hidden" id="editor-stop-error"></p>
       <span class="editor-add-form-actions">
+        <button class="ghost danger" type="button" id="editor-stop-delete"
+          title="Take this stop off the console — its source still offers it">Delete</button>
         <button class="ghost" type="button" id="editor-stop-close">Close</button>
       </span>
     </form>
@@ -629,11 +631,51 @@
       <span class="editor-add-form-actions">
         <button class="ghost" type="button" id="editor-coupler-route-add">Add route</button>
       </span>
+      <label class="settings-row">
+        <span class="rail-label"
+          title="Whether engaging this coupler pulls the coupled keys down on the keyboards">Coupled keys</span>
+        <select id="editor-coupler-keys">
+          <option value="auto">Organ default</option>
+          <option value="never">Never move</option>
+          <option value="always">Always move</option>
+        </select>
+      </label>
+      <div id="editor-coupler-linked-box"></div>
       <p class="organ-edit-error hidden" id="editor-coupler-error"></p>
       <span class="editor-add-form-actions">
+        <button class="ghost danger" type="button" id="editor-coupler-delete"
+          title="Delete this coupler — a set's own goes off the console instead, restorable in Preferences">Delete</button>
         <button class="ghost" type="button" id="editor-coupler-close">Close</button>
       </span>
     </form>
+  </div>
+
+  <!-- Right-click the Couplers panel (edit mode) for this organ's own
+       coupler-wide settings. Organ facts live on the console, in the
+       organ's file — never in the Preferences dialog, which is the
+       player's. -->
+  <div class="editor-add hidden" id="editor-couplers-menu">
+    <form class="editor-add-form" id="editor-couplers-menu-form">
+      <span class="editor-tuning-head">
+        <span class="rail-label">Couplers &middot; this organ</span>
+      </span>
+      <label class="settings-row">
+        <span class="rail-label"
+          title="Engaged couplers pull the coupled keys down on the keyboards, tracker-style">Coupled keys move</span>
+        <input id="editor-coupled-keys" type="checkbox" />
+      </label>
+      <p class="pane-note">Tracker-style: an engaged coupler pulls the
+        coupled keys down on the other keyboard. Any one coupler can
+        override this &mdash; right-click its rocker.</p>
+    </form>
+  </div>
+
+  <div id="editor-link-confirm" class="organ-remove-confirm hidden">
+    <p id="editor-link-confirm-text"></p>
+    <div class="organ-remove-confirm-actions">
+      <button class="ghost" id="editor-link-confirm-yes">Link them</button>
+      <button class="ghost" id="editor-link-confirm-no">Keep separate</button>
+    </div>
   </div>
 
   <!-- The per-manual tuning popover, opened from the keyboard menu above.

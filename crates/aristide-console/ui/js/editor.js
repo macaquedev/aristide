@@ -79,6 +79,7 @@ export class Editor {
     this.couplerApplying = false; // an apply pump is running
     this.couplerResync = false; // a settled apply awaits folding back in
     this.addCouplerNamed = false; // the add form's name field was typed in
+    this.pendingLink = null; // {onYes, onNo}: the duplicate-coupler dialog's answers
     this.tuningBrowseKind = null; // "scale" | "keymap" | null — the tuning form's own file browser
     this.tuningBrowseDir = null;
     this.tuningBrowseParent = null;
@@ -187,14 +188,24 @@ export class Editor {
       stopLabelMode: root.getElementById("editor-stop-label-mode"),
       stopLabelText: root.getElementById("editor-stop-label-text"),
       stopOwnPipes: root.getElementById("editor-stop-own-pipes"),
+      stopDelete: root.getElementById("editor-stop-delete"),
       coupler: root.getElementById("editor-coupler"),
       couplerForm: root.getElementById("editor-coupler-form"),
       couplerTitle: root.getElementById("editor-coupler-title"),
       couplerName: root.getElementById("editor-coupler-name"),
       couplerRoutesBox: root.getElementById("editor-coupler-routes"),
       couplerRouteAdd: root.getElementById("editor-coupler-route-add"),
+      couplerKeys: root.getElementById("editor-coupler-keys"),
+      couplerLinkedBox: root.getElementById("editor-coupler-linked-box"),
+      couplerDelete: root.getElementById("editor-coupler-delete"),
       couplerError: root.getElementById("editor-coupler-error"),
       couplerClose: root.getElementById("editor-coupler-close"),
+      couplersMenu: root.getElementById("editor-couplers-menu"),
+      coupledKeys: root.getElementById("editor-coupled-keys"),
+      linkConfirm: root.getElementById("editor-link-confirm"),
+      linkConfirmText: root.getElementById("editor-link-confirm-text"),
+      linkConfirmYes: root.getElementById("editor-link-confirm-yes"),
+      linkConfirmNo: root.getElementById("editor-link-confirm-no"),
       addCoupler: root.getElementById("editor-add-coupler"),
       addCouplerForm: root.getElementById("editor-add-coupler-form"),
       addCouplerName: root.getElementById("editor-add-coupler-name"),
@@ -217,6 +228,8 @@ export class Editor {
     this.wireLock();
     this.wireDrawer();
     this.wireRemoveConfirm();
+    this.wireLinkConfirm();
+    this.wireCouplersMenu();
     this.wireAdd();
     this.wireTuningForm();
     this.wireHexForm();
@@ -299,6 +312,7 @@ export class Editor {
     this.closeTremForm();
     this.closeStopForm();
     this.closeCouplerForm();
+    this.closeCouplersMenu();
   }
 
   // A double-click on a locked canvas is someone reaching for the add
@@ -374,6 +388,7 @@ export class Editor {
     if (this.tremOpen != null) this.syncTremForm();
     if (this.stopOpen != null) this.syncStopForm();
     if (this.couplerOpen != null) this.syncCouplerForm();
+    if (!this.el.couplersMenu.classList.contains("hidden")) this.syncCouplersMenu();
   }
 
   /// Called by Console right after every structural rebuild (see its
@@ -393,6 +408,8 @@ export class Editor {
     this.wireCheekRename();
     this.wireKeyboardContextMenu();
     this.wireCouplerContextMenus();
+    this.wireCouplerDrags();
+    this.wireCouplersPanel();
     this.wirePanelMoves(snapshot);
     this.wirePanelResize();
     this.addDivisionButtons(snapshot);
@@ -504,15 +521,18 @@ export class Editor {
     }
   }
 
-  /// Right-click a coupler rocker in edit mode opens its route editor —
-  /// the same reach-through-the-lock contract as the stop and keyboard
-  /// context menus. The cancel piston's `data-key` is "cancel", not
-  /// "coupler-N", so the selector already leaves it out.
+  /// Right-click a coupler — its rail rocker or its jamb drawknob —
+  /// in edit mode opens its route editor, the same reach-through-the-
+  /// lock contract as the stop and keyboard context menus. The cancel
+  /// piston's `data-key` is "cancel", not "coupler-N", so the selector
+  /// already leaves it out.
   wireCouplerContextMenus() {
-    for (const rocker of this.root.querySelectorAll('.rocker[data-key^="coupler-"]')) {
-      const idx = Number(rocker.dataset.key.slice("coupler-".length));
-      rocker.title = "Right-click to edit this coupler.";
-      rocker.addEventListener("contextmenu", (event) => {
+    for (const control of this.root.querySelectorAll('[data-key^="coupler-"]')) {
+      const idx = Number(control.dataset.key.slice("coupler-".length));
+      control.title =
+        "Drag to a jamb to seat this coupler among the stops (ctrl reaches " +
+        "through the lock) — right-click to edit it.";
+      control.addEventListener("contextmenu", (event) => {
         event.preventDefault();
         event.stopPropagation();
         if (!this.unlocked && !event.ctrlKey) {
@@ -521,6 +541,94 @@ export class Editor {
         }
         this.openCouplerForm(idx, event.clientX, event.clientY);
       });
+    }
+  }
+
+  /// Couplers drag like stops: into a jamb to seat them among the
+  /// stops, back to the rail to unseat, to the bin to delete.
+  wireCouplerDrags() {
+    for (const control of this.root.querySelectorAll('[data-key^="coupler-"]')) {
+      const idx = Number(control.dataset.key.slice("coupler-".length));
+      this.wireDragSource(control, () => {
+        const coupler = this.lastSnapshot?.couplers.find((c) => c.idx === idx);
+        if (!coupler) return null;
+        return {
+          kind: "coupler",
+          payload: { idx, midx: coupler.midx ?? null, name: coupler.name },
+          label: coupler.name,
+        };
+      });
+    }
+  }
+
+  /// The coupler rail's own chrome: a + that adds a coupler right
+  /// there, and a right-click for this organ's coupler-wide settings
+  /// (organ facts live on the console, never in Preferences).
+  wireCouplersPanel() {
+    const panel = this.el.canvas.querySelector('.panel[data-panel="couplers"]');
+    const rail = panel?.querySelector(".coupler-rail");
+    if (!panel || !rail) return;
+    const add = document.createElement("button");
+    add.type = "button";
+    add.className = "division-add";
+    add.textContent = "+";
+    add.setAttribute("aria-label", "Add a coupler");
+    add.title = "Add a coupler.";
+    add.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const rect = add.getBoundingClientRect();
+      this.openCouplerAddAt(rect.right + 6, rect.top);
+    });
+    rail.append(add);
+    panel.addEventListener("contextmenu", (event) => {
+      if (event.target.closest('[data-key^="coupler-"]')) return; // its own editor
+      event.preventDefault();
+      event.stopPropagation();
+      if (!this.unlocked && !event.ctrlKey) {
+        this.nudgeUnlock();
+        return;
+      }
+      this.openCouplersMenu(event.clientX, event.clientY);
+    });
+  }
+
+  /// The add popover, opened straight onto its coupler form — the
+  /// rail's + skips the menu the canvas double-click goes through.
+  openCouplerAddAt(x, y) {
+    this.closeDivisionMenu();
+    this.closeKeyboardMenu();
+    this.closeCouplerForm();
+    this.closeCouplersMenu();
+    this.addAnchor = { x, y };
+    this.el.add.classList.remove("hidden");
+    this.openCouplerAddForm();
+  }
+
+  // ---- the couplers menu: this organ's coupler-wide settings --------------
+
+  wireCouplersMenu() {
+    this.el.coupledKeys.addEventListener("change", () => {
+      this.organCommand(commands.organCoupledKeys(this.el.coupledKeys.checked));
+    });
+  }
+
+  openCouplersMenu(x, y) {
+    this.closeAdd();
+    this.closeDivisionMenu();
+    this.closeKeyboardMenu();
+    this.closeCouplerForm();
+    this.syncCouplersMenu();
+    this.el.couplersMenu.classList.remove("hidden");
+    this.positionPopover(this.el.couplersMenu, x, y);
+  }
+
+  closeCouplersMenu() {
+    this.el.couplersMenu.classList.add("hidden");
+  }
+
+  syncCouplersMenu() {
+    if (this.root.activeElement !== this.el.coupledKeys) {
+      this.el.coupledKeys.checked = this.lastSnapshot?.coupled_keys !== false;
     }
   }
 
@@ -643,28 +751,76 @@ export class Editor {
     this.organCommand(commands.organPanelPlace(panel.dataset.panel, x, y));
   }
 
-  // ---- resizing jambs: the grip in the corner ------------------------------
+  // ---- resizing: the grip in the corner ------------------------------------
   //
-  // Dragging the grip sets the panel's width — which is what wraps
-  // the knob rank into columns (see .division-knobs); the height
-  // always follows the content, so nothing is ever clipped. The size
-  // persists as canvas fractions alongside the panel's position, the
-  // panel-placement contract.
+  // Dragging a jamb's grip sets the panel's width — which is what
+  // wraps the knob rank into columns (see .division-knobs); the height
+  // always follows the content, so nothing is ever clipped. Dragging a
+  // keyboard's grip scales its keys instead (see --kb-scale in
+  // style.css): the panel keeps hugging the scaled content. Either
+  // size persists as canvas fractions alongside the panel's position,
+  // the panel-placement contract.
 
   wirePanelResize() {
-    for (const panel of this.el.canvas.querySelectorAll(".panel-jamb")) {
+    for (const panel of this.el.canvas.querySelectorAll(".panel-jamb, .panel-keyboard")) {
+      const keyboard = panel.classList.contains("panel-keyboard");
       const grip = document.createElement("div");
       grip.className = "panel-grip";
-      grip.title = "Drag to widen — the stops wrap into columns.";
+      grip.title = keyboard
+        ? "Drag to resize the keyboard."
+        : "Drag to widen — the stops wrap into columns.";
       grip.addEventListener("pointerdown", (event) => {
         if (event.button !== 0) return;
         if (!(event.ctrlKey || this.unlocked)) return;
         event.preventDefault();
         event.stopPropagation(); // never also a panel move
-        this.startPanelResize(panel, event);
+        if (keyboard) this.startKeyboardResize(panel, event);
+        else this.startPanelResize(panel, event);
       });
       panel.append(grip);
     }
+  }
+
+  /// A keyboard's resize: the chrome (cheek, padding) doesn't scale,
+  /// so the factor is solved against the key field alone — the same
+  /// math console.js's scaleKeyboard applies when the stored size
+  /// comes back off the file.
+  startKeyboardResize(panel, event) {
+    const keys = panel.querySelector(".keys");
+    if (!keys) return;
+    const start = {
+      x: event.clientX,
+      w: panel.offsetWidth,
+      chrome: panel.offsetWidth - keys.offsetWidth,
+      natural:
+        keys.offsetWidth / (parseFloat(panel.style.getPropertyValue("--kb-scale")) || 1),
+    };
+    if (!(start.natural > 0)) return;
+    panel.dataset.dragging = "1"; // layoutPanels leaves a mid-gesture panel alone
+    const move = (e) => {
+      const target = start.w + e.clientX - start.x;
+      const scale = Math.max(0.35, Math.min(3, (target - start.chrome) / start.natural));
+      panel.style.setProperty("--kb-scale", scale.toFixed(4));
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      delete panel.dataset.dragging;
+      const canvas = this.el.canvas.getBoundingClientRect();
+      if (!canvas.width || !canvas.height) return;
+      this.organCommand(
+        commands.organPanelPlace(
+          panel.dataset.panel,
+          parseFloat(panel.style.left || "0") / canvas.width,
+          parseFloat(panel.style.top || "0") / canvas.height,
+          {
+            w: panel.offsetWidth / canvas.width,
+            h: panel.offsetHeight / canvas.height,
+          }
+        )
+      );
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up, { once: true });
   }
 
   startPanelResize(panel, event) {
@@ -860,6 +1016,18 @@ export class Editor {
     }
 
     menu.append(document.createElement("hr"));
+
+    // The bin gesture as a menu item — same confirm, same command.
+    const remove = document.createElement("button");
+    remove.className = "menu-item";
+    remove.innerHTML = "<span>Remove keyboard&hellip;</span>";
+    remove.addEventListener("click", (event) => {
+      event.stopPropagation();
+      this.closeKeyboardMenu();
+      const stopCount = (this.lastSnapshot?.stops ?? []).filter((s) => s.midx === idx).length;
+      this.showRemoveConfirm("manual", { idx, name: manual.name, stopCount });
+    });
+    menu.append(remove);
 
     // A hex field is a microtonal-manual fact; the other kinds have
     // no layout to offer. Kept above "Change tuning…" so the tuning
@@ -1210,6 +1378,16 @@ export class Editor {
     this.el.stopSrcChange.addEventListener("click", () => this.openStopSrcView());
     this.el.stopSrcCancel.addEventListener("click", () => this.closeStopSrcView());
 
+    // Deleting is the drag-to-bin gesture as a button: the stop comes
+    // off the console, its source still offers it — no confirm, same
+    // as the bin.
+    this.el.stopDelete.addEventListener("click", () => {
+      if (this.stopOpen == null) return;
+      const id = this.stopOpen;
+      this.closeStopForm();
+      this.organCommand(commands.organUnpull(id));
+    });
+
     // Every field commits on change already — Enter in the name field
     // must not also reload the page.
     this.el.stopForm.addEventListener("submit", (event) => event.preventDefault());
@@ -1468,6 +1646,24 @@ export class Editor {
       this.renderCouplerRoutes();
       this.scheduleCouplerApply();
     });
+
+    // The coupled-keys override — display only, live, the same
+    // per-field contract as the name.
+    this.el.couplerKeys.addEventListener("change", () => {
+      if (this.couplerOpen == null) return;
+      this.couplerCommand(commands.organCouplerKeys(this.couplerOpen, this.el.couplerKeys.value));
+    });
+
+    this.el.couplerDelete.addEventListener("click", () => {
+      if (this.couplerOpen == null) return;
+      const coupler = this.lastSnapshot?.couplers.find((c) => c.idx === this.couplerOpen);
+      if (!coupler) return;
+      // Skip the close-time duplicate nag — the coupler is leaving.
+      this.couplerOpen = null;
+      this.couplerRoutes = null;
+      this.closeCouplerForm();
+      this.showRemoveConfirm("coupler", { idx: coupler.idx, name: coupler.name });
+    });
   }
 
   /// Queue the working copy for an auto-apply. Coalescing: the newest
@@ -1533,10 +1729,60 @@ export class Editor {
   }
 
   closeCouplerForm() {
+    const idx = this.couplerOpen;
+    const routes = this.couplerRoutes;
     this.couplerOpen = null;
     this.couplerRoutes = null;
     this.el.coupler.classList.add("hidden");
     this.hideCouplerError();
+    // Editing done: if the routes now duplicate another coupler's,
+    // offer the permanent link — the same warning adding a duplicate
+    // gets, at the same "finished" moment rather than on every
+    // transient state mid-edit.
+    if (idx != null && routes) this.warnDuplicateCoupler(idx, routes);
+  }
+
+  /// The first other coupler whose routes do exactly what `routes` do
+  /// — field-for-field, order-blind — or null. Hidden couplers don't
+  /// count: they're off the console.
+  duplicateCouplerOf(excludeIdx, routes) {
+    const signature = (routes) =>
+      JSON.stringify(
+        (routes ?? [])
+          .map((route) => [
+            route.from ?? null,
+            route.to ?? null,
+            route.shift ?? 0,
+            route.low ?? null,
+            route.high ?? null,
+            !!route.unison_off,
+            route.scope ?? "",
+            route.repitch ?? null,
+            !!route.own_pipes,
+          ])
+          .map((fields) => JSON.stringify(fields))
+          .sort()
+      );
+    const mine = signature(routes);
+    return (
+      (this.lastSnapshot?.couplers ?? []).find(
+        (coupler) =>
+          coupler.idx !== excludeIdx && !coupler.hidden && signature(coupler.routes) === mine
+      ) ?? null
+    );
+  }
+
+  warnDuplicateCoupler(idx, routes) {
+    const coupler = this.lastSnapshot?.couplers.find((c) => c.idx === idx);
+    if (!coupler) return;
+    const twin = this.duplicateCouplerOf(idx, routes);
+    if (!twin || (coupler.linked ?? []).includes(twin.idx)) return;
+    this.showLinkConfirm(
+      `${coupler.name} now does exactly what ${twin.name} does. Link them, ` +
+        "so either control moves both?",
+      () => this.runQueue([commands.organCouplerLink(idx, twin.idx, true)]),
+      null
+    );
   }
 
   /// Refreshes the title and (unless focused) the name field from the
@@ -1553,6 +1799,10 @@ export class Editor {
     }
     this.el.couplerTitle.textContent = coupler.name;
     if (this.root.activeElement !== this.el.couplerName) this.el.couplerName.value = coupler.name;
+    if (this.root.activeElement !== this.el.couplerKeys) {
+      this.el.couplerKeys.value = coupler.keys ?? "auto";
+    }
+    this.renderCouplerLinks(coupler);
     if (
       this.couplerResync &&
       !this.couplerApplying &&
@@ -1563,6 +1813,32 @@ export class Editor {
       this.couplerResync = false;
       this.couplerRoutes = structuredClone(coupler.routes ?? []);
       this.renderCouplerRoutes();
+    }
+  }
+
+  /// The popover's linked-partners lines: one per linked coupler,
+  /// with its undo. Rebuilt from the snapshot on every sync — links
+  /// change rarely and never under the pointer mid-gesture.
+  renderCouplerLinks(coupler) {
+    const box = this.el.couplerLinkedBox;
+    box.replaceChildren();
+    for (const linkedIdx of coupler.linked ?? []) {
+      const partner = this.lastSnapshot?.couplers.find((c) => c.idx === linkedIdx);
+      if (!partner) continue;
+      const row = document.createElement("div");
+      row.className = "coupler-linked";
+      const label = document.createElement("span");
+      label.textContent = `Linked with ${partner.name} — either control moves both.`;
+      const unlink = document.createElement("button");
+      unlink.type = "button";
+      unlink.className = "ghost";
+      unlink.textContent = "Unlink";
+      unlink.addEventListener("click", () => {
+        if (this.couplerOpen == null) return;
+        this.couplerCommand(commands.organCouplerLink(this.couplerOpen, linkedIdx, false));
+      });
+      row.append(label, unlink);
+      box.append(row);
     }
   }
 
@@ -1971,7 +2247,7 @@ export class Editor {
   // still toggles its stop; a cheek's dblclick still renames).
 
   binAllowed(kind) {
-    return kind === "stop" || kind === "manual" || kind === "enclosure";
+    return kind === "stop" || kind === "manual" || kind === "enclosure" || kind === "coupler";
   }
 
   manualAllowed(kind) {
@@ -1980,6 +2256,41 @@ export class Editor {
 
   encAllowed(kind) {
     return kind === "stop";
+  }
+
+  /// The kinds that live in a division's knob rank — the ones a drop
+  /// on a jamb carries a position for.
+  rankKind(kind) {
+    return kind === "stop" || kind === "coupler";
+  }
+
+  /// The dragged control's rank token — the vocabulary the order
+  /// endpoint and the snapshot's `rank` share.
+  dragToken(drag) {
+    return drag.kind === "coupler" ? `c${drag.payload.idx}` : `s${drag.payload.id}`;
+  }
+
+  /// A division's current display rank as tokens, from the snapshot —
+  /// the list a reorder splices into, so seated couplers keep their
+  /// places when a stop moves and vice versa.
+  rankTokens(midx) {
+    const manual = this.lastSnapshot?.manuals.find((m) => m.idx === midx);
+    if (manual?.rank) return [...manual.rank];
+    return (this.lastSnapshot?.stops ?? [])
+      .filter((stop) => stop.midx === midx)
+      .map((stop) => `s${stop.id}`);
+  }
+
+  /// The destination rank with the dragged control where the drop's
+  /// seam showed — in front of `beforeToken`, or at the bottom when
+  /// the drop carried no position (null, or a keyboard drop).
+  spliceRank(midx, drag) {
+    const token = this.dragToken(drag);
+    const tokens = this.rankTokens(midx).filter((t) => t !== token);
+    const before = drag.insert?.beforeToken ?? null;
+    const at = before == null ? tokens.length : tokens.indexOf(before);
+    tokens.splice(at < 0 ? tokens.length : at, 0, token);
+    return tokens;
   }
 
   /// `getInfo()` returns `{kind, payload, label}` for the drag about to
@@ -2043,13 +2354,18 @@ export class Editor {
     if (shoe && this.encAllowed(this.drag.kind)) {
       return { type: "shoe", idx: Number(shoe.dataset.enclosure) };
     }
+    // The coupler rail takes a dragged coupler home: unseated from
+    // whatever jamb held it, a tablet again.
+    if (this.drag.kind === "coupler" && el.closest(".panel-couplers")) {
+      return { type: "rail" };
+    }
     const manual = el.closest("[data-drop-manual]");
     if (manual && this.manualAllowed(this.drag.kind)) {
       const hit = { type: "manual", idx: Number(manual.dataset.dropManual) };
-      // Over a jamb division a dragged stop carries a *position* too:
-      // where in the knob rank it would land. A keyboard is a plain
-      // "onto this manual" target, as before.
-      if (this.drag.kind === "stop" && manual.classList.contains("division")) {
+      // Over a jamb division a dragged stop or coupler carries a
+      // *position* too: where in the knob rank it would land. A
+      // keyboard is a plain "onto this manual" target, as before.
+      if (this.rankKind(this.drag.kind) && manual.classList.contains("division")) {
         hit.insert = this.insertionPoint(manual, x, y);
       }
       return hit;
@@ -2057,18 +2373,21 @@ export class Editor {
     return null;
   }
 
-  /// Where in a division's knob rank the dragged stop would land: the
-  /// nearest stop knob (the dragged one doesn't count) and which side
-  /// of it the pointer sits — normalized to "before this stop id",
-  /// with null meaning the bottom of the rank. Works unchanged when a
-  /// resized jamb has wrapped the rank into columns: nearest-knob is a
-  /// distance, not an index.
+  /// Where in a division's knob rank the dragged control would land:
+  /// the nearest rank knob — stop or seated coupler, the dragged one
+  /// doesn't count — and which side of it the pointer sits, normalized
+  /// to "before this token", with null meaning the bottom of the rank.
+  /// Works unchanged when a resized jamb has wrapped the rank into
+  /// columns: nearest-knob is a distance, not an index.
   insertionPoint(division, x, y) {
-    const dragged = `stop-${this.drag.payload.id}`;
-    const knobs = [...division.querySelectorAll('.knob[data-key^="stop-"]')].filter(
-      (knob) => knob.dataset.key !== dragged
-    );
-    if (!knobs.length) return { beforeId: null, marker: null, side: "after" };
+    const dragged =
+      this.drag.kind === "coupler"
+        ? `coupler-${this.drag.payload.idx}`
+        : `stop-${this.drag.payload.id}`;
+    const knobs = [
+      ...division.querySelectorAll('.knob[data-key^="stop-"], .knob[data-key^="coupler-"]'),
+    ].filter((knob) => knob.dataset.key !== dragged);
+    if (!knobs.length) return { beforeToken: null, marker: null, side: "after" };
     let nearest = null;
     let best = Infinity;
     for (const knob of knobs) {
@@ -2082,7 +2401,11 @@ export class Editor {
       }
     }
     const rect = nearest.getBoundingClientRect();
-    const id = (knob) => Number(knob.dataset.key.slice("stop-".length));
+    // "stop-12" → "s12", "coupler-3" → "c3": the rank vocabulary.
+    const token = (knob) =>
+      knob.dataset.key.startsWith("coupler-")
+        ? `c${knob.dataset.key.slice("coupler-".length)}`
+        : `s${knob.dataset.key.slice("stop-".length)}`;
     // Which side of the nearest knob the pointer means: judged along
     // whichever axis it's further out on, so a wrapped grid reads
     // left/right within a row and above/below across rows — and the
@@ -2093,10 +2416,10 @@ export class Editor {
     const horizontal = Math.abs(dx) > Math.abs(dy);
     const side = horizontal ? (before ? "left" : "right") : before ? "before" : "after";
     if (before) {
-      return { beforeId: id(nearest), marker: nearest, side };
+      return { beforeToken: token(nearest), marker: nearest, side };
     }
     const next = knobs[knobs.indexOf(nearest) + 1] ?? null;
-    return { beforeId: next ? id(next) : null, marker: nearest, side };
+    return { beforeToken: next ? token(next) : null, marker: nearest, side };
   }
 
   applyDropHighlight(hit) {
@@ -2107,9 +2430,14 @@ export class Editor {
       el.classList.remove("insert-before", "insert-after", "insert-left", "insert-right");
     }
     this.el.bin.classList.remove("drop-target");
+    for (const el of this.root.querySelectorAll(".panel-couplers.drop-target")) {
+      el.classList.remove("drop-target");
+    }
     this.drag.targetType = hit?.type ?? null;
     this.drag.targetIdx = hit?.idx ?? null;
-    this.drag.insert = hit?.insert ? { manual: hit.idx, beforeId: hit.insert.beforeId } : null;
+    this.drag.insert = hit?.insert
+      ? { manual: hit.idx, beforeToken: hit.insert.beforeToken }
+      : null;
     this.drag.ghost.textContent = this.drag.label;
     if (!hit) return;
 
@@ -2120,7 +2448,18 @@ export class Editor {
           ? `Remove the ${this.drag.label} box`
           : this.drag.kind === "manual"
             ? `Remove ${this.drag.label}`
-            : `Drop to remove ${this.drag.label}`;
+            : this.drag.kind === "coupler"
+              ? `Delete the ${this.drag.label} coupler`
+              : `Drop to remove ${this.drag.label}`;
+      return;
+    }
+
+    // Home again: a coupler over the rail reads as its tablet's return
+    // — unless it never left.
+    if (hit.type === "rail") {
+      if (this.drag.payload.midx == null) return;
+      this.root.querySelector('.panel[data-panel="couplers"]')?.classList.add("drop-target");
+      this.drag.ghost.textContent = `${this.drag.label} → the coupler rail`;
       return;
     }
 
@@ -2138,10 +2477,11 @@ export class Editor {
       return;
     }
 
-    // Over a jamb division a dragged stop shows where it would land —
-    // a seam beside the nearest knob — whether it's coming home to its
-    // own rank (a pure reorder) or arriving from another manual.
-    if (this.drag.kind === "stop" && hit.insert) {
+    // Over a jamb division a dragged stop or coupler shows where it
+    // would land — a seam beside the nearest knob — whether it's
+    // coming home to its own rank (a pure reorder) or arriving from
+    // the rail or another manual.
+    if (this.rankKind(this.drag.kind) && hit.insert) {
       hit.insert.marker?.classList.add(`insert-${hit.insert.side}`);
       const manual = this.lastSnapshot?.manuals.find((m) => m.idx === hit.idx);
       this.drag.ghost.textContent =
@@ -2153,7 +2493,7 @@ export class Editor {
 
     // Dropping a stop back on its own manual, or a manual's cheek on its
     // own board, isn't a move — no need to light it up as one.
-    if (this.drag.kind === "stop" && hit.idx === this.drag.payload.midx) return;
+    if (this.rankKind(this.drag.kind) && hit.idx === this.drag.payload.midx) return;
     if (this.drag.kind === "manual" && hit.idx === this.drag.payload.idx) return;
     for (const el of this.root.querySelectorAll(`[data-drop-manual="${hit.idx}"]`)) {
       el.classList.add("drop-target");
@@ -2193,23 +2533,18 @@ export class Editor {
         const sameManual = targetIdx === drag.payload.midx;
         if (drag.insert && drag.insert.manual === targetIdx) {
           // The drop carried a position: deal the destination rank out
-          // anew with the dragged stop where the seam showed. The list
-          // is the snapshot's display order minus the dragged stop,
-          // spliced back in front of `beforeId` (null = the bottom).
-          const ids = (this.lastSnapshot?.stops ?? [])
-            .filter((s) => s.midx === targetIdx && s.id !== drag.payload.id)
-            .map((s) => s.id);
-          const at = drag.insert.beforeId == null ? ids.length : ids.indexOf(drag.insert.beforeId);
-          ids.splice(at < 0 ? ids.length : at, 0, drag.payload.id);
+          // anew with the dragged stop where the seam showed — tokens,
+          // so any couplers seated in the rank keep their places.
+          const tokens = this.spliceRank(targetIdx, drag);
           if (sameManual) {
-            this.organCommand(commands.organStopOrder(targetIdx, ids));
+            this.organCommand(commands.organRankOrder(targetIdx, tokens));
           } else {
             // Arriving from another manual: move first (live), then
             // place — the queue waits each response out, and refusals
             // surface like any other edit's.
             this.runQueue([
               commands.organMove(drag.payload.id, targetIdx),
-              commands.organStopOrder(targetIdx, ids),
+              commands.organRankOrder(targetIdx, tokens),
             ]);
           }
         } else if (!sameManual) {
@@ -2219,6 +2554,25 @@ export class Editor {
           // poison the file), so it goes through the queue.
           this.runQueue([commands.organMove(drag.payload.id, targetIdx)]);
         }
+      }
+    } else if (drag.kind === "coupler") {
+      if (targetType === "bin") {
+        this.showRemoveConfirm("coupler", drag.payload);
+      } else if (targetType === "rail") {
+        // Home to the rail: the seat's division deals its rank out
+        // without the coupler, which unseats it.
+        if (drag.payload.midx != null) {
+          const token = this.dragToken(drag);
+          const tokens = this.rankTokens(drag.payload.midx).filter((t) => t !== token);
+          this.organCommand(commands.organRankOrder(drag.payload.midx, tokens));
+        }
+      } else if (targetType === "manual") {
+        // Seat it in the jamb where the seam showed — or, from a
+        // keyboard drop, at the bottom of that division's rank. The
+        // server unseats it everywhere else.
+        this.organCommand(
+          commands.organRankOrder(targetIdx, this.spliceRank(targetIdx, drag))
+        );
       }
     } else if (drag.kind === "manual") {
       if (targetType === "bin") {
@@ -2249,8 +2603,11 @@ export class Editor {
     this.el.removeConfirmText.textContent =
       kind === "enclosure"
         ? `Remove the ${payload.name} box? Its stops stay, unenclosed.`
-        : `Remove ${payload.name} and its ${n} stop${n === 1 ? "" : "s"}? ` +
-          "Sources still offer everything.";
+        : kind === "coupler"
+          ? `Delete the ${payload.name} coupler? A sample set's own goes ` +
+            "off the console instead, restorable in Preferences."
+          : `Remove ${payload.name} and its ${n} stop${n === 1 ? "" : "s"}? ` +
+            "Sources still offer everything.";
     this.el.removeConfirm.classList.remove("hidden");
   }
 
@@ -2265,9 +2622,54 @@ export class Editor {
       this.hideRemoveConfirm();
       if (!target) return;
       if (target.kind === "enclosure") this.organCommand(commands.organEnclosureRemove(target.name));
+      else if (target.kind === "coupler") this.organCommand(commands.organCouplerRemove(target.idx));
       else this.organCommand(commands.organManualRemove(target.idx));
     });
     this.el.removeConfirmNo.addEventListener("click", () => this.hideRemoveConfirm());
+  }
+
+  // ---- the duplicate-coupler dialog: warn, and offer the link -------------
+  //
+  // Two couplers doing exactly the same thing is usually a console
+  // convenience (a thumb piston and a toe stud for one action), so the
+  // deliberate answer is a permanent link: either control moves both.
+  // The dialog offers it wherever a duplicate is born — adding one, or
+  // editing one into sameness.
+
+  /// `onYes` runs on "Link them"; `onNo` (optional) on "Keep separate".
+  showLinkConfirm(text, onYes, onNo) {
+    this.pendingLink = { onYes, onNo };
+    this.el.linkConfirmText.textContent = text;
+    this.el.linkConfirm.classList.remove("hidden");
+  }
+
+  wireLinkConfirm() {
+    const answer = (yes) => {
+      const pending = this.pendingLink;
+      this.pendingLink = null;
+      this.el.linkConfirm.classList.add("hidden");
+      if (!pending) return;
+      (yes ? pending.onYes : pending.onNo)?.();
+    };
+    this.el.linkConfirmYes.addEventListener("click", () => answer(true));
+    this.el.linkConfirmNo.addEventListener("click", () => answer(false));
+  }
+
+  /// Add a coupler and link it to its twin: the add rebuilds the
+  /// organ, so the link waits until both wear console indexes.
+  async addCouplerLinked(name, routes, twinName) {
+    await this.runQueue([commands.organCouplerAdd(name, routes)]);
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    for (let attempt = 0; attempt < 60; attempt++) {
+      const couplers = this.lastSnapshot?.couplers ?? [];
+      const added = couplers.find((c) => c.name === name);
+      const twin = couplers.find((c) => c.name === twinName);
+      if (added && twin) {
+        this.runQueue([commands.organCouplerLink(added.idx, twin.idx, true)]);
+        return;
+      }
+      await sleep(200);
+    }
   }
 
   // ---- organ edits: a fetch of their own, not send()/poll ------------------
@@ -2531,6 +2933,7 @@ export class Editor {
       this.el.trem,
       this.el.stop,
       this.el.coupler,
+      this.el.couplersMenu,
     ]) {
       el.addEventListener("click", (event) => event.stopPropagation());
     }
@@ -2543,6 +2946,7 @@ export class Editor {
       this.closeTremForm();
       this.closeStopForm();
       this.closeCouplerForm();
+      this.closeCouplersMenu();
     });
     window.addEventListener("keydown", (event) => {
       if (event.key !== "Escape") return;
@@ -2554,6 +2958,7 @@ export class Editor {
       this.closeTremForm();
       this.closeStopForm();
       this.closeCouplerForm();
+      this.closeCouplersMenu();
     });
   }
 
@@ -2645,7 +3050,21 @@ export class Editor {
       const from = Number(this.el.addCouplerOn.value);
       const shift = Number(this.el.addCouplerAt.value) || 0;
       if (!Number.isFinite(from) || !Number.isFinite(to)) return;
-      this.organCommand(commands.organCouplerAdd(name, [{ from, to, shift }])).then(
+      const routes = [{ from, to, shift }];
+      // A coupler that duplicates an existing one gets the warning —
+      // and, accepted, a permanent link: either control moves both.
+      const twin = this.duplicateCouplerOf(null, routes);
+      if (twin) {
+        this.closeAdd();
+        this.showLinkConfirm(
+          `${twin.name} already does exactly this. Add ${name} anyway, ` +
+            "linked, so either control moves both?",
+          () => this.addCouplerLinked(name, routes, twin.name),
+          null
+        );
+        return;
+      }
+      this.organCommand(commands.organCouplerAdd(name, routes)).then(
         (ok) => ok && this.closeAdd()
       );
     });

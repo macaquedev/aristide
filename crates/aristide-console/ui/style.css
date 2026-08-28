@@ -1203,6 +1203,16 @@ input[type="range"]:hover::-webkit-slider-thumb { filter: brightness(1.15); }
 }
 .coupler-route-remove { margin-left: auto; padding: 1px 6px; font-size: 12px; line-height: 1.4; }
 
+/* linked partners: one line per link, its undo beside it */
+.coupler-linked {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.coupler-linked .ghost { margin-left: auto; padding: 1px 6px; font-size: 10.5px; }
+
 /* an empty organ says what to do next */
 .organ-hint {
   margin: 4px 0;
@@ -1902,7 +1912,8 @@ body.editing .panel-jamb.empty { display: block; }
   );
   border-bottom-right-radius: 5px;
 }
-body.editing .panel-jamb .panel-grip { display: block; }
+body.editing .panel-jamb .panel-grip,
+body.editing .panel-keyboard .panel-grip { display: block; }
 
 /* where a dragged stop would land: a bright seam on the edge of the
    knob the pointer is nearest — above/below in a column, left/right
@@ -1936,6 +1947,9 @@ body.editing .panel-jamb .panel-grip { display: block; }
 }
 body.editing .division-add { display: block; }
 .division-add:hover { color: var(--accent); border-color: var(--accent); }
+
+/* the same + on the coupler rail: add a coupler right where they live */
+.coupler-rail .division-add { margin-bottom: 0; flex: none; }
 
 .division h2 {
   margin: 0 0 2px;
@@ -2014,6 +2028,10 @@ body.editing .division-add { display: block; }
 .knob.on .stop-pitch { color: var(--accent-ink); }
 .knob:active { filter: brightness(0.85); }
 
+/* a coupler seated in the jamb: same knob, italic engraving — the
+   organ builder's convention for couplers among the stops */
+.knob.coupler .stop-name { font-style: italic; }
+
 /* ---- coupler rail ---------------------------------------------------- */
 
 .coupler-rail {
@@ -2087,8 +2105,19 @@ body.editing .division-add { display: block; }
   border-radius: 5px;
   box-shadow: var(--bevel);
 }
-.keyboard.manual { --nat-w: 23px; --kb-h: 96px; --sharp-w: 13px; }
-.keyboard.pedal { --nat-w: 27px; --kb-h: 84px; --sharp-w: 15px; }
+/* Every key-geometry var multiplies --kb-scale, so a resized
+   keyboard panel (see console.js's scaleKeyboard) grows or shrinks
+   the whole key field with one number while the chrome stays put. */
+.keyboard.manual {
+  --nat-w: calc(23px * var(--kb-scale, 1));
+  --kb-h: calc(96px * var(--kb-scale, 1));
+  --sharp-w: calc(13px * var(--kb-scale, 1));
+}
+.keyboard.pedal {
+  --nat-w: calc(27px * var(--kb-scale, 1));
+  --kb-h: calc(84px * var(--kb-scale, 1));
+  --sharp-w: calc(15px * var(--kb-scale, 1));
+}
 
 .cheek {
   writing-mode: vertical-rl;
@@ -2147,6 +2176,17 @@ body.editing .division-add { display: block; }
 .key.natural.held { background: var(--accent); }
 .key.sharp.held { background: var(--accent-deep); }
 
+/* coupled: an engaged coupler pulling the key down mechanically — the
+   same dip as a played key, in a quieter wash of the accent, so the
+   player reads which action moved it and which finger did */
+.key.coupled { transform: scaleY(0.97); transition-duration: 40ms; }
+.key.natural.coupled {
+  background: color-mix(in srgb, var(--accent) 45%, var(--key-white));
+}
+.key.sharp.coupled {
+  background: color-mix(in srgb, var(--accent-deep) 55%, var(--key-black));
+}
+
 /* pedal naturals read slightly darker than the manuals */
 .keyboard.pedal .key.natural { background: #caccd0; }
 .keyboard.pedal .key.natural.held { background: var(--accent); }
@@ -2160,7 +2200,10 @@ body.editing .division-add { display: block; }
    right (see console.js's hexKeys, which sets --hx/--hy per key and
    --hex-rows/--hex-cols on the field). Keys outside the compass render
    dead — the board keeps its shape, they just don't play. */
-.keyboard.microtonal { --hex-w: 30px; --hex-h: 34px; }
+.keyboard.microtonal {
+  --hex-w: calc(30px * var(--kb-scale, 1));
+  --hex-h: calc(34px * var(--kb-scale, 1));
+}
 .keyboard.microtonal .keys {
   width: calc((var(--hex-cols) + 0.5) * var(--hex-w));
   height: calc((var(--hex-rows) - 1) * var(--hex-h) * 0.75 + var(--hex-h));
@@ -2189,14 +2232,24 @@ body.editing .division-add { display: block; }
   transform: scale(1.02);
   filter: brightness(1.3);
 }
+.key.hex.coupled {
+  background: color-mix(in srgb, var(--accent) 45%, var(--hex-color, var(--key-white)));
+  filter: brightness(1.15);
+}
 .key.hex.dead {
   background: #303236;
   cursor: default;
   pointer-events: none;
 }
 
-body[data-density="compact"] .keyboard.microtonal { --hex-w: 25px; --hex-h: 28px; }
-body[data-density="spacious"] .keyboard.microtonal { --hex-w: 35px; --hex-h: 40px; }
+body[data-density="compact"] .keyboard.microtonal {
+  --hex-w: calc(25px * var(--kb-scale, 1));
+  --hex-h: calc(28px * var(--kb-scale, 1));
+}
+body[data-density="spacious"] .keyboard.microtonal {
+  --hex-w: calc(35px * var(--kb-scale, 1));
+  --hex-h: calc(40px * var(--kb-scale, 1));
+}
 
 /* ---- swell shoes: vertical faders ------------------------------------- */
 
@@ -2270,8 +2323,16 @@ body[data-density="compact"] .panel.sized .division-knobs { max-width: none; }
 body[data-density="compact"] .knob { width: 78px; min-height: 46px; }
 body[data-density="compact"] .coupler-rail { padding: 6px 10px; }
 body[data-density="compact"] .rocker { min-width: 58px; height: 28px; }
-body[data-density="compact"] .keyboard.manual { --nat-w: 20px; --kb-h: 84px; --sharp-w: 11px; }
-body[data-density="compact"] .keyboard.pedal { --nat-w: 24px; --kb-h: 72px; --sharp-w: 13px; }
+body[data-density="compact"] .keyboard.manual {
+  --nat-w: calc(20px * var(--kb-scale, 1));
+  --kb-h: calc(84px * var(--kb-scale, 1));
+  --sharp-w: calc(11px * var(--kb-scale, 1));
+}
+body[data-density="compact"] .keyboard.pedal {
+  --nat-w: calc(24px * var(--kb-scale, 1));
+  --kb-h: calc(72px * var(--kb-scale, 1));
+  --sharp-w: calc(13px * var(--kb-scale, 1));
+}
 body[data-density="compact"] .shoe-track { height: 108px; }
 
 body[data-density="spacious"] .panel-jamb .panel-body { gap: 20px; padding: 20px 18px 22px; }
