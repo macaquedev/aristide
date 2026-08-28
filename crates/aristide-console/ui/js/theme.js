@@ -5,8 +5,8 @@
 // Each accent carries its own dark ink (text over the accent) and a
 // deeper shade (held sharps), picked by eye rather than derived, so
 // every choice keeps contrast. The 1f/33 alpha suffixes match the
-// soft/glow tokens in style.css. The pickers live in Preferences →
-// Appearance.
+// soft/glow tokens in style.css. The pickers live in the Preferences
+// dialog, which is exactly and only this: the player's own settings.
 // LED hues: an engaged control fills with the accent and its legend
 // goes ink, like any lit button on a control surface.
 const ACCENTS = {
@@ -49,7 +49,7 @@ function applyDensity(name) {
   document.body.dataset.density = DENSITIES.includes(name) ? name : "regular";
 }
 
-/// Builds the two picker rows in Preferences → Appearance and restores
+/// Builds the two picker rows in the Preferences dialog and restores
 /// the saved choices. Call once at startup.
 export function wireTheme(root) {
   const swatches = root.getElementById("accent-swatches");

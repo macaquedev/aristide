@@ -2625,3 +2625,94 @@ body.editing .shoe-label:active {
   letter-spacing: 0.5px;
   outline: none;
 }
+
+/* ---- the organ-scoped settings popovers (see editor.js) ---------------- */
+
+/* Wiring rows (wiring.js) are wider than a bare add-form: a device
+   select, channel, shift and Listen need the room the old dialog gave
+   them. Bindings likewise. Both scroll rather than outgrow the view. */
+.editor-wiring-form { width: 400px; max-height: 70vh; overflow-y: auto; }
+.editor-bindings-form { width: 480px; max-height: 70vh; overflow-y: auto; }
+.editor-room-form { width: 280px; }
+.editor-save-form { width: 360px; }
+.editor-save-form .editor-add-form-row input[type="text"] { flex: 1; width: auto; }
+
+.editor-midi-pistons { display: flex; flex-direction: column; gap: 4px; }
+.editor-midi-pistons .menu-heading { padding: 2px 0 0; }
+.editor-midi-pistons .settings-row { gap: 8px; }
+
+/* A piston row: the triggers bound to one action, as removable chips,
+   plus Listen. Lives on stop/coupler editors and the MIDI popover. */
+.piston-box { display: flex; flex: 1; min-width: 0; }
+.piston-row {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.piston-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding: 2px 4px 2px 8px;
+  border: 1px solid #000000d0;
+  border-radius: 3px;
+  background: var(--well);
+  box-shadow: var(--bevel-well);
+  font-size: 10.5px;
+  color: var(--text);
+}
+.piston-chip > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.piston-none { font-size: 10.5px; color: var(--text-dim); }
+
+/* Couplers taken off the console, restorable from the add form. */
+.editor-add-coupler-restore { display: flex; flex-direction: column; gap: 4px; }
+.editor-add-coupler-restore:empty { display: none; }
+.editor-add-coupler-restore .menu-heading { padding: 0; }
+.coupler-restore-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+}
+.coupler-restore-row > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The badge a keyboard with no MIDI input wears: silence is the honest
+   default for an unwired organ, but it must not look like a fault. */
+.kb-silent {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  z-index: 3;
+  padding: 2px 7px;
+  border: 1px solid #000000a0;
+  border-radius: 3px;
+  background: #26282bd8;
+  color: var(--text-dim);
+  font-family: var(--sans);
+  font-size: 9.5px;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+}
+.kb-silent:hover { color: var(--text); border-color: var(--accent); }
+
+/* The user-only Preferences card: one small pane, so it fits its
+   content — the fixed height existed for the old tabbed dialog. */
+.prefs-card { width: min(520px, 100%); height: auto; }
+
+/* The bindings popover's trigger cell must never squeeze to nothing
+   between the two selects — it's the half the player just played. */
+.editor-bindings-form .control-row .control-trigger { flex: 1 1 110px; }

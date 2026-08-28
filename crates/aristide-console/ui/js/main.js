@@ -23,10 +23,17 @@ window.addEventListener("contextmenu", (event) => {
 const base = await resolveBase();
 let send;
 let snapshot = {}; // the latest state, for menus that ask what is true now
-const prefs = new Preferences(document, base, (query) => send(query));
+const prefs = new Preferences(document);
 const picker = new Picker(document, base, (query) => send(query));
 const editor = new Editor(document, base, (query) => send(query));
-const view = new Console(document, (query) => send(query), (tab) => prefs.open(tab), (x, y) => editor.beginBuild(x, y));
+// The bar's tuning readout opens the whole-instrument tuning popover —
+// an organ fact, edited where organ facts are edited, on the console.
+const view = new Console(
+  document,
+  (query) => send(query),
+  (x, y) => editor.openTuningForm("organ", x, y),
+  (x, y) => editor.beginBuild(x, y)
+);
 view.decorate = (snapshot) => editor.decorateConsole(snapshot);
 const keys = new PianoKeys(document, (query) => send(query));
 const conflict = new ConflictDialog(document, (query) => send(query));
@@ -85,13 +92,26 @@ renameInput.addEventListener("keydown", (event) => {
 // Menus are rebuilt each time one is pulled down, so every item states
 // what is true at that moment — whether the legend is up, whether the
 // window is full screen. Playing itself needs no menu: the computer
-// keyboard is assigned in Preferences → MIDI like any other device,
-// and shifting it is a binding like any other.
+// keyboard is assigned in a keyboard's MIDI popover like any other
+// device, and shifting it is a binding like any other.
 //
-// The first menu is the organ's own name: the instrument is picked and
-// renamed where it is named. An ad-hoc combination has no file to keep
-// a name in, so renaming waits until it is saved as one.
+// The bar reads as the scopes read: the Aristide menu is the app and
+// the player (About, Preferences — nothing in it touches the organ);
+// the organ's own name is its file (pick, rename, save); the Organ
+// menu is the instrument — performance actions plus the organ-wide
+// settings popovers, every one an organ fact written to its file.
+// An ad-hoc combination has no file to keep a name in, so renaming
+// waits until it is saved as one.
 new MenuBar(document, document.getElementById("menus"), [
+  {
+    button: document.getElementById("app-menu"),
+    list: document.getElementById("app-menu-list"),
+    items: () => [
+      { label: "Preferences…", accel: "Ctrl ,", run: () => prefs.open() },
+      "-",
+      { label: "About Aristide", run: () => prefs.openAbout() },
+    ],
+  },
   {
     button: organButton,
     list: document.getElementById("organ-menu-list"),
@@ -105,6 +125,9 @@ new MenuBar(document, document.getElementById("menus"), [
         disabled: !snapshot.organ || !!snapshot.setup?.implicit,
         run: startRename,
       },
+      ...(snapshot.setup && !snapshot.setup.file
+        ? [{ label: "Save as an organ file…", run: (at) => editor.openSaveForm(at?.x, at?.y) }]
+        : []),
       "-",
       { label: "Load an organ…", run: () => picker.open() },
       { label: "New blank organ…", run: () => picker.newBlank() },
@@ -127,7 +150,21 @@ new MenuBar(document, document.getElementById("menus"), [
       { label: "Cancel registration", run: () => view.cancel() },
       { label: "Silence everything", accel: "Panic", run: () => view.panic() },
       "-",
-      { label: "Preferences…", accel: "Ctrl ,", run: () => prefs.open() },
+      {
+        label: "Tuning…",
+        disabled: !snapshot.tuning,
+        run: (at) => editor.openTuningForm("organ", at?.x ?? 120, at?.y ?? 40),
+      },
+      {
+        label: "Room & noises…",
+        disabled: snapshot.reverb == null && !snapshot.noises,
+        run: (at) => editor.openRoomForm(at?.x ?? 120, at?.y ?? 40),
+      },
+      {
+        label: "Bindings…",
+        disabled: !snapshot.organ,
+        run: (at) => editor.openBindingsForm(at?.x ?? 120, at?.y ?? 40),
+      },
     ],
   },
   {
@@ -139,13 +176,7 @@ new MenuBar(document, document.getElementById("menus"), [
         check: Boolean(document.fullscreenElement),
         run: fullscreen,
       },
-      "-",
-      { label: "Appearance…", run: () => prefs.open("appearance") },
     ],
-  },
-  {
-    title: "Help",
-    items: () => [{ label: "About Aristide", run: () => prefs.openAbout() }],
   },
 ]);
 
@@ -162,7 +193,6 @@ send = connect(
     snapshot = state;
     view.render(snapshot);
     keys.update(snapshot);
-    prefs.update(snapshot);
     picker.update(snapshot);
     conflict.update(snapshot);
     editor.update(snapshot);

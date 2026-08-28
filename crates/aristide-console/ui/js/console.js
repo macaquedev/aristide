@@ -57,19 +57,20 @@ function stopFace(stop) {
 }
 
 export class Console {
-  /// `openPreferences(tab)` is how the console reaches the settings that
-  /// no longer live on the bar itself — the tuning readout is a button
-  /// onto its own preferences tab. `enterEditMode(x, y)` is what an
-  /// empty organ's card offers instead: editing unlocked and the add
-  /// menu open at the click — an empty organ is already auto-unlocked,
-  /// so unlocking alone would visibly do nothing.
+  /// `openTuning(x, y)` is how the bar's tuning readout opens the
+  /// whole-instrument tuning popover right under itself — tuning is an
+  /// organ fact and is edited on the console, never in Preferences.
+  /// `enterEditMode(x, y)` is what an empty organ's card offers
+  /// instead: editing unlocked and the add menu open at the click — an
+  /// empty organ is already auto-unlocked, so unlocking alone would
+  /// visibly do nothing.
   /// `decorate` is set by main.js after construction (see editor.js) and
   /// called at the end of every structural `build()` — Console builds
   /// the DOM, the editor only ever decorates what's already there.
-  constructor(root, send, openPreferences, enterEditMode) {
+  constructor(root, send, openTuning, enterEditMode) {
     this.root = root;
     this.send = send;
-    this.openPreferences = openPreferences;
+    this.openTuning = openTuning;
     this.enterEditMode = enterEditMode;
     this.decorate = null;
     this.signature = null;
@@ -125,7 +126,7 @@ export class Console {
   // ---- structure ----------------------------------------------------
 
   build(snapshot) {
-    this.el.organName.textContent = snapshot.organ ?? "Aristide";
+    this.el.organName.textContent = snapshot.organ ?? "No organ";
     // A loaded organ with nothing built yet has no panels worth drawing —
     // a card points at the editor instead. The canvas stays live under
     // it: double-clicking the bare case is how the first manual arrives.
@@ -269,7 +270,7 @@ export class Console {
     const couplersBody = this.panel("couplers", "couplers", "Couplers");
     const rail = document.createElement("div");
     rail.className = "coupler-rail";
-    // A coupler taken off the console (see the Organ tab) is disengaged,
+    // A coupler taken off the console (restorable from the add menu) is disengaged,
     // not deleted — it simply doesn't get a tablet on the rail. One
     // seated in a jamb (midx) wears a drawknob there instead.
     for (const coupler of snapshot.couplers.filter((c) => !c.hidden && c.midx == null)) {
@@ -765,6 +766,12 @@ export class Console {
     });
 
     this.el.panic.addEventListener("click", () => this.panic());
-    this.el.tuning.addEventListener("click", () => this.openPreferences("tuning"));
+    this.el.tuning.addEventListener("click", (event) => {
+      // The same click must not travel on to the window's close-all
+      // listener and shut the popover it just opened.
+      event.stopPropagation();
+      const rect = this.el.tuning.getBoundingClientRect();
+      this.openTuning(rect.left, rect.bottom + 6);
+    });
   }
 }

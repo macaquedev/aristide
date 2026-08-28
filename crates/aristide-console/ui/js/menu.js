@@ -96,9 +96,15 @@ export class MenuBar {
       accel.textContent = item.accel;
       button.append(accel);
     }
-    button.addEventListener("click", () => {
+    button.addEventListener("click", (event) => {
+      // The click must not travel on to the window's own close-all
+      // listener: an item that opens a popover (Tuning…, Bindings…)
+      // would see it shut by the very click that opened it. The
+      // anchor rides along so such a popover can open under the item.
+      event.stopPropagation();
+      const rect = button.getBoundingClientRect();
       this.close();
-      item.run?.();
+      item.run?.({ x: rect.left, y: rect.top });
     });
     return button;
   }

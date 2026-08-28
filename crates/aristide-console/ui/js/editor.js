@@ -10,10 +10,17 @@
 // already built — it never builds jambs or keyboards itself.
 // `decorateConsole(snapshot)` is called by Console right after every
 // structural rebuild (see console.js's `decorate` hook); `update(snapshot)`
-// is called on every poll, the same as Preferences and the other panels.
+// is called on every poll, the same as the other panels.
 
 import { commands } from "./api.js";
 import { formatFootage, keyName, parseKeyName } from "./pitch.js";
+import {
+  buildManualInputs,
+  buildControlsList,
+  pistonRow,
+  keyboardNote,
+  PITCH_ACTIONS,
+} from "./wiring.js";
 
 // What the native add-source dialog offers. Narrower than the picker's
 // filter: a source must be a sample set — the server refuses another
@@ -90,6 +97,20 @@ export class Editor {
     this.addBrowseEntries = null;
     this.addBrowseError = null;
     this._lockNoteTimer = null;
+    this.midiManual = null; // manual idx the MIDI-input popover is open for, or null
+    this.midiSignature = null; // rebuild the popover's rows only when these change
+    this.compassManual = null; // manual idx the compass popover is open for, or null
+    this.compassSignature = null;
+    this.roomOpen = false; // the Room & noises popover
+    this.roomDragging = new Set(); // slider keys mid-drag: the snapshot keeps its hands off
+    this.bindingsOpen = false; // the flat Bindings popover
+    this.bindingsSignature = null;
+    this.saveOpen = false; // the save-as popover
+    this.savePromptedFor = null; // organ name already auto-prompted to save, once
+    // A quick-bind in flight: Listen was pressed on a piston row, and
+    // once the learned trigger lands at `slot` the action (and target
+    // manual, for pitch actions) is bound over the learned default.
+    this.quickBind = null; // {action, manual?, slot}
 
     this.el = {
       lock: root.getElementById("editor-lock"),
@@ -213,6 +234,39 @@ export class Editor {
       addCouplerOn: root.getElementById("editor-add-coupler-on"),
       addCouplerAt: root.getElementById("editor-add-coupler-at"),
       addCouplerCancel: root.getElementById("editor-add-coupler-cancel"),
+      midi: root.getElementById("editor-midi"),
+      midiTitle: root.getElementById("editor-midi-title"),
+      midiRescan: root.getElementById("editor-midi-rescan"),
+      midiInputs: root.getElementById("editor-midi-inputs"),
+      midiPistons: root.getElementById("editor-midi-pistons"),
+      midiPorts: root.getElementById("editor-midi-ports"),
+      midiClose: root.getElementById("editor-midi-close"),
+      compass: root.getElementById("editor-compass"),
+      compassTitle: root.getElementById("editor-compass-title"),
+      compassRow: root.getElementById("editor-compass-row"),
+      compassError: root.getElementById("editor-compass-error"),
+      compassClose: root.getElementById("editor-compass-close"),
+      room: root.getElementById("editor-room"),
+      roomReverbRow: root.getElementById("editor-room-reverb-row"),
+      roomReverb: root.getElementById("editor-room-reverb"),
+      roomNoisesRow: root.getElementById("editor-room-noises-row"),
+      roomNoisesOn: root.getElementById("editor-room-noises-on"),
+      roomNoisesVol: root.getElementById("editor-room-noises-vol"),
+      roomClose: root.getElementById("editor-room-close"),
+      bindings: root.getElementById("editor-bindings"),
+      bindingsList: root.getElementById("editor-bindings-list"),
+      bindingsAdd: root.getElementById("editor-bindings-add"),
+      bindingsKeyboard: root.getElementById("editor-bindings-keyboard"),
+      bindingsClose: root.getElementById("editor-bindings-close"),
+      save: root.getElementById("editor-save"),
+      saveNote: root.getElementById("editor-save-note"),
+      savePath: root.getElementById("editor-save-path"),
+      saveBtn: root.getElementById("editor-save-btn"),
+      saveError: root.getElementById("editor-save-error"),
+      saveClose: root.getElementById("editor-save-close"),
+      stopPistons: root.getElementById("editor-stop-pistons"),
+      couplerPistons: root.getElementById("editor-coupler-pistons"),
+      addCouplerRestore: root.getElementById("editor-add-coupler-restore"),
       hex: root.getElementById("editor-hex"),
       hexTitle: root.getElementById("editor-hex-title"),
       hexReset: root.getElementById("editor-hex-reset"),
@@ -236,6 +290,11 @@ export class Editor {
     this.wireTremForm();
     this.wireStopForm();
     this.wireCouplerForm();
+    this.wireMidiForm();
+    this.wireCompassForm();
+    this.wireRoomForm();
+    this.wireBindingsForm();
+    this.wireSaveForm();
     this.wireCanvas();
   }
 
@@ -383,12 +442,65 @@ export class Editor {
       if (this.drawerOpen) this.fetchOfferings();
     }
 
+    this.pumpQuickBind(snapshot);
+
     if (this.tuningManual != null) this.syncTuningForm();
     if (this.hexManual != null) this.syncHexForm();
     if (this.tremOpen != null) this.syncTremForm();
     if (this.stopOpen != null) this.syncStopForm();
     if (this.couplerOpen != null) this.syncCouplerForm();
     if (!this.el.couplersMenu.classList.contains("hidden")) this.syncCouplersMenu();
+    if (this.midiManual != null) this.syncMidiForm();
+    if (this.compassManual != null) this.syncCompassForm();
+    if (this.roomOpen) this.syncRoomForm();
+    if (this.bindingsOpen) this.syncBindingsForm();
+    if (this.saveOpen) this.syncSaveForm();
+    this.refreshSilentBadges();
+
+    // An organ combined ad hoc on the command line has nobody to ask
+    // "keep this?" but the player — offer the save-as popover once, and
+    // never fight them for it again.
+    if (
+      snapshot.setup?.implicit &&
+      snapshot.organ &&
+      this.savePromptedFor !== snapshot.organ &&
+      !snapshot.loading
+    ) {
+      this.savePromptedFor = snapshot.organ;
+      this.openSaveForm();
+    }
+  }
+
+  /// The second half of a piston row's Listen: the server learned a
+  /// trigger into `slot` (as a default-action binding), and now the
+  /// action the row stands for is bound over it. Cleared whenever the
+  /// learn was cancelled or stolen by another Listen.
+  pumpQuickBind(snapshot) {
+    const quick = this.quickBind;
+    if (!quick) return;
+    const learning = snapshot.control_learning ?? null;
+    if (learning === quick.slot) return; // still waiting for the press
+    const landed = (snapshot.controls ?? []).find(
+      (c) => c.slot === quick.slot && c.trigger
+    );
+    this.quickBind = null;
+    if (learning == null && landed) {
+      const fields = quick.manual ? { manual: quick.manual } : {};
+      this.send(commands.controlBind(quick.slot, quick.action, fields));
+    }
+  }
+
+  /// Starts (or cancels) a quick-bind from a piston row: learn a fresh
+  /// trigger at the end of the list, then point it at `action`.
+  quickBindListen(action, manual, cancelling) {
+    if (cancelling) {
+      this.quickBind = null;
+      this.send(commands.controlLearn(null));
+      return;
+    }
+    const slot = (this.lastSnapshot?.controls ?? []).length;
+    this.quickBind = { action, manual: manual ?? null, slot };
+    this.send(commands.controlLearn(slot));
   }
 
   /// Called by Console right after every structural rebuild (see its
@@ -414,6 +526,41 @@ export class Editor {
     this.wirePanelResize();
     this.addDivisionButtons(snapshot);
     this.placePending(snapshot);
+    this.refreshSilentBadges();
+  }
+
+  /// A keyboard whose manual has no MIDI input wears a quiet badge —
+  /// silence is the honest default for an unwired organ, but it looks
+  /// like a fault unless the console says so where the player is
+  /// looking. Clicking the badge opens the MIDI popover right there;
+  /// it isn't gated by the padlock, for the same reason the old
+  /// Preferences dialog wasn't — wiring is the first thing a player
+  /// does, not an act of organ building. Runs on every poll (wiring
+  /// isn't structural, so decorate alone would miss changes).
+  refreshSilentBadges() {
+    const midiManuals = this.lastSnapshot?.midi?.manuals ?? [];
+    for (const board of this.root.querySelectorAll(".keyboard[data-manual]")) {
+      const idx = Number(board.dataset.manual);
+      const entry = midiManuals.find((m) => m.idx === idx);
+      const silent = !!entry && !entry.inputs.length;
+      let badge = board.querySelector(".kb-silent");
+      if (!silent) {
+        badge?.remove();
+        continue;
+      }
+      if (!badge) {
+        badge = document.createElement("button");
+        badge.className = "kb-silent";
+        badge.textContent = "silent — no input";
+        badge.title = "This keyboard has no MIDI input yet — click to give it one";
+        badge.addEventListener("click", (event) => {
+          event.stopPropagation();
+          const rect = badge.getBoundingClientRect();
+          this.openMidiForm(idx, rect.left, rect.bottom + 6);
+        });
+        board.append(badge);
+      }
+    }
   }
 
   /// Every keyboard and every jamb division carries its manual index in
@@ -985,6 +1132,7 @@ export class Editor {
     this.closeDivisionMenu();
     this.closeTuningForm();
     this.closeCouplerForm();
+    this.closeSettingsPopovers();
     const menu = this.el.keyboardMenu;
     menu.replaceChildren();
     this.buildKeyboardMenuItems(menu, idx);
@@ -1029,9 +1177,33 @@ export class Editor {
     });
     menu.append(remove);
 
+    // The manual's own wiring and reach, popovers of their own. Both
+    // sit above "Change tuning…" so the tuning item stays the menu's
+    // last (harness-hooks.js counts on that).
+    const midi = document.createElement("button");
+    midi.className = "menu-item";
+    midi.innerHTML = "<span>MIDI input&hellip;</span>";
+    midi.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const rect = menu.getBoundingClientRect();
+      this.closeKeyboardMenu();
+      this.openMidiForm(idx, rect.left, rect.top);
+    });
+    menu.append(midi);
+
+    const compass = document.createElement("button");
+    compass.className = "menu-item";
+    compass.innerHTML = "<span>Compass&hellip;</span>";
+    compass.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const rect = menu.getBoundingClientRect();
+      this.closeKeyboardMenu();
+      this.openCompassForm(idx, rect.left, rect.top);
+    });
+    menu.append(compass);
+
     // A hex field is a microtonal-manual fact; the other kinds have
-    // no layout to offer. Kept above "Change tuning…" so the tuning
-    // item stays the menu's last (harness-hooks.js counts on that).
+    // no layout to offer.
     if (currentKind === "microtonal") {
       const hex = document.createElement("button");
       hex.className = "menu-item";
@@ -1076,7 +1248,7 @@ export class Editor {
     this.el.tuningClose.addEventListener("click", () => this.closeTuningForm());
 
     this.el.tuningReset.addEventListener("click", () => {
-      if (this.tuningManual == null) return;
+      if (this.tuningManual == null || this.tuningManual === "organ") return;
       this.tuningCommand({ manual: this.tuningManual, reset: 1 });
     });
 
@@ -1085,7 +1257,7 @@ export class Editor {
       // Naming a temperament here is allowed even with a scale active —
       // the server reads it as leaving the scale (http.rs's /api/tuning
       // arm clears `tuning.scale` whenever `temperament` is given).
-      this.tuningCommand({ manual: this.tuningManual, temperament: this.el.tuningTemperament.value });
+      this.tuningCommand(this.tuningFields({ temperament: this.el.tuningTemperament.value }));
       this.el.tuningTemperament.blur();
     });
 
@@ -1095,14 +1267,14 @@ export class Editor {
       this.el.tuningEdo.value = edo;
       // Like naming a temperament, choosing a division count leaves
       // any active scale (the server clears it on this field).
-      this.tuningCommand({ manual: this.tuningManual, edo });
+      this.tuningCommand(this.tuningFields({ edo }));
     });
 
     this.el.tuningA4.addEventListener("change", () => {
       if (this.tuningManual == null) return;
       const a4 = Math.min(500, Math.max(300, Number(this.el.tuningA4.value) || 440));
       this.el.tuningA4.value = a4;
-      this.tuningCommand({ manual: this.tuningManual, a4 });
+      this.tuningCommand(this.tuningFields({ a4 }));
       this.el.tuningA4.blur();
     });
 
@@ -1110,14 +1282,14 @@ export class Editor {
       if (this.tuningManual == null) return;
       const transpose = Math.min(12, Math.max(-12, Math.round(Number(this.el.tuningTranspose.value) || 0)));
       this.el.tuningTranspose.value = transpose;
-      this.tuningCommand({ manual: this.tuningManual, transpose });
+      this.tuningCommand(this.tuningFields({ transpose }));
       this.el.tuningTranspose.blur();
     });
 
     this.el.tuningScalePick.addEventListener("click", () => this.openTuningBrowse("scale"));
     this.el.tuningScaleClear.addEventListener("click", () => {
       if (this.tuningManual == null) return;
-      this.tuningCommand({ manual: this.tuningManual, scale: "off" });
+      this.tuningCommand(this.tuningFields({ scale: "off" }));
     });
 
     this.el.tuningKeymapPick.addEventListener("click", () => this.openTuningBrowse("keymap"));
@@ -1128,7 +1300,7 @@ export class Editor {
       // An empty `keymap` param is indistinguishable, server-side, from
       // an omitted one (http.rs filters both to "no keymap") — sending
       // it explicitly just documents the intent here.
-      this.tuningCommand({ manual: this.tuningManual, scale: scl, keymap: "" });
+      this.tuningCommand(this.tuningFields({ scale: scl, keymap: "" }));
     });
 
     this.el.tuningBrowseUp.addEventListener("click", () => {
@@ -1143,6 +1315,7 @@ export class Editor {
     this.closeKeyboardMenu();
     this.closeHexForm();
     this.closeCouplerForm();
+    this.closeSettingsPopovers();
     this.tuningManual = idx;
     this.hideTuningError();
     this.closeTuningBrowse();
@@ -1166,15 +1339,24 @@ export class Editor {
   /// — a poll landing mid-navigation must not yank it shut.
   syncTuningForm() {
     const idx = this.tuningManual;
-    const manual = this.lastSnapshot?.manuals.find((m) => m.idx === idx);
-    if (!manual) {
-      this.closeTuningForm();
-      return;
+    let tuning;
+    if (idx === "organ") {
+      // The whole instrument: the shared tuning itself, nothing to
+      // reset back to.
+      this.el.tuningTitle.textContent = "Whole instrument";
+      this.el.tuningReset.classList.add("hidden");
+      tuning = this.lastSnapshot?.tuning;
+    } else {
+      const manual = this.lastSnapshot?.manuals.find((m) => m.idx === idx);
+      if (!manual) {
+        this.closeTuningForm();
+        return;
+      }
+      this.el.tuningTitle.textContent = manual.name;
+      const own = (this.lastSnapshot?.manual_tuning ?? []).find((t) => t.idx === idx);
+      this.el.tuningReset.classList.toggle("hidden", !own);
+      tuning = own ?? this.lastSnapshot?.tuning;
     }
-    this.el.tuningTitle.textContent = manual.name;
-    const own = (this.lastSnapshot?.manual_tuning ?? []).find((t) => t.idx === idx);
-    this.el.tuningReset.classList.toggle("hidden", !own);
-    const tuning = own ?? this.lastSnapshot?.tuning;
     if (!tuning) return;
     // Temperaments are twelve-class vocabulary: the row shows only
     // while the division count is 12 (absent on an old snapshot = 12).
@@ -1227,10 +1409,18 @@ export class Editor {
   /// takes the scale and its keymap together (see http.rs).
   currentScalePath() {
     const idx = this.tuningManual;
+    if (idx === "organ") return this.lastSnapshot?.tuning?.scale?.scl ?? null;
     if (!this.lastSnapshot?.manuals.some((m) => m.idx === idx)) return null;
     const own = (this.lastSnapshot?.manual_tuning ?? []).find((t) => t.idx === idx);
     const tuning = own ?? this.lastSnapshot?.tuning;
     return tuning?.scale?.scl ?? null;
+  }
+
+  /// The tuning popover's target as /api/tuning fields: a manual idx
+  /// rides along as `manual`; the whole instrument sends none, which
+  /// is the endpoint's own vocabulary for it.
+  tuningFields(extra) {
+    return this.tuningManual === "organ" ? extra : { manual: this.tuningManual, ...extra };
   }
 
   /// Sends a tuning field update directly (not through the app-wide
@@ -1260,6 +1450,489 @@ export class Editor {
   hideTuningError() {
     this.el.tuningError.classList.add("hidden");
     this.el.tuningError.textContent = "";
+  }
+
+  // ---- the MIDI-input popover: what plays this manual ---------------------
+  //
+  // "What drives the Récit?" is asked at the Récit: the keyboard menu's
+  // "MIDI input…" (or the silent badge an unwired keyboard wears) opens
+  // this manual's own input rows — device, channel, shift, bend, Listen
+  // — plus quick piston rows for the pitch actions that shift it. The
+  // wiring is an organ fact and lands in the organ's file; the rows are
+  // the shared builders in wiring.js.
+
+  wireMidiForm() {
+    this.el.midiClose.addEventListener("click", () => this.closeMidiForm());
+    this.el.midiRescan.addEventListener("click", () => this.send(commands.midiRescan()));
+  }
+
+  openMidiForm(idx, x, y) {
+    this.closeAdd();
+    this.closeDivisionMenu();
+    this.closeKeyboardMenu();
+    this.closeTuningForm();
+    this.closeHexForm();
+    this.closeCouplerForm();
+    this.closeSettingsPopovers();
+    this.midiManual = idx;
+    this.midiSignature = null;
+    this.syncMidiForm();
+    this.el.midi.classList.remove("hidden");
+    this.positionPopover(this.el.midi, x, y);
+  }
+
+  closeMidiForm() {
+    if (this.midiManual == null) return;
+    // Leaving the popover ends any wait for a key: the next thing the
+    // player touches should sound, not be swallowed as an assignment.
+    if (this.lastSnapshot?.midi?.learning) this.send(commands.midiLearn(null));
+    this.midiManual = null;
+    this.midiSignature = null;
+    this.el.midi.classList.add("hidden");
+  }
+
+  /// Rebuilt only when something the rows depend on changes — the same
+  /// signature discipline the old dialog kept, so a poll never tears a
+  /// select out from under the pointer.
+  syncMidiForm() {
+    const idx = this.midiManual;
+    const midi = this.lastSnapshot?.midi ?? { ports: [], manuals: [] };
+    const entry = midi.manuals.find((m) => m.idx === idx);
+    if (!entry) {
+      this.closeMidiForm();
+      return;
+    }
+    const keyboardSpan = this.lastSnapshot?.keyboard
+      ? [this.lastSnapshot.keyboard.low, this.lastSnapshot.keyboard.high]
+      : null;
+    const pitchBindings = (this.lastSnapshot?.controls ?? []).filter(
+      (c) => PITCH_ACTIONS.includes(c.action) && c.manual === entry.name
+    );
+    const signature = JSON.stringify([
+      midi.ports, entry, midi.learning ?? null, keyboardSpan, pitchBindings, this.quickBind,
+    ]);
+    if (signature === this.midiSignature) return;
+    this.midiSignature = signature;
+
+    this.el.midiTitle.textContent = `${entry.name} · MIDI input`;
+    this.el.midiInputs.replaceChildren();
+    buildManualInputs(this.el.midiInputs, {
+      midi,
+      manualEntry: entry,
+      keyboardSpan,
+      send: this.send,
+    });
+
+    // The pitch actions that shift *this* keyboard, as quick piston
+    // rows. Bindings that shift "the same keyboard" (no manual of
+    // their own) live in the Bindings popover, where the whole list is.
+    this.el.midiPistons.replaceChildren();
+    const heading = document.createElement("span");
+    heading.className = "menu-heading";
+    heading.textContent = "Pistons";
+    this.el.midiPistons.append(heading);
+    for (const [action, label] of [
+      ["octave-up", "Octave up"],
+      ["octave-down", "Octave down"],
+      ["transpose-up", "Transpose up"],
+      ["transpose-down", "Transpose down"],
+    ]) {
+      const ctx = {
+        snapshot: this.lastSnapshot,
+        send: this.send,
+        manual: entry.name,
+        listening: this.quickBind?.action === action && this.quickBind?.manual === entry.name,
+      };
+      const row = document.createElement("div");
+      row.className = "settings-row";
+      const name = document.createElement("span");
+      name.className = "rail-label";
+      name.textContent = label;
+      row.append(
+        name,
+        pistonRow(ctx, action, (act, cancelling) =>
+          this.quickBindListen(act, entry.name, cancelling)
+        )
+      );
+      this.el.midiPistons.append(row);
+    }
+
+    this.el.midiPorts.replaceChildren();
+    if (!midi.ports.length) {
+      this.el.midiPorts.append(
+        this.emptyNote("No MIDI inputs. Plug the console in — the list finds it by itself.")
+      );
+    }
+    for (const port of midi.ports) {
+      const row = document.createElement("div");
+      row.className = "midi-port";
+      row.textContent = port.name;
+      row.title = port.name;
+      this.el.midiPorts.append(row);
+    }
+  }
+
+  // ---- the compass popover: how far this manual reaches -------------------
+
+  wireCompassForm() {
+    this.el.compassClose.addEventListener("click", () => this.closeCompassForm());
+  }
+
+  openCompassForm(idx, x, y) {
+    this.closeAdd();
+    this.closeDivisionMenu();
+    this.closeKeyboardMenu();
+    this.closeTuningForm();
+    this.closeHexForm();
+    this.closeCouplerForm();
+    this.closeSettingsPopovers();
+    this.compassManual = idx;
+    this.compassSignature = null;
+    this.hideCompassError();
+    this.syncCompassForm();
+    this.el.compass.classList.remove("hidden");
+    this.positionPopover(this.el.compass, x, y);
+  }
+
+  closeCompassForm() {
+    this.compassManual = null;
+    this.compassSignature = null;
+    this.el.compass.classList.add("hidden");
+    this.hideCompassError();
+  }
+
+  syncCompassForm() {
+    const idx = this.compassManual;
+    const manual = this.lastSnapshot?.manuals.find((m) => m.idx === idx);
+    const compass = (this.lastSnapshot?.setup?.compass ?? []).find((c) => c.idx === idx);
+    if (!manual || !compass) {
+      this.closeCompassForm();
+      return;
+    }
+    const signature = JSON.stringify([manual.name, compass]);
+    if (signature === this.compassSignature) return;
+    this.compassSignature = signature;
+    this.el.compassTitle.textContent = `${manual.name} · compass`;
+    this.el.compassRow.replaceChildren(this.compassRow(manual, compass));
+  }
+
+  /// One manual's compass: two editable bounds and the two ways to
+  /// change them — type new values and press Set, or fall back to
+  /// whatever the sample set itself declares.
+  compassRow(manual, compass) {
+    const row = document.createElement("div");
+    row.className = "organ-compass-row";
+
+    const low = this.compassField(compass.low ?? compass.native_low, compass.native_low);
+    const high = this.compassField(compass.high ?? compass.native_high, compass.native_high);
+    row.append(low.wrap, high.wrap);
+
+    const set = document.createElement("button");
+    set.className = "ghost";
+    set.textContent = "Set";
+    set.title = "Declare this manual's compass";
+    set.addEventListener("click", () => {
+      const lo = parseKeyName(low.input.value);
+      const hi = parseKeyName(high.input.value);
+      // A bound that doesn't name a note stays marked by its own field;
+      // nothing is sent until both read as pitches.
+      if (lo == null || hi == null) return;
+      low.input.value = keyName(lo);
+      high.input.value = keyName(hi);
+      this.compassCommand(commands.organCompass(manual.idx, lo, hi));
+    });
+    row.append(set);
+
+    if (compass.declared) {
+      const native = document.createElement("button");
+      native.className = "ghost";
+      native.textContent = "Native";
+      native.title = "Go back to the sample set's own compass";
+      native.addEventListener("click", () =>
+        this.compassCommand(commands.organCompass(manual.idx))
+      );
+      row.append(native);
+    }
+
+    return row;
+  }
+
+  /// A bound of the compass as a note name — "C2", "F♯4" — never as a
+  /// MIDI number. The echo confirms what a nonstandard spelling ("bb2")
+  /// reads as and flags text that names no note at all. Purely local
+  /// until Set is pressed: typing here never sends anything.
+  compassField(value, native) {
+    const wrap = document.createElement("span");
+    wrap.className = "compass-field";
+
+    const input = document.createElement("input");
+    input.type = "text";
+    input.autocomplete = "off";
+    input.spellcheck = false;
+    input.value = keyName(value);
+    input.placeholder = keyName(native);
+    input.title = `Sample set's own: ${keyName(native)} · C4 is middle C`;
+
+    const note = document.createElement("i");
+    input.addEventListener("input", () => {
+      const parsed = parseKeyName(input.value);
+      input.classList.toggle("invalid", parsed == null);
+      const canonical = parsed == null ? null : keyName(parsed);
+      note.textContent = parsed == null ? "?" : canonical === input.value.trim() ? "" : canonical;
+    });
+
+    wrap.append(input, note);
+    return { wrap, input };
+  }
+
+  async compassCommand(query) {
+    this.hideCompassError();
+    const { ok, error } = await this.organCommandResult(query);
+    if (error != null) this.showCompassError(error);
+    return ok;
+  }
+
+  showCompassError(text) {
+    this.el.compassError.textContent = text;
+    this.el.compassError.classList.remove("hidden");
+  }
+
+  hideCompassError() {
+    this.el.compassError.classList.add("hidden");
+    this.el.compassError.textContent = "";
+  }
+
+  // ---- the Room & noises popover: organ-wide sound character --------------
+  //
+  // Reverb wet and the mechanism noises are the organ's, not the
+  // player's: both live in the organ's file and travel with it. The
+  // sliders report live while they move (~30 commands/s) and persist
+  // only on release, so a drag never writes the file per frame.
+
+  wireRoomForm() {
+    this.el.roomClose.addEventListener("click", () => this.closeRoomForm());
+
+    this.throttledRoomSlider(this.el.roomReverb, "reverb", (persist) =>
+      this.send(commands.reverb(this.el.roomReverb.value, persist))
+    );
+    const sendNoises = (persist) =>
+      this.send(
+        commands.noises(this.el.roomNoisesOn.checked, this.el.roomNoisesVol.value, persist)
+      );
+    this.el.roomNoisesOn.addEventListener("change", () => sendNoises(true));
+    this.throttledRoomSlider(this.el.roomNoisesVol, "noises-vol", sendNoises);
+  }
+
+  /// A slider that reports while it moves: ~30 commands/s during the
+  /// drag, one final, persisted value on release.
+  throttledRoomSlider(slider, key, send) {
+    let lastSent = 0;
+    slider.addEventListener("pointerdown", () => this.roomDragging.add(key));
+    slider.addEventListener("input", () => {
+      const now = performance.now();
+      if (now - lastSent > 33) {
+        lastSent = now;
+        send(false);
+      }
+    });
+    slider.addEventListener("change", () => {
+      this.roomDragging.delete(key);
+      send(true);
+    });
+  }
+
+  openRoomForm(x, y) {
+    this.closeAdd();
+    this.closeDivisionMenu();
+    this.closeKeyboardMenu();
+    this.closeTuningForm();
+    this.closeHexForm();
+    this.closeCouplerForm();
+    this.closeSettingsPopovers();
+    this.roomOpen = true;
+    this.syncRoomForm();
+    this.el.room.classList.remove("hidden");
+    this.positionPopover(this.el.room, x, y);
+  }
+
+  closeRoomForm() {
+    this.roomOpen = false;
+    this.el.room.classList.add("hidden");
+  }
+
+  syncRoomForm() {
+    const snapshot = this.lastSnapshot ?? {};
+    this.el.roomReverbRow.classList.toggle("hidden", snapshot.reverb == null);
+    if (snapshot.reverb != null && !this.roomDragging.has("reverb")) {
+      this.el.roomReverb.value = snapshot.reverb;
+    }
+    this.el.roomNoisesRow.classList.toggle("hidden", !snapshot.noises);
+    if (snapshot.noises) {
+      this.el.roomNoisesOn.checked = snapshot.noises.on;
+      if (!this.roomDragging.has("noises-vol")) {
+        this.el.roomNoisesVol.value = snapshot.noises.vol;
+      }
+    }
+  }
+
+  // ---- the Bindings popover: the whole flat list --------------------------
+  //
+  // Every piston, pedal and key this organ answers to, in one place —
+  // the piston rows on stop and coupler editors are filtered views
+  // over this same list. Action-first, not manual-first: a binding
+  // doesn't belong to a manual, so a flat list is the honest shape.
+
+  wireBindingsForm() {
+    this.el.bindingsClose.addEventListener("click", () => this.closeBindingsForm());
+    // A new slot doesn't exist on the server until either a bind or a
+    // learned trigger names it; learning one past the end is enough —
+    // learn_control defaults a slot with nothing saved to "octave-up".
+    this.el.bindingsAdd.addEventListener("click", () =>
+      this.send(commands.controlLearn((this.lastSnapshot?.controls ?? []).length))
+    );
+  }
+
+  openBindingsForm(x, y) {
+    this.closeAdd();
+    this.closeDivisionMenu();
+    this.closeKeyboardMenu();
+    this.closeTuningForm();
+    this.closeHexForm();
+    this.closeCouplerForm();
+    this.closeSettingsPopovers();
+    this.bindingsOpen = true;
+    this.bindingsSignature = null;
+    this.syncBindingsForm();
+    this.el.bindings.classList.remove("hidden");
+    this.positionPopover(this.el.bindings, x, y);
+  }
+
+  closeBindingsForm() {
+    if (!this.bindingsOpen) return;
+    // Same contract as the MIDI popover: leaving ends any wait for a key.
+    if (this.lastSnapshot?.control_learning != null && !this.quickBind) {
+      this.send(commands.controlLearn(null));
+    }
+    this.bindingsOpen = false;
+    this.bindingsSignature = null;
+    this.el.bindings.classList.add("hidden");
+  }
+
+  syncBindingsForm() {
+    const snapshot = this.lastSnapshot;
+    if (!snapshot) return;
+    const learning = snapshot.control_learning ?? null;
+    const signature = JSON.stringify([
+      snapshot.controls ?? [],
+      snapshot.actions ?? [],
+      learning,
+      (snapshot.stops ?? []).map((s) => s.name),
+      (snapshot.couplers ?? []).map((c) => c.name),
+      (snapshot.enclosures ?? []).map((e) => e.name),
+      (snapshot.manuals ?? []).map((m) => m.name),
+      snapshot.keyboard ?? null,
+    ]);
+    if (signature === this.bindingsSignature) return;
+    this.bindingsSignature = signature;
+    this.el.bindingsList.replaceChildren();
+    buildControlsList(this.el.bindingsList, { snapshot, learning, send: this.send });
+    this.el.bindingsKeyboard.textContent = keyboardNote(snapshot);
+  }
+
+  // ---- the save-as popover: an ad-hoc combination becomes a file ----------
+  //
+  // Opened from the organ-name menu, and once, automatically, for an
+  // organ combined on the command line. Saving bypasses send()/poll:
+  // a bad path has a specific, useful reason the server already wrote
+  // out, and it belongs in this popover.
+
+  wireSaveForm() {
+    this.el.saveClose.addEventListener("click", () => this.closeSaveForm());
+    this.el.saveBtn.addEventListener("click", () => this.saveOrgan());
+    this.el.savePath.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        this.saveOrgan();
+      }
+    });
+  }
+
+  openSaveForm(x, y) {
+    const setup = this.lastSnapshot?.setup;
+    if (!setup || setup.file) return; // nothing unsaved to write
+    this.closeAdd();
+    this.closeDivisionMenu();
+    this.closeKeyboardMenu();
+    this.closeTuningForm();
+    this.closeHexForm();
+    this.closeCouplerForm();
+    this.closeSettingsPopovers();
+    this.saveOpen = true;
+    this.el.savePath.value = "";
+    this.hideSaveError();
+    this.el.save.classList.remove("hidden");
+    this.positionPopover(
+      this.el.save,
+      x ?? window.innerWidth / 2 - 180,
+      y ?? 96
+    );
+    requestAnimationFrame(() => this.el.savePath.focus());
+  }
+
+  closeSaveForm() {
+    this.saveOpen = false;
+    this.el.save.classList.add("hidden");
+    this.hideSaveError();
+  }
+
+  /// The popover only makes sense while the organ has no file — once
+  /// the save lands (this session's or another's), it closes itself.
+  syncSaveForm() {
+    const setup = this.lastSnapshot?.setup;
+    if (!setup || setup.file) this.closeSaveForm();
+  }
+
+  async saveOrgan() {
+    const path = this.el.savePath.value.trim();
+    if (!path) {
+      this.showSaveError("Give it a path first.");
+      return;
+    }
+    this.el.saveBtn.disabled = true;
+    try {
+      const response = await fetch(this.base + commands.organSave(path), { method: "POST" });
+      if (!response.ok) {
+        this.showSaveError((await response.text()) || `${response.status} ${response.statusText}`);
+        return;
+      }
+      // The next poll picks up the now-saved organ; syncSaveForm sees
+      // setup.file and closes the popover.
+      this.hideSaveError();
+    } catch (err) {
+      this.showSaveError(String(err));
+    } finally {
+      this.el.saveBtn.disabled = false;
+    }
+  }
+
+  showSaveError(text) {
+    this.el.saveError.textContent = text;
+    this.el.saveError.classList.remove("hidden");
+  }
+
+  hideSaveError() {
+    this.el.saveError.classList.add("hidden");
+    this.el.saveError.textContent = "";
+  }
+
+  /// The settings popovers as a family, closed whenever another
+  /// popover opens over them.
+  closeSettingsPopovers() {
+    this.closeMidiForm();
+    this.closeCompassForm();
+    this.closeRoomForm();
+    this.closeBindingsForm();
+    this.closeSaveForm();
   }
 
   // ---- the tremulant-shape popover: right-click the Tremblant knob --------
@@ -1459,7 +2132,9 @@ export class Editor {
     this.closeHexForm();
     this.closeTremForm();
     this.closeCouplerForm();
+    this.closeSettingsPopovers();
     this.stopOpen = id;
+    this.stopPistonsSignature = null;
     this.hideStopError();
     this.closeStopSrcView();
     this.syncStopForm();
@@ -1520,6 +2195,26 @@ export class Editor {
     this.el.stopSrc.textContent = src
       ? `${src.from} · ${src.manual}${src.stop ? ` · ${src.stop}` : ""}`
       : "—";
+
+    this.syncPistonRow(this.el.stopPistons, `stop:${stop.name}`, "stopPistonsSignature");
+  }
+
+  /// One popover's quick piston row, rebuilt only when the bindings it
+  /// shows (or the quick-bind in flight) change — a poll must never
+  /// recreate the Listen button under the pointer.
+  syncPistonRow(container, action, signatureKey) {
+    const listening = this.quickBind?.action === action && this.quickBind?.manual == null;
+    const bound = (this.lastSnapshot?.controls ?? []).filter((c) => c.action === action);
+    const signature = JSON.stringify([action, bound, listening]);
+    if (signature === this[signatureKey]) return;
+    this[signatureKey] = signature;
+    container.replaceChildren(
+      pistonRow(
+        { snapshot: this.lastSnapshot, send: this.send, listening },
+        action,
+        (act, cancelling) => this.quickBindListen(act, null, cancelling)
+      )
+    );
   }
 
   /// Sends a stop field update directly (not through the app-wide
@@ -1718,7 +2413,9 @@ export class Editor {
     this.closeHexForm();
     this.closeTremForm();
     this.closeStopForm();
+    this.closeSettingsPopovers();
     this.couplerOpen = idx;
+    this.couplerPistonsSignature = null;
     this.hideCouplerError();
     this.couplerRoutes = structuredClone(coupler.routes ?? []);
     this.renderCouplerRoutes();
@@ -1802,6 +2499,7 @@ export class Editor {
     if (this.root.activeElement !== this.el.couplerKeys) {
       this.el.couplerKeys.value = coupler.keys ?? "auto";
     }
+    this.syncPistonRow(this.el.couplerPistons, `coupler:${coupler.name}`, "couplerPistonsSignature");
     this.renderCouplerLinks(coupler);
     if (
       this.couplerResync &&
@@ -2231,8 +2929,8 @@ export class Editor {
     if (this.tuningManual == null) return;
     const fields =
       this.tuningBrowseKind === "keymap"
-        ? { manual: this.tuningManual, scale: this.currentScalePath(), keymap: path }
-        : { manual: this.tuningManual, scale: path };
+        ? this.tuningFields({ scale: this.currentScalePath(), keymap: path })
+        : this.tuningFields({ scale: path });
     if (fields.scale == null) return;
     const ok = await this.tuningCommand(fields);
     if (ok) this.closeTuningBrowse();
@@ -2605,7 +3303,7 @@ export class Editor {
         ? `Remove the ${payload.name} box? Its stops stay, unenclosed.`
         : kind === "coupler"
           ? `Delete the ${payload.name} coupler? A sample set's own goes ` +
-            "off the console instead, restorable in Preferences."
+            "off the console instead, restorable from the add menu."
           : `Remove ${payload.name} and its ${n} stop${n === 1 ? "" : "s"}? ` +
             "Sources still offer everything.";
     this.el.removeConfirm.classList.remove("hidden");
@@ -2934,6 +3632,11 @@ export class Editor {
       this.el.stop,
       this.el.coupler,
       this.el.couplersMenu,
+      this.el.midi,
+      this.el.compass,
+      this.el.room,
+      this.el.bindings,
+      this.el.save,
     ]) {
       el.addEventListener("click", (event) => event.stopPropagation());
     }
@@ -2947,6 +3650,7 @@ export class Editor {
       this.closeStopForm();
       this.closeCouplerForm();
       this.closeCouplersMenu();
+      this.closeSettingsPopovers();
     });
     window.addEventListener("keydown", (event) => {
       if (event.key !== "Escape") return;
@@ -2959,12 +3663,14 @@ export class Editor {
       this.closeStopForm();
       this.closeCouplerForm();
       this.closeCouplersMenu();
+      this.closeSettingsPopovers();
     });
   }
 
   openAddMenu(x, y) {
     this.closeDivisionMenu();
     this.closeCouplerForm();
+    this.closeSettingsPopovers();
     this.addAnchor = { x, y };
     this.closeAddPanels();
     this.el.add.classList.remove("hidden");
@@ -3144,6 +3850,34 @@ export class Editor {
     this.el.addCouplerName.value = "";
     this.addCouplerNamed = false;
     this.el.addCouplerAt.value = "0";
+    // Couplers taken off the console come back from here — a set's own
+    // can't be deleted, only hidden, and hiding must be reversible
+    // where couplers are added, not in some other surface.
+    this.el.addCouplerRestore.replaceChildren();
+    const hidden = (this.lastSnapshot?.couplers ?? []).filter((c) => c.hidden);
+    if (hidden.length) {
+      const heading = document.createElement("span");
+      heading.className = "menu-heading";
+      heading.textContent = "Off the console";
+      this.el.addCouplerRestore.append(heading);
+      for (const coupler of hidden) {
+        const row = document.createElement("div");
+        row.className = "coupler-restore-row";
+        const name = document.createElement("span");
+        name.textContent = coupler.name;
+        name.title = coupler.name;
+        const restore = document.createElement("button");
+        restore.type = "button";
+        restore.className = "ghost";
+        restore.textContent = "Restore";
+        restore.addEventListener("click", () => {
+          this.closeAdd();
+          this.organCommand(commands.organCoupler(coupler.idx, true));
+        });
+        row.append(name, restore);
+        this.el.addCouplerRestore.append(row);
+      }
+    }
     const manuals = this.lastSnapshot?.manuals ?? [];
     for (const select of [this.el.addCouplerSounds, this.el.addCouplerOn]) {
       select.replaceChildren();

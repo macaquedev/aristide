@@ -7,10 +7,10 @@
 // hiding the dialog would leave it stuck rather than resolved.
 
 import { commands } from "./api.js";
-import { actionLabel, keyGlyph } from "./prefs.js";
+import { actionLabel, keyGlyph } from "./wiring.js";
 import { noteTriggerText } from "./pitch.js";
 
-/// Mirrors prefs.js's own triggerText, applied to a conflict object
+/// Mirrors wiring.js's own triggerText, applied to a conflict object
 /// rather than a control row: a computer key reads as the character it
 /// is, a note as its pitch, any other MIDI message as its wire text —
 /// each plus device and channel.

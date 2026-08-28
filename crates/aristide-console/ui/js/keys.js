@@ -92,7 +92,7 @@ export class PianoKeys {
     this.down = new Set(); // codes currently held, so a repeat is not a second press
     this.keyboard = null; // {manual, transpose, low, high} from the server
     this.bound = new Set(); // key codes the player has bound to an action
-    this.learning = false; // Preferences is waiting to be taught a control
+    this.learning = false; // a Listen somewhere is waiting to be taught a control
     this.target = null; // the manual notes go to
     this.mode = "piano"; // "piano" | "grid" — the legend's shape, from the target's kind
     this.signature = null;
@@ -104,8 +104,8 @@ export class PianoKeys {
   // ---- state ----------------------------------------------------------
 
   /// Follow the snapshot. The legend only *shows* the assignment —
-  /// where the keyboard plays is set in Preferences → MIDI, the same
-  /// place as every other device.
+  /// where the keyboard plays is set in a keyboard's MIDI popover, the
+  /// same place as every other device.
   update(snapshot) {
     // Which keys are worth sending is snapshot state too: a key nobody
     // has bound should keep doing whatever the browser does with it.
@@ -193,7 +193,7 @@ export class PianoKeys {
   // ---- input -----------------------------------------------------------
 
   /// The organ has the keyboard only when no dialog is up: inside
-  /// Preferences a stray "z" must not sound a pipe.
+  /// a dialog a stray "z" must not sound a pipe.
   get busy() {
     return document.body.classList.contains("modal-open");
   }
@@ -205,7 +205,7 @@ export class PianoKeys {
       // except while it is listening for the one to bind.
       if (typing(event.target) || (this.busy && !this.learning)) return;
       // Every key the server has a use for goes to it: the note rows,
-      // anything bound to an action, and — while Preferences is waiting
+      // anything bound to an action, and — while a Listen is waiting
       // to be taught — whatever the player presses next.
       if (!this.learning && !this.playable(event.code) && !this.bound.has(event.code)) {
         return;
@@ -286,8 +286,8 @@ export class PianoKeys {
 
   /// Caps show what they play under the current octave shift; keys off the
   /// end of the manual read as unavailable. Where the keyboard plays is
-  /// only reported here — it is assigned in Preferences → MIDI, the
-  /// same place as every other device.
+  /// only reported here — it is assigned in a keyboard's MIDI popover,
+  /// the same place as every other device.
   paintLegend() {
     const grid = this.mode === "grid";
     for (const [code, { key, note }] of this.caps) {
@@ -307,10 +307,10 @@ export class PianoKeys {
       : "plays nothing";
     const spoken = shiftWords(this.keyboard?.transpose ?? 0);
     this.el.octave.textContent = this.keyboard
-      ? [spoken && `sounding ${spoken}`, "octave keys are bindings, in Preferences → Controls"]
+      ? [spoken && `sounding ${spoken}`, "octave keys are bindings — Organ → Bindings…"]
           .filter(Boolean)
           .join(" · ")
-      : "assign it a manual in Preferences → MIDI, like any device";
+      : "assign it a manual: right-click a keyboard → MIDI input…";
   }
 
   paintCap(code, on) {

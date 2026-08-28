@@ -29,8 +29,13 @@ export const commands = {
   coupler: (idx, on) => `/api/coupler?idx=${idx}&on=${on ? 1 : 0}`,
   tremulant: (on) => `/api/trem?on=${on ? 1 : 0}`,
   gain: (v) => `/api/gain?v=${v}`,
-  reverb: (wet) => `/api/reverb?wet=${wet}`,
-  noises: (on, vol) => `/api/noises?on=${on ? 1 : 0}&vol=${vol}`,
+  // `persist` writes the value into the organ's own file as well as
+  // applying it live — sent on a slider's release, never per frame of
+  // the drag. Reverb wet and the noises are the organ's room, so they
+  // travel with the instrument.
+  reverb: (wet, persist) => `/api/reverb?wet=${wet}` + (persist ? "&persist=1" : ""),
+  noises: (on, vol, persist) =>
+    `/api/noises?on=${on ? 1 : 0}&vol=${vol}` + (persist ? "&persist=1" : ""),
   // Partial updates: the server only applies the params present, so a
   // temperament change never has to re-send pitch or transposition.
   // `fields.manual`, when given, tunes that division apart from the

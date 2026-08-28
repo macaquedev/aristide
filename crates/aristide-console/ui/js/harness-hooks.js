@@ -12,15 +12,23 @@
 export function applyHarnessHooks({ prefs, editor }) {
   const params = new URLSearchParams(location.search);
 
-  const prefsParam = params.get("prefs");
-  if (prefsParam) prefs.open(prefsParam);
+  // Preferences is user-only now (a single appearance pane), so the
+  // param takes no tab; any value opens the dialog.
+  if (params.has("prefs")) prefs.open();
 
-  const scrollParam = params.get("paneScroll");
-  if (scrollParam) {
-    const pane = document.querySelector(`.pane[data-pane="${prefsParam}"]`);
-    // Wait out the first poll so there's real content to scroll through,
-    // not just the pane's pre-snapshot shell.
-    if (pane) setTimeout(() => { pane.scrollTop = Number(scrollParam); }, 400);
+  // The organ-scoped settings popovers, opened as their menu items
+  // would open them.
+  if (params.has("organTuning")) {
+    setTimeout(() => editor.openTuningForm("organ", 120, 40), 400);
+  }
+  if (params.has("roomForm")) {
+    setTimeout(() => editor.openRoomForm(120, 40), 400);
+  }
+  if (params.has("bindingsForm")) {
+    setTimeout(() => editor.openBindingsForm(120, 40), 400);
+  }
+  if (params.has("saveForm")) {
+    setTimeout(() => editor.openSaveForm(), 400);
   }
 
   if (params.has("openSources")) {
@@ -131,6 +139,26 @@ export function applyHarnessHooks({ prefs, editor }) {
       editor.unlock();
       const board = findKeyboardBoard(kbdMenuParam);
       if (board) rightClick(board);
+    }, 400);
+  }
+
+  // One step into the keyboard menu: the manual's MIDI-input popover
+  // or its compass popover, found by their labels.
+  for (const [param, label] of [
+    ["kbdMidi", "MIDI input"],
+    ["kbdCompass", "Compass"],
+  ]) {
+    const ref = params.get(param); // a manual name or idx
+    if (ref == null) continue;
+    setTimeout(() => {
+      editor.unlock();
+      const board = findKeyboardBoard(ref);
+      if (board) rightClick(board);
+      setTimeout(() => {
+        [...document.querySelectorAll("#editor-keyboard-menu .menu-item")]
+          .find((item) => item.textContent.includes(label))
+          ?.click();
+      }, 200);
     }, 400);
   }
 

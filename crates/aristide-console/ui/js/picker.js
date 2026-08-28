@@ -207,8 +207,8 @@ export class Picker {
     // Auto-open: there is nothing behind the console to use. `loading`
     // alone no longer forces this open — once an organ is up, it also
     // flags an in-place structural edit (a manual added, a stop pulled,
-    // from the Organ pane), and that must never pop the picker over
-    // Preferences. A load started with no organ yet (the common case)
+    // on the canvas), and that must never pop the picker over an open
+    // popover. A load started with no organ yet (the common case)
     // still opens this because !hasOrgan already covers it.
     if (!this.isOpen && !hasOrgan) {
       this.openedWithOrgan = undefined;
