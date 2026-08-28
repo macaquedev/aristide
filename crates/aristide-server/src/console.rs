@@ -95,6 +95,10 @@ pub struct Console {
     /// an unavailable coupler is disengaged and hidden, never deleted,
     /// so it can come back without reloading the set.
     available_couplers: Vec<bool>,
+    /// Groups of couplers permanently linked (indices into
+    /// `organ.couplers`): engaging any member engages the rest,
+    /// releasing likewise — one action wearing several rockers.
+    coupler_links: Vec<Vec<usize>>,
     tuning: Tuning,
     /// Per manual index: a tuning of that division's own, overriding
     /// the console's — a 415 Hz meantone Positif against a 440 equal
@@ -273,6 +277,7 @@ impl Console {
             compass,
             engaged_couplers: Vec::new(),
             available_couplers: Vec::new(),
+            coupler_links: Vec::new(),
             tuning: Tuning::default(),
             manual_tuning: Vec::new(),
             noise_stops: Vec::new(),
@@ -1658,7 +1663,9 @@ impl Console {
         (stopped, starts)
     }
 
-    /// Engage or release a coupler by its index in `organ.couplers`.
+    /// Engage or release a coupler by its index in `organ.couplers` —
+    /// and, with it, every coupler linked to it: a link group is one
+    /// action wearing several rockers, so its members move together.
     /// Takes effect under held notes immediately, as an electric-action
     /// console does (and as drawing a stop mid-hold already did):
     /// engaging starts the coupled pipes under the held keys, releasing
@@ -1666,14 +1673,36 @@ impl Console {
     /// Returns (voice handles to stop, voices to start) like
     /// `set_drawn` — the clack noise rides along in them.
     pub fn set_coupler(&mut self, index: usize, engaged: bool) -> (Vec<u64>, Vec<VoiceStart>) {
+        let mut stops = Vec::new();
+        let mut starts = Vec::new();
+        let mut changed = false;
+        for member in self.link_group(index) {
+            changed |= self.flip_coupler(member, engaged, &mut stops, &mut starts);
+        }
+        if changed {
+            self.recouple_held_keys(&mut stops, &mut starts);
+        }
+        stops.sort_unstable();
+        stops.dedup();
+        (stops, starts)
+    }
+
+    /// One coupler's own engagement flip — state and clack only, no
+    /// recoupling: `set_coupler` recouples once for the whole link
+    /// group. Returns whether anything actually changed.
+    fn flip_coupler(
+        &mut self,
+        index: usize,
+        engaged: bool,
+        stops: &mut Vec<u64>,
+        starts: &mut Vec<VoiceStart>,
+    ) -> bool {
         if index >= self.organ.couplers.len()
             || self.engaged_couplers.contains(&index) == engaged
             || (engaged && !self.coupler_available(index))
         {
-            return (Vec::new(), Vec::new());
+            return false;
         }
-        let mut stops = Vec::new();
-        let mut starts = Vec::new();
         if engaged {
             self.engaged_couplers.push(index);
             if let Some(noise) = self.open_noise(self.coupler_noise.get(&index).copied()) {
@@ -1685,10 +1714,120 @@ impl Console {
             // Note-off on the open noise voice = the release clack.
             stops.extend(self.coupler_noise_open.remove(&index));
         }
-        self.recouple_held_keys(&mut stops, &mut starts);
-        stops.sort_unstable();
-        stops.dedup();
-        (stops, starts)
+        true
+    }
+
+    /// The link group `index` belongs to — itself first, then its
+    /// linked partners; just itself when unlinked.
+    fn link_group(&self, index: usize) -> Vec<usize> {
+        let mut members = vec![index];
+        if let Some(group) = self.coupler_links.iter().find(|g| g.contains(&index)) {
+            members.extend(group.iter().copied().filter(|&i| i != index));
+        }
+        members
+    }
+
+    /// Install the link groups (indices into `organ.couplers`) — from
+    /// the organ file at load, and live when the console links two.
+    pub fn set_coupler_links(&mut self, groups: Vec<Vec<usize>>) {
+        self.coupler_links = groups;
+    }
+
+    /// The couplers linked with `index`, itself excluded — what the
+    /// snapshot reports so the editor can show and undo the link.
+    pub fn coupler_linked_with(&self, index: usize) -> Vec<usize> {
+        let mut linked = self.link_group(index);
+        linked.retain(|&i| i != index);
+        linked.sort_unstable();
+        linked
+    }
+
+    /// Link or unlink two couplers, live. Linking merges any groups
+    /// either belongs to; unlinking takes `b` out of `a`'s group (a
+    /// group left with one member dissolves). The engaged states are
+    /// then reconciled — linked couplers may not disagree, so if
+    /// either is on, both end on. Returns (stops, starts) like
+    /// `set_coupler`.
+    pub fn link_couplers(&mut self, a: usize, b: usize, on: bool) -> (Vec<u64>, Vec<VoiceStart>) {
+        if a == b || a >= self.organ.couplers.len() || b >= self.organ.couplers.len() {
+            return (Vec::new(), Vec::new());
+        }
+        if on {
+            let mut merged: Vec<usize> = Vec::new();
+            self.coupler_links.retain(|group| {
+                if group.contains(&a) || group.contains(&b) {
+                    merged.extend(group.iter().copied());
+                    false
+                } else {
+                    true
+                }
+            });
+            merged.extend([a, b]);
+            merged.sort_unstable();
+            merged.dedup();
+            self.coupler_links.push(merged);
+            if self.coupler_engaged(a) != self.coupler_engaged(b) {
+                return self.set_coupler(a, true);
+            }
+        } else if let Some(group) = self.coupler_links.iter_mut().find(|g| g.contains(&b)) {
+            group.retain(|&i| i != b);
+            self.coupler_links.retain(|g| g.len() > 1);
+        }
+        (Vec::new(), Vec::new())
+    }
+
+    /// The keys engaged couplers are pulling down right now, per manual
+    /// index — the mechanical-action view for on-screen keyboards,
+    /// never consulted by the sound path. `show` filters by coupler
+    /// index (the per-organ default and per-coupler overrides live in
+    /// the server's State, not here). Keys are in each board's own
+    /// coordinates: the played key's ladder landing minus the sounding
+    /// division's transpose — the key a tracker rod would move.
+    pub fn coupled_display_keys(&self, show: &dyn Fn(usize) -> bool) -> Vec<Vec<u16>> {
+        let mut out = vec![Vec::new(); self.organ.manuals.len()];
+        for &(manual_index, key) in self.sounding.keys() {
+            let Some(origin) = self.organ.manuals.get(manual_index).map(|m| m.id) else {
+                continue;
+            };
+            let played = key as i16 + self.effective_tuning(manual_index).transpose as i16;
+            for &engaged in &self.engaged_couplers {
+                if !show(engaged) {
+                    continue;
+                }
+                let Some(coupler) = self.organ.couplers.get(engaged) else {
+                    continue;
+                };
+                for route in &coupler.routes {
+                    if route.from_manual != origin
+                        || !route.covers(played)
+                        || !self.route_hears(origin, played, route)
+                    {
+                        continue;
+                    }
+                    let Some(target) = &route.target else { continue };
+                    let Some(index) = self
+                        .organ
+                        .manuals
+                        .iter()
+                        .position(|m| m.id == target.manual)
+                    else {
+                        continue;
+                    };
+                    let shown = played.saturating_add(target.key_shift)
+                        - self.effective_tuning(index).transpose as i16;
+                    let (low, high) = self.compass[index];
+                    if shown < low || shown > high {
+                        continue;
+                    }
+                    out[index].push(shown as u16);
+                }
+            }
+        }
+        for keys in &mut out {
+            keys.sort_unstable();
+            keys.dedup();
+        }
+        out
     }
 
     /// Re-derive what every held key should sound under the current

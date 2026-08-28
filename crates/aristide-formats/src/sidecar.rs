@@ -299,6 +299,17 @@ pub struct CouplersConfig {
     /// never edits the loaded set itself.
     #[serde(default)]
     pub drop: Vec<String>,
+    /// Couplers permanently linked, by exact console name: engaging any
+    /// member of a group engages the rest, releasing likewise — one
+    /// action with several rockers, the deliberate answer to two
+    /// couplers that do the same thing (a duplicated Gt/Ped).
+    ///
+    /// ```toml
+    /// [couplers]
+    /// link = [["Great to Pedal", "Gt/Ped (thumb)"]]
+    /// ```
+    #[serde(default)]
+    pub link: Vec<Vec<String>>,
 }
 
 /// One user-defined coupler: a name for the console rocker and the

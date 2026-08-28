@@ -640,6 +640,13 @@ pub struct State {
     /// step with it; purely cosmetic, so editing it never rebuilds the
     /// engine.
     pub layout: std::collections::BTreeMap<String, instrument::PanelPos>,
+    /// Whether engaged couplers pull the coupled keys down on the
+    /// on-screen keyboards — the organ file's `[console] coupled_keys`.
+    /// Display only, so editing it never rebuilds; true by default.
+    pub coupled_keys: bool,
+    /// Per-coupler `"never"` / `"always"` overrides of `coupled_keys`,
+    /// by console name — the file's `[console.coupler_keys]`.
+    pub coupler_key_modes: std::collections::BTreeMap<String, String>,
 }
 
 /// One request to load an instrument, from the picker or the CLI.
@@ -677,6 +684,16 @@ pub struct CouplerRouteEdit {
     pub repitch: Option<bool>,
     #[serde(default)]
     pub own_pipes: bool,
+}
+
+/// One entry of a division's display rank, as the order endpoint
+/// speaks it: a stop by id (`s12`), or a coupler by console index
+/// (`c3`) — a coupler listed in a division's rank is seated in that
+/// jamb, a drawknob among the stops, instead of on the rail.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RankItem {
+    Stop(StopId),
+    Coupler(usize),
 }
 
 /// The provenance of the loaded instrument.
@@ -2647,6 +2664,104 @@ impl State {
         Ok(())
     }
 
+    /// Delete a coupler outright. One this organ's file defines is
+    /// removed from it (links, overrides and jamb seats go too) and
+    /// the organ rebuilds; a source's coupler is taken off the console
+    /// instead — as deleted as a set's own coupler can get, and still
+    /// restorable from the Organ preferences.
+    pub fn remove_coupler(&mut self, index: usize) -> Result<(), String> {
+        let Control::Organ(console) = &self.control else {
+            return Err("no organ is loaded".into());
+        };
+        let Some(name) = console
+            .coupler_states()
+            .get(index)
+            .map(|(_, name, _, _)| name.to_string())
+        else {
+            return Err("no such coupler".into());
+        };
+        let path = self.organ_file()?;
+        if config::remove_composite_coupler(&path, &name)? {
+            self.coupler_key_modes.remove(&name);
+            for names in self.stop_order.values_mut() {
+                names.retain(|n| !n.eq_ignore_ascii_case(&format!("coupler:{name}")));
+            }
+            self.reload_organ_file(path);
+        } else if !self.set_coupler_pick(index, false) {
+            return Err("no such coupler".into());
+        }
+        Ok(())
+    }
+
+    /// Link or unlink two couplers so they move together — live (the
+    /// console reconciles their engaged states at once) and in the
+    /// file's `[couplers] link`. No rebuild: a link changes what a
+    /// rocker does, not what the organ is.
+    pub fn link_coupler(&mut self, index: usize, with: usize, on: bool) -> Result<(), String> {
+        if index == with {
+            return Err("a coupler cannot link to itself".into());
+        }
+        // The file first: an organ that can't keep the link (not saved
+        // yet) must refuse before the live state moves.
+        let path = self.organ_file()?;
+        let State {
+            engine, control, ..
+        } = &mut *self;
+        let Control::Organ(console) = control else {
+            return Err("no organ is loaded".into());
+        };
+        let states = console.coupler_states();
+        let (Some((_, a, _, _)), Some((_, b, _, _))) = (states.get(index), states.get(with))
+        else {
+            return Err("no such coupler".into());
+        };
+        let (a, b) = (a.to_string(), b.to_string());
+        let (stopped, starts) = console.link_couplers(index, with, on);
+        for handle in stopped {
+            engine.send(Command::StopVoice { handle });
+        }
+        for start in starts {
+            engine.send(start_command(&start));
+        }
+        config::write_composite_coupler_link(&path, &a, &b, on)
+    }
+
+    /// The organ-wide coupled-keys default — display only, live, and
+    /// in the file's `[console] coupled_keys`.
+    pub fn set_coupled_keys(&mut self, on: bool) -> Result<(), String> {
+        let path = self.organ_file()?;
+        config::write_composite_coupled_keys(&path, on)?;
+        self.coupled_keys = on;
+        Ok(())
+    }
+
+    /// One coupler's coupled-keys override: `"never"`, `"always"`, or
+    /// None for auto (follow the organ default). Display only, live,
+    /// and in the file's `[console.coupler_keys]`.
+    pub fn set_coupler_key_mode(&mut self, index: usize, mode: Option<&str>) -> Result<(), String> {
+        let Control::Organ(console) = &self.control else {
+            return Err("no organ is loaded".into());
+        };
+        let Some(name) = console
+            .coupler_states()
+            .get(index)
+            .map(|(_, name, _, _)| name.to_string())
+        else {
+            return Err("no such coupler".into());
+        };
+        let path = self.organ_file()?;
+        config::write_composite_coupler_key_mode(&path, &name, mode)?;
+        match mode {
+            Some(mode) => {
+                self.coupler_key_modes.insert(name, mode.to_string());
+            }
+            None => {
+                self.coupler_key_modes.remove(&name);
+            }
+        }
+        Ok(())
+    }
+
     /// Route tuples from the API (from, to, shift, low, high,
     /// unison_off, scope, repitch — manuals as console indexes) into
     /// the file's vocabulary. A route must listen somewhere, and must
@@ -2830,37 +2945,82 @@ impl State {
     }
 
     /// A division's drawknob order — display only: the file keeps the
-    /// console names top-first, the snapshot deals the stops out in
+    /// console names top-first (couplers seated in the jamb as
+    /// `coupler:<name>` entries), the snapshot deals the rank out in
     /// that order, and nothing structural moves (ids, voicing,
-    /// combinations all stay put). Live, like panel placement.
-    pub fn set_stop_order(&mut self, manual: usize, stops: &[StopId]) -> Result<(), String> {
-        let Control::Organ(console) = &self.control else {
-            return Err("no organ is loaded".into());
-        };
+    /// combinations all stay put). Live, like panel placement. A
+    /// coupler has one seat, so listing it here unseats it from every
+    /// other division's rank.
+    pub fn set_rank_order(&mut self, manual: usize, items: &[RankItem]) -> Result<(), String> {
         let manual_names = self.manual_names();
         let Some(manual_name) = manual_names.get(manual).cloned() else {
             return Err("no such manual".into());
         };
-        let states = console.stop_states();
-        let mut names = Vec::with_capacity(stops.len());
-        for id in stops {
-            let Some((_, name, ..)) = states
-                .iter()
-                .find(|(existing, _, _, midx, _)| existing == id && *midx == manual)
-            else {
-                return Err(format!(
-                    "the order names a stop that isn't on {manual_name:?} — reordering \
-                     raced an edit; try again"
-                ));
+        let (names, seated) = {
+            let Control::Organ(console) = &self.control else {
+                return Err("no organ is loaded".into());
             };
-            names.push(name.to_string());
-        }
+            let states = console.stop_states();
+            let couplers = console.coupler_states();
+            let mut names = Vec::with_capacity(items.len());
+            let mut seated: Vec<String> = Vec::new();
+            for item in items {
+                match item {
+                    RankItem::Stop(id) => {
+                        let Some((_, name, ..)) = states
+                            .iter()
+                            .find(|(existing, _, _, midx, _)| existing == id && *midx == manual)
+                        else {
+                            return Err(format!(
+                                "the order names a stop that isn't on {manual_name:?} — \
+                                 reordering raced an edit; try again"
+                            ));
+                        };
+                        names.push(name.to_string());
+                    }
+                    RankItem::Coupler(index) => {
+                        let Some((_, name, _, _)) = couplers.get(*index) else {
+                            return Err(
+                                "the order names a coupler that no longer exists — \
+                                 reordering raced an edit; try again"
+                                    .into(),
+                            );
+                        };
+                        seated.push(format!("coupler:{name}"));
+                        names.push(format!("coupler:{name}"));
+                    }
+                }
+            }
+            (names, seated)
+        };
         let path = self.organ_file()?;
         config::write_composite_stop_order(&path, &manual_name, &names)?;
         if names.is_empty() {
             self.stop_order.remove(&manual_name);
         } else {
-            self.stop_order.insert(manual_name, names);
+            self.stop_order.insert(manual_name.clone(), names);
+        }
+        // Unseat the couplers just listed from every other division —
+        // in memory and in the file, one rewrite per list that changes.
+        for other in manual_names {
+            if other == manual_name {
+                continue;
+            }
+            let Some(list) = self.stop_order.get(&other) else { continue };
+            let kept: Vec<String> = list
+                .iter()
+                .filter(|name| !seated.iter().any(|token| token.eq_ignore_ascii_case(name)))
+                .cloned()
+                .collect();
+            if kept.len() == list.len() {
+                continue;
+            }
+            config::write_composite_stop_order(&path, &other, &kept)?;
+            if kept.is_empty() {
+                self.stop_order.remove(&other);
+            } else {
+                self.stop_order.insert(other, kept);
+            }
         }
         Ok(())
     }
@@ -3044,6 +3204,8 @@ fn main() -> Result<()> {
         load_error: None,
         load_warnings: Vec::new(),
         layout: Default::default(),
+        coupled_keys: true,
+        coupler_key_modes: Default::default(),
     }));
     // Assignments exist before any hardware does: the computer
     // keyboard and every binding are live from the first note.
@@ -3425,6 +3587,8 @@ fn perform_load(
         stop_labels,
         stop_order,
         layout,
+        coupled_keys,
+        coupler_key_modes,
         buses,
         warnings,
     } = load::prepare(&request.paths, &request.stops, audio.sample_rate, &progress)?;
@@ -3606,6 +3770,8 @@ fn perform_load(
     state.stop_order = stop_order;
     state.compass_overrides = Vec::new();
     state.layout = layout;
+    state.coupled_keys = coupled_keys;
+    state.coupler_key_modes = coupler_key_modes;
     state.learn = None;
     state.control_learn = None;
     state.pending = None;
@@ -4369,6 +4535,8 @@ mod tests {
             load_error: None,
             load_warnings: Vec::new(),
             layout: Default::default(),
+            coupled_keys: true,
+            coupler_key_modes: Default::default(),
         }));
         // Everything downstream reads the resolved tables, exactly as
         // the server does once before it opens any device.
@@ -4924,11 +5092,6 @@ mod tests {
         );
     }
 
-    /// A MIDI keyboard's width becomes the manual's compass; the
-    /// computer keyboard's never does. Two QWERTY rows are not a
-    /// console: however it is assigned or shifted, the manual keeps the
-    /// compass it had, and keys pushed past it stay silent.
-    #[test]
     /// On a microtonal manual the computer keyboard is a hex surface,
     /// not a piano: the four rows read as the manual's own layout in
     /// the slanted, physically-true stagger — S (up-right of Z) is
@@ -4995,6 +5158,10 @@ mod tests {
         );
     }
 
+    /// A MIDI keyboard's width becomes the manual's compass; the
+    /// computer keyboard's never does. Two QWERTY rows are not a
+    /// console: however it is assigned or shifted, the manual keeps the
+    /// compass it had, and keys pushed past it stay silent.
     #[test]
     fn the_computer_keyboard_never_rescales_a_manual() {
         let Some((state, manual)) = demo_state("Gamba 8'") else {

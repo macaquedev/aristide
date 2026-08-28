@@ -808,6 +808,78 @@ fn respond(
                 Err(err) => bad_request(&err),
             }
         }
+        // Delete a coupler outright: a define is removed from the file
+        // (rebuild); a source's coupler is taken off the console
+        // instead, restorable from the Organ preferences.
+        (Method::Post, "/api/organ/coupler/remove") => {
+            let mut state = state.lock().expect("state poisoned");
+            if state.loading.is_some() || state.pending_load.is_some() {
+                return bad_request("an organ is already loading");
+            }
+            match param(query, "idx").and_then(|v| v.parse::<usize>().ok()) {
+                Some(index) => match state.remove_coupler(index) {
+                    Ok(()) => json(state_json_locked(&state)),
+                    Err(err) => bad_request(&err),
+                },
+                None => bad_request("missing idx"),
+            }
+        }
+        // Link (`on=1`) or unlink two couplers so they move together —
+        // live and in the file's [couplers] link, no rebuild.
+        (Method::Post, "/api/organ/coupler/link") => {
+            let mut state = state.lock().expect("state poisoned");
+            if state.loading.is_some() || state.pending_load.is_some() {
+                return bad_request("an organ is already loading");
+            }
+            match (
+                param(query, "idx").and_then(|v| v.parse::<usize>().ok()),
+                param(query, "with").and_then(|v| v.parse::<usize>().ok()),
+                param(query, "on").map(|v| v != "0"),
+            ) {
+                (Some(index), Some(with), Some(on)) => {
+                    match state.link_coupler(index, with, on) {
+                        Ok(()) => json(state_json_locked(&state)),
+                        Err(err) => bad_request(&err),
+                    }
+                }
+                _ => bad_request("missing idx/with/on"),
+            }
+        }
+        // One coupler's coupled-keys override: auto (follow the organ
+        // default), never, or always. Display only — live, no rebuild.
+        (Method::Post, "/api/organ/coupler/keys") => {
+            let mut state = state.lock().expect("state poisoned");
+            if state.loading.is_some() || state.pending_load.is_some() {
+                return bad_request("an organ is already loading");
+            }
+            let mode = match param(query, "mode") {
+                Some("auto") => None,
+                Some(mode @ ("never" | "always")) => Some(mode),
+                _ => return bad_request("mode must be auto, never or always"),
+            };
+            match param(query, "idx").and_then(|v| v.parse::<usize>().ok()) {
+                Some(index) => match state.set_coupler_key_mode(index, mode) {
+                    Ok(()) => json(state_json_locked(&state)),
+                    Err(err) => bad_request(&err),
+                },
+                None => bad_request("missing idx"),
+            }
+        }
+        // The organ-wide coupled-keys default: whether engaged couplers
+        // pull the coupled keys down on screen. Display only — live.
+        (Method::Post, "/api/organ/coupled_keys") => {
+            let mut state = state.lock().expect("state poisoned");
+            if state.loading.is_some() || state.pending_load.is_some() {
+                return bad_request("an organ is already loading");
+            }
+            match param(query, "on").map(|v| v != "0") {
+                Some(on) => match state.set_coupled_keys(on) {
+                    Ok(()) => json(state_json_locked(&state)),
+                    Err(err) => bad_request(&err),
+                },
+                None => bad_request("missing on"),
+            }
+        }
         // Point a stop at a different source stop — same drawknob,
         // same label, different pipes. Structural (the pull lines are
         // rewritten), so the organ rebuilds.
@@ -920,28 +992,58 @@ fn respond(
         }
         // A division's drawknob order, top of the jamb first — display
         // only, so it lands live like panel placement: no rebuild, no
-        // ids moved, just the snapshot dealing the stops out anew.
+        // ids moved, just the snapshot dealing the rank out anew.
+        // `items=` is the full vocabulary (`s<id>` stops, `c<idx>`
+        // couplers seated in the jamb); `stops=` is the older
+        // stops-only spelling and still accepted.
         (Method::Post, "/api/organ/stop/order") => {
             let mut state = state.lock().expect("state poisoned");
             if state.loading.is_some() || state.pending_load.is_some() {
                 return bad_request("an organ is already loading");
             }
-            match (
-                param(query, "manual").and_then(|v| v.parse::<usize>().ok()),
-                param(query, "stops").map(|list| {
+            let items: Option<Result<Vec<crate::RankItem>, ()>> = match (
+                param(query, "items"),
+                param(query, "stops"),
+            ) {
+                (Some(list), _) => Some(
                     list.split(',')
                         .filter(|part| !part.is_empty())
-                        .map(|part| part.parse::<u32>().map(aristide_model::StopId))
-                        .collect::<Result<Vec<_>, _>>()
-                }),
+                        .map(|part| match part.split_at(1) {
+                            ("s", id) => id
+                                .parse::<u32>()
+                                .map(|id| crate::RankItem::Stop(aristide_model::StopId(id)))
+                                .map_err(|_| ()),
+                            ("c", index) => index
+                                .parse::<usize>()
+                                .map(crate::RankItem::Coupler)
+                                .map_err(|_| ()),
+                            _ => Err(()),
+                        })
+                        .collect(),
+                ),
+                (None, Some(list)) => Some(
+                    list.split(',')
+                        .filter(|part| !part.is_empty())
+                        .map(|part| {
+                            part.parse::<u32>()
+                                .map(|id| crate::RankItem::Stop(aristide_model::StopId(id)))
+                                .map_err(|_| ())
+                        })
+                        .collect(),
+                ),
+                (None, None) => None,
+            };
+            match (
+                param(query, "manual").and_then(|v| v.parse::<usize>().ok()),
+                items,
             ) {
-                (Some(manual), Some(Ok(stops))) => {
-                    match state.set_stop_order(manual, &stops) {
+                (Some(manual), Some(Ok(items))) => {
+                    match state.set_rank_order(manual, &items) {
                         Ok(()) => json(state_json_locked(&state)),
                         Err(err) => bad_request(&err),
                     }
                 }
-                _ => bad_request("missing manual/stops (comma-separated stop ids)"),
+                _ => bad_request("missing manual/items (comma-separated s<id>/c<idx>)"),
             }
         }
         // What every source of this organ offers, for the pane's
@@ -1536,6 +1638,83 @@ fn state_json(state: &Mutex<State>) -> String {
 }
 
 fn state_json_locked(state: &State) -> String {
+    // Precomputed for the couplers and manuals arrays below: where
+    // each coupler is seated (a [console.order] `coupler:` entry puts
+    // it in that division's jamb), each division's display rank —
+    // stops in dealt order with seated couplers interleaved — and the
+    // keys engaged couplers are pulling down, filtered through the
+    // organ's coupled-keys default and per-coupler overrides.
+    let mut coupler_seats: Vec<Option<usize>> = Vec::new();
+    let mut division_ranks: Vec<Vec<String>> = Vec::new();
+    let mut coupled_keys: Vec<Vec<u16>> = Vec::new();
+    if let Control::Organ(console) = &state.control {
+        let manuals: Vec<(usize, String)> = console
+            .manual_states()
+            .into_iter()
+            .map(|(idx, name, ..)| (idx, name.to_string()))
+            .collect();
+        let listed_at = |manual: &str, name: &str| -> Option<usize> {
+            state
+                .stop_order
+                .iter()
+                .find(|(listed, _)| listed.eq_ignore_ascii_case(manual))
+                .and_then(|(_, order)| {
+                    order.iter().position(|entry| entry.eq_ignore_ascii_case(name))
+                })
+        };
+        // (listed position, tiebreak) → token; couplers tiebreak 0 so
+        // they sit exactly where listed, stops keep dealt order.
+        let mut ranks: Vec<Vec<((usize, usize), String)>> = vec![Vec::new(); manuals.len()];
+        for (seq, (id, name, manual, manual_index, _)) in
+            console.stop_states().into_iter().enumerate()
+        {
+            let Some(rank) = ranks.get_mut(manual_index) else { continue };
+            let pos = listed_at(manual, name).unwrap_or(usize::MAX);
+            rank.push(((pos, seq + 1), format!("\"s{}\"", id.0)));
+        }
+        let couplers = console.coupler_states();
+        coupler_seats = vec![None; couplers.len()];
+        for (index, name, _, available) in couplers {
+            if !available {
+                continue;
+            }
+            let token = format!("coupler:{name}");
+            for (midx, manual) in &manuals {
+                if let Some(pos) = listed_at(manual, &token) {
+                    coupler_seats[index] = Some(*midx);
+                    if let Some(rank) = ranks.get_mut(*midx) {
+                        rank.push(((pos, 0), format!("\"c{index}\"")));
+                    }
+                    break;
+                }
+            }
+        }
+        division_ranks = ranks
+            .into_iter()
+            .map(|mut rank| {
+                rank.sort_by_key(|(key, _)| *key);
+                rank.into_iter().map(|(_, token)| token).collect()
+            })
+            .collect();
+        let show: Vec<bool> = console
+            .coupler_states()
+            .iter()
+            .map(|(_, name, _, _)| {
+                let mode = state
+                    .coupler_key_modes
+                    .iter()
+                    .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                    .map(|(_, mode)| mode.as_str());
+                match mode {
+                    Some("never") => false,
+                    Some("always") => true,
+                    _ => state.coupled_keys,
+                }
+            })
+            .collect();
+        coupled_keys =
+            console.coupled_display_keys(&|index| show.get(index).copied().unwrap_or(false));
+    }
     let mut out = String::from("{\"stops\":[");
     if let Control::Organ(console) = &state.control {
         // The player's drawknob order ([console.order]): listed stops
@@ -1669,8 +1848,29 @@ fn state_json_locked(state: &State) -> String {
                     out
                 })
                 .collect();
+            // A jamb seat, linked partners and a coupled-keys override
+            // are all present only when they exist, so the common
+            // snapshot stays small and old clients stay right — same
+            // rule as `hidden` below.
+            let seat = match coupler_seats.get(index).copied().flatten() {
+                Some(midx) => format!(",\"midx\":{midx}"),
+                None => String::new(),
+            };
+            let linked = console.coupler_linked_with(index);
+            let linked = if linked.is_empty() {
+                String::new()
+            } else {
+                let linked: Vec<String> = linked.iter().map(|i| i.to_string()).collect();
+                format!(",\"linked\":[{}]", linked.join(","))
+            };
+            let keys = state
+                .coupler_key_modes
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                .map(|(_, mode)| format!(",\"keys\":{}", json_string(mode)))
+                .unwrap_or_default();
             out.push_str(&format!(
-                "{{\"idx\":{index},\"name\":{},\"on\":{engaged},\"routes\":[{}]{}}}",
+                "{{\"idx\":{index},\"name\":{},\"on\":{engaged},\"routes\":[{}]{seat}{linked}{keys}{}}}",
                 json_string(name),
                 routes.join(","),
                 // Present only when off the console, so the common
@@ -1718,8 +1918,24 @@ fn state_json_locked(state: &State) -> String {
                 }
                 None => String::new(),
             };
+            // The division's display rank: stop and seated-coupler
+            // tokens in jamb order — what the console deals the
+            // drawknobs out from. `coupled` is the keys engaged
+            // couplers are pulling down (absent when none), the
+            // mechanical-action view beside `held`.
+            let rank = division_ranks
+                .get(idx)
+                .map(|tokens| format!(",\"rank\":[{}]", tokens.join(",")))
+                .unwrap_or_default();
+            let coupled = match coupled_keys.get(idx) {
+                Some(keys) if !keys.is_empty() => {
+                    let keys: Vec<String> = keys.iter().map(|k| k.to_string()).collect();
+                    format!(",\"coupled\":[{}]", keys.join(","))
+                }
+                _ => String::new(),
+            };
             out.push_str(&format!(
-                "{{\"idx\":{idx},\"name\":{},\"first_key\":{first_key},\"key_count\":{key_count},\"pedal\":{},\"kind\":\"{}\"{hex},\"held\":[{}]}}",
+                "{{\"idx\":{idx},\"name\":{},\"first_key\":{first_key},\"key_count\":{key_count},\"pedal\":{},\"kind\":\"{}\"{hex},\"held\":[{}]{rank}{coupled}}}",
                 json_string(name),
                 console.manual_pedal(idx),
                 console.manual_kind(idx).as_str(),
@@ -2031,6 +2247,12 @@ fn state_json_locked(state: &State) -> String {
             ",\"keyboard\":{{\"manual\":{},\"transpose\":{},\"low\":{},\"high\":{}}}",
             keyboard.manual, keyboard.transpose, keyboard.compass.0, keyboard.compass.1
         ));
+    }
+    if let Control::Organ(_) = &state.control {
+        // The organ-wide coupled-keys default, for the console's own
+        // organ-scoped settings (per-coupler overrides ride each
+        // coupler's `keys` field).
+        out.push_str(&format!(",\"coupled_keys\":{}", state.coupled_keys));
     }
     if let Control::Organ(console) = &state.control {
         out.push_str(&format!(
@@ -2447,6 +2669,8 @@ mod tests {
             load_error: None,
             load_warnings: Vec::new(),
             layout: Default::default(),
+            coupled_keys: true,
+            coupler_key_modes: Default::default(),
         }));
         // As the server does once before it opens any device: routing,
         // bindings and the computer keyboard all come from this.
@@ -3415,6 +3639,181 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Couplers seat in jambs (a `c` token in the rank order), link
+    /// into one action that moves together, and pull coupled keys down
+    /// for the display — all live console facts, no rebuild; deleting
+    /// a define rewrites the file and rebuilds.
+    #[test]
+    fn couplers_seat_link_and_pull_keys() {
+        let Some(state) = demo_state() else { return };
+        let demo = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testsets/grandorgue-demo/demo.organ");
+        let dir = std::env::temp_dir().join("aristide-coupler-console-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let organ = aristide_formats::grandorgue::load(&demo).expect("demo parses").organ;
+        let canonical = demo.canonicalize().expect("canonicalizes");
+        let file =
+            crate::config::create_wrapper_organ(&dir, "Coupler Console", &canonical, &organ, None)
+                .expect("inventory written");
+        state.lock().expect("state").composite_path = Some(file.clone());
+        let snapshot = || -> serde_json::Value {
+            serde_json::from_str(&state_json(&state)).expect("valid JSON")
+        };
+        let coupler_idx = |value: &serde_json::Value, name: &str| -> u64 {
+            value["couplers"]
+                .as_array()
+                .expect("couplers")
+                .iter()
+                .find(|c| c["name"] == name)
+                .unwrap_or_else(|| panic!("coupler {name}"))["idx"]
+                .as_u64()
+                .expect("idx")
+        };
+
+        // Seat II/I in First Manual's jamb, between its stops: the
+        // rank order takes the `c` token, the snapshot deals the
+        // manual's rank with the coupler in place and stamps the
+        // coupler's seat — live, no rebuild.
+        let value = snapshot();
+        let ii_i = coupler_idx(&value, "II/I");
+        let stops: Vec<String> = value["stops"]
+            .as_array()
+            .expect("stops")
+            .iter()
+            .filter(|stop| stop["midx"] == 1)
+            .map(|stop| format!("s{}", stop["id"].as_u64().expect("id")))
+            .collect();
+        let mut items = stops.clone();
+        items.insert(1, format!("c{ii_i}"));
+        let seated = respond(
+            &state,
+            &Method::Post,
+            &format!("/api/organ/stop/order?manual=1&items={}", items.join(",")),
+        );
+        assert_eq!(seated.status_code().0, 200);
+        assert!(
+            state.lock().expect("state").pending_load.is_none(),
+            "a seat is display only — no rebuild"
+        );
+        let value = snapshot();
+        let manual = &value["manuals"].as_array().expect("manuals")[1];
+        let rank: Vec<&str> =
+            manual["rank"].as_array().expect("rank").iter().map(|t| t.as_str().unwrap()).collect();
+        assert_eq!(rank[1], format!("c{ii_i}"), "the coupler sits second: {rank:?}");
+        assert_eq!(
+            value["couplers"].as_array().expect("couplers")[ii_i as usize]["midx"], 1,
+            "the coupler knows its jamb"
+        );
+        let text = std::fs::read_to_string(&file).expect("reads");
+        assert!(text.contains("coupler:II/I"), "{text}");
+
+        // A coupler has one seat: listing it in another division's
+        // rank unseats it from the first.
+        let moved = respond(
+            &state,
+            &Method::Post,
+            &format!("/api/organ/stop/order?manual=2&items=c{ii_i}"),
+        );
+        assert_eq!(moved.status_code().0, 200);
+        let value = snapshot();
+        assert_eq!(value["couplers"].as_array().expect("couplers")[ii_i as usize]["midx"], 2);
+        let first: Vec<&str> = value["manuals"].as_array().expect("manuals")[1]["rank"]
+            .as_array()
+            .expect("rank")
+            .iter()
+            .map(|t| t.as_str().unwrap())
+            .collect();
+        assert!(!first.contains(&format!("c{ii_i}").as_str()), "unseated: {first:?}");
+
+        // Linking two couplers makes them one action: engaging either
+        // engages both, releasing either releases both — live, in the
+        // snapshot's `linked`, and in the file's [couplers] link.
+        let ii_p = coupler_idx(&value, "II/P");
+        let linked = respond(
+            &state,
+            &Method::Post,
+            &format!("/api/organ/coupler/link?idx={ii_i}&with={ii_p}&on=1"),
+        );
+        assert_eq!(linked.status_code().0, 200);
+        assert!(state.lock().expect("state").pending_load.is_none(), "a link is live");
+        let on = |value: &serde_json::Value, idx: u64| -> bool {
+            value["couplers"].as_array().expect("couplers")[idx as usize]["on"]
+                .as_bool()
+                .expect("on")
+        };
+        respond(&state, &Method::Post, &format!("/api/coupler?idx={ii_i}&on=1"));
+        let value = snapshot();
+        assert!(on(&value, ii_i) && on(&value, ii_p), "linked couplers move together");
+        assert_eq!(value["couplers"].as_array().expect("couplers")[ii_i as usize]["linked"][0], ii_p);
+        respond(&state, &Method::Post, &format!("/api/coupler?idx={ii_p}&on=0"));
+        let value = snapshot();
+        assert!(!on(&value, ii_i) && !on(&value, ii_p), "either rocker releases both");
+        let def: aristide_formats::instrument::Definition =
+            toml::from_str(&std::fs::read_to_string(&file).expect("reads")).expect("parses");
+        assert_eq!(def.couplers.link, [["II/I", "II/P"]]);
+        let unlinked = respond(
+            &state,
+            &Method::Post,
+            &format!("/api/organ/coupler/link?idx={ii_i}&with={ii_p}&on=0"),
+        );
+        assert_eq!(unlinked.status_code().0, 200);
+        respond(&state, &Method::Post, &format!("/api/coupler?idx={ii_i}&on=1"));
+        let value = snapshot();
+        assert!(on(&value, ii_i) && !on(&value, ii_p), "unlinked couplers part ways");
+
+        // With II/I engaged, a First Manual key pulls the coupled key
+        // down on the Second Manual — display only, `coupled` beside
+        // `held`, and never a note the sound path didn't already play.
+        respond(&state, &Method::Post, "/api/note?manual=1&key=60&on=1");
+        let value = snapshot();
+        let manuals = value["manuals"].as_array().expect("manuals");
+        assert_eq!(manuals[1]["held"][0], 60);
+        assert_eq!(manuals[2]["coupled"][0], 60, "the coupled key goes down too");
+        assert!(manuals[2]["held"].as_array().is_none_or(|held| held.is_empty()));
+
+        // The organ default turns the display off; a per-coupler
+        // "always" override brings this coupler's back.
+        let off = respond(&state, &Method::Post, "/api/organ/coupled_keys?on=0");
+        assert_eq!(off.status_code().0, 200);
+        let value = snapshot();
+        assert_eq!(value["coupled_keys"], false);
+        assert!(value["manuals"][2]["coupled"].as_array().is_none_or(|c| c.is_empty()));
+        let always = respond(
+            &state,
+            &Method::Post,
+            &format!("/api/organ/coupler/keys?idx={ii_i}&mode=always"),
+        );
+        assert_eq!(always.status_code().0, 200);
+        let value = snapshot();
+        assert_eq!(value["manuals"][2]["coupled"][0], 60);
+        assert_eq!(value["couplers"].as_array().expect("couplers")[ii_i as usize]["keys"], "always");
+        let def: aristide_formats::instrument::Definition =
+            toml::from_str(&std::fs::read_to_string(&file).expect("reads")).expect("parses");
+        assert_eq!(def.console.coupled_keys, Some(false));
+        assert_eq!(def.console.coupler_keys.get("II/I").map(String::as_str), Some("always"));
+        respond(&state, &Method::Post, "/api/note?manual=1&key=60&on=0");
+
+        // Deleting a define rewrites the file — every reference goes
+        // with it — and rebuilds.
+        let removed = respond(
+            &state,
+            &Method::Post,
+            &format!("/api/organ/coupler/remove?idx={ii_i}"),
+        );
+        assert_eq!(removed.status_code().0, 200);
+        {
+            let mut state = state.lock().expect("state");
+            assert!(state.pending_load.is_some(), "deleting a define rebuilds");
+            state.pending_load = None;
+            state.loading = None;
+        }
+        let def: aristide_formats::instrument::Definition =
+            toml::from_str(&std::fs::read_to_string(&file).expect("reads")).expect("parses");
+        assert!(!def.couplers.define.iter().any(|d| d.name == "II/I"), "the define is gone");
+        assert!(def.console.coupler_keys.is_empty(), "its override went with it");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Panel placement (`/api/organ/panel/place`) is cosmetic console
     /// geometry, not organ structure: it writes `[console.layout]` and
     /// updates the snapshot, but — unlike every editor above — never
@@ -3767,6 +4166,8 @@ mod tests {
             load_error: None,
             load_warnings: Vec::new(),
             layout: Default::default(),
+            coupled_keys: true,
+            coupler_key_modes: Default::default(),
         }))
     }
 

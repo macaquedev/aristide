@@ -376,10 +376,12 @@ pub struct ControlDef {
 /// `"shoes"`) to where it sits — and, when the player has resized it,
 /// how big it is (a sized jamb wraps its stops into columns).
 /// `[console.order]` is each division's drawknob order, by console
-/// stop name. Cosmetic only — an organ with none of this, or with
-/// entries that no longer resolve, still loads and plays identically;
-/// the console auto-lays-out whatever isn't placed and shows unlisted
-/// stops after the listed ones.
+/// stop name — and an entry `"coupler:<name>"` seats that coupler in
+/// the division's jamb at that spot, a drawknob among the stops,
+/// instead of on the coupler rail. Cosmetic only — an organ with none
+/// of this, or with entries that no longer resolve, still loads and
+/// plays identically; the console auto-lays-out whatever isn't placed
+/// and shows unlisted stops after the listed ones.
 ///
 /// ```toml
 /// [console.layout]
@@ -387,7 +389,7 @@ pub struct ControlDef {
 /// "jamb:Great" = { x = 0.02, y = 0.2, w = 0.14, h = 0.5 }
 ///
 /// [console.order]
-/// "Great" = ["Montre 8", "Bourdon 8", "Prestant 4"]
+/// "Great" = ["Montre 8", "coupler:Swell to Great", "Bourdon 8"]
 /// ```
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -396,6 +398,15 @@ pub struct ConsoleDef {
     pub layout: BTreeMap<String, PanelPos>,
     #[serde(default)]
     pub order: BTreeMap<String, Vec<String>>,
+    /// Whether engaged couplers pull the coupled keys down on the
+    /// on-screen keyboards — the mechanical-action view. Absent means
+    /// yes; display only, the sound never consults it.
+    #[serde(default)]
+    pub coupled_keys: Option<bool>,
+    /// Per-coupler override of `coupled_keys`, by exact console name:
+    /// `"never"` or `"always"`; unlisted couplers follow the default.
+    #[serde(default)]
+    pub coupler_keys: BTreeMap<String, String>,
 }
 
 /// One panel's top-left corner — and, once resized, its size — as
@@ -527,8 +538,15 @@ pub struct Assembled {
     /// here).
     pub console_layout: BTreeMap<String, PanelPos>,
     /// The file's `[console.order]`, verbatim — each division's
-    /// drawknob order by console stop name, same cosmetic contract.
+    /// drawknob order by console stop name (couplers homed in a jamb
+    /// ride along as `coupler:<name>` entries), same cosmetic contract.
     pub console_order: BTreeMap<String, Vec<String>>,
+    /// The file's `[console] coupled_keys` — whether engaged couplers
+    /// pull the coupled keys down on screen. Absent means yes.
+    pub console_coupled_keys: Option<bool>,
+    /// The file's `[console.coupler_keys]` — per-coupler `"never"` /
+    /// `"always"` overrides of `coupled_keys`, by console name.
+    pub console_coupler_keys: BTreeMap<String, String>,
     pub warnings: Vec<String>,
 }
 
@@ -936,6 +954,8 @@ pub fn assemble(
         manual_tuning,
         console_layout: def.console.layout.clone(),
         console_order: def.console.order.clone(),
+        console_coupled_keys: def.console.coupled_keys,
+        console_coupler_keys: def.console.coupler_keys.clone(),
         warnings: assembly.warnings,
     })
 }

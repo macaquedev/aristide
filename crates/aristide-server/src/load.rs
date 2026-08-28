@@ -79,6 +79,13 @@ pub struct PreparedInstrument {
     /// The organ file's `[console.layout]` — empty unless it is a
     /// composite loaded alone, same condition as `composite` above.
     pub layout: std::collections::BTreeMap<String, instrument::PanelPos>,
+    /// The file's `[console] coupled_keys` — whether engaged couplers
+    /// pull the coupled keys down on the on-screen keyboards. Display
+    /// only; true unless the file says otherwise.
+    pub coupled_keys: bool,
+    /// The file's `[console.coupler_keys]` — per-coupler `"never"` /
+    /// `"always"` overrides of `coupled_keys`, by console name.
+    pub coupler_key_modes: std::collections::BTreeMap<String, String>,
     /// Bus setups from the sidecar's `[routing]`, ready to send to the
     /// engine (bus 0, the main pair, is never listed). The per-stop
     /// half of the plan is already installed in the console.
@@ -251,6 +258,9 @@ pub fn prepare(
         std::collections::BTreeMap::new();
     let mut console_layout: std::collections::BTreeMap<String, instrument::PanelPos> =
         std::collections::BTreeMap::new();
+    let mut console_coupled_keys = true;
+    let mut coupler_key_modes: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
     let mut setup = Setup::default();
     let mut load_warnings: Vec<String> = Vec::new();
 
@@ -300,6 +310,8 @@ pub fn prepare(
                 manual_tuning_defs = assembled.manual_tuning;
                 console_layout = assembled.console_layout;
                 console_order = assembled.console_order;
+                console_coupled_keys = assembled.console_coupled_keys.unwrap_or(true);
+                coupler_key_modes = assembled.console_coupler_keys;
             } else if !assembled.midi.inputs.is_empty()
                 || !assembled.midi.controls.is_empty()
                 || !assembled.manual_tuning.is_empty()
@@ -826,6 +838,35 @@ pub fn prepare(
             }
         }
     }
+    // Linked couplers ([couplers] link): engaging one engages the rest.
+    // Names that don't resolve are reported and skipped — a group left
+    // with one member links nothing.
+    {
+        let names: Vec<String> = console
+            .coupler_states()
+            .iter()
+            .map(|(_, name, _, _)| name.to_string())
+            .collect();
+        let mut groups: Vec<Vec<usize>> = Vec::new();
+        for group in &sidecar.couplers.link {
+            let mut indices: Vec<usize> = Vec::new();
+            for name in group {
+                match names.iter().position(|n| n.eq_ignore_ascii_case(name)) {
+                    Some(index) => indices.push(index),
+                    None => {
+                        load_warnings
+                            .push(format!("couplers.link: no coupler named {name:?}"));
+                    }
+                }
+            }
+            indices.sort_unstable();
+            indices.dedup();
+            if indices.len() > 1 {
+                groups.push(indices);
+            }
+        }
+        console.set_coupler_links(groups);
+    }
     console.set_noises(
         sidecar.noises.enabled,
         sidecar.noises.volume.clamp(0.0, 2.0) as f32,
@@ -1012,6 +1053,8 @@ pub fn prepare(
         stop_labels,
         stop_order: console_order,
         layout: console_layout,
+        coupled_keys: console_coupled_keys,
+        coupler_key_modes,
         buses,
         warnings: load_warnings,
     })

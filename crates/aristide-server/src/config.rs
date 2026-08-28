@@ -2260,6 +2260,47 @@ pub fn rename_composite_coupler(path: &Path, old: &str, new: &str) -> Result<(),
             }
         }
     }
+    // Every other name-keyed reference follows too: link groups, the
+    // coupled-keys override, and any jamb seat in [console.order].
+    let mut groups = coupler_link_groups(&doc);
+    let mut linked = false;
+    for group in &mut groups {
+        for name in group {
+            if name.eq_ignore_ascii_case(old) {
+                *name = new.to_string();
+                linked = true;
+            }
+        }
+    }
+    if linked {
+        write_coupler_link_groups(&mut doc, groups)?;
+    }
+    if let Some(map) = console_map_mut(&mut doc, "coupler_keys") {
+        let stale: Vec<String> = map
+            .iter()
+            .filter(|(key, _)| key.eq_ignore_ascii_case(old))
+            .map(|(key, _)| key.to_string())
+            .collect();
+        for key in stale {
+            if let Some(value) = map.remove(&key) {
+                map.insert(new, value);
+            }
+        }
+    }
+    if let Some(order) = console_order_mut(&mut doc) {
+        let token = format!("coupler:{old}");
+        for (_, item) in order.iter_mut() {
+            if let Some(list) = item.as_array_mut() {
+                for value in list.iter_mut() {
+                    if value.as_str().is_some_and(|v| v.eq_ignore_ascii_case(&token)) {
+                        let decor = value.decor().clone();
+                        *value = format!("coupler:{new}").into();
+                        *value.decor_mut() = decor;
+                    }
+                }
+            }
+        }
+    }
     write_atomically(path, doc.to_string())
 }
 
@@ -2372,6 +2413,219 @@ pub fn append_composite_coupler(
     }
     table["route"] = toml_edit::Item::ArrayOfTables(route_tables);
     defines.push(table);
+    write_atomically(path, doc.to_string())
+}
+
+/// Delete a coupler this file defines: its `[[couplers.define]]` table
+/// goes, and every name-keyed reference — link groups, drop entries,
+/// a `[console.coupler_keys]` override, its `coupler:` seats in
+/// `[console.order]` — goes with it, so nothing dangles. Returns false
+/// for a coupler the file doesn't define (a source's — the caller
+/// drops it off the console instead, which is as deleted as a set's
+/// own coupler can get).
+pub fn remove_composite_coupler(path: &Path, name: &str) -> Result<bool, String> {
+    let mut doc = composite_doc(path)?;
+    let Some(index) = coupler_define_index(&doc, name) else {
+        return Ok(false);
+    };
+    coupler_defines_mut(&mut doc)?.remove(index);
+    if let Some(couplers) = doc.get_mut("couplers").and_then(|item| item.as_table_mut()) {
+        if couplers
+            .get("define")
+            .and_then(|item| item.as_array_of_tables())
+            .is_some_and(|defines| defines.is_empty())
+        {
+            couplers.remove("define");
+        }
+        if let Some(drops) = couplers.get_mut("drop").and_then(|item| item.as_array_mut()) {
+            drops.retain(|value| !value.as_str().is_some_and(|v| v.eq_ignore_ascii_case(name)));
+            if drops.is_empty() {
+                couplers.remove("drop");
+            }
+        }
+    }
+    unlink_everywhere(&mut doc, name);
+    if let Some(map) = console_map_mut(&mut doc, "coupler_keys") {
+        let stale: Vec<String> = map
+            .iter()
+            .filter(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(key, _)| key.to_string())
+            .collect();
+        for key in stale {
+            map.remove(&key);
+        }
+    }
+    remove_console_order_coupler(&mut doc, name);
+    write_atomically(path, doc.to_string())?;
+    Ok(true)
+}
+
+/// The `[couplers] link` groups as the file holds them.
+fn coupler_link_groups(doc: &toml_edit::DocumentMut) -> Vec<Vec<String>> {
+    doc.get("couplers")
+        .and_then(|couplers| couplers.get("link"))
+        .and_then(|item| item.as_array())
+        .map(|groups| {
+            groups
+                .iter()
+                .filter_map(|group| group.as_array())
+                .map(|group| {
+                    group
+                        .iter()
+                        .filter_map(|value| value.as_str().map(str::to_string))
+                        .collect()
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn write_coupler_link_groups(
+    doc: &mut toml_edit::DocumentMut,
+    groups: Vec<Vec<String>>,
+) -> Result<(), String> {
+    let couplers = couplers_table(doc)?;
+    if groups.is_empty() {
+        couplers.remove("link");
+        return Ok(());
+    }
+    let mut list = toml_edit::Array::new();
+    for group in groups {
+        let mut inner = toml_edit::Array::new();
+        for name in group {
+            inner.push(name.as_str());
+        }
+        list.push(inner);
+    }
+    couplers["link"] = toml_edit::value(list);
+    Ok(())
+}
+
+/// Link or unlink two couplers in `[couplers] link`. Linking merges
+/// any groups either name belongs to; unlinking takes `b` out of its
+/// group, and a group left with one member dissolves.
+pub fn write_composite_coupler_link(
+    path: &Path,
+    a: &str,
+    b: &str,
+    on: bool,
+) -> Result<(), String> {
+    let mut doc = composite_doc(path)?;
+    let mut groups = coupler_link_groups(&doc);
+    if on {
+        let mut merged: Vec<String> = Vec::new();
+        groups.retain(|group| {
+            let joins = group
+                .iter()
+                .any(|n| n.eq_ignore_ascii_case(a) || n.eq_ignore_ascii_case(b));
+            if joins {
+                merged.extend(group.iter().cloned());
+            }
+            !joins
+        });
+        for name in [a, b] {
+            if !merged.iter().any(|n| n.eq_ignore_ascii_case(name)) {
+                merged.push(name.to_string());
+            }
+        }
+        groups.push(merged);
+    } else {
+        for group in &mut groups {
+            if group.iter().any(|n| n.eq_ignore_ascii_case(b))
+                && group.iter().any(|n| n.eq_ignore_ascii_case(a))
+            {
+                group.retain(|n| !n.eq_ignore_ascii_case(b));
+            }
+        }
+        groups.retain(|group| group.len() > 1);
+    }
+    write_coupler_link_groups(&mut doc, groups)?;
+    write_atomically(path, doc.to_string())
+}
+
+/// Take one name out of every `[couplers] link` group — deletion's
+/// housekeeping (a rename edits in place instead).
+fn unlink_everywhere(doc: &mut toml_edit::DocumentMut, name: &str) {
+    let mut groups = coupler_link_groups(doc);
+    for group in &mut groups {
+        group.retain(|n| !n.eq_ignore_ascii_case(name));
+    }
+    groups.retain(|group| group.len() > 1);
+    let _ = write_coupler_link_groups(doc, groups);
+}
+
+/// A map directly under `[console]` (`coupler_keys`), if present.
+fn console_map_mut<'a>(
+    doc: &'a mut toml_edit::DocumentMut,
+    key: &str,
+) -> Option<&'a mut dyn toml_edit::TableLike> {
+    doc.get_mut("console")
+        .and_then(|console| console.get_mut(key))
+        .and_then(|item| item.as_table_like_mut())
+}
+
+/// Drop a coupler's `coupler:<name>` seat from every `[console.order]`
+/// list — the jamb spot of a coupler that no longer exists.
+fn remove_console_order_coupler(doc: &mut toml_edit::DocumentMut, name: &str) {
+    let token = format!("coupler:{name}");
+    let Some(order) = console_order_mut(doc) else { return };
+    for (_, item) in order.iter_mut() {
+        if let Some(list) = item.as_array_mut() {
+            list.retain(|value| !value.as_str().is_some_and(|v| v.eq_ignore_ascii_case(&token)));
+        }
+    }
+}
+
+/// The organ-wide coupled-keys default: `[console] coupled_keys`.
+/// True is the default, so true removes the line.
+pub fn write_composite_coupled_keys(path: &Path, on: bool) -> Result<(), String> {
+    let mut doc = composite_doc(path)?;
+    let console = doc
+        .entry("console")
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+    let Some(console) = console.as_table_mut() else {
+        return Err("[console] is not a table".into());
+    };
+    console.set_implicit(true);
+    if on {
+        console.remove("coupled_keys");
+    } else {
+        console["coupled_keys"] = toml_edit::value(false);
+    }
+    write_atomically(path, doc.to_string())
+}
+
+/// One coupler's coupled-keys override in `[console.coupler_keys]`:
+/// `"never"`, `"always"`, or None for auto (entry removed).
+pub fn write_composite_coupler_key_mode(
+    path: &Path,
+    name: &str,
+    mode: Option<&str>,
+) -> Result<(), String> {
+    let mut doc = composite_doc(path)?;
+    match mode {
+        Some(mode) => {
+            let map = console_section(&mut doc, "coupler_keys")?;
+            map.insert(name, toml_edit::value(mode));
+        }
+        None => {
+            if let Some(map) = console_map_mut(&mut doc, "coupler_keys") {
+                let stale: Vec<String> = map
+                    .iter()
+                    .filter(|(key, _)| key.eq_ignore_ascii_case(name))
+                    .map(|(key, _)| key.to_string())
+                    .collect();
+                for key in stale {
+                    map.remove(&key);
+                }
+                if map.is_empty()
+                    && let Some(console) = doc.get_mut("console").and_then(|c| c.as_table_mut())
+                {
+                    console.remove("coupler_keys");
+                }
+            }
+        }
+    }
     write_atomically(path, doc.to_string())
 }
 
@@ -3580,6 +3834,93 @@ shift = -5
         assert!(append_composite_coupler(&path, "great SUB", &[route("Great", "Great", -12)])
             .is_err());
         assert_eq!(def(&path).couplers.define.len(), 4);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Couplers are addressed by name everywhere else the file speaks
+    /// of them — link groups, the coupled-keys override, jamb seats in
+    /// [console.order] — so a rename carries every reference along and
+    /// a delete takes them all out; nothing may dangle.
+    #[test]
+    fn coupler_links_and_delete_keep_the_references_straight() {
+        let dir = std::env::temp_dir().join("aristide-coupler-link-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("test dir");
+        let path = dir.join("orgue.toml");
+        std::fs::write(
+            &path,
+            r#"name = "Linked"
+
+[[couplers.define]]
+name = "Gt/Ped"
+[[couplers.define.route]]
+from = "Great"
+to = "Pedal"
+
+[[couplers.define]]
+name = "Gt/Ped (thumb)"
+[[couplers.define.route]]
+from = "Great"
+to = "Pedal"
+
+[console.order]
+"Great" = ["Montre 8", "coupler:Gt/Ped (thumb)", "Bourdon 8"]
+"#,
+        )
+        .expect("fixture");
+        let def = |path: &Path| -> aristide_formats::instrument::Definition {
+            toml::from_str(&std::fs::read_to_string(path).expect("reads")).expect("parses")
+        };
+
+        // Linking writes a group; linking a third into either merges.
+        write_composite_coupler_link(&path, "Gt/Ped", "Gt/Ped (thumb)", true).expect("links");
+        assert_eq!(def(&path).couplers.link, [["Gt/Ped", "Gt/Ped (thumb)"]]);
+        write_composite_coupler_link(&path, "Gt/Ped", "II/I", true).expect("merges");
+        assert_eq!(def(&path).couplers.link, [["Gt/Ped", "Gt/Ped (thumb)", "II/I"]]);
+        write_composite_coupler_link(&path, "Gt/Ped", "II/I", false).expect("unlinks");
+        assert_eq!(def(&path).couplers.link, [["Gt/Ped", "Gt/Ped (thumb)"]]);
+
+        // The coupled-keys settings: an organ-wide default (true is
+        // the default, so true removes the line) and per-coupler
+        // overrides in [console.coupler_keys].
+        write_composite_coupled_keys(&path, false).expect("writes");
+        assert_eq!(def(&path).console.coupled_keys, Some(false));
+        write_composite_coupled_keys(&path, true).expect("clears");
+        assert_eq!(def(&path).console.coupled_keys, None);
+        write_composite_coupler_key_mode(&path, "Gt/Ped (thumb)", Some("never")).expect("sets");
+        assert_eq!(
+            def(&path).console.coupler_keys.get("Gt/Ped (thumb)").map(String::as_str),
+            Some("never")
+        );
+
+        // A rename carries the link entry, the override and the jamb
+        // seat along.
+        rename_composite_coupler(&path, "Gt/Ped (thumb)", "Gt/Ped (toe)").expect("renames");
+        let parsed = def(&path);
+        assert_eq!(parsed.couplers.link, [["Gt/Ped", "Gt/Ped (toe)"]]);
+        assert_eq!(
+            parsed.console.coupler_keys.get("Gt/Ped (toe)").map(String::as_str),
+            Some("never")
+        );
+        assert_eq!(
+            parsed.console.order.get("Great").expect("order")[1],
+            "coupler:Gt/Ped (toe)"
+        );
+
+        // Deleting the define takes every reference with it — and the
+        // group left with one member dissolves. A name the file
+        // doesn't define reports false (the caller drops it off the
+        // console instead).
+        assert!(remove_composite_coupler(&path, "Gt/Ped (toe)").expect("removes"));
+        let parsed = def(&path);
+        assert_eq!(parsed.couplers.define.len(), 1);
+        assert!(parsed.couplers.link.is_empty(), "{:?}", parsed.couplers.link);
+        assert!(parsed.console.coupler_keys.is_empty());
+        assert_eq!(
+            parsed.console.order.get("Great").expect("order").as_slice(),
+            ["Montre 8", "Bourdon 8"]
+        );
+        assert!(!remove_composite_coupler(&path, "Sw/Gt").expect("no such define"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
