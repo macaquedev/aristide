@@ -265,9 +265,23 @@ fn respond(
                         tuning.edo = edo;
                         tuning.scale = None;
                     }
+                    // The anchor: `reference_key` (a note name or MIDI
+                    // number) and `reference_hz`, either alone keeping
+                    // the other; `a4=` is the older single-field form
+                    // and means an A4 anchor.
                     if let Some(a4) = param(query, "a4").and_then(|v| v.parse::<f64>().ok()) {
-                        tuning.a4_hz = a4.clamp(300.0, 500.0);
+                        tuning.reference = crate::tuning::PitchReference { key: 69, hz: a4 };
                     }
+                    if let Some(spec) = param(query, "reference_key").map(unescape) {
+                        tuning.reference.key = parse_reference_key(&spec)
+                            .ok_or_else(|| format!("reference_key {spec:?} names no key"))?;
+                    }
+                    if let Some(hz) =
+                        param(query, "reference_hz").and_then(|v| v.parse::<f64>().ok())
+                    {
+                        tuning.reference.hz = hz;
+                    }
+                    tuning.reference = tuning.reference.clamped();
                     if let Some(t) = param(query, "transpose").and_then(|v| v.parse::<i8>().ok())
                     {
                         tuning.transpose = t.clamp(-12, 12);
@@ -279,7 +293,7 @@ fn respond(
                             let scale = crate::tuning::ScaleTuning::load(
                                 &scl,
                                 kbm.as_deref().filter(|kbm| !kbm.is_empty()),
-                                tuning.a4_hz,
+                                tuning.reference,
                                 scale_base.as_deref(),
                             )?;
                             tuning.scale = Some(std::sync::Arc::new(scale));
@@ -2086,10 +2100,11 @@ fn state_json_locked(state: &State) -> String {
                 None => String::new(),
             };
             format!(
-                "\"temperament\":{},\"edo\":{},\"a4\":{},\"transpose\":{}{scale}",
+                "\"temperament\":{},\"edo\":{},\"reference\":{{\"key\":{},\"hz\":{}}},\"transpose\":{}{scale}",
                 json_string(tuning.temperament.name()),
                 tuning.edo,
-                tuning.a4_hz,
+                tuning.reference.key,
+                tuning.reference.hz,
                 tuning.transpose
             )
         };
@@ -2631,6 +2646,16 @@ fn bad_request(reason: &str) -> Response<std::io::Cursor<Vec<u8>>> {
     Response::from_string(reason).with_status_code(400)
 }
 
+/// A tuning anchor's key as the API takes it: a scientific-pitch name
+/// ("C4", "F#3") or a bare MIDI number.
+fn parse_reference_key(spec: &str) -> Option<u8> {
+    let spec = spec.trim();
+    spec.parse::<u8>()
+        .ok()
+        .filter(|&key| key <= 127)
+        .or_else(|| aristide_formats::sidecar::parse_note_name(spec))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2819,7 +2844,7 @@ mod tests {
         let body = state_json(&state);
         assert!(
             body.contains(
-                "\"manual_tuning\":[{\"idx\":1,\"temperament\":\"meantone4\",\"edo\":12,\"a4\":415"
+                "\"manual_tuning\":[{\"idx\":1,\"temperament\":\"meantone4\",\"edo\":12,\"reference\":{\"key\":69,\"hz\":415}"
             ),
             "own tuning shows: {body}"
         );
@@ -2831,7 +2856,8 @@ mod tests {
                 manual: 1,
                 temperament: Some("meantone4".into()),
                 edo: None,
-                a4_hz: Some(415.0),
+                reference_key: Some(aristide_formats::sidecar::KeySpec::Name("A4".into())),
+                reference_hz: Some(415.0),
                 transpose: Some(0),
                 scale: None,
                 keymap: None,
@@ -2893,13 +2919,37 @@ mod tests {
         // none is needed — every successful commit lands in the file.
         respond(&state, &Method::Post, "/api/tuning?temperament=meantone&a4=415");
         assert!(
-            state_json(&state).contains("\"tuning\":{\"temperament\":\"meantone4\",\"edo\":12,\"a4\":415"),
+            state_json(&state).contains(
+                "\"tuning\":{\"temperament\":\"meantone4\",\"edo\":12,\"reference\":{\"key\":69,\"hz\":415}"
+            ),
             "live tuning shows: {}",
             state_json(&state)
         );
         let saved = aristide_formats::instrument::load(&path).expect("reloads");
         assert_eq!(saved.sidecar.tuning.temperament, "meantone4");
-        assert_eq!(saved.sidecar.tuning.a4_hz, 415.0);
+        assert_eq!(saved.sidecar.tuning.reference_hz, 415.0);
+        assert_eq!(saved.sidecar.tuning.reference_key.midi_note(), Some(69));
+
+        // The anchor may name any key: middle C at 256 Hz lands live
+        // and in the file as the pair it is.
+        respond(
+            &state,
+            &Method::Post,
+            "/api/tuning?reference_key=C4&reference_hz=256",
+        );
+        assert!(
+            state_json(&state).contains("\"reference\":{\"key\":60,\"hz\":256}"),
+            "{}",
+            state_json(&state)
+        );
+        let saved = aristide_formats::instrument::load(&path).expect("reloads");
+        assert_eq!(saved.sidecar.tuning.reference_key.midi_note(), Some(60));
+        assert_eq!(saved.sidecar.tuning.reference_hz, 256.0);
+        let text = std::fs::read_to_string(&path).expect("reads");
+        assert!(text.contains("reference_key = \"C4\""), "{text}");
+        assert!(!text.contains("a4_hz"), "old spelling must not linger: {text}");
+        let response = respond(&state, &Method::Post, "/api/tuning?reference_key=H9");
+        assert_eq!(response.status_code().0, 400, "a non-key is refused");
 
         // Reverb without persist=1 stays live-only.
         respond(&state, &Method::Post, "/api/reverb?wet=0.6");

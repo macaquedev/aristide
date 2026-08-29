@@ -300,10 +300,16 @@ apply, never a reload — because the layout is a console fact throughout:
 duplicate hexes share a key number, a bound Lumatone `.ltn` map's key
 colours tint the hexes in the same extended-key numbering its notes land
 in, and *pitch* still comes only from the tuning layer), and
-per-manual tuning (`[[manual]] temperament/edo/a4_hz/transpose` — `edo` is
-divisions per octave, default 12 and written as absence; away from 12 keys
-walk equal steps of 1200/edo cents from a′ and the temperament — twelve-class
-vocabulary — is dormant, so the UIs offer it only at 12) —
+per-manual tuning (`[[manual]] temperament/edo/reference_key/reference_hz/
+transpose` — `edo` is divisions per octave, default 12 and written as absence;
+away from 12 keys walk equal steps of 1200/edo cents from the reference key and
+the temperament — twelve-class vocabulary — is dormant, so the UIs offer it
+only at 12. The pitch anchor is a *pair*, the way Scala's `.kbm` anchors: one
+piano key named in scientific pitch notation plus the Hz it sounds, default
+`A4` = 440. "a′ = 415" is one choice of anchor; it presumes a tuning that has
+an a′, which 15-EDO or Bohlen–Pierce does not, whereas "the key labelled C4
+sounds 261.6 Hz" always means something. `a4_hz` is the older single-field
+spelling and still reads) —
 a 415 meantone Positif against a 440 equal Great is one instrument. Tuning is
 physical: a coupled copy sounds the destination division's pipes, so it speaks
 that division's temperament; a division's transpose moves only its own

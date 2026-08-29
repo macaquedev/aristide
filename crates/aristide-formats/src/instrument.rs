@@ -194,13 +194,17 @@ pub struct ManualDef {
     /// Divisions per octave of this manual's own (12 is the default
     /// and the only count where `temperament` means anything).
     pub edo: Option<u16>,
-    pub a4_hz: Option<f64>,
+    /// This manual's own pitch anchor (see `[tuning] reference_key`);
+    /// `a4_hz` is the older spelling of `reference_hz`.
+    pub reference_key: Option<KeySpec>,
+    #[serde(alias = "a4_hz")]
+    pub reference_hz: Option<f64>,
     pub transpose: Option<i8>,
     /// A Scala `.scl` file (path, resolved against the organ file's
     /// directory) standing in for the temperament on this manual.
     pub scale: Option<String>,
     /// Its `.kbm` keyboard mapping; omitted, keys map linearly onto
-    /// successive degrees with a′ anchored at `a4_hz`.
+    /// successive degrees with the reference key at `reference_hz`.
     pub keymap: Option<String>,
     /// A microtonal manual's hex-field layout (`hex = { rows = 5,
     /// right = 2, upright = 1, ... }`). Fields left out follow the
@@ -487,7 +491,8 @@ pub struct ManualTuningDef {
     pub temperament: Option<String>,
     /// Divisions per octave of its own (see `[tuning] edo`).
     pub edo: Option<u16>,
-    pub a4_hz: Option<f64>,
+    pub reference_key: Option<KeySpec>,
+    pub reference_hz: Option<f64>,
     pub transpose: Option<i8>,
     pub scale: Option<String>,
     pub keymap: Option<String>,
@@ -927,7 +932,8 @@ pub fn assemble(
         .filter(|(_, manual)| {
             manual.temperament.is_some()
                 || manual.edo.is_some()
-                || manual.a4_hz.is_some()
+                || manual.reference_key.is_some()
+                || manual.reference_hz.is_some()
                 || manual.transpose.is_some()
                 || manual.scale.is_some()
         })
@@ -935,7 +941,8 @@ pub fn assemble(
             manual: index,
             temperament: manual.temperament.clone(),
             edo: manual.edo,
-            a4_hz: manual.a4_hz,
+            reference_key: manual.reference_key.clone(),
+            reference_hz: manual.reference_hz,
             transpose: manual.transpose,
             scale: manual.scale.clone(),
             keymap: manual.keymap.clone(),
@@ -1771,7 +1778,8 @@ mod tests {
             high: high.map(KeySpec::Number),
             temperament: None,
             edo: None,
-            a4_hz: None,
+            reference_key: None,
+            reference_hz: None,
             transpose: None,
             scale: None,
             keymap: None,
@@ -2414,7 +2422,8 @@ drop = ["Swell to Great"]
                 edo: None,
                 manual: 1,
                 temperament: Some("meantone".to_string()),
-                a4_hz: Some(415.0),
+                reference_key: None,
+                reference_hz: Some(415.0),
                 transpose: None,
                 scale: None,
                 keymap: None,
@@ -2497,7 +2506,7 @@ a4_hz = 415.0
         assert_eq!(definition.sources.len(), 2);
         assert_eq!(definition.manuals[0].name, "Great");
         assert_eq!(definition.midi.inputs[0].device, "KeyLab 61");
-        assert_eq!(definition.to_sidecar().tuning.a4_hz, 415.0);
+        assert_eq!(definition.to_sidecar().tuning.reference_hz, 415.0);
         assert_eq!(definition.couplers.define[0].routes[0].shift, -12);
     }
 }

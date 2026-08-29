@@ -199,12 +199,14 @@ try {
     "…in whole-instrument mode"
   );
   await drive.shot(join(OUT, "tuning-whole-instrument.png"));
-  await drive.eval(`const a4 = document.getElementById("editor-tuning-a4");
-    a4.value = 415; a4.dispatchEvent(new Event("change", {bubbles: true})); true`);
+  // Key left at A4 (the default reference key); only the Hz moves.
+  await drive.eval(`const refhz = document.getElementById("editor-tuning-ref-hz");
+    refhz.value = 415; refhz.dispatchEvent(new Event("change", {bubbles: true})); true`);
   await sleep(400);
   snap = await state();
-  check(Math.abs(snap.tuning.a4 - 415) < 0.01, `a′ committed live (${snap.tuning.a4})`);
-  check(/\[tuning\][^[]*a4_hz\s*=\s*415/s.test(fileText()), "…and written to the file's [tuning]");
+  check(Math.abs(snap.tuning.reference.hz - 415) < 0.01, `reference Hz committed live (${snap.tuning.reference.hz})`);
+  check(snap.tuning.reference.key === 69, `reference key stayed A4 (${snap.tuning.reference.key})`);
+  check(/\[tuning\][^[]*reference_hz\s*=\s*415/s.test(fileText()), "…and written to the file's [tuning]");
   await escape();
 
   // ---- 4. room & noises ---------------------------------------------

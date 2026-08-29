@@ -1151,8 +1151,8 @@ input[type="range"]:hover::-webkit-slider-thumb { filter: brightness(1.15); }
 #editor-tuning-browse { width: 270px; }
 
 /* a scale's name (or a keymap's), and the controls beside it, right-
-   aligned against the row's label like the temperament/a4/transpose
-   fields above it */
+   aligned against the row's label like the temperament/reference/
+   transpose fields above it */
 .tuning-scale-value {
   display: flex;
   align-items: center;
@@ -1189,6 +1189,12 @@ input[type="range"]:hover::-webkit-slider-thumb { filter: brightness(1.15); }
 /* .editor-add-form input[type="text"] defaults to 100% width — too
    wide once a cents field shares its row */
 #editor-stop-footage { width: 70px; }
+
+/* the tuning popover's reference-pitch row: a compact key field (it
+   only ever holds a note name like "A4" or "C#3"), not the full-width
+   text input the other add-forms use for a single field; the width
+   counts the 9px side padding, so 4ch of text needs ~54px in all */
+#editor-tuning-ref-key { width: 54px; flex: 0 0 auto; text-align: center; }
 
 /* the coupler route editor: wide enough for a route's selects on one
    line without wrapping; each route is a compact block whose fields

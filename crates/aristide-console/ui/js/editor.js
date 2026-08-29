@@ -175,7 +175,9 @@ export class Editor {
       tuningTemperament: root.getElementById("editor-tuning-temperament"),
       tuningEdoRow: root.getElementById("editor-tuning-edo-row"),
       tuningEdo: root.getElementById("editor-tuning-edo"),
-      tuningA4: root.getElementById("editor-tuning-a4"),
+      tuningRefKey: root.getElementById("editor-tuning-ref-key"),
+      tuningRefHz: root.getElementById("editor-tuning-ref-hz"),
+      pitchNames: root.getElementById("pitch-names"),
       tuningTranspose: root.getElementById("editor-tuning-transpose"),
       tuningError: root.getElementById("editor-tuning-error"),
       tuningClose: root.getElementById("editor-tuning-close"),
@@ -1252,6 +1254,14 @@ export class Editor {
   // popover, not the app-wide status strip — see `showTuningError`.
 
   wireTuningForm() {
+    // Every MIDI note, once, for the reference-key field's autocomplete —
+    // built here rather than hand-written into index.html.
+    for (let key = 0; key <= 127; key++) {
+      const option = document.createElement("option");
+      option.value = keyName(key);
+      this.el.pitchNames.append(option);
+    }
+
     this.el.tuningClose.addEventListener("click", () => this.closeTuningForm());
 
     this.el.tuningReset.addEventListener("click", () => {
@@ -1277,12 +1287,41 @@ export class Editor {
       this.tuningCommand(this.tuningFields({ edo }));
     });
 
-    this.el.tuningA4.addEventListener("change", () => {
+    // The pitch anchor is a key/Hz *pair* — "a′" only names a key in
+    // 12-EDO — so either field changing re-sends both: the server keeps
+    // whichever one didn't move.
+    this.el.tuningRefKey.addEventListener("change", () => {
       if (this.tuningManual == null) return;
-      const a4 = Math.min(500, Math.max(300, Number(this.el.tuningA4.value) || 440));
-      this.el.tuningA4.value = a4;
-      this.tuningCommand(this.tuningFields({ a4 }));
-      this.el.tuningA4.blur();
+      const key = parseKeyName(this.el.tuningRefKey.value);
+      if (key == null) {
+        this.showTuningError(`"${this.el.tuningRefKey.value}" doesn't name a key`);
+        this.el.tuningRefKey.blur();
+        this.syncTuningForm(); // restores the last known-good spelling
+        return;
+      }
+      this.el.tuningRefKey.value = keyName(key); // canonical spelling
+      const hz = Number(this.el.tuningRefHz.value);
+      this.tuningCommand(this.tuningFields({ reference_key: keyName(key), reference_hz: hz }));
+      this.el.tuningRefKey.blur();
+    });
+
+    this.el.tuningRefHz.addEventListener("change", () => {
+      if (this.tuningManual == null) return;
+      const hz = Number(this.el.tuningRefHz.value);
+      // No hard range here — the server clamps so the implied shift
+      // stays within a′ 300–500 Hz equivalents and the next snapshot
+      // reflects the clamped value; a bad number just reverts.
+      if (!Number.isFinite(hz) || hz <= 0) {
+        this.el.tuningRefHz.blur();
+        this.syncTuningForm();
+        return;
+      }
+      const key = parseKeyName(this.el.tuningRefKey.value);
+      this.tuningCommand(this.tuningFields({
+        reference_key: key != null ? keyName(key) : this.el.tuningRefKey.value,
+        reference_hz: hz,
+      }));
+      this.el.tuningRefHz.blur();
     });
 
     this.el.tuningTranspose.addEventListener("change", () => {
@@ -1373,7 +1412,10 @@ export class Editor {
       this.el.tuningTemperament.value = tuning.temperament;
     }
     if (this.root.activeElement !== this.el.tuningEdo) this.el.tuningEdo.value = edo;
-    if (this.root.activeElement !== this.el.tuningA4) this.el.tuningA4.value = tuning.a4;
+    if (this.root.activeElement !== this.el.tuningRefKey) {
+      this.el.tuningRefKey.value = keyName(tuning.reference.key);
+    }
+    if (this.root.activeElement !== this.el.tuningRefHz) this.el.tuningRefHz.value = tuning.reference.hz;
     if (this.root.activeElement !== this.el.tuningTranspose) this.el.tuningTranspose.value = tuning.transpose;
 
     const scale = tuning.scale ?? null;

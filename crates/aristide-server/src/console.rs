@@ -3360,7 +3360,7 @@ mod tests {
             edo: 12,
             temperament: crate::tuning::Temperament::Meantone4,
             scale: None,
-            a4_hz: 440.0,
+            reference: crate::tuning::PitchReference::A440,
             transpose: 0,
         });
         let meantone_c = console.note_on_manual(0, 60, 127).0[0].spec.rate;
@@ -3377,7 +3377,7 @@ mod tests {
             edo: 12,
             temperament: crate::tuning::Temperament::Equal,
             scale: None,
-            a4_hz: 440.0,
+            reference: crate::tuning::PitchReference::A440,
             transpose: 2,
         });
         let (transposed, _) = console.note_on_manual(0, 60, 127);
@@ -3402,7 +3402,7 @@ mod tests {
                 edo: 12,
                 temperament: crate::tuning::Temperament::Meantone4,
                 scale: None,
-                a4_hz: 440.0,
+                reference: crate::tuning::PitchReference::A440,
                 transpose: 0,
             }),
         );
@@ -3426,7 +3426,7 @@ mod tests {
                 edo: 12,
                 temperament: crate::tuning::Temperament::Equal,
                 scale: None,
-                a4_hz: 440.0,
+                reference: crate::tuning::PitchReference::A440,
                 transpose: 2,
             }),
         );
@@ -3456,9 +3456,9 @@ mod tests {
                 scl: "19edo.scl".into(),
                 kbm: None,
                 scale,
-                mapping: aristide_model::scala::KeyboardMapping::linear(440.0),
+                mapping: crate::tuning::PitchReference::A440.linear_mapping(),
             })),
-            a4_hz: 440.0,
+            reference: crate::tuning::PitchReference::A440,
             transpose: 0,
         };
         let mut console = coupled_console();
@@ -3508,7 +3508,7 @@ mod tests {
         let (starts, _) = console.note_on_manual(0, 60, 127);
         assert_eq!(starts.len(), 2, "both drawn stops sound");
         let mut tuning = console.tuning();
-        tuning.a4_hz = 415.0;
+        tuning.reference.hz = 415.0;
         console.set_tuning(tuning);
         let updates = console.retune_held();
         assert_eq!(updates.len(), starts.len(), "every held voice drifts");
@@ -3549,9 +3549,9 @@ mod tests {
                 scl: "19edo.scl".into(),
                 kbm: None,
                 scale,
-                mapping: aristide_model::scala::KeyboardMapping::linear(440.0),
+                mapping: crate::tuning::PitchReference::A440.linear_mapping(),
             })),
-            a4_hz: 440.0,
+            reference: crate::tuning::PitchReference::A440,
             transpose: 0,
         };
         let mut console = coupled_console();
@@ -3590,7 +3590,7 @@ mod tests {
 
         // A drift under the bend: both apply.
         let mut tuning = console.tuning();
-        tuning.a4_hz = 415.0;
+        tuning.reference.hz = 415.0;
         console.set_tuning(tuning);
         let updates = console.retune_held();
         assert_eq!(updates.len(), 1);
@@ -3629,7 +3629,7 @@ mod tests {
                 scale,
                 mapping,
             })),
-            a4_hz: 440.0,
+            reference: crate::tuning::PitchReference::A440,
             transpose: 0,
         };
         let mut console = coupled_console();

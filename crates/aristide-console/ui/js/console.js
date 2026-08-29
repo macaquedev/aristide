@@ -15,7 +15,7 @@
 // is the editor's job (editor.js); this file only draws and places.
 
 import { commands } from "./api.js";
-import { formatFootage } from "./pitch.js";
+import { formatFootage, keyName } from "./pitch.js";
 
 const SHARPS = new Set([1, 3, 6, 8, 10]);
 const isSharp = (midi) => SHARPS.has(midi % 12);
@@ -731,8 +731,11 @@ export class Console {
       ? tuning.scale?.name ??
         ((tuning.edo ?? 12) !== 12 ? `${tuning.edo}-EDO` : tuning.temperament)
       : "";
+    // "C4 = 261.6" rather than "a′ NNN Hz": the anchor is a key/Hz pair
+    // now, not a 12-EDO-only concept — up to one decimal, no trailing ".0".
+    const hz = tuning ? tuning.reference.hz.toFixed(1).replace(/\.0$/, "") : "";
     this.el.tuning.textContent = tuning
-      ? `${governs} · a′ ${tuning.a4.toFixed(0)} Hz` +
+      ? `${governs} · ${keyName(tuning.reference.key)} = ${hz}` +
         (tuning.transpose ? ` · ${tuning.transpose > 0 ? "+" : ""}${tuning.transpose}` : "")
       : "";
     this.el.tuning.classList.toggle("hidden", !tuning);

@@ -21,7 +21,8 @@ damping = 0.5
 [tuning]
 # equal | werckmeister3 | kirnberger3 | meantone4 | pythagorean
 temperament = "equal"
-a4_hz = 440.0
+reference_key = "A4"
+reference_hz = 440.0
 transpose = 0
 
 # Convolution reverb (this set is recorded wet, so off by default):

@@ -821,14 +821,15 @@ pub fn write_composite_midi(path: &Path, organ: Option<&OrganConfig>) -> Result<
 }
 
 /// A manual's own tuning as the file spells it: temperament name,
-/// a4 Hz, transpose, and optionally a Scala scale (.scl path and .kbm
-/// path) standing in for the temperament.
+/// pitch reference (which key, what Hz), transpose, and optionally a
+/// Scala scale (.scl path and .kbm path) standing in for the
+/// temperament.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ManualTuningFields {
     pub temperament: String,
     /// Divisions per octave; 12 writes as absence, the file's default.
     pub edo: u16,
-    pub a4_hz: f64,
+    pub reference: crate::tuning::PitchReference,
     pub transpose: i8,
     pub scale: Option<String>,
     pub keymap: Option<String>,
@@ -961,7 +962,16 @@ pub fn write_composite_manual_tuning(
             write_manual_tuning_fields(table, fields);
         }
         None => {
-            for field in ["temperament", "a4_hz", "transpose", "scale", "keymap"] {
+            for field in [
+                "temperament",
+                "edo",
+                "reference_key",
+                "reference_hz",
+                "a4_hz",
+                "transpose",
+                "scale",
+                "keymap",
+            ] {
                 table.remove(field);
             }
         }
@@ -987,7 +997,12 @@ fn write_manual_tuning_fields(table: &mut toml_edit::Table, fields: &ManualTunin
     } else {
         table["edo"] = toml_edit::value(fields.edo as i64);
     }
-    table["a4_hz"] = toml_edit::value(fields.a4_hz);
+    // The anchor is written as the pair it is; the older `a4_hz`
+    // spelling (always an A4 anchor) goes so the file says it once.
+    table["reference_key"] =
+        toml_edit::value(aristide_formats::sidecar::note_name(fields.reference.key));
+    table["reference_hz"] = toml_edit::value(fields.reference.hz);
+    table.remove("a4_hz");
     table["transpose"] = toml_edit::value(fields.transpose as i64);
     for (key, value) in [("scale", &fields.scale), ("keymap", &fields.keymap)] {
         match value {
@@ -3457,7 +3472,7 @@ mod tests {
         let tuned = |temperament: &str, scale: Option<&str>| ManualTuningFields {
             temperament: temperament.into(),
             edo: 12,
-            a4_hz: 432.0,
+            reference: crate::tuning::PitchReference { key: 69, hz: 432.0 },
             transpose: 0,
             scale: scale.map(str::to_string),
             keymap: None,
@@ -3469,7 +3484,11 @@ mod tests {
         let parsed = def(&path);
         assert_eq!(parsed.manuals[0].scale.as_deref(), Some("19edo.scl"));
         assert_eq!(parsed.manuals[0].temperament, None, "a scale IS the temperament");
-        assert_eq!(parsed.manuals[0].a4_hz, Some(432.0));
+        assert_eq!(parsed.manuals[0].reference_hz, Some(432.0));
+        assert_eq!(
+            parsed.manuals[0].reference_key,
+            Some(aristide_formats::sidecar::KeySpec::Name("A4".into()))
+        );
         assert!(
             write_composite_manual_tuning(&path, "Grand orgue", Some(tuned("meantone4", None)))
                 .expect("tuning")
@@ -3501,7 +3520,8 @@ mod tests {
         assert_eq!(parsed.manuals[0].temperament.as_deref(), Some("meantone4"));
 
         assert!(write_composite_manual_tuning(&path, "Grand orgue", None).expect("tuning"));
-        assert_eq!(def(&path).manuals[0].a4_hz, None);
+        assert_eq!(def(&path).manuals[0].reference_hz, None);
+        assert_eq!(def(&path).manuals[0].reference_key, None);
 
         // A declared drawknob order rides [console.order], keyed by
         // manual name — so a manual rename must carry the key.
@@ -4102,7 +4122,7 @@ device = "Keys"
             &ManualTuningFields {
                 temperament: "meantone4".into(),
                 edo: 12,
-                a4_hz: 415.0,
+                reference: crate::tuning::PitchReference { key: 69, hz: 415.0 },
                 transpose: -2,
                 scale: None,
                 keymap: None,
@@ -4115,7 +4135,8 @@ device = "Keys"
         let parsed = def(&path);
         assert_eq!(parsed.tuning.temperament, "meantone4");
         assert_eq!(parsed.tuning.edo, 12, "the default divisions, absent from the file");
-        assert_eq!(parsed.tuning.a4_hz, 415.0);
+        assert_eq!(parsed.tuning.reference_hz, 415.0);
+        assert_eq!(parsed.tuning.reference_key.midi_note(), Some(69));
         assert_eq!(parsed.tuning.transpose, -2);
         assert_eq!(parsed.tuning.scale, None);
         assert!(!parsed.noises.enabled);
@@ -4131,7 +4152,7 @@ device = "Keys"
             &ManualTuningFields {
                 temperament: "equal".into(),
                 edo: 31,
-                a4_hz: 440.0,
+                reference: crate::tuning::PitchReference::A440,
                 transpose: 0,
                 scale: Some("19edo.scl".into()),
                 keymap: Some("19edo.kbm".into()),
@@ -4149,7 +4170,7 @@ device = "Keys"
             &ManualTuningFields {
                 temperament: "werckmeister3".into(),
                 edo: 19,
-                a4_hz: 440.0,
+                reference: crate::tuning::PitchReference::A440,
                 transpose: 0,
                 scale: None,
                 keymap: None,
@@ -4218,7 +4239,7 @@ volume = 0.7
             &ManualTuningFields {
                 temperament: "meantone4".into(),
                 edo: 12,
-                a4_hz: 440.0,
+                reference: crate::tuning::PitchReference::A440,
                 transpose: 0,
                 scale: None,
                 keymap: None,
@@ -4239,7 +4260,9 @@ volume = 0.7
         let def: aristide_formats::instrument::Definition =
             toml::from_str(&text).expect("parses");
         assert_eq!(def.tuning.temperament, "meantone4");
-        assert_eq!(def.tuning.a4_hz, 440.0);
+        assert_eq!(def.tuning.reference_hz, 440.0);
+        assert!(!text.contains("a4_hz"), "the old spelling is rewritten: {text}");
+        assert!(text.contains("reference_key = \"A4\""), "{text}");
         assert_eq!(def.reverb.wet, 0.5);
         assert!(!def.noises.enabled);
         assert_eq!(def.noises.volume, 0.3);

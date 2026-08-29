@@ -360,7 +360,7 @@ pub struct RouteDef {
 }
 
 /// A key in a route definition: a raw MIDI note number or a name.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum KeySpec {
     Number(i64),
@@ -374,6 +374,16 @@ impl KeySpec {
             KeySpec::Name(name) => parse_note_name(name),
         }
     }
+}
+
+/// The reverse of [`parse_note_name`]: 60 → "C4", spelled the way
+/// the console spells keys (sharps and flats as an organist reads
+/// them: C#, Eb, F#, Ab, Bb) so the file and the screen agree.
+pub fn note_name(key: u8) -> String {
+    const NAMES: [&str; 12] = [
+        "C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B",
+    ];
+    format!("{}{}", NAMES[(key % 12) as usize], (key / 12) as i32 - 1)
 }
 
 /// "C4" → 60 (middle C), scientific pitch notation, any number of
@@ -622,8 +632,17 @@ pub struct TuningConfig {
     /// otherwise); away from 12 the temperament is dormant.
     #[serde(default = "default_edo")]
     pub edo: u16,
-    #[serde(default = "default_a4_hz")]
-    pub a4_hz: f64,
+    /// The pitch anchor: which piano key (scientific pitch notation,
+    /// C4 = middle C, or a MIDI number) sounds `reference_hz`. "a′ =
+    /// 440" is only one choice of anchor and only makes sense where
+    /// the tuning has an a′ at all; a 15-EDO piece with its tonic on
+    /// C wants `reference_key = "C4"` outright.
+    #[serde(default = "default_reference_key")]
+    pub reference_key: KeySpec,
+    /// What the reference key sounds, in Hz. `a4_hz` is the older
+    /// spelling (an A4 anchor) and still reads.
+    #[serde(default = "default_reference_hz", alias = "a4_hz")]
+    pub reference_hz: f64,
     /// Semitones added to incoming keys (a transposer).
     #[serde(default)]
     pub transpose: i8,
@@ -631,8 +650,8 @@ pub struct TuningConfig {
     /// against the organ file's directory.
     #[serde(default)]
     pub scale: Option<String>,
-    /// Its `.kbm` keyboard mapping; omitted, keys map linearly with a′
-    /// anchored at `a4_hz`.
+    /// Its `.kbm` keyboard mapping; omitted, keys map linearly with
+    /// the reference key anchored at `reference_hz`.
     #[serde(default)]
     pub keymap: Option<String>,
 }
@@ -645,7 +664,11 @@ fn default_edo() -> u16 {
     12
 }
 
-fn default_a4_hz() -> f64 {
+fn default_reference_key() -> KeySpec {
+    KeySpec::Name("A4".into())
+}
+
+fn default_reference_hz() -> f64 {
     440.0
 }
 
@@ -654,7 +677,8 @@ impl Default for TuningConfig {
         TuningConfig {
             temperament: default_temperament(),
             edo: default_edo(),
-            a4_hz: default_a4_hz(),
+            reference_key: default_reference_key(),
+            reference_hz: default_reference_hz(),
             transpose: 0,
             scale: None,
             keymap: None,
@@ -927,6 +951,34 @@ default = ["Bourdon 16'", "Montre 8'", "Prestant 4'", "Plein jeu III"]
             path_for(Path::new("/sets/demo.organ")),
             PathBuf::from("/sets/demo.organ.aristide.toml")
         );
+    }
+
+    #[test]
+    fn note_name_round_trips_every_key() {
+        assert_eq!(note_name(60), "C4");
+        assert_eq!(note_name(69), "A4");
+        assert_eq!(note_name(61), "C#4");
+        assert_eq!(note_name(63), "Eb4");
+        assert_eq!(note_name(0), "C-1");
+        for key in 0..=127u8 {
+            assert_eq!(parse_note_name(&note_name(key)), Some(key), "key {key}");
+        }
+    }
+
+    #[test]
+    fn tuning_reference_defaults_to_a440_and_reads_the_old_spelling() {
+        let tuning: TuningConfig = toml::from_str("").expect("parses");
+        assert_eq!(tuning.reference_key.midi_note(), Some(69));
+        assert_eq!(tuning.reference_hz, 440.0);
+        let old: TuningConfig = toml::from_str("a4_hz = 415.0").expect("parses");
+        assert_eq!(old.reference_key.midi_note(), Some(69));
+        assert_eq!(old.reference_hz, 415.0);
+        let anchored: TuningConfig =
+            toml::from_str("reference_key = \"C4\"\nreference_hz = 256.0").expect("parses");
+        assert_eq!(anchored.reference_key.midi_note(), Some(60));
+        assert_eq!(anchored.reference_hz, 256.0);
+        let numbered: TuningConfig = toml::from_str("reference_key = 60").expect("parses");
+        assert_eq!(numbered.reference_key.midi_note(), Some(60));
     }
 
     #[test]

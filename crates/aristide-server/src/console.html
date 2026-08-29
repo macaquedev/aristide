@@ -39,8 +39,10 @@
     <option>kirnberger3</option><option>meantone4</option>
     <option>pythagorean</option>
   </select>
-  <label for="a4" style="color:#8b93a1;font-size:0.8rem">a′</label>
-  <input id="a4" type="number" min="300" max="500" step="0.5" style="width:5rem">
+  <label for="refkey" style="color:#8b93a1;font-size:0.8rem">REFERENCE</label>
+  <input id="refkey" type="text" style="width:3.5rem">
+  <span style="color:#8b93a1">=</span>
+  <input id="refhz" type="number" step="0.1" style="width:5rem">
   <label for="transpose" style="color:#8b93a1;font-size:0.8rem">TRANSPOSE</label>
   <input id="transpose" type="number" min="-12" max="12" step="1" style="width:3.5rem">
 </div>
@@ -66,6 +68,14 @@ window.addEventListener('contextmenu', (event) => {
   if (event.target.closest('textarea, input[type=text], input[type=number], input:not([type])')) return;
   event.preventDefault();
 });
+
+// MIDI note number spelled in scientific pitch notation (middle C = C4) —
+// the fallback UI has no modules, so this mirrors the console's own
+// js/pitch.js keyName() in miniature, ASCII accidentals only.
+const NOTE_NAMES = ['C', 'C#', 'D', 'Eb', 'E', 'F', 'F#', 'G', 'Ab', 'A', 'Bb', 'B'];
+function keyName(key) {
+  return `${NOTE_NAMES[key % 12]}${Math.floor(key / 12) - 1}`;
+}
 
 async function refresh(data) {
   if (!data) data = await (await fetch('/api/state')).json();
@@ -172,15 +182,19 @@ async function refresh(data) {
     const row = document.getElementById('tuningrow');
     row.style.display = 'flex';
     const temperament = document.getElementById('temperament');
-    const a4 = document.getElementById('a4');
+    const refkey = document.getElementById('refkey');
+    const refhz = document.getElementById('refhz');
     const transpose = document.getElementById('transpose');
     if (document.activeElement !== temperament) temperament.value = data.tuning.temperament;
-    if (document.activeElement !== a4) a4.value = data.tuning.a4;
+    if (document.activeElement !== refkey) refkey.value = keyName(data.tuning.reference.key);
+    if (document.activeElement !== refhz) refhz.value = data.tuning.reference.hz;
     if (document.activeElement !== transpose) transpose.value = data.tuning.transpose;
     const post = async () => refresh(await (await fetch(
-      `/api/tuning?temperament=${temperament.value}&a4=${a4.value}&transpose=${transpose.value}`,
+      `/api/tuning?temperament=${temperament.value}` +
+      `&reference_key=${encodeURIComponent(refkey.value)}&reference_hz=${refhz.value}` +
+      `&transpose=${transpose.value}`,
       {method: 'POST'})).json());
-    temperament.onchange = post; a4.onchange = post; transpose.onchange = post;
+    temperament.onchange = post; refkey.onchange = post; refhz.onchange = post; transpose.onchange = post;
   }
   const gain = document.getElementById('gain');
   gain.value = data.gain;

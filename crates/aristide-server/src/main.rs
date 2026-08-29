@@ -1954,7 +1954,7 @@ impl State {
         config::ManualTuningFields {
             temperament: tuning.temperament.name().to_string(),
             edo: tuning.edo,
-            a4_hz: tuning.a4_hz,
+            reference: tuning.reference,
             transpose: tuning.transpose,
             scale: tuning.scale.as_ref().map(|scale| scale.scl.clone()),
             keymap: tuning.scale.as_ref().and_then(|scale| scale.kbm.clone()),

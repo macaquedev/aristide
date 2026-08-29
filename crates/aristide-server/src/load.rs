@@ -735,8 +735,8 @@ pub fn prepare(
     // that names them. A scale that fails to load warns and leaves the
     // temperament standing — a missing .scl must not brick the organ.
     let scale_base = first_path.parent().map(std::path::Path::to_path_buf);
-    let load_scale = |scl: &str, kbm: Option<&str>, a4_hz: f64| {
-        match tuning::ScaleTuning::load(scl, kbm, a4_hz, scale_base.as_deref()) {
+    let load_scale = |scl: &str, kbm: Option<&str>, reference: tuning::PitchReference| {
+        match tuning::ScaleTuning::load(scl, kbm, reference, scale_base.as_deref()) {
             Ok(scale) => Some(std::sync::Arc::new(scale)),
             Err(err) => {
                 tracing::warn!("tuning scale not loaded: {err} — keeping the temperament");
@@ -751,11 +751,19 @@ pub fn prepare(
             .edo
             .clamp(*tuning::EDO_RANGE.start(), *tuning::EDO_RANGE.end()),
         scale: None,
-        a4_hz: sidecar.tuning.a4_hz.clamp(300.0, 500.0),
+        reference: tuning::PitchReference {
+            key: reference_key(&sidecar.tuning.reference_key, None),
+            hz: sidecar.tuning.reference_hz,
+        }
+        .clamped(),
         transpose: sidecar.tuning.transpose.clamp(-12, 12),
     };
     if let Some(scl) = &sidecar.tuning.scale {
-        live_tuning.scale = load_scale(scl, sidecar.tuning.keymap.as_deref(), live_tuning.a4_hz);
+        live_tuning.scale = load_scale(
+            scl,
+            sidecar.tuning.keymap.as_deref(),
+            live_tuning.reference,
+        );
     }
     console.set_tuning(live_tuning.clone());
     // Divisions the definition tunes apart from the rest: missing
@@ -781,21 +789,31 @@ pub fn prepare(
                 .unwrap_or(live_tuning.edo)
                 .clamp(*tuning::EDO_RANGE.start(), *tuning::EDO_RANGE.end()),
             scale: None,
-            a4_hz: def.a4_hz.unwrap_or(live_tuning.a4_hz).clamp(300.0, 500.0),
+            reference: tuning::PitchReference {
+                key: def
+                    .reference_key
+                    .as_ref()
+                    .map_or(live_tuning.reference.key, |key| {
+                        reference_key(key, Some(live_tuning.reference.key))
+                    }),
+                hz: def.reference_hz.unwrap_or(live_tuning.reference.hz),
+            }
+            .clamped(),
             transpose: def.transpose.unwrap_or(live_tuning.transpose).clamp(-12, 12),
         };
         if let Some(scl) = &def.scale {
-            own.scale = load_scale(scl, def.keymap.as_deref(), own.a4_hz);
+            own.scale = load_scale(scl, def.keymap.as_deref(), own.reference);
         }
         tracing::info!(
-            "tuning: manual {} plays {} @ a'={} Hz, transpose {:+}",
+            "tuning: manual {} plays {} @ {}={} Hz, transpose {:+}",
             def.manual,
             match &own.scale {
                 Some(scale) => scale.name().to_string(),
                 None if own.edo != 12 => format!("{}-EDO", own.edo),
                 None => own.temperament.name().to_string(),
             },
-            own.a4_hz,
+            aristide_formats::sidecar::note_name(own.reference.key),
+            own.reference.hz,
             own.transpose
         );
         console.set_manual_tuning(def.manual, Some(own));
@@ -1031,9 +1049,10 @@ pub fn prepare(
         }
     }
     tracing::info!(
-        "tuning: {} @ a'={} Hz, transpose {:+}",
+        "tuning: {} @ {}={} Hz, transpose {:+}",
         live_tuning.temperament.name(),
-        live_tuning.a4_hz,
+        aristide_formats::sidecar::note_name(live_tuning.reference.key),
+        live_tuning.reference.hz,
         live_tuning.transpose
     );
 
@@ -1242,4 +1261,18 @@ mod tests {
             "progress was reported"
         );
     }
+}
+
+/// A `reference_key` as the file spells it ("C4", "F#3", or a MIDI
+/// number) resolved to a key, falling back — with a warning, never a
+/// failed load — to `inherited` (the instrument's anchor) or A4.
+fn reference_key(spec: &aristide_formats::sidecar::KeySpec, inherited: Option<u8>) -> u8 {
+    spec.midi_note().unwrap_or_else(|| {
+        let fallback = inherited.unwrap_or(tuning::PitchReference::A440.key);
+        tracing::warn!(
+            "tuning: reference_key {spec:?} names no key, anchoring on {}",
+            aristide_formats::sidecar::note_name(fallback)
+        );
+        fallback
+    })
 }

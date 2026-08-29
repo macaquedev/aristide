@@ -223,17 +223,18 @@ impl KeyboardMapping {
 
     /// The linear default used when an organ names a scale but no
     /// `.kbm`: every key maps 1:1 to successive degrees, middle key 60
-    /// on degree 0, reference key 69 at `reference_hz` (the manual's
-    /// a'). Modeled as an empty pattern, which [`degree_of`] already
-    /// treats as `key - middle_key`.
+    /// on degree 0, and `reference_key` sounding `reference_hz` — the
+    /// tuning's own anchor, whichever piano key it names. Modeled as
+    /// an empty pattern, which [`degree_of`] already treats as `key -
+    /// middle_key`.
     ///
     /// [`degree_of`]: KeyboardMapping::degree_of
-    pub fn linear(reference_hz: f64) -> KeyboardMapping {
+    pub fn linear(reference_key: i32, reference_hz: f64) -> KeyboardMapping {
         KeyboardMapping {
             first_key: 0,
             last_key: 127,
             middle_key: 60,
-            reference_key: 69,
+            reference_key,
             reference_hz,
             octave_degrees: 0,
             mapping: Vec::new(),
@@ -523,7 +524,7 @@ desc
     #[test]
     fn key_frequency_linear_12edo_reproduces_standard_midi_pitch() {
         let scale = Scale::parse(EDO_12_SCL).unwrap();
-        let mapping = KeyboardMapping::linear(440.0);
+        let mapping = KeyboardMapping::linear(69, 440.0);
 
         assert_eq!(key_frequency(&scale, &mapping, 69), Some(440.0));
 
@@ -537,8 +538,20 @@ desc
     #[test]
     fn key_frequency_with_baroque_reference_pitch() {
         let scale = Scale::parse(EDO_12_SCL).unwrap();
-        let mapping = KeyboardMapping::linear(415.0);
+        let mapping = KeyboardMapping::linear(69, 415.0);
         assert_eq!(key_frequency(&scale, &mapping, 69), Some(415.0));
+    }
+
+    /// The linear mapping anchors whichever key the tuning names:
+    /// middle C at 256 Hz puts a′ nine equal steps above it, not at
+    /// 440.
+    #[test]
+    fn key_frequency_linear_anchors_any_reference_key() {
+        let scale = Scale::parse(EDO_12_SCL).unwrap();
+        let mapping = KeyboardMapping::linear(60, 256.0);
+        assert_eq!(key_frequency(&scale, &mapping, 60), Some(256.0));
+        let a = key_frequency(&scale, &mapping, 69).unwrap();
+        assert!((a - 256.0 * 2f64.powf(9.0 / 12.0)).abs() < 1e-9, "got {a}");
     }
 
     #[test]
