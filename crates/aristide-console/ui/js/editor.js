@@ -13,7 +13,15 @@
 // is called on every poll, the same as the other panels.
 
 import { commands } from "./api.js";
-import { formatFootage, keyName, parseFootage, parseKeyName, splitFootageName } from "./pitch.js";
+import {
+  formatFootage,
+  keyName,
+  keySpellings,
+  parseFootage,
+  parseKeyName,
+  splitFootageName,
+  tidyKeyName,
+} from "./pitch.js";
 import {
   buildManualInputs,
   buildControlsList,
@@ -1254,12 +1262,15 @@ export class Editor {
   // popover, not the app-wide status strip — see `showTuningError`.
 
   wireTuningForm() {
-    // Every MIDI note, once, for the reference-key field's autocomplete —
-    // built here rather than hand-written into index.html.
+    // Every MIDI note for the reference-key field's autocomplete —
+    // built here rather than hand-written into index.html, in the
+    // ASCII spellings a player can type, black keys under both names.
     for (let key = 0; key <= 127; key++) {
-      const option = document.createElement("option");
-      option.value = keyName(key);
-      this.el.pitchNames.append(option);
+      for (const spelling of keySpellings(key)) {
+        const option = document.createElement("option");
+        option.value = spelling;
+        this.el.pitchNames.append(option);
+      }
     }
 
     this.el.tuningClose.addEventListener("click", () => this.closeTuningForm());
@@ -1299,7 +1310,11 @@ export class Editor {
         this.syncTuningForm(); // restores the last known-good spelling
         return;
       }
-      this.el.tuningRefKey.value = keyName(key); // canonical spelling
+      // The player's own spelling stays on screen: D#4 typed is D#4
+      // shown, not the E♭4 the canonical printer would pick. The
+      // server only ever sees the key number's canonical name.
+      this.tuningRefKeySpelling = { key, text: tidyKeyName(this.el.tuningRefKey.value) };
+      this.el.tuningRefKey.value = this.tuningRefKeySpelling.text;
       const hz = Number(this.el.tuningRefHz.value);
       this.tuningCommand(this.tuningFields({ reference_key: keyName(key), reference_hz: hz }));
       this.el.tuningRefKey.blur();
@@ -1413,7 +1428,9 @@ export class Editor {
     }
     if (this.root.activeElement !== this.el.tuningEdo) this.el.tuningEdo.value = edo;
     if (this.root.activeElement !== this.el.tuningRefKey) {
-      this.el.tuningRefKey.value = keyName(tuning.reference.key);
+      const spelling = this.tuningRefKeySpelling;
+      this.el.tuningRefKey.value =
+        spelling?.key === tuning.reference.key ? spelling.text : keyName(tuning.reference.key);
     }
     if (this.root.activeElement !== this.el.tuningRefHz) this.el.tuningRefHz.value = tuning.reference.hz;
     if (this.root.activeElement !== this.el.tuningTranspose) this.el.tuningTranspose.value = tuning.transpose;

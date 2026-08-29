@@ -96,22 +96,47 @@ export function keyName(key) {
   return `${NOTE_NAMES[key % 12]}${Math.floor(key / 12) - 1}`;
 }
 
-/// The reverse: "C4", "f♯3", "Bb2" (either accidental glyph, any case)
-/// back to a MIDI note, or null when the text doesn't name one. A bare
-/// number is still accepted — pasted MIDI values shouldn't be an error.
+/// The reverse: "C4", "f♯3", "Bb2", "D#4" (ASCII or glyph accidentals,
+/// any number of them, any case — D#4 and Eb4 are the same key and
+/// both are accepted) back to a MIDI note, or null when the text
+/// doesn't name one. A bare number is still accepted — pasted MIDI
+/// values shouldn't be an error.
 export function parseKeyName(text) {
   const s = String(text).replace(/\s+/g, "");
   if (/^\d+$/.test(s)) {
     const n = Number(s);
     return n <= 127 ? n : null;
   }
-  const m = /^([a-g])([#♯b♭]?)(-?\d+)$/i.exec(s);
+  const m = /^([a-g])([#♯b♭]*)(-?\d+)$/i.exec(s);
   if (!m) return null;
   let semitone = LETTER_SEMITONES[m[1].toLowerCase()];
-  if (m[2] === "#" || m[2] === "♯") semitone += 1;
-  else if (m[2]) semitone -= 1;
+  for (const accidental of m[2]) semitone += accidental === "#" || accidental === "♯" ? 1 : -1;
   const key = (Number(m[3]) + 1) * 12 + semitone;
   return key >= 0 && key <= 127 ? key : null;
+}
+
+/// Every typeable spelling of a key, for autocomplete lists: naturals
+/// once, black keys as both their sharp and their flat in ASCII
+/// ("C#4", "Db4") — the glyph forms `keyName` prints can't be typed,
+/// so a list of those would never match what the player enters.
+export function keySpellings(key) {
+  const octave = Math.floor(key / 12) - 1;
+  const natural = NOTE_NAMES[key % 12];
+  if (natural.length === 1) return [`${natural}${octave}`];
+  const below = NOTE_NAMES[(key + 11) % 12];
+  const above = NOTE_NAMES[(key + 1) % 12];
+  return [`${below}#${octave}`, `${above}b${octave}`];
+}
+
+/// A typed key name tidied for display without changing the spelling
+/// the player chose: capital letter, ASCII accidentals swapped for the
+/// glyphs `keyName` uses ("d#4" → "D♯4", "eb4" → "E♭4"). Null when it
+/// names no key.
+export function tidyKeyName(text) {
+  if (parseKeyName(text) == null) return null;
+  const s = String(text).replace(/\s+/g, "");
+  if (/^\d+$/.test(s)) return keyName(Number(s));
+  return s[0].toUpperCase() + s.slice(1).replace(/#/g, "♯").replace(/b/g, "♭");
 }
 
 /// A trigger's note spelled as its pitch: "note:36" reads as "note C2";
