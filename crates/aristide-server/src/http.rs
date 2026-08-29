@@ -2053,8 +2053,10 @@ fn state_json_locked(state: &State) -> String {
         }
         out.push(']');
     }
+    // Only organs whose files still exist: a deleted set must not
+    // linger in Recent as a row that can only fail to load.
     out.push_str(",\"library\":[");
-    for (index, entry) in state.midi_config.library.iter().enumerate() {
+    for (index, entry) in state.midi_config.present().enumerate() {
         if index > 0 {
             out.push(',');
         }
@@ -4390,15 +4392,23 @@ mod tests {
 
     #[test]
     fn the_snapshot_offers_the_library_and_forget_removes() {
+        let dir = std::env::temp_dir().join("aristide-library-forget-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        let set = dir.join("demo.organ");
+        std::fs::write(&set, "[Organ]").expect("fixture set");
         let state = tone_state();
         state
             .lock()
             .expect("state poisoned")
             .midi_config
-            .remember("Demo", Path::new("/sets/demo.organ"));
+            .remember("Demo", &set);
         let body = state_json(&state);
         assert!(
-            body.contains("\"library\":[{\"name\":\"Demo\",\"path\":\"/sets/demo.organ\"}]"),
+            body.contains(&format!(
+                "\"library\":[{{\"name\":\"Demo\",\"path\":{}}}]",
+                json_string(&set.display().to_string())
+            )),
             "library present: {body}"
         );
         assert!(!body.contains("\"organ\":"), "no organ is loaded");
@@ -4406,9 +4416,48 @@ mod tests {
         respond(
             &state,
             &Method::Post,
-            "/api/library/forget?path=/sets/demo.organ",
+            &format!("/api/library/forget?path={}", set.display()),
         );
         assert!(state_json(&state).contains("\"library\":[]"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Recent lists only organs whose files exist. A deleted set drops
+    /// off the list without being forgotten, so an organ on an
+    /// unplugged drive comes back when the drive does.
+    #[test]
+    fn recent_hides_a_missing_file_until_it_returns() {
+        let dir = std::env::temp_dir().join("aristide-library-missing-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        let kept = dir.join("kept.organ");
+        let gone = dir.join("gone.organ");
+        std::fs::write(&kept, "[Organ]").expect("fixture set");
+        std::fs::write(&gone, "[Organ]").expect("fixture set");
+        let state = tone_state();
+        {
+            let mut state = state.lock().expect("state poisoned");
+            state.midi_config.remember("Kept", &kept);
+            state.midi_config.remember("Gone", &gone);
+        }
+        assert!(state_json(&state).contains("\"name\":\"Gone\""), "listed while present");
+
+        std::fs::remove_file(&gone).expect("delete fixture");
+        let body = state_json(&state);
+        assert!(!body.contains("\"name\":\"Gone\""), "hidden once deleted: {body}");
+        assert!(body.contains("\"name\":\"Kept\""), "the others stay: {body}");
+        assert_eq!(
+            state.lock().expect("state poisoned").midi_config.library.len(),
+            2,
+            "hidden, not forgotten"
+        );
+
+        std::fs::write(&gone, "[Organ]").expect("restore fixture");
+        assert!(
+            state_json(&state).contains("\"name\":\"Gone\""),
+            "back when the file is"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Renaming a sample-set organ: the name lands in the set's

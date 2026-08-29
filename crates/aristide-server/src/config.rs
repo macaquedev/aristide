@@ -192,6 +192,15 @@ impl MidiConfig {
         fallback
     }
 
+    /// The library entries whose files still exist — what the picker
+    /// shows as Recent. A missing file is hidden, not forgotten: sample
+    /// sets live on external drives, and an organ that vanished because
+    /// its drive is unplugged must reappear when it is mounted again.
+    /// Only `forget` removes an entry for good.
+    pub fn present(&self) -> impl Iterator<Item = &LibraryEntry> {
+        self.library.iter().filter(|entry| entry.path.exists())
+    }
+
     /// Drop an organ from the picker. Its assignments stay: forgetting
     /// where a set lives must not silently unwire it.
     pub fn forget(&mut self, path: &Path) -> bool {
