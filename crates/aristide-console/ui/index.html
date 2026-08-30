@@ -758,6 +758,33 @@
     </div>
   </div>
 
+  <!-- Save-as: a sample set's own organ is kept exactly as the set
+       defines it, so the first change to one lands here — save it under
+       a different name and the copy takes the change. Also the
+       organ-name menu's "Save as…" for any organ with a file. -->
+  <div id="save-as" class="modal hidden" role="dialog" aria-modal="true"
+    aria-labelledby="save-as-title">
+    <div class="modal-backdrop" data-close></div>
+    <div class="modal-card save-as-card">
+      <header class="modal-head">
+        <h1 id="save-as-title">Save under a different name</h1>
+        <button class="modal-close" data-close aria-label="Close">&times;</button>
+      </header>
+      <div class="modal-body save-as-body">
+        <p class="pane-note" id="save-as-note"></p>
+        <label class="save-as-field">
+          <span class="rail-label">Name</span>
+          <input id="save-as-name" type="text" autocomplete="off" spellcheck="false" />
+        </label>
+        <p class="organ-edit-error hidden" id="save-as-error"></p>
+        <span class="editor-add-form-actions">
+          <button class="ghost" type="button" id="save-as-cancel">Cancel</button>
+          <button class="ghost" type="button" id="save-as-btn">Save</button>
+        </span>
+      </div>
+    </div>
+  </div>
+
   <script type="module" src="js/main.js"></script>
 </body>
 </html>

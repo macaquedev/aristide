@@ -30,6 +30,11 @@ export function applyHarnessHooks({ prefs, editor }) {
   if (params.has("saveForm")) {
     setTimeout(() => editor.openSaveForm(), 400);
   }
+  // The save-as dialog as a refused edit opens it: a pending command
+  // in hand, the note explaining why the organ won't take it.
+  if (params.has("saveAsForm")) {
+    setTimeout(() => editor.openSaveAsForm("/api/tuning?reference_hz=415"), 400);
+  }
 
   if (params.has("openSources")) {
     setTimeout(() => {

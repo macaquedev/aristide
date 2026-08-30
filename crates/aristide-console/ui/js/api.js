@@ -94,6 +94,11 @@ export const commands = {
   // loads the same way next time instead of being re-assembled from the
   // command line.
   organSave: (path) => `/api/organ/save?path=${encodeURIComponent(path)}`,
+  // Copies the loaded organ's file under `name`, beside the original,
+  // and switches to the copy — the way past a sample set's own organ
+  // refusing to change (a 409 on any edit). 400s with a reason when
+  // the organ has no file yet or the name is the organ's own.
+  organSaveAs: (name) => `/api/organ/save_as?name=${encodeURIComponent(name)}`,
   // Reassigns a stop to a different manual's division.
   organMove: (stopId, manual) => `/api/organ/move?stop=${stopId}&manual=${manual}`,
   // Structural edits to the organ's own manuals — unlike organMove these
@@ -251,9 +256,12 @@ export const commands = {
 
 /// Start the client. Calls `onState(snapshot)` for every fresh snapshot,
 /// `onError(message)` when the server is unreachable, and
-/// `onRefused(reason)` when it answered but said no (a 4xx with its
-/// plain-text reason) — a refusal is the organ talking, not a dead
-/// connection, and must never dress up as one. Returns `send(query)`,
+/// `onRefused(reason, status, query)` when it answered but said no (a
+/// 4xx with its plain-text reason, the status, and the query that was
+/// refused — a 409 is a sample set's own organ refusing to change, and
+/// the query is what to send again once it has a name of its own) — a
+/// refusal is the organ talking, not a dead connection, and must never
+/// dress up as one. Returns `send(query)`,
 /// which POSTs one command and feeds its response back through `onState`.
 export function connect(base, onState, onError, onRefused) {
   let pollTimer = null;
@@ -274,7 +282,7 @@ export function connect(base, onState, onError, onRefused) {
         const reason =
           (await response.text().catch(() => "")) ||
           `${response.status} ${response.statusText}`;
-        (onRefused ?? onError)(reason);
+        (onRefused ?? onError)(reason, response.status, query);
         return;
       }
       const snapshot = await response.json();

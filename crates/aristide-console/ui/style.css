@@ -2656,6 +2656,28 @@ body.editing .shoe-label:active {
 .editor-wiring-form { width: 400px; max-height: 70vh; overflow-y: auto; }
 .editor-bindings-form { width: 480px; max-height: 70vh; overflow-y: auto; }
 .editor-room-form { width: 280px; }
+/* ---- save-as dialog: a set's own organ becomes the player's ------------ */
+
+/* above the popovers (z 48): a refused edit opens this over the very
+   popover that sent it, and the backdrop must cover that too */
+#save-as { z-index: 60; }
+.save-as-card { width: min(460px, 100%); height: auto; }
+.save-as-body { flex-direction: column; gap: 12px; padding: 16px 18px 14px; }
+.save-as-body .pane-note strong { color: var(--text); font-weight: 600; }
+.save-as-field { display: flex; flex-direction: column; gap: 6px; }
+.save-as-field input[type="text"] {
+  width: 100%;
+  padding: 6px 9px;
+  border: 1px solid #000000d0;
+  border-radius: 3px;
+  background: var(--well);
+  box-shadow: var(--bevel-well);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 12px;
+}
+.save-as-field input[type="text"]:focus { outline: none; border-color: var(--accent); }
+
 .editor-save-form { width: 360px; }
 .editor-save-form .editor-add-form-row input[type="text"] { flex: 1; width: auto; }
 

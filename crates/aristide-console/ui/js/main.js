@@ -125,6 +125,11 @@ new MenuBar(document, document.getElementById("menus"), [
         disabled: !snapshot.organ || !!snapshot.setup?.implicit,
         run: startRename,
       },
+      // A copy under a new name, switched to — for a sample set's own
+      // organ (which refuses to change) the only way to an editable one.
+      ...(snapshot.setup?.file
+        ? [{ label: "Save as…", run: () => editor.openSaveAsForm() }]
+        : []),
       ...(snapshot.setup && !snapshot.setup.file
         ? [{ label: "Save as an organ file…", run: (at) => editor.openSaveForm(at?.x, at?.y) }]
         : []),
@@ -200,6 +205,12 @@ send = connect(
   (message) => view.offline(message),
   // A refused command (a 4xx and its reason) lands in the editor's
   // status strip — the same place rebuild errors show — instead of
-  // masquerading as a lost connection.
-  (reason) => editor.showError(reason),
+  // masquerading as a lost connection. Except a 409: that is the sample
+  // set's own organ refusing to change, answered with the save-as
+  // dialog, which holds the command and sends it again once the organ
+  // has a name of its own.
+  (reason, status, query) => {
+    if (status === 409) editor.openSaveAsForm(query);
+    else editor.showError(reason);
+  },
 );

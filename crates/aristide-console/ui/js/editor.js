@@ -117,6 +117,9 @@ export class Editor {
     this.bindingsOpen = false; // the flat Bindings popover
     this.bindingsSignature = null;
     this.saveOpen = false; // the save-as popover
+    this.saveAsOpen = false; // the save-as dialog (a copy under a new name)
+    this.saveAsFor = null; // the organ it was opened for
+    this.saveAsPending = null; // the refused command to send again after saving
     this.savePromptedFor = null; // organ name already auto-prompted to save, once
     // A quick-bind in flight: Listen was pressed on a piston row, and
     // once the learned trigger lands at `slot` the action (and target
@@ -281,6 +284,12 @@ export class Editor {
       saveBtn: root.getElementById("editor-save-btn"),
       saveError: root.getElementById("editor-save-error"),
       saveClose: root.getElementById("editor-save-close"),
+      saveAs: root.getElementById("save-as"),
+      saveAsNote: root.getElementById("save-as-note"),
+      saveAsName: root.getElementById("save-as-name"),
+      saveAsBtn: root.getElementById("save-as-btn"),
+      saveAsCancel: root.getElementById("save-as-cancel"),
+      saveAsError: root.getElementById("save-as-error"),
       stopPistons: root.getElementById("editor-stop-pistons"),
       couplerPistons: root.getElementById("editor-coupler-pistons"),
       addCouplerRestore: root.getElementById("editor-add-coupler-restore"),
@@ -312,6 +321,7 @@ export class Editor {
     this.wireRoomForm();
     this.wireBindingsForm();
     this.wireSaveForm();
+    this.wireSaveAsForm();
     this.wireCanvas();
   }
 
@@ -472,6 +482,7 @@ export class Editor {
     if (this.roomOpen) this.syncRoomForm();
     if (this.bindingsOpen) this.syncBindingsForm();
     if (this.saveOpen) this.syncSaveForm();
+    if (this.saveAsOpen) this.syncSaveAsForm();
     this.refreshSilentBadges();
 
     // An organ combined ad hoc on the command line has nobody to ask
@@ -1495,9 +1506,11 @@ export class Editor {
   /// `organCommandResult` uses for structural edits.
   async tuningCommand(fields) {
     this.hideTuningError();
+    const query = commands.tuning(fields);
     try {
-      const response = await fetch(this.base + commands.tuning(fields), { method: "POST" });
+      const response = await fetch(this.base + query, { method: "POST" });
       if (!response.ok) {
+        if (this.deferToSaveAs(response, query)) return false;
         this.showTuningError((await response.text()) || `${response.status} ${response.statusText}`);
         return false;
       }
@@ -1989,6 +2002,131 @@ export class Editor {
   hideSaveError() {
     this.el.saveError.classList.add("hidden");
     this.el.saveError.textContent = "";
+  }
+
+  // ---- the save-as dialog: a set's own organ becomes the player's --------
+  //
+  // A sample set's own organ (its file marked `adopted`) is kept exactly
+  // as the set defines it: the server answers every change with 409,
+  // and main.js routes that here with the refused command in hand.
+  // Saving copies the file under the new name, the server switches to
+  // the copy, and the refused command is sent again — so the player's
+  // gesture lands after all, on an organ that is theirs. The same
+  // dialog is the organ-name menu's "Save as…" for any organ with a
+  // file, with nothing to replay.
+
+  wireSaveAsForm() {
+    for (const closer of this.el.saveAs.querySelectorAll("[data-close]")) {
+      closer.addEventListener("click", () => this.closeSaveAsForm());
+    }
+    this.el.saveAsCancel.addEventListener("click", () => this.closeSaveAsForm());
+    this.el.saveAsBtn.addEventListener("click", () => this.saveOrganAs());
+    this.el.saveAsName.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        this.saveOrganAs();
+      }
+    });
+  }
+
+  /// `pending` is the refused command, if a refusal opened the dialog.
+  openSaveAsForm(pending = null) {
+    const snapshot = this.lastSnapshot;
+    if (!snapshot?.setup?.file || !snapshot.organ) return;
+    const organ = snapshot.organ;
+    const adopted = Boolean(snapshot.setup.adopted);
+    // A refused rename IS this dialog: the name goes on the copy, and
+    // there is nothing left to send again.
+    const rename = pending?.match(/^\/api\/organ\/rename\?name=([^&]*)/);
+    this.saveAsPending = rename ? null : pending;
+    this.saveAsFor = organ;
+    this.saveAsOpen = true;
+    this.closeSaveForm();
+    const strong = (text) => Object.assign(document.createElement("strong"), { textContent: text });
+    this.el.saveAsNote.replaceChildren(
+      ...(adopted
+        ? [
+            strong(organ),
+            " is the sample set's own organ, and Aristide keeps it exactly as the set " +
+              "defines it. Save it under a different name and the copy is yours to change" +
+              (pending && !rename ? " — this change and every one after it." : ".") +
+              " The set's own organ stays as it was.",
+          ]
+        : [
+            "Save a copy of ",
+            strong(organ),
+            " under a new name and carry on playing the copy. ",
+            strong(organ),
+            " stays as it is.",
+          ])
+    );
+    this.el.saveAsName.value = rename
+      ? decodeURIComponent(rename[1].replace(/\+/g, " "))
+      : `My ${organ}`;
+    this.hideSaveAsError();
+    this.el.saveAs.classList.remove("hidden");
+    this.root.body.classList.add("modal-open");
+    requestAnimationFrame(() => {
+      this.el.saveAsName.focus();
+      this.el.saveAsName.select();
+    });
+  }
+
+  closeSaveAsForm() {
+    if (!this.saveAsOpen) return;
+    this.saveAsOpen = false;
+    this.saveAsPending = null;
+    this.saveAsFor = null;
+    this.el.saveAs.classList.add("hidden");
+    this.root.body.classList.remove("modal-open");
+    this.hideSaveAsError();
+  }
+
+  /// The dialog is about one organ: if another loads under it, or the
+  /// one it is about has been saved elsewhere already, it no longer
+  /// applies.
+  syncSaveAsForm() {
+    const snapshot = this.lastSnapshot;
+    if (!snapshot?.setup?.file || snapshot.organ !== this.saveAsFor) this.closeSaveAsForm();
+  }
+
+  async saveOrganAs() {
+    const name = this.el.saveAsName.value.trim();
+    if (!name) {
+      this.showSaveAsError("Give it a name first.");
+      return;
+    }
+    if (name === this.saveAsFor) {
+      this.showSaveAsError("Give the copy a name of its own.");
+      return;
+    }
+    const pending = this.saveAsPending;
+    this.el.saveAsBtn.disabled = true;
+    try {
+      const response = await fetch(this.base + commands.organSaveAs(name), { method: "POST" });
+      if (!response.ok) {
+        this.showSaveAsError((await response.text()) || `${response.status} ${response.statusText}`);
+        return;
+      }
+      this.closeSaveAsForm();
+      // The server has switched to the copy; the change it refused a
+      // moment ago goes through now. The next poll shows the new name.
+      if (pending) this.send(pending);
+    } catch (err) {
+      this.showSaveAsError(String(err));
+    } finally {
+      this.el.saveAsBtn.disabled = false;
+    }
+  }
+
+  showSaveAsError(text) {
+    this.el.saveAsError.textContent = text;
+    this.el.saveAsError.classList.remove("hidden");
+  }
+
+  hideSaveAsError() {
+    this.el.saveAsError.classList.add("hidden");
+    this.el.saveAsError.textContent = "";
   }
 
   /// The settings popovers as a family, closed whenever another
@@ -3517,11 +3655,23 @@ export class Editor {
     return ok;
   }
 
+  /// A 409 is the sample set's own organ refusing to change: not an
+  /// error to show, but the save-as dialog to open with the refused
+  /// command in hand (see openSaveAsForm). True when handled that way.
+  deferToSaveAs(response, query) {
+    if (response.status !== 409) return false;
+    this.openSaveAsForm(query);
+    return true;
+  }
+
+  /// `error` is null when nothing is the caller's to show — the edit
+  /// went through, or the save-as dialog has taken it over.
   async organCommandResult(query) {
     this.hideError();
     try {
       const response = await fetch(this.base + query, { method: "POST" });
       if (!response.ok) {
+        if (this.deferToSaveAs(response, query)) return { ok: false, error: null };
         return { ok: false, error: (await response.text()) || `${response.status} ${response.statusText}` };
       }
       // Any successful edit can change what the sources offer (a new
@@ -3548,6 +3698,7 @@ export class Editor {
         while (this.lastSnapshot?.loading) await sleep(150);
         const { ok, error } = await this.organCommandResult(query);
         if (ok) break;
+        if (error == null) return; // the save-as dialog has it now
         if (!/loading/i.test(error ?? "")) {
           this.showError(error);
           return;
@@ -3787,6 +3938,12 @@ export class Editor {
     });
     window.addEventListener("keydown", (event) => {
       if (event.key !== "Escape") return;
+      // The dialog is modal: Escape means it, and nothing under it.
+      if (this.saveAsOpen) {
+        event.preventDefault();
+        this.closeSaveAsForm();
+        return;
+      }
       this.closeAdd();
       this.closeDivisionMenu();
       this.closeKeyboardMenu();
