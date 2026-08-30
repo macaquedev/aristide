@@ -52,6 +52,18 @@ fn respond(
     url: &str,
 ) -> Response<std::io::Cursor<Vec<u8>>> {
     let (path, query) = url.split_once('?').unwrap_or((url, ""));
+    // A sample set's own organ is kept exactly as the set defines it:
+    // one gate, ahead of every handler, so no edit lands live or in the
+    // file until the organ is saved under a different name. 409, not
+    // 400 — the request is fine, the organ's state is what refuses —
+    // so the console can answer with the save-as dialog rather than an
+    // error strip.
+    if *method == Method::Post
+        && edits_organ(path, query)
+        && state.lock().expect("state poisoned").setup.adopted
+    {
+        return adopted_refusal();
+    }
     match (method, path) {
         (Method::Get, "/") => html(PAGE),
         (Method::Get, "/api/state") => json(state_json(state)),
@@ -1235,6 +1247,18 @@ fn respond(
                 None => bad_request("missing path"),
             }
         }
+        // Copy the loaded organ's file under a new name and switch to
+        // the copy — the way past an adopted organ's refusal to change.
+        (Method::Post, "/api/organ/save_as") => match param(query, "name").map(unescape) {
+            Some(name) => {
+                let mut state = state.lock().expect("state poisoned");
+                match state.save_organ_as(&name) {
+                    Ok(()) => json(state_json_locked(&state)),
+                    Err(err) => bad_request(&err),
+                }
+            }
+            None => bad_request("missing name"),
+        },
         // Input routing, addressed the way the player thinks about it:
         // *this manual* listens to *that device*. `slot` numbers a
         // manual's inputs (a manual may have several); a slot past the
@@ -2365,12 +2389,13 @@ fn state_json_locked(state: &State) -> String {
     // preferences edit compasses, and saving writes it all to a file.
     if !state.setup.sources.is_empty() {
         out.push_str(&format!(
-            ",\"setup\":{{\"implicit\":{},\"file\":{},\"sources\":[",
+            ",\"setup\":{{\"implicit\":{},\"file\":{},\"adopted\":{},\"sources\":[",
             state.setup.implicit,
             state
                 .composite_path
                 .as_ref()
-                .map_or_else(|| "null".to_string(), |p| json_string(&p.display().to_string()))
+                .map_or_else(|| "null".to_string(), |p| json_string(&p.display().to_string())),
+            state.setup.adopted
         ));
         for (index, (label, path)) in state.setup.sources.iter().enumerate() {
             if index > 0 {
@@ -2644,6 +2669,31 @@ fn json(body: String) -> Response<std::io::Cursor<Vec<u8>>> {
 
 fn bad_request(reason: &str) -> Response<std::io::Cursor<Vec<u8>>> {
     Response::from_string(reason).with_status_code(400)
+}
+
+/// The refusal every organ-changing route answers while the loaded
+/// organ is a sample set's own (`adopted = true` in its file).
+pub const ADOPTED_REFUSAL: &str = "this is the sample set's own organ, kept exactly as the set \
+     defines it — save it under a different name to change it";
+
+fn adopted_refusal() -> Response<std::io::Cursor<Vec<u8>>> {
+    Response::from_string(ADOPTED_REFUSAL).with_status_code(409)
+}
+
+/// Whether a POST changes the organ — anything that writes into its
+/// file, or arms a learn that ends in a write. Playing (stops, keys,
+/// swell, gain, pistons) is not a change; neither is loading another
+/// organ, nor saving this one. Mirrors the `config::write_composite_*`
+/// family: extend both together.
+fn edits_organ(path: &str, query: &str) -> bool {
+    match path {
+        "/api/organ/load" | "/api/organ/new" | "/api/organ/save" | "/api/organ/save_as" => false,
+        "/api/reverb" | "/api/noises" => param(query, "persist") == Some("1"),
+        "/api/tuning" | "/api/trem/params" | "/api/conflict" | "/api/midi/bind"
+        | "/api/midi/unbind" | "/api/midi/learn" | "/api/control/bind" | "/api/control/unbind"
+        | "/api/control/learn" => true,
+        _ => path.starts_with("/api/organ/"),
+    }
 }
 
 /// A tuning anchor's key as the API takes it: a scientific-pitch name
@@ -3329,6 +3379,78 @@ mod tests {
         }
         let refused = respond(&state, &Method::Post, "/api/trem/params?rate=5");
         assert_eq!(refused.status_code().0, 400, "wave tremulants have no shape");
+    }
+
+    /// A sample set's own organ refuses every change with 409 — live
+    /// edits and structural ones alike, nothing touches the engine or
+    /// the file — while playing it is untouched. Saving it under a
+    /// different name copies the file, switches to the copy, and from
+    /// then on edits land there; the original keeps its mark and its
+    /// bytes.
+    #[test]
+    fn an_adopted_organ_refuses_edits_until_saved_under_another_name() {
+        let Some(state) = demo_state() else { return };
+        let demo = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testsets/grandorgue-demo/demo.organ");
+        let dir = std::env::temp_dir().join("aristide-adopted-guard-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let organ = aristide_formats::grandorgue::load(&demo).expect("demo parses").organ;
+        let canonical = demo.canonicalize().expect("canonicalizes");
+        let file = crate::config::create_wrapper_organ(&dir, "Demo", &canonical, &organ, None)
+            .expect("inventory written");
+        let before = std::fs::read_to_string(&file).expect("reads");
+        {
+            let mut state = state.lock().expect("state");
+            state.composite_path = Some(file.clone());
+            state.setup.adopted = true;
+            state.setup.sources = vec![("Demo".into(), file.clone())];
+            state.organ_key = "Demo".into();
+        }
+        assert!(state_json(&state).contains("\"adopted\":true"));
+
+        let tuning_before = state_json(&state);
+        let refused = respond(&state, &Method::Post, "/api/tuning?reference_hz=415");
+        assert_eq!(refused.status_code().0, 409, "a live edit is refused");
+        let refused = respond(&state, &Method::Post, "/api/organ/manual/add?name=Solo");
+        assert_eq!(refused.status_code().0, 409, "a structural edit is refused");
+        let refused = respond(&state, &Method::Post, "/api/reverb?wet=0.5&persist=1");
+        assert_eq!(refused.status_code().0, 409, "a persisted room setting is refused");
+        let refused = respond(&state, &Method::Post, "/api/organ/rename?name=Other");
+        assert_eq!(refused.status_code().0, 409, "so is renaming the set's own organ");
+        let refused = respond(&state, &Method::Post, "/api/midi/learn?manual=0&slot=0");
+        assert_eq!(refused.status_code().0, 409, "and arming a learn that ends in a write");
+        assert_eq!(state_json(&state), tuning_before, "nothing changed live");
+        assert_eq!(std::fs::read_to_string(&file).expect("reads"), before, "nor on disk");
+        assert!(state.lock().expect("state").pending_load.is_none(), "no rebuild queued");
+
+        let played = respond(&state, &Method::Post, "/api/stop?id=0&on=1");
+        assert_eq!(played.status_code().0, 200, "playing is not a change");
+        let live = respond(&state, &Method::Post, "/api/reverb?wet=0.5");
+        assert_eq!(live.status_code().0, 200, "a slider mid-drag is not a change either");
+
+        let same = respond(&state, &Method::Post, "/api/organ/save_as?name=Demo");
+        assert_eq!(same.status_code().0, 400, "the copy needs a name of its own");
+        let saved = respond(&state, &Method::Post, "/api/organ/save_as?name=My%20Demo");
+        assert_eq!(saved.status_code().0, 200);
+        let body = state_json(&state);
+        assert!(body.contains("\"adopted\":false"), "the copy takes edits: {body}");
+        assert!(body.contains("\"organ\":\"My Demo\""), "and carries the new name: {body}");
+        let copy = state.lock().expect("state").composite_path.clone().expect("a file");
+        assert_ne!(copy, file);
+        assert_eq!(copy.parent(), file.parent(), "the copy sits beside the original");
+        assert_eq!(std::fs::read_to_string(&file).expect("reads"), before, "original untouched");
+        {
+            let state = state.lock().expect("state");
+            assert_eq!(state.organ_key, "My Demo", "wiring is keyed by the new name");
+            assert_eq!(state.midi_config.library[0].name, "My Demo", "the library learned it");
+            assert!(!state.setup.adopted);
+        }
+
+        let ok = respond(&state, &Method::Post, "/api/tuning?reference_hz=415");
+        assert_eq!(ok.status_code().0, 200, "edits land on the copy");
+        let text = std::fs::read_to_string(&copy).expect("reads");
+        assert!(text.contains("415"), "written into the copy: {text}");
+        assert_eq!(std::fs::read_to_string(&file).expect("reads"), before, "never the original");
     }
 
     /// The organ-pane editor endpoints against a real inventory file:

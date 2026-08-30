@@ -241,6 +241,20 @@ delete. Renames, wiring and every per-organ edit have a durable home from
 the first load. The only un-adopted loads are multi-set CLI launches (the
 implicit combination, until saved) and the no-config-directory fallback.
 
+**The set's own organ is read-only (locked 2026-08-30):** the adopted file
+carries `adopted = true` and refuses every change — live or structural,
+wiring included — with 409 until the organ is saved under a different name.
+The console answers the refusal with a save-as dialog rather than an error;
+saving (`/api/organ/save_as`) copies the file line for line beside the
+original with the mark dropped, switches to the copy without a rebuild, and
+sends the refused change again, so the player's gesture lands after all —
+on an organ that is theirs. A sample set's organ therefore always loads as
+the set defines it, the player's instrument is a named copy, and browsing
+to the raw set again means the marked original, never a copy (the older
+`layout = true` / bare-file signs of adoption only count when no marked
+file is in reach). "Save as…" on the organ-name menu makes the same copy of
+any organ that has a file.
+
 The console edits the instrument live, and every edit lands in its file:
 declared compasses (`[[manual]] low/high`), stops moved between manuals
 (`[[move]]` — pitch-anchored, replayed after the pulls), couplers taken off the

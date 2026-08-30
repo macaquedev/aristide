@@ -121,9 +121,11 @@ impl MidiConfig {
     /// built on the console from it), so `name` — the library entry
     /// the player actually clicked — decides between them: an organ
     /// named exactly that wins. Without a name match, only *adopted*
-    /// wrappers qualify — `layout = true` on the source (adoption
-    /// writes it), or a bare file with no structure of its own (how
-    /// adoption wrote them before the inventory). An organ merely
+    /// wrappers qualify — `adopted = true` in the file first (the
+    /// set's own organ, never a copy saved from it), else the older
+    /// signs: `layout = true` on the source, or a bare file with no
+    /// structure of its own (how adoption wrote them before the
+    /// inventory). An organ merely
     /// *built from* the set — its own manuals, its own pulls — is
     /// reached by its name, never by naming the raw set: browsing to
     /// the set means the set's own organ, not silently the most
@@ -139,7 +141,7 @@ impl MidiConfig {
         name: Option<&str>,
         organs_dir: Option<&Path>,
     ) -> Option<PathBuf> {
-        let wraps = |candidate: &Path| -> Option<(String, bool)> {
+        let wraps = |candidate: &Path| -> Option<(String, bool, bool)> {
             if !aristide_formats::instrument::is_definition(candidate) {
                 return None;
             }
@@ -158,13 +160,18 @@ impl MidiConfig {
             if resolved.canonicalize().ok().as_deref() != Some(set) {
                 return None;
             }
-            let adopted = source.layout()
+            let adopted = def.adopted
+                || source.layout()
                 || (def.manuals.is_empty()
                     && def.divisions.is_empty()
                     && def.stops.is_empty()
                     && def.moves.is_empty());
-            Some((def.name, adopted))
+            Some((def.name, def.adopted, adopted))
         };
+        // The marked original outranks a copy made to edit it (which
+        // wraps the set the same way, `layout = true` and all); the
+        // heuristic alone is for wrappers written before the mark.
+        let mut marked: Option<PathBuf> = None;
         let mut fallback: Option<PathBuf> = None;
         let mut candidates: Vec<PathBuf> =
             self.library.iter().map(|entry| entry.path.clone()).collect();
@@ -179,17 +186,19 @@ impl MidiConfig {
             candidates.extend(on_disk);
         }
         for candidate in candidates {
-            let Some((organ_name, adopted)) = wraps(&candidate) else {
+            let Some((organ_name, is_marked, adopted)) = wraps(&candidate) else {
                 continue;
             };
             if name.is_some_and(|wanted| organ_name == wanted) {
                 return Some(candidate);
             }
-            if adopted {
+            if is_marked {
+                marked.get_or_insert(candidate);
+            } else if adopted {
                 fallback.get_or_insert(candidate);
             }
         }
-        fallback
+        marked.or(fallback)
     }
 
     /// The library entries whose files still exist — what the picker
@@ -503,6 +512,9 @@ pub fn create_wrapper_organ(
     let (name, path) = organ_file_path(dir, name)?;
     let mut doc = toml_edit::DocumentMut::new();
     doc["name"] = toml_edit::value(name);
+    // The set's own organ, kept as the set defines it: edits refuse
+    // until it is saved under another name (`copy_composite_as`).
+    doc["adopted"] = toml_edit::value(true);
     let mut sources = toml_edit::Table::new();
     let mut source = toml_edit::InlineTable::new();
     source.insert("path", set.to_string_lossy().as_ref().into());
@@ -1224,6 +1236,24 @@ pub fn write_composite_drops(path: &Path, dropped: &[String]) -> Result<(), Stri
 /// changes, every other line — comments included — survives. The file
 /// itself stays where it is, so the library and anything else that
 /// refers to it by path keeps working.
+/// Copy the organ file at `path` into `dir` as an organ named `name`:
+/// the same file line for line — inventory, sidecar sections, wiring,
+/// layout — under the new name, with the `adopted` flag dropped so the
+/// copy takes edits. This is how a sample set's own organ becomes the
+/// player's: the original stays exactly as the set defines it.
+pub fn copy_composite_as(path: &Path, dir: &Path, name: &str) -> Result<PathBuf, String> {
+    let mut doc = composite_doc(path)?;
+    let current = doc.get("name").and_then(|item| item.as_str()).unwrap_or("");
+    if current.trim() == name.trim() {
+        return Err("give the copy a name of its own".into());
+    }
+    let (name, target) = organ_file_path(dir, name)?;
+    doc["name"] = toml_edit::value(name);
+    doc.remove("adopted");
+    write_atomically(&target, doc.to_string())?;
+    Ok(target)
+}
+
 pub fn write_composite_name(path: &Path, name: &str) -> Result<(), String> {
     let text =
         std::fs::read_to_string(path).map_err(|err| format!("{}: {err}", path.display()))?;
@@ -3015,6 +3045,56 @@ mod tests {
         }
     }
 
+    /// An adopted wrapper is marked as the set's own organ, and the
+    /// copy made to edit it is the same file under another name with
+    /// the mark dropped — the original untouched. The copy still wraps
+    /// the set, but only the marked original stands in for the set
+    /// when the raw set is loaded again.
+    #[test]
+    fn a_copy_under_another_name_drops_the_adopted_mark() {
+        let dir = std::env::temp_dir().join("aristide-copy-as-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        let set = dir.join("village.organ");
+        std::fs::write(&set, "[Organ]").expect("fixture set");
+        let organs = dir.join("organs");
+        let original = create_wrapper_organ(&organs, "Village", &set, &test_organ(), None)
+            .expect("wrapper created");
+        let before = std::fs::read_to_string(&original).expect("reads");
+        assert!(before.contains("adopted = true"), "adoption marks the set's own organ");
+
+        assert!(
+            copy_composite_as(&original, &organs, "Village").is_err(),
+            "the copy needs a name of its own"
+        );
+        let copy = copy_composite_as(&original, &organs, "My Village").expect("copied");
+        assert_ne!(copy, original);
+        assert_eq!(std::fs::read_to_string(&original).expect("reads"), before, "untouched");
+        let text = std::fs::read_to_string(&copy).expect("reads");
+        assert!(!text.contains("adopted"), "the copy takes edits: {text}");
+        let def: aristide_formats::instrument::Definition =
+            toml::from_str(&text).expect("a valid organ file");
+        assert_eq!(def.name, "My Village");
+        assert!(!def.adopted);
+        assert_eq!(def.stops.len(), 2, "the inventory came along");
+
+        let mut config = MidiConfig::default();
+        config.remember("My Village", &copy);
+        config.remember("Village", &original);
+        let canonical = set.canonicalize().expect("canonicalizes");
+        assert_eq!(
+            config.wrapper_for(&canonical, Some("My Village"), None),
+            Some(copy.clone()),
+            "the copy is reached by its name"
+        );
+        config.library.retain(|entry| entry.path != original);
+        assert_eq!(
+            config.wrapper_for(&canonical, None, Some(&organs)),
+            Some(original.clone()),
+            "the raw set means the marked original, not the copy"
+        );
+    }
+
     /// Adopting a set makes a real organ file: the set as the one
     /// source, the sidecar's sections carried in (its rename becoming
     /// the file's own name, its relative reverb IR resolved — the file
@@ -3138,8 +3218,9 @@ mod tests {
     /// Several organs can wrap one set — the adopted wrapper plus
     /// organs built on the console from it. The name of the library
     /// entry the player clicked decides which one loads; without it
-    /// (or when nothing carries that name) the most recently played
-    /// one wins, never silently a different organ than the click said.
+    /// (or when nothing carries that name) the set's own organ — the
+    /// marked original — wins, never silently a different organ than
+    /// the click said, and never a copy saved from it.
     #[test]
     fn the_clicked_name_picks_among_organs_sharing_a_set() {
         let dir = std::env::temp_dir().join("aristide-wrapper-name-test");
@@ -3176,14 +3257,21 @@ mod tests {
         );
         assert_eq!(
             config.wrapper_for(&canonical, None, None),
-            Some(built.clone()),
-            "no name: most recent wins"
+            Some(adopted.clone()),
+            "no name: the set's own organ wins over recency"
         );
         assert_eq!(
             config.wrapper_for(&canonical, Some("Renamed Since"), None),
-            Some(built),
+            Some(adopted.clone()),
             "a stale name still resolves rather than duplicating the organ"
         );
+        config.forget(&adopted);
+        assert_eq!(
+            config.wrapper_for(&canonical, None, None),
+            Some(built),
+            "with no marked original in reach, the older signs still count"
+        );
+        config.remember("Chapelle", &adopted);
 
         // The name also reaches into the organs folder for an organ
         // taken off Recent.

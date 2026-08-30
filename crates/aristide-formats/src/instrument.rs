@@ -93,6 +93,13 @@ fn invalid(message: impl Into<String>) -> InstrumentError {
 #[serde(deny_unknown_fields)]
 pub struct Definition {
     pub name: String,
+    /// Written by adoption: this file is a sample set's own organ,
+    /// the inventory of what the set defines, kept exactly as the set
+    /// defines it. An adopted organ refuses edits — changing anything
+    /// means saving it under a different name first, and the copy
+    /// drops the flag.
+    #[serde(default)]
+    pub adopted: bool,
     /// Alias → source set, relative to this file.
     #[serde(default)]
     pub sources: BTreeMap<String, SourceDef>,
@@ -552,6 +559,8 @@ pub struct Assembled {
     /// The file's `[console.coupler_keys]` — per-coupler `"never"` /
     /// `"always"` overrides of `coupled_keys`, by console name.
     pub console_coupler_keys: BTreeMap<String, String>,
+    /// The file's top-level `adopted` flag — see `Definition::adopted`.
+    pub adopted: bool,
     pub warnings: Vec<String>,
 }
 
@@ -963,6 +972,7 @@ pub fn assemble(
         console_order: def.console.order.clone(),
         console_coupled_keys: def.console.coupled_keys,
         console_coupler_keys: def.console.coupler_keys.clone(),
+        adopted: def.adopted,
         warnings: assembly.warnings,
     })
 }

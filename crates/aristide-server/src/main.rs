@@ -711,6 +711,11 @@ pub struct Setup {
     /// instrument yet, so the console should ask how it goes together
     /// and offer to save it.
     pub implicit: bool,
+    /// The sample set's own organ (its file carries `adopted = true`):
+    /// kept exactly as the set defines it, so every edit is refused
+    /// until the organ is saved under a different name — the copy is
+    /// the player's and takes edits.
+    pub adopted: bool,
 }
 
 impl State {
@@ -2119,6 +2124,59 @@ impl State {
             }
         }
         tracing::info!("organ renamed: {old_key:?} → {name:?}");
+        self.persist();
+        Ok(())
+    }
+
+    /// Save the loaded organ as a copy under `name` and switch to it:
+    /// the file is copied line for line beside the original (an
+    /// adopted set's organ loses its `adopted` flag on the way), the
+    /// wiring is copied under the new name, the library learns the
+    /// copy, and the console carries on playing the very same
+    /// instrument — nothing needs rebuilding, only the name and the
+    /// file behind it change. The original file is left untouched.
+    /// This is the way past an adopted organ's refusal to be edited.
+    pub fn save_organ_as(&mut self, name: &str) -> Result<(), String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("the organ needs a name".into());
+        }
+        let Some(current) = self.composite_path.clone() else {
+            return Err(
+                "this combination isn't saved as a file yet — save it as an organ file first"
+                    .into(),
+            );
+        };
+        // The copy sits beside the original — the organs directory
+        // for an adopted set, or wherever the player keeps the file.
+        let dir = current
+            .parent()
+            .filter(|dir| !dir.as_os_str().is_empty())
+            .map(std::path::Path::to_path_buf)
+            .or_else(config::organs_dir)
+            .ok_or_else(|| "no directory to keep the copy in".to_string())?;
+        let Control::Organ(console) = &mut self.control else {
+            return Err("no organ is loaded".into());
+        };
+        let copy = config::copy_composite_as(&current, &dir, name)?;
+        let old_file = current.canonicalize().unwrap_or(current);
+        let file = copy.canonicalize().unwrap_or_else(|_| copy.clone());
+        let old_key = std::mem::replace(&mut self.organ_key, name.to_string());
+        if let Some(wiring) = self.midi_config.organs.get(&old_key).cloned() {
+            self.midi_config.organs.insert(name.to_string(), wiring);
+        }
+        console.set_organ_name(name.to_string());
+        self.midi_config.remember(name, &file);
+        for (label, path) in &mut self.setup.sources {
+            if *path == old_file {
+                *label = name.to_string();
+                *path = file.clone();
+            }
+        }
+        self.composite_path = Some(copy);
+        self.setup.adopted = false;
+        self.setup.implicit = false;
+        tracing::info!("organ saved as {name:?}: {}", file.display());
         self.persist();
         Ok(())
     }

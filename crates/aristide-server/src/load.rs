@@ -293,6 +293,7 @@ pub fn prepare(
             );
             if paths.len() == 1 {
                 composite_midi = Some((path.clone(), assembled.midi));
+                setup.adopted = assembled.adopted;
                 // Assembled stops are ids in placement order, so the
                 // provenance vec zips onto them by index.
                 single_provenance = assembled
