@@ -661,6 +661,16 @@ pub struct TuningConfig {
     /// the reference key anchored at `reference_hz`.
     #[serde(default)]
     pub keymap: Option<String>,
+    /// Under a target tuning: `original` (the default) moves each pipe
+    /// by what the organ's fitted tuning moves by, so every pipe keeps
+    /// its own few cents of drift — the same instrument retuned;
+    /// `exact` lands each pipe on the target from its measured pitch.
+    #[serde(default = "default_pipes")]
+    pub pipes: String,
+}
+
+fn default_pipes() -> String {
+    "original".into()
 }
 
 fn default_temperament() -> String {
@@ -685,6 +695,7 @@ impl Default for TuningConfig {
             transpose: 0,
             scale: None,
             keymap: None,
+            pipes: default_pipes(),
         }
     }
 }

@@ -213,6 +213,8 @@ pub struct ManualDef {
     /// Its `.kbm` keyboard mapping; omitted, keys map linearly onto
     /// successive degrees with the reference key at `reference_hz`.
     pub keymap: Option<String>,
+    /// `original` | `exact` — see `[tuning] pipes`.
+    pub pipes: Option<String>,
     /// A microtonal manual's hex-field layout (`hex = { rows = 5,
     /// right = 2, upright = 1, ... }`). Fields left out follow the
     /// derived default; the whole table left out means the default.
@@ -503,6 +505,7 @@ pub struct ManualTuningDef {
     pub transpose: Option<i8>,
     pub scale: Option<String>,
     pub keymap: Option<String>,
+    pub pipes: Option<String>,
 }
 
 /// Where an assembled stop came from — the coordinates every per-stop
@@ -945,6 +948,7 @@ pub fn assemble(
                 || manual.reference_hz.is_some()
                 || manual.transpose.is_some()
                 || manual.scale.is_some()
+                || manual.pipes.is_some()
         })
         .map(|(index, manual)| ManualTuningDef {
             manual: index,
@@ -955,6 +959,7 @@ pub fn assemble(
             transpose: manual.transpose,
             scale: manual.scale.clone(),
             keymap: manual.keymap.clone(),
+            pipes: manual.pipes.clone(),
         })
         .collect();
     let mut organ = assembly.finish(def.name.clone());
@@ -1793,6 +1798,7 @@ mod tests {
             transpose: None,
             scale: None,
             keymap: None,
+            pipes: None,
             hex: None,
         }
     }
@@ -2437,6 +2443,7 @@ drop = ["Swell to Great"]
                 transpose: None,
                 scale: None,
                 keymap: None,
+                pipes: None,
             }]
         );
         assert_eq!(built.sidecar.couplers.drop, ["Swell to Great"]);

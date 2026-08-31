@@ -353,7 +353,13 @@ its measured pitch, so "440 equal" on a 415 meantone set is exact per pipe,
 Hauptwerk-style, not a guess applied on top of an unknown. Naming `original`
 returns the reference to the organ's own; naming a target keeps the reference
 it had (a temperament change never jumps the pitch a semitone on its own);
-`reference_hz = home` releases a pulled reference. Measurement also decides
+`reference_hz = home` releases a pulled reference. What a target does with
+each pipe's own *drift* — the few cents every real pipe sits from where its
+tuner meant it, left once pitch standard and temperament are accounted for —
+is `pipes = "original" | "exact"` (default `original`): each pipe moved by
+what the fitted model moves by, drift kept (the same instrument, retuned by a
+tuner exactly as good as the first), or each pipe landed on the target from
+its measured pitch (clinically in tune). Measurement also decides
 key placement: a pipe more than 50 ¢ from where its rank's anchor plus the
 class table puts it is a file at another key (a borrowed neighbour, a mis-keyed
 sample), moved onto the model from its measured pitch; the `smpl`/ODF metadata

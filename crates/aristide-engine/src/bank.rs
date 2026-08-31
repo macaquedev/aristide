@@ -328,7 +328,7 @@ impl Sample {
     pub fn measure_period(&self, expected: f64) -> Option<f64> {
         let (loop_start, loop_end) = self.sustain_loop?;
         let loop_len = (loop_end - loop_start) as f64;
-        if !(expected >= 4.0) || loop_len < expected * 2.5 {
+        if expected.is_nan() || expected < 4.0 || loop_len < expected * 2.5 {
             return None;
         }
         let window = (2048.0_f64).min(loop_len / 2.0) as u64;

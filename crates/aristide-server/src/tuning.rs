@@ -233,6 +233,39 @@ pub(crate) fn median(values: &mut [f64]) -> Option<f64> {
     })
 }
 
+/// What a target tuning does with each pipe's own drift — the few
+/// cents every real pipe sits from where its tuner meant it (weather,
+/// a knocked slide, a deliberately stretched top), left over once the
+/// pitch standard and the temperament are accounted for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PipeRetune {
+    /// Each pipe moves by what its neighbours move by and keeps its
+    /// own drift: the same instrument, retuned by a tuner exactly as
+    /// good as the original one.
+    #[default]
+    Original,
+    /// Each pipe lands on the target to the precision of the
+    /// measurement — a clinically in-tune instrument.
+    Exact,
+}
+
+impl PipeRetune {
+    pub fn parse(name: &str) -> Option<PipeRetune> {
+        Some(match name.trim().to_lowercase().as_str() {
+            "original" | "keep" | "drift" => PipeRetune::Original,
+            "exact" | "flat" | "flatten" => PipeRetune::Exact,
+            _ => return None,
+        })
+    }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            PipeRetune::Original => "original",
+            PipeRetune::Exact => "exact",
+        }
+    }
+}
+
 /// A Scala scale with its keyboard mapping, loaded and ready — one
 /// division's whole key→pitch table. Shared by `Arc`: tunings are
 /// cloned on every key press's landing walk, and the table itself
@@ -388,6 +421,9 @@ pub struct Tuning {
     /// Semitones added to incoming keys before routing — a transposer
     /// selects different pipes, like the real console gadget.
     pub transpose: i8,
+    /// Under a target: whether each pipe keeps its own drift or lands
+    /// exactly on the target. Moot as recorded.
+    pub pipes: PipeRetune,
     /// What the organ was recorded in, when its pipes measured — the
     /// console stamps this into every tuning it installs. Under
     /// `Original` it is what the reference is measured against; under
@@ -407,6 +443,7 @@ impl Default for Tuning {
             scale: None,
             reference: PitchReference::A440,
             transpose: 0,
+            pipes: PipeRetune::Original,
             home: None,
         }
     }
@@ -462,6 +499,20 @@ impl Tuning {
     /// [`Tuning::deviation_cents`] is one whole-instrument shift.
     pub fn corrects_pipes(&self) -> bool {
         !(self.temperament == Temperament::Original && self.scale.is_none() && self.edo == 12)
+    }
+
+    /// What a target subtracts from its deviation for one pipe: the
+    /// pipe's measured offset (`home`) when every pipe must land
+    /// exactly, the fitted model's (`model`) when each keeps its own
+    /// drift; nothing as recorded.
+    pub fn pipe_offset(&self, home: f64, model: f64) -> f64 {
+        if !self.corrects_pipes() {
+            return 0.0;
+        }
+        match self.pipes {
+            PipeRetune::Exact => home,
+            PipeRetune::Original => model,
+        }
     }
 
     /// Under `Original`: how far the reference pulls the instrument

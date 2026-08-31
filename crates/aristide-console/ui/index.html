@@ -601,6 +601,17 @@
            entirely in editor.js (syncTuningForm) since it reads five
            fields off snapshot.home and none of them are static. -->
       <p class="editor-tuning-home" id="editor-tuning-home"></p>
+      <!-- Under a target tuning: whether each pipe keeps its own few
+           cents of drift (moved by what the organ's fitted tuning
+           moves by) or lands exactly on the target from its measured
+           pitch. Moot as recorded, so the row reads dimmed then. -->
+      <label class="settings-row" id="editor-tuning-pipes-row">
+        <span class="rail-label">Pipes</span>
+        <select id="editor-tuning-pipes">
+          <option value="original">Original (keep drift)</option>
+          <option value="exact">Exact</option>
+        </select>
+      </label>
       <!-- The pitch anchor: a piano key plus the Hz it sounds — not a
            fixed "a′" concept, since that only names a key in 12-EDO.
            `pitch-names` is filled in by editor.js at startup, one

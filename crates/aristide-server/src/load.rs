@@ -790,6 +790,7 @@ pub fn prepare(
         }
         .clamped(),
         transpose: sidecar.tuning.transpose.clamp(-12, 12),
+        pipes: parse_pipes(&sidecar.tuning.pipes).unwrap_or_default(),
         home: home.clone(),
     };
     if let Some(scl) = &sidecar.tuning.scale {
@@ -834,6 +835,11 @@ pub fn prepare(
             }
             .clamped(),
             transpose: def.transpose.unwrap_or(live_tuning.transpose).clamp(-12, 12),
+            pipes: def
+                .pipes
+                .as_deref()
+                .and_then(parse_pipes)
+                .unwrap_or(live_tuning.pipes),
             home: home.clone(),
         };
         if let Some(scl) = &def.scale {
@@ -1315,6 +1321,16 @@ mod tests {
 /// A `reference_key` as the file spells it ("C4", "F#3", or a MIDI
 /// number) resolved to a key, falling back — with a warning, never a
 /// failed load — to `inherited` (the instrument's anchor) or A4.
+/// `pipes = "original" | "exact"`, warning (and keeping the default)
+/// on anything else — a typo must not brick the organ.
+fn parse_pipes(name: &str) -> Option<tuning::PipeRetune> {
+    let parsed = tuning::PipeRetune::parse(name);
+    if parsed.is_none() {
+        tracing::warn!("tuning: unknown pipes mode {name:?}; pipes keep their drift");
+    }
+    parsed
+}
+
 fn reference_key(spec: &aristide_formats::sidecar::KeySpec, inherited: Option<u8>) -> u8 {
     spec.midi_note().unwrap_or_else(|| {
         let fallback = inherited.unwrap_or(tuning::PitchReference::A440.key);

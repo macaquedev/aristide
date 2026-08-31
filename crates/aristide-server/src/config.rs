@@ -845,6 +845,7 @@ pub struct ManualTuningFields {
     pub transpose: i8,
     pub scale: Option<String>,
     pub keymap: Option<String>,
+    pub pipes: crate::tuning::PipeRetune,
 }
 
 /// One manual as `save_composite` writes it: name, compass, and any
@@ -983,6 +984,7 @@ pub fn write_composite_manual_tuning(
                 "transpose",
                 "scale",
                 "keymap",
+                "pipes",
             ] {
                 table.remove(field);
             }
@@ -1022,6 +1024,13 @@ fn write_manual_tuning_fields(table: &mut toml_edit::Table, fields: &ManualTunin
             None => {
                 table.remove(key);
             }
+        }
+    }
+    // Pipes keep their drift by default; only `exact` is worth a line.
+    match fields.pipes {
+        crate::tuning::PipeRetune::Exact => table["pipes"] = toml_edit::value("exact"),
+        crate::tuning::PipeRetune::Original => {
+            table.remove("pipes");
         }
     }
 }
@@ -3564,6 +3573,7 @@ mod tests {
             transpose: 0,
             scale: scale.map(str::to_string),
             keymap: None,
+            pipes: crate::tuning::PipeRetune::Original,
         };
         assert!(
             write_composite_manual_tuning(&path, "Grand orgue", Some(tuned("equal", Some("19edo.scl"))))
@@ -4187,6 +4197,37 @@ device = "Keys"
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// `pipes` is written only as `exact`: keeping drift is the
+    /// default and reads as absence.
+    #[test]
+    fn pipes_mode_writes_only_when_exact() {
+        let path = std::env::temp_dir().join("aristide-pipes-mode-test.toml");
+        std::fs::write(&path, "name = \"P\"\n[sources]\ns1 = \"x.organ\"\n").expect("writes");
+        let fields = |pipes: crate::tuning::PipeRetune| ManualTuningFields {
+            temperament: "equal".into(),
+            edo: 12,
+            reference: crate::tuning::PitchReference::A440,
+            transpose: 0,
+            scale: None,
+            keymap: None,
+            pipes,
+        };
+        write_composite_tuning(&path, &fields(crate::tuning::PipeRetune::Exact)).expect("exact");
+        let text = std::fs::read_to_string(&path).expect("reads");
+        assert!(text.contains("pipes = \"exact\""), "{text}");
+        let def: aristide_formats::instrument::Definition =
+            toml::from_str(&text).expect("parses");
+        assert_eq!(def.tuning.pipes, "exact");
+        write_composite_tuning(&path, &fields(crate::tuning::PipeRetune::Original))
+            .expect("original");
+        let text = std::fs::read_to_string(&path).expect("reads");
+        assert!(!text.contains("pipes"), "{text}");
+        let def: aristide_formats::instrument::Definition =
+            toml::from_str(&text).expect("parses");
+        assert_eq!(def.tuning.pipes, "original");
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// The three whole-instrument settings the console commits without
     /// naming a manual: tuning, reverb wet, and the operating noises.
     /// Round-trips through the sidecar's own types, and follows the
@@ -4214,6 +4255,7 @@ device = "Keys"
                 transpose: -2,
                 scale: None,
                 keymap: None,
+                pipes: crate::tuning::PipeRetune::Original,
             },
         )
         .expect("tuning");
@@ -4244,6 +4286,7 @@ device = "Keys"
                 transpose: 0,
                 scale: Some("19edo.scl".into()),
                 keymap: Some("19edo.kbm".into()),
+                pipes: crate::tuning::PipeRetune::Original,
             },
         )
         .expect("tuning");
@@ -4262,6 +4305,7 @@ device = "Keys"
                 transpose: 0,
                 scale: None,
                 keymap: None,
+                pipes: crate::tuning::PipeRetune::Original,
             },
         )
         .expect("tuning");
@@ -4331,6 +4375,7 @@ volume = 0.7
                 transpose: 0,
                 scale: None,
                 keymap: None,
+                pipes: crate::tuning::PipeRetune::Original,
             },
         )
         .expect("tuning");

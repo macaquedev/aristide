@@ -320,6 +320,10 @@ fn respond(
                     {
                         tuning.transpose = t.clamp(-12, 12);
                     }
+                    if let Some(mode) = param(query, "pipes") {
+                        tuning.pipes = crate::tuning::PipeRetune::parse(mode)
+                            .ok_or_else(|| format!("pipes {mode:?} is neither original nor exact"))?;
+                    }
                     match param(query, "scale").map(unescape) {
                         Some(scl) if scl.is_empty() || scl == "off" => tuning.scale = None,
                         Some(scl) => {
@@ -2146,12 +2150,13 @@ fn state_json_locked(state: &State) -> String {
                 None => String::new(),
             };
             format!(
-                "\"temperament\":{},\"edo\":{},\"reference\":{{\"key\":{},\"hz\":{}}},\"transpose\":{}{scale}",
+                "\"temperament\":{},\"edo\":{},\"reference\":{{\"key\":{},\"hz\":{}}},\"transpose\":{},\"pipes\":{}{scale}",
                 json_string(tuning.temperament.name()),
                 tuning.edo,
                 tuning.reference.key,
                 tuning.reference.hz,
-                tuning.transpose
+                tuning.transpose,
+                json_string(tuning.pipes.name())
             )
         };
         out.push_str(&format!(",\"tuning\":{{{}}}", tuning_json(&console.tuning())));
@@ -2897,6 +2902,13 @@ mod tests {
         assert!((reference_hz(&state_json(&state)) - home_a4).abs() < 0.01, "and released");
         let bad = respond(&state, &Method::Post, "/api/tuning?reference_hz=loud");
         assert_eq!(bad.status_code().0, 400);
+
+        // Pipes keep their drift unless asked to land exactly.
+        assert!(state_json(&state).contains("\"pipes\":\"original\""));
+        respond(&state, &Method::Post, "/api/tuning?pipes=exact");
+        assert!(state_json(&state).contains("\"pipes\":\"exact\""));
+        let bad = respond(&state, &Method::Post, "/api/tuning?pipes=sloppy");
+        assert_eq!(bad.status_code().0, 400);
     }
 
     /// The whole setup story over the API: the snapshot describes how
@@ -3010,6 +3022,7 @@ mod tests {
                 transpose: Some(0),
                 scale: None,
                 keymap: None,
+                pipes: None,
             }]
         );
         assert_eq!(saved.sidecar.couplers.drop.len(), 1);

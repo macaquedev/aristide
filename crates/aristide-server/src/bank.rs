@@ -32,6 +32,10 @@ pub struct VoiceSpec {
     /// nominal — that is what makes "440 equal" exact on a set
     /// recorded at 415 in meantone.
     pub home_cents: f32,
+    /// Where the organ's fitted tuning puts this pipe (rank anchor +
+    /// class table), cents from `nominal_hz`: `home_cents` less the
+    /// pipe's own drift. A target that keeps drift bends from here.
+    pub model_cents: f32,
     /// Linear gain.
     pub gain: f32,
     /// The rank's velocity→volume ramp; the console multiplies its
@@ -704,6 +708,7 @@ pub fn build(
                 rate: (p.info.sample_rate / device_rate as f64 * (cents / 1200.0).exp2()) as f32,
                 nominal_hz: pipe.nominal_frequency_hz as f32,
                 home_cents: home_cents as f32,
+                model_cents: model.unwrap_or(home_cents) as f32,
                 gain: db_to_linear(pipe.gain_db),
                 velocity: rank.velocity_volume,
                 percussive: p.info.percussive,
@@ -1272,6 +1277,7 @@ mod tests {
                 "key {midi}: home {} vs model {model}",
                 spec.home_cents
             );
+            assert!((spec.model_cents as f64 - model).abs() < 0.5, "key {midi}: model");
             if midi == 65 {
                 // Moved up the semitone its file is short of — E's
                 // recording to F's place, the tempering of each

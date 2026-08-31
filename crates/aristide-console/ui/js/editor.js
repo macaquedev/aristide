@@ -209,6 +209,8 @@ export class Editor {
       tuningTemperamentRow: root.getElementById("editor-tuning-temperament-row"),
       tuningTemperament: root.getElementById("editor-tuning-temperament"),
       tuningHome: root.getElementById("editor-tuning-home"),
+      tuningPipesRow: root.getElementById("editor-tuning-pipes-row"),
+      tuningPipes: root.getElementById("editor-tuning-pipes"),
       tuningEdoRow: root.getElementById("editor-tuning-edo-row"),
       tuningEdo: root.getElementById("editor-tuning-edo"),
       tuningRefKey: root.getElementById("editor-tuning-ref-key"),
@@ -1327,6 +1329,12 @@ export class Editor {
       this.el.tuningTemperament.blur();
     });
 
+    this.el.tuningPipes.addEventListener("change", () => {
+      if (this.tuningManual == null) return;
+      this.tuningCommand(this.tuningFields({ pipes: this.el.tuningPipes.value }));
+      this.el.tuningPipes.blur();
+    });
+
     this.el.tuningEdo.addEventListener("change", () => {
       if (this.tuningManual == null) return;
       const edo = Math.min(311, Math.max(1, Math.round(Number(this.el.tuningEdo.value) || 12)));
@@ -1541,6 +1549,18 @@ export class Editor {
       : "";
     this.el.tuningEdo.title = scale
       ? "A scale is active — setting a division count here leaves it"
+      : "";
+
+    // Pipes only mean something under a target: as recorded, every
+    // pipe is exactly where it is, so the row stays visible (the
+    // choice persists into the next target) but reads dimmed.
+    if (this.root.activeElement !== this.el.tuningPipes) {
+      this.el.tuningPipes.value = tuning.pipes ?? "original";
+    }
+    const asRecorded = tuning.temperament === "original" && edo === 12 && !scale;
+    this.el.tuningPipesRow.classList.toggle("tuning-dimmed", asRecorded);
+    this.el.tuningPipes.title = asRecorded
+      ? "As recorded, pipes are exactly where they are — this applies under a target tuning"
       : "";
   }
 

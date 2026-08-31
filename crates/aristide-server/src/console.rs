@@ -215,9 +215,11 @@ struct Speaking {
     rate: f32,
     deviation: f64,
     bend: f64,
-    /// The pipe's measured offset from its nominal (`home_cents`):
-    /// what a target tuning subtracts, and `Original` leaves alone.
+    /// The pipe's measured offset from its nominal (`home_cents`) and
+    /// the fitted model's (`model_cents`): what a target subtracts
+    /// (one or the other, see `Tuning::pipe_offset`).
     home: f64,
+    model: f64,
     /// Where the pitch was priced: sounding manual index + the (post-
     /// transpose) MIDI key on it. Live retuning re-prices exactly this
     /// coordinate, so a later transpose change — which reroutes future
@@ -245,6 +247,7 @@ struct KeyVoice {
     key: PipeKey,
     deviation: f64,
     home: f64,
+    model: f64,
     target: usize,
     ladder_key: i16,
     spec: VoiceSpec,
@@ -738,13 +741,13 @@ impl Console {
     /// was (note-off still finds it); a pipe several keys share
     /// follows the holder that started it.
     pub fn retune_held(&mut self) -> Vec<(u64, f32)> {
-        let voices: Vec<(PipeKey, usize, i16, f64)> = self
+        let voices: Vec<(PipeKey, usize, i16, f64, f64)> = self
             .speaking
             .iter()
-            .map(|(&at, voice)| (at, voice.target, voice.ladder_key, voice.home))
+            .map(|(&at, voice)| (at, voice.target, voice.ladder_key, voice.home, voice.model))
             .collect();
         let mut updates = Vec::new();
-        for (at, target, ladder_key, home) in voices {
+        for (at, target, ladder_key, home, model) in voices {
             let tuning = self.effective_tuning(target);
             let Some(deviation) = tuning.deviation_cents(ladder_key.max(0) as u16) else {
                 continue;
@@ -752,7 +755,7 @@ impl Console {
             // Priced net of the pipe's own offset under a target, as
             // at note-on — so leaving `Original` for "440 equal" pulls
             // each held pipe from where it really is.
-            let deviation = deviation - if tuning.corrects_pipes() { home } else { 0.0 };
+            let deviation = deviation - tuning.pipe_offset(home, model);
             let Some(voice) = self.speaking.get_mut(&at) else {
                 continue;
             };
@@ -1161,9 +1164,10 @@ impl Console {
             let Some(deviation) = tuning.deviation_cents(midi_key.max(0) as u16) else {
                 continue;
             };
-            // A target tuning is exact: each pipe is bent from where
-            // it was measured to sound, not from the nominal the
-            // ladder assumes. `Original` leaves every pipe as it is.
+            // A target tuning bends each pipe from where it was
+            // measured to sound (or from the organ's model of it, when
+            // it keeps its drift), not from the nominal the ladder
+            // assumes. `Original` leaves every pipe as it is.
             let corrects_pipes = tuning.corrects_pipes();
             // Negative below the set's own bottom key: the rank ladder
             // is extrapolated in both directions, so keep the sign.
@@ -1205,7 +1209,7 @@ impl Console {
                     let Some(spec) = self.specs.get(&(range.rank, pipe)) else {
                         continue;
                     };
-                    let home = if corrects_pipes { spec.home_cents as f64 } else { 0.0 };
+                    let home = tuning.pipe_offset(spec.home_cents as f64, spec.model_cents as f64);
                     let bend_cents = key_bend_cents - home;
                     let bend_ratio = ((bend_cents / 1200.0).exp2()) as f32;
                     // Routing is a property of the STOP (its speakers,
@@ -1245,6 +1249,7 @@ impl Console {
                         key,
                         deviation: deviation - home,
                         home: spec.home_cents as f64,
+                        model: spec.model_cents as f64,
                         target,
                         ladder_key: midi_key,
                         spec: self.voiced(spec, ratio * bend_ratio),
@@ -1474,6 +1479,7 @@ impl Console {
                         deviation: voice.deviation,
                         bend: 0.0,
                         home: voice.home,
+                        model: voice.model,
                         target: voice.target,
                         ladder_key: voice.ladder_key,
                     },
@@ -2287,6 +2293,7 @@ mod tests {
                         brightness: 0.02,
                         nominal_hz: 440.0,
                         home_cents: 0.0,
+                        model_cents: 0.0,
                         enclosure: aristide_engine::enclosure::ENCLOSURE_NONE,
                         bus: 0,
                         delay_frames: 0,
@@ -2739,6 +2746,7 @@ mod tests {
                     brightness: 0.02,
                     nominal_hz: 440.0,
                     home_cents: 0.0,
+                    model_cents: 0.0,
                     enclosure: aristide_engine::enclosure::ENCLOSURE_NONE,
                     bus: 0,
                     delay_frames: 0,
@@ -3091,6 +3099,7 @@ mod tests {
                         brightness: 0.0,
                         nominal_hz: 440.0,
                         home_cents: 0.0,
+                        model_cents: 0.0,
                         enclosure: aristide_engine::enclosure::ENCLOSURE_NONE,
                         bus: 0,
                         delay_frames: 0,
@@ -3403,8 +3412,12 @@ mod tests {
     fn targets_bend_from_the_measured_pitch_and_original_leaves_it() {
         let mut console = test_console();
         let anchor = 1200.0 * (415.0f64 / 440.0).log2();
+        // Every pipe sits 3 cents sharp of where the organ's tuning
+        // puts it: its own drift.
+        let drift = 3.0;
         for spec in console.specs.values_mut() {
-            spec.home_cents = anchor as f32;
+            spec.home_cents = (anchor + drift) as f32;
+            spec.model_cents = anchor as f32;
         }
         let home = std::sync::Arc::new(crate::tuning::HomeTuning {
             a4_hz: 415.0,
@@ -3437,14 +3450,25 @@ mod tests {
         });
         assert!((cents(rate_of(&mut console)) + anchor).abs() < 0.01, "pulled as one");
 
-        // Equal at 440: exact, from the measured pitch — the same 101
-        // cents here, but per pipe (a tempered set would differ).
+        // Equal at 440, pipes original: each pipe moves by what the
+        // model moves by and keeps its 3 cents of drift.
         console.set_tuning(crate::tuning::Tuning {
             temperament: crate::tuning::Temperament::Equal,
             reference: crate::tuning::PitchReference::A440,
             ..crate::tuning::Tuning::default()
         });
-        assert!((cents(rate_of(&mut console)) + anchor).abs() < 0.01, "target is exact");
+        assert!((cents(rate_of(&mut console)) + anchor).abs() < 0.01, "drift kept");
+        // Pipes exact: from the measured pitch, the drift goes too.
+        console.set_tuning(crate::tuning::Tuning {
+            temperament: crate::tuning::Temperament::Equal,
+            reference: crate::tuning::PitchReference::A440,
+            pipes: crate::tuning::PipeRetune::Exact,
+            ..crate::tuning::Tuning::default()
+        });
+        assert!(
+            (cents(rate_of(&mut console)) + anchor + drift).abs() < 0.01,
+            "target is exact"
+        );
 
         // Meantone at 440: C sits +10.265 above equal, from measured.
         console.set_tuning(crate::tuning::Tuning {
@@ -3489,6 +3513,7 @@ mod tests {
             scale: None,
             reference: crate::tuning::PitchReference::A440,
             transpose: 0,
+            pipes: crate::tuning::PipeRetune::Original,
             home: None,
         });
         let meantone_c = console.note_on_manual(0, 60, 127).0[0].spec.rate;
@@ -3507,6 +3532,7 @@ mod tests {
             scale: None,
             reference: crate::tuning::PitchReference::A440,
             transpose: 2,
+            pipes: crate::tuning::PipeRetune::Original,
             home: None,
         });
         let (transposed, _) = console.note_on_manual(0, 60, 127);
@@ -3533,6 +3559,7 @@ mod tests {
                 scale: None,
                 reference: crate::tuning::PitchReference::A440,
                 transpose: 0,
+                pipes: crate::tuning::PipeRetune::Original,
                 home: None,
             }),
         );
@@ -3558,6 +3585,7 @@ mod tests {
                 scale: None,
                 reference: crate::tuning::PitchReference::A440,
                 transpose: 2,
+                pipes: crate::tuning::PipeRetune::Original,
                 home: None,
             }),
         );
@@ -3591,6 +3619,7 @@ mod tests {
             })),
             reference: crate::tuning::PitchReference::A440,
             transpose: 0,
+            pipes: crate::tuning::PipeRetune::Original,
             home: None,
         };
         let mut console = coupled_console();
@@ -3685,6 +3714,7 @@ mod tests {
             })),
             reference: crate::tuning::PitchReference::A440,
             transpose: 0,
+            pipes: crate::tuning::PipeRetune::Original,
             home: None,
         };
         let mut console = coupled_console();
@@ -3764,6 +3794,7 @@ mod tests {
             })),
             reference: crate::tuning::PitchReference::A440,
             transpose: 0,
+            pipes: crate::tuning::PipeRetune::Original,
             home: None,
         };
         let mut console = coupled_console();
@@ -3928,6 +3959,7 @@ mod tests {
                         brightness: 0.0,
                         nominal_hz: 440.0,
                         home_cents: 0.0,
+                        model_cents: 0.0,
                         enclosure: aristide_engine::enclosure::ENCLOSURE_NONE,
                         bus: 0,
                         delay_frames: 0,
