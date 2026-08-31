@@ -587,6 +587,7 @@
       <label class="settings-row" id="editor-tuning-temperament-row">
         <span class="rail-label">Temperament</span>
         <select id="editor-tuning-temperament">
+          <option value="original">Original</option>
           <option value="equal">Equal</option>
           <option value="werckmeister3">Werckmeister III</option>
           <option value="kirnberger3">Kirnberger III</option>
@@ -594,16 +595,23 @@
           <option value="pythagorean">Pythagorean</option>
         </select>
       </label>
+      <!-- What the sample set actually sounds, measured against equal
+           A440 at load time — informational, but it's what "Original"
+           above and the ↺ button below both pull from. Text is built
+           entirely in editor.js (syncTuningForm) since it reads five
+           fields off snapshot.home and none of them are static. -->
+      <p class="editor-tuning-home" id="editor-tuning-home"></p>
       <!-- The pitch anchor: a piano key plus the Hz it sounds — not a
            fixed "a′" concept, since that only names a key in 12-EDO.
            `pitch-names` is filled in by editor.js at startup, one
            option per MIDI note 0-127, rather than hand-written here. -->
       <label class="settings-row">
         <span class="rail-label">Reference</span>
-        <span class="stepper">
+        <span class="stepper" id="editor-tuning-ref-stepper">
           <input id="editor-tuning-ref-key" type="text" list="pitch-names" autocomplete="off" spellcheck="false" />
           =
           <input id="editor-tuning-ref-hz" type="number" step="0.1" /> Hz
+          <button class="ghost hidden" type="button" id="editor-tuning-ref-home" title="As recorded">&#8634;</button>
         </span>
       </label>
       <datalist id="pitch-names"></datalist>

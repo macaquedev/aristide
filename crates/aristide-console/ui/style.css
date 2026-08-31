@@ -1135,6 +1135,10 @@ input[type="range"]:hover::-webkit-slider-thumb { filter: brightness(1.15); }
 }
 .editor-tuning-head .rail-label { font-size: 11px; letter-spacing: 0.6px; color: var(--text); }
 .editor-tuning-head .ghost { align-self: flex-end; padding: 3px 8px; font-size: 9px; }
+/* the recorded-tuning readout: same idiom as tuning-scale-name — small
+   and dim, since it's context for the fields above rather than one of
+   them — but full-width and wrapping, since the sentence runs long */
+.editor-tuning-home { margin: 0; font-size: 11px; line-height: 1.4; color: var(--text-dim); }
 .editor-add-form select { width: 100%; }
 .editor-add-form .settings-row .rail-label { flex: 0 0 auto; }
 .hex-presets { display: flex; gap: 6px; flex-wrap: wrap; }
@@ -1170,6 +1174,18 @@ input[type="range"]:hover::-webkit-slider-thumb { filter: brightness(1.15); }
   color: var(--text);
 }
 .tuning-scale-value .ghost { padding: 3px 8px; font-size: 9px; }
+/* sits inside a .stepper span (with the other reference fields), so
+   it needs its own override of that container's generic button sizing
+   — same small-ghost look as the scale-row buttons above */
+#editor-tuning-ref-home { width: auto; height: auto; padding: 3px 8px; font-size: 9px; }
+/* the key input, "=", Hz value and "Hz" label already fill this
+   popover's width on their own (270px, sized for the temperament
+   select's longest label) — the ↺ button has nowhere left on that
+   line. `.wrap` (toggled in syncTuningForm alongside the button's own
+   `hidden`) lets it wrap with "Hz", right-aligned under the Hz value,
+   instead of running off the popover's edge — scoped to only when the
+   button actually shows, so the row's ordinary layout is untouched. */
+#editor-tuning-ref-stepper.wrap { flex-wrap: wrap; justify-content: flex-end; row-gap: 4px; }
 #editor-tuning-scale-clear,
 #editor-tuning-keymap-clear {
   padding: 1px 6px;

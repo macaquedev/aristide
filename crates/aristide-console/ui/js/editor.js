@@ -59,6 +59,30 @@ function suppressClick(event) {
 /// these, or a drawknob could not be clicked and a key could not play.
 const INTERACTIVE = ".knob, .key, .cheek, .rocker, .shoe, button, input, select, textarea";
 
+/// What the tuning popover's "Recorded: …" line calls each of the
+/// temperaments `snapshot.home` can *identify* by name — `null` there
+/// means an unequal temperament that doesn't match any of these
+/// tables, not an absence of measurement (that's `home` itself null).
+const HOME_TEMPERAMENT_NAMES = {
+  equal: "equal",
+  werckmeister3: "Werckmeister III",
+  kirnberger3: "Kirnberger III",
+  meantone4: "¼-comma meantone",
+  pythagorean: "Pythagorean",
+};
+
+/// The pitch a sample set was actually recorded at for MIDI key `key`,
+/// per the snapshot's `home` block: `home.a4_hz` is the measured A4,
+/// `home.offsets_cents` the other eleven pitch classes' deviation from
+/// equal temperament under that A4 (C = index 0). Used only to decide
+/// whether the "as recorded" reference button has anything to do —
+/// the popover otherwise just echoes `home.a4_hz` verbatim.
+function homeHz(home, key) {
+  const equalCents = 1200 * Math.log2(home.a4_hz / 440);
+  const classCents = home.offsets_cents[key % 12];
+  return 440 * 2 ** ((key - 69) / 12 + (equalCents + classCents) / 1200);
+}
+
 export class Editor {
   constructor(root, base, send) {
     this.root = root;
@@ -184,10 +208,13 @@ export class Editor {
       tuningKeymapClear: root.getElementById("editor-tuning-keymap-clear"),
       tuningTemperamentRow: root.getElementById("editor-tuning-temperament-row"),
       tuningTemperament: root.getElementById("editor-tuning-temperament"),
+      tuningHome: root.getElementById("editor-tuning-home"),
       tuningEdoRow: root.getElementById("editor-tuning-edo-row"),
       tuningEdo: root.getElementById("editor-tuning-edo"),
       tuningRefKey: root.getElementById("editor-tuning-ref-key"),
       tuningRefHz: root.getElementById("editor-tuning-ref-hz"),
+      tuningRefStepper: root.getElementById("editor-tuning-ref-stepper"),
+      tuningRefHome: root.getElementById("editor-tuning-ref-home"),
       pitchNames: root.getElementById("pitch-names"),
       tuningTranspose: root.getElementById("editor-tuning-transpose"),
       tuningError: root.getElementById("editor-tuning-error"),
@@ -1350,6 +1377,16 @@ export class Editor {
       this.el.tuningRefHz.blur();
     });
 
+    // "As recorded": put the reference back on whatever the sample set
+    // itself sounds on the current reference key — the server reads
+    // `reference_hz=home` as that instruction rather than a literal Hz
+    // number (see /api/tuning). Only shown when it would move anything;
+    // see the visibility check in syncTuningForm.
+    this.el.tuningRefHome.addEventListener("click", () => {
+      if (this.tuningManual == null) return;
+      this.tuningCommand(this.tuningFields({ reference_hz: "home" }));
+    });
+
     this.el.tuningTranspose.addEventListener("change", () => {
       if (this.tuningManual == null) return;
       const transpose = Math.min(12, Math.max(-12, Math.round(Number(this.el.tuningTranspose.value) || 0)));
@@ -1445,6 +1482,32 @@ export class Editor {
     }
     if (this.root.activeElement !== this.el.tuningRefHz) this.el.tuningRefHz.value = tuning.reference.hz;
     if (this.root.activeElement !== this.el.tuningTranspose) this.el.tuningTranspose.value = tuning.transpose;
+
+    // "Recorded: …" — what the sample set itself sounds, measured at
+    // load time. Lives on the snapshot's top level (`home`), not per-
+    // manual: every division of one organ was recorded together.
+    const home = this.lastSnapshot?.home ?? null;
+    if (!home) {
+      this.el.tuningHome.textContent = "Recorded: not measured (assuming A4 = 440 equal)";
+    } else {
+      const name = HOME_TEMPERAMENT_NAMES[home.temperament] ?? "unequal (unnamed)";
+      const mixed = home.spread_cents > 8 ? " · mixed pitch standards?" : "";
+      this.el.tuningHome.textContent =
+        `Recorded: A4 = ${home.a4_hz.toFixed(1).replace(/\.0$/, "")} Hz · ${name} · ` +
+        `±${home.spread_cents.toFixed(1).replace(/\.0$/, "")} ¢ · ${home.measured} of ${home.pipes} pipes${mixed}`;
+    }
+    // The ↺ button next to Reference: only worth showing when it would
+    // actually move something — when the reference isn't already
+    // sitting on what the recording itself sounds on that key. A
+    // button that silently does nothing on click is worse than none.
+    // `.wrap` rides along on the same condition: the row has no spare
+    // width for a fourth thing, so the button (and "Hz" alongside it)
+    // only wrap to their own line while there's a button to make room
+    // for — the row's ordinary layout is untouched the rest of the time.
+    const showRefHome =
+      home != null && Math.abs(tuning.reference.hz - homeHz(home, tuning.reference.key)) > 0.05;
+    this.el.tuningRefHome.classList.toggle("hidden", !showRefHome);
+    this.el.tuningRefStepper.classList.toggle("wrap", showRefHome);
 
     const scale = tuning.scale ?? null;
     this.el.tuningScalePick.classList.toggle("hidden", !!scale);
