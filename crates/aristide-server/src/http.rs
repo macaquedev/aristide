@@ -255,6 +255,15 @@ fn respond(
                     .and_then(std::path::Path::parent)
                     .map(std::path::Path::to_path_buf);
                 let patched = |mut tuning: crate::tuning::Tuning| -> Result<_, String> {
+                    // Naming `original` is asking for the organ as
+                    // recorded: the reference returns to the organ's
+                    // own pitch on its key unless this same request
+                    // pins it. A target keeps whatever reference the
+                    // player had — changing the temperament never
+                    // jumps the pitch a semitone on its own.
+                    let anchor_given = ["a4", "reference_key", "reference_hz"]
+                        .iter()
+                        .any(|field| param(query, field).is_some());
                     if let Some(t) =
                         param(query, "temperament").and_then(crate::tuning::Temperament::parse)
                     {
@@ -263,6 +272,9 @@ fn respond(
                         // and temperaments are twelve-class vocabulary.
                         tuning.scale = None;
                         tuning.edo = 12;
+                        if !tuning.corrects_pipes() && !anchor_given {
+                            tuning.reference = tuning.home_reference(tuning.reference.key);
+                        }
                     }
                     if let Some(edo) = param(query, "edo").and_then(|v| v.parse::<u16>().ok()) {
                         if !crate::tuning::EDO_RANGE.contains(&edo) {
@@ -281,17 +293,27 @@ fn respond(
                     // number) and `reference_hz`, either alone keeping
                     // the other; `a4=` is the older single-field form
                     // and means an A4 anchor.
-                    if let Some(a4) = param(query, "a4").and_then(|v| v.parse::<f64>().ok()) {
-                        tuning.reference = crate::tuning::PitchReference { key: 69, hz: a4 };
+                    // `home` for either Hz field puts the key back on
+                    // what the recording sounds there.
+                    if let Some(a4) = param(query, "a4") {
+                        tuning.reference = match a4.parse::<f64>() {
+                            Ok(hz) => crate::tuning::PitchReference { key: 69, hz },
+                            Err(_) if a4 == "home" => tuning.home_reference(69),
+                            Err(_) => return Err(format!("a4 {a4:?} is not a pitch")),
+                        };
                     }
                     if let Some(spec) = param(query, "reference_key").map(unescape) {
                         tuning.reference.key = parse_reference_key(&spec)
                             .ok_or_else(|| format!("reference_key {spec:?} names no key"))?;
                     }
-                    if let Some(hz) =
-                        param(query, "reference_hz").and_then(|v| v.parse::<f64>().ok())
-                    {
-                        tuning.reference.hz = hz;
+                    if let Some(hz) = param(query, "reference_hz") {
+                        tuning.reference.hz = match hz.parse::<f64>() {
+                            Ok(hz) => hz,
+                            Err(_) if hz == "home" => {
+                                tuning.home_reference(tuning.reference.key).hz
+                            }
+                            Err(_) => return Err(format!("reference_hz {hz:?} is not a pitch")),
+                        };
                     }
                     tuning.reference = tuning.reference.clamped();
                     if let Some(t) = param(query, "transpose").and_then(|v| v.parse::<i8>().ok())
@@ -2133,6 +2155,28 @@ fn state_json_locked(state: &State) -> String {
             )
         };
         out.push_str(&format!(",\"tuning\":{{{}}}", tuning_json(&console.tuning())));
+        // What the samples were recorded in, as measured at load —
+        // the truth `original` plays and every target retunes from.
+        // `null` when no pipe could be measured.
+        out.push_str(",\"home\":");
+        match console.home() {
+            Some(home) => out.push_str(&format!(
+                "{{\"a4_hz\":{:.2},\"temperament\":{},\"offsets_cents\":[{}],\"spread_cents\":{:.2},\"measured\":{},\"pipes\":{}}}",
+                home.a4_hz,
+                home.temperament
+                    .map(|t| json_string(t.name()))
+                    .unwrap_or_else(|| "null".to_string()),
+                home.offsets_cents
+                    .iter()
+                    .map(|c| format!("{c:.2}"))
+                    .collect::<Vec<_>>()
+                    .join(","),
+                home.spread_cents,
+                home.measured,
+                home.pipes
+            )),
+            None => out.push_str("null"),
+        }
         // Divisions tuned apart from the instrument, by manual index —
         // absent manuals follow the shared tuning above.
         let own: Vec<String> = (0..console.manual_states().len())
@@ -2748,7 +2792,14 @@ mod tests {
             })
             .collect();
         let loaded = crate::bank::build(&organ, 48000.0, 16, None).expect("bank builds");
-        let console = crate::console::Console::new(organ, loaded.specs, Vec::new(), 48000.0);
+        let mut console =
+            crate::console::Console::new(organ, loaded.specs, Vec::new(), 48000.0);
+        console.set_home(loaded.home.map(std::sync::Arc::new));
+        if let Some(home) = console.home() {
+            let mut tuning = console.tuning();
+            tuning.reference = home.reference(69);
+            console.set_tuning(tuning);
+        }
         let (_engine, handle) =
             aristide_engine::Engine::new(48000.0, std::sync::Arc::new(loaded.bank));
         let state = Arc::new(Mutex::new(State {
@@ -2798,6 +2849,54 @@ mod tests {
         // bindings and the computer keyboard all come from this.
         state.lock().expect("state poisoned").resolve_routes();
         Some(state)
+    }
+
+    /// The snapshot names what the demo set was recorded in, and the
+    /// tuning API speaks `original`: naming it returns the reference
+    /// to the organ's own pitch, `home` for either Hz field does the
+    /// same on demand, and a target keeps whatever reference it had.
+    #[test]
+    fn snapshot_names_the_recorded_tuning_and_original_follows_it() {
+        let Some(state) = demo_state() else { return };
+        let body = state_json(&state);
+        let home_a4 = body
+            .split("\"home\":{\"a4_hz\":")
+            .nth(1)
+            .and_then(|rest| rest.split(',').next())
+            .and_then(|hz| hz.parse::<f64>().ok())
+            .unwrap_or_else(|| panic!("home in the snapshot: {body}"));
+        assert!((400.0..480.0).contains(&home_a4), "a′ = {home_a4}");
+        assert!(body.contains("\"offsets_cents\":["), "{body}");
+        assert!(body.contains("\"temperament\":\"original\""), "the default: {body}");
+        let reference_hz = |body: &str| {
+            body.split("\"reference\":{\"key\":69,\"hz\":")
+                .nth(1)
+                .and_then(|rest| rest.split('}').next())
+                .and_then(|hz| hz.parse::<f64>().ok())
+                .unwrap_or_else(|| panic!("reference in the snapshot: {body}"))
+        };
+        assert!(
+            (reference_hz(&body) - home_a4).abs() < 0.01,
+            "as recorded, the reference is the organ's own a′"
+        );
+
+        let ok = respond(&state, &Method::Post, "/api/tuning?temperament=equal&a4=440");
+        assert_eq!(ok.status_code().0, 200);
+        let body = state_json(&state);
+        assert!(body.contains("\"temperament\":\"equal\""), "{body}");
+        assert_eq!(reference_hz(&body), 440.0);
+
+        respond(&state, &Method::Post, "/api/tuning?temperament=original");
+        let body = state_json(&state);
+        assert!(body.contains("\"temperament\":\"original\""), "{body}");
+        assert!((reference_hz(&body) - home_a4).abs() < 0.01, "back to as recorded");
+
+        respond(&state, &Method::Post, "/api/tuning?a4=430");
+        assert_eq!(reference_hz(&state_json(&state)), 430.0, "pulled by hand");
+        respond(&state, &Method::Post, "/api/tuning?reference_hz=home");
+        assert!((reference_hz(&state_json(&state)) - home_a4).abs() < 0.01, "and released");
+        let bad = respond(&state, &Method::Post, "/api/tuning?reference_hz=loud");
+        assert_eq!(bad.status_code().0, 400);
     }
 
     /// The whole setup story over the API: the snapshot describes how
@@ -2977,7 +3076,7 @@ mod tests {
         );
         let saved = aristide_formats::instrument::load(&path).expect("reloads");
         assert_eq!(saved.sidecar.tuning.temperament, "meantone4");
-        assert_eq!(saved.sidecar.tuning.reference_hz, 415.0);
+        assert_eq!(saved.sidecar.tuning.reference_hz, Some(415.0));
         assert_eq!(saved.sidecar.tuning.reference_key.midi_note(), Some(69));
 
         // The anchor may name any key: middle C at 256 Hz lands live
@@ -2994,7 +3093,7 @@ mod tests {
         );
         let saved = aristide_formats::instrument::load(&path).expect("reloads");
         assert_eq!(saved.sidecar.tuning.reference_key.midi_note(), Some(60));
-        assert_eq!(saved.sidecar.tuning.reference_hz, 256.0);
+        assert_eq!(saved.sidecar.tuning.reference_hz, Some(256.0));
         let text = std::fs::read_to_string(&path).expect("reads");
         assert!(text.contains("reference_key = \"C4\""), "{text}");
         assert!(!text.contains("a4_hz"), "old spelling must not linger: {text}");

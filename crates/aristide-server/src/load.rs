@@ -724,13 +724,29 @@ pub fn prepare(
     let suggested: Vec<Option<u8>> = per_source_suggested.concat();
     let mut console = Console::new(organ, loaded.specs, drawn, sample_rate);
     console.set_attack_options(loaded.attack_options);
+    let home = loaded.home.map(std::sync::Arc::new);
+    match &home {
+        Some(home) => tracing::info!(
+            "recorded tuning: a′ = {:.1} Hz, {} (±{:.1} cents over {} of {} pipes)",
+            home.a4_hz,
+            match home.temperament {
+                Some(t) => t.name().to_string(),
+                None => "an unequal temperament the tables don't name".to_string(),
+            },
+            home.spread_cents,
+            home.measured,
+            home.pipes
+        ),
+        None => tracing::info!("recorded tuning: no pipe measured; assuming a′ = 440 equal"),
+    }
+    console.set_home(home.clone());
     let temperament = tuning::Temperament::parse(&sidecar.tuning.temperament)
         .unwrap_or_else(|| {
             tracing::warn!(
-                "sidecar tuning: unknown temperament {:?}, using equal",
+                "sidecar tuning: unknown temperament {:?}, playing as recorded",
                 sidecar.tuning.temperament
             );
-            tuning::Temperament::Equal
+            tuning::Temperament::Original
         });
     // Scale files resolve against the organ's own directory: the file
     // that names them. A scale that fails to load warns and leaves the
@@ -745,19 +761,36 @@ pub fn prepare(
             }
         }
     };
+    let edo = sidecar
+        .tuning
+        .edo
+        .clamp(*tuning::EDO_RANGE.start(), *tuning::EDO_RANGE.end());
+    // The anchor the file leaves unsaid: the organ's own pitch on the
+    // reference key when it plays as recorded (a 415 set reads "A4 =
+    // 415.3", not a 440 it never sounded), the equal ladder's under a
+    // target.
+    let anchor_key = reference_key(&sidecar.tuning.reference_key, None);
+    let unsaid_reference = |temperament: tuning::Temperament, edo: u16, scale: bool| {
+        let as_recorded = temperament == tuning::Temperament::Original && edo == 12 && !scale;
+        match &home {
+            Some(home) if as_recorded => home.reference(anchor_key),
+            _ => tuning::PitchReference {
+                key: anchor_key,
+                hz: 440.0 * ((anchor_key as f64 - 69.0) / 12.0).exp2(),
+            },
+        }
+    };
     let mut live_tuning = tuning::Tuning {
         temperament,
-        edo: sidecar
-            .tuning
-            .edo
-            .clamp(*tuning::EDO_RANGE.start(), *tuning::EDO_RANGE.end()),
+        edo,
         scale: None,
-        reference: tuning::PitchReference {
-            key: reference_key(&sidecar.tuning.reference_key, None),
-            hz: sidecar.tuning.reference_hz,
+        reference: match sidecar.tuning.reference_hz {
+            Some(hz) => tuning::PitchReference { key: anchor_key, hz },
+            None => unsaid_reference(temperament, edo, sidecar.tuning.scale.is_some()),
         }
         .clamped(),
         transpose: sidecar.tuning.transpose.clamp(-12, 12),
+        home: home.clone(),
     };
     if let Some(scl) = &sidecar.tuning.scale {
         live_tuning.scale = load_scale(
@@ -801,6 +834,7 @@ pub fn prepare(
             }
             .clamped(),
             transpose: def.transpose.unwrap_or(live_tuning.transpose).clamp(-12, 12),
+            home: home.clone(),
         };
         if let Some(scl) = &def.scale {
             own.scale = load_scale(scl, def.keymap.as_deref(), own.reference);
@@ -1191,9 +1225,23 @@ mod tests {
             adopted.suggested_channels, direct.suggested_channels,
             "the sidecar's channel suggestions survive"
         );
+        // The home fit is compared by its coverage: the adopted organ
+        // pulls the same pipes, but the two organs list them in a
+        // different order (and the fit takes medians of them).
+        let strip = |tuning: tuning::Tuning| tuning::Tuning {
+            home: None,
+            ..tuning
+        };
         assert_eq!(
-            format!("{:?}", adopted.console.tuning()),
-            format!("{:?}", direct.console.tuning())
+            format!("{:?}", strip(adopted.console.tuning())),
+            format!("{:?}", strip(direct.console.tuning()))
+        );
+        let coverage = |home: Option<std::sync::Arc<tuning::HomeTuning>>| {
+            home.map(|home| (home.measured, home.pipes, home.temperament))
+        };
+        assert_eq!(
+            coverage(adopted.console.home()),
+            coverage(direct.console.home())
         );
         assert_eq!(adopted.console.noises(), direct.console.noises());
         assert_eq!(

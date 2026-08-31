@@ -286,6 +286,21 @@ note across different nominal pitches has its smpl data distrusted (editor
 default, not a measurement). Repitched/borrowed/extended pipes ride the same
 math. The "silent wrong-octave" bug class is closed.
 
+**Aristide now (2026-08-31, home pitch measured):** metadata is no longer
+the primary truth. The engine measures every looped pipe's fundamental at
+load (staged autocorrelation, ±600 ¢ around the set's own voiced expectation,
+refined over up to 24 cycles), and `server/bank.rs` fits the organ's home
+tuning from it — per-rank anchor, a-referenced 12-class table, best-matching
+named temperament, spread — exposed as `LoadedBank::home` and in the state
+snapshot. Each `VoiceSpec` carries `home_cents` (measured offset from
+nominal). `Temperament::Original` (the default) plays as recorded with the
+reference showing the organ's own pitch; every other tuning is a target that
+bends each pipe from its measured pitch — HW's "retune from measured pitch"
+with GO's "original temperament" as the resting state. Key placement is
+measured too: a pipe >50 ¢ from its rank anchor + class model
+(`REANCHOR_TOLERANCE_CENTS`) is moved onto the model. The `smpl`/ODF
+metadata path below survives only for pipes that cannot be measured.
+
 **Remaining gaps:**
 - ~~`AcceptsRetuning`~~ ✅ (2026-08-26): parsed per rank (default true) and per
   pipe (default = rank), folded into `Pipe.accepts_retuning`; `false` skips the
@@ -293,9 +308,12 @@ math. The "silent wrong-octave" bug class is closed.
   **CMBSetting** (GO's per-organ user settings file), not an ODF key
   (`GOPipeConfig.cpp` reads it with `CMBSetting`) — the equivalent user-side
   override belongs to our voicing sidecar, not the loader.
-- The tolerance heuristic is deliberately not GO's exact temperament-conditional
-  dispatch; divergence is documented in `go-odf-notes.md`. Watch for sets where
-  a <50-cent metadata error should have been corrected.
+- ~~The tolerance heuristic~~ superseded 2026-08-31 by measurement (above); the
+  50-cent metadata tolerance now only governs unmeasurable pipes.
+- Home fit is per organ with per-rank anchors; a composite of two pitch
+  standards reads as a large spread rather than two named homes. Per-pipe
+  drift is kept under `original` and flattened under a target (no
+  "keep the character" option yet).
 - **Named temperaments: still 5** (`server/tuning.rs::Temperament::ALL`) vs GO's
   100+. In practice Scala support (M6) unlocks arbitrary tuning: `.scl`/`.kbm`
   parsing (`model/scala.rs`), applied per manual with nearest-pipe re-anchoring

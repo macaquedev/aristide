@@ -11,6 +11,14 @@
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Temperament {
+    /// The organ's own tuning, as recorded: every pipe plays exactly
+    /// as the samples have it, whatever pitch standard and temperament
+    /// the instrument was sampled in — measured at load into a
+    /// [`HomeTuning`] so the console can *name* it, and so the
+    /// reference can pull the whole instrument to another pitch while
+    /// keeping its intervals. Not a table: the tables below are
+    /// targets that retune every pipe from its measured pitch.
+    Original,
     Equal,
     /// Werckmeister III (1691): C–G–D–A and B–F♯ narrowed ¼ Pythagorean
     /// comma; the organ temperament of the Baroque north.
@@ -27,6 +35,7 @@ pub enum Temperament {
 impl Temperament {
     pub fn parse(name: &str) -> Option<Temperament> {
         Some(match name.to_lowercase().replace(['-', '_', ' '], "").as_str() {
+            "original" | "asrecorded" | "recorded" | "home" => Temperament::Original,
             "equal" | "et" | "12edo" => Temperament::Equal,
             "werckmeister3" | "werckmeisteriii" | "werckmeister" => Temperament::Werckmeister3,
             "kirnberger3" | "kirnbergeriii" | "kirnberger" => Temperament::Kirnberger3,
@@ -38,6 +47,7 @@ impl Temperament {
 
     pub fn name(&self) -> &'static str {
         match self {
+            Temperament::Original => "original",
             Temperament::Equal => "equal",
             Temperament::Werckmeister3 => "werckmeister3",
             Temperament::Kirnberger3 => "kirnberger3",
@@ -46,6 +56,7 @@ impl Temperament {
         }
     }
 
+    /// The twelve-class tables — every temperament that is a *target*.
     pub const ALL: [Temperament; 5] = [
         Temperament::Equal,
         Temperament::Werckmeister3,
@@ -55,10 +66,11 @@ impl Temperament {
     ];
 
     /// Deviation from equal temperament per pitch class (C = index 0),
-    /// in cents, normalized so A = 0.
+    /// in cents, normalized so A = 0. `Original` has no table of its
+    /// own — the organ's measured one stands in (see [`HomeTuning`]).
     pub fn offsets_cents(&self) -> [f32; 12] {
         match self {
-            Temperament::Equal => [0.0; 12],
+            Temperament::Original | Temperament::Equal => [0.0; 12],
             Temperament::Werckmeister3 => [
                 11.730, 1.955, 3.910, 5.865, 1.955, 9.775, 0.000, 7.820, 3.910, 0.000, 7.820,
                 3.910,
@@ -77,6 +89,148 @@ impl Temperament {
             ],
         }
     }
+}
+
+/// What the samples were recorded in: the organ's *home* tuning, fitted
+/// at load from the measured fundamental of every looped pipe. The
+/// truth the tuning layer works from instead of assuming that every
+/// set sits on the 12-EDO/A440 ladder — a Baroque set at a′ = 415 in
+/// meantone is exactly that, and a target of "440 equal" or "452
+/// Pythagorean" is a per-pipe retune from here, not from a guess.
+///
+/// Pitch classes are those of the *sounding* pitch (a 4′ rank's pipe
+/// under C4 is a C, a 2⅔′ mutation's is a G) and the table is
+/// a-referenced like the [`Temperament`] tables, so the two compare
+/// directly. Only octave-class ranks (nominals on the equal ladder)
+/// feed the table: a mutation is tuned pure against its unison, and
+/// would smear the class it lands on.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HomeTuning {
+    /// The a′ the instrument's A pipes sound, on the equal ladder
+    /// through the fitted table: the pitch standard it was recorded
+    /// at (415 for a Baroque set, 440 for a modern one, 465 chorton).
+    pub a4_hz: f64,
+    /// Median deviation from equal per pitch class (C = 0), cents,
+    /// A = 0 — the temperament the tuner left the organ in.
+    pub offsets_cents: [f64; 12],
+    /// The named temperament the table matches within
+    /// [`HomeTuning::MATCH_CENTS`] RMS, if any; `None` is an unequal
+    /// temperament the tables don't name (or a drifted one).
+    pub temperament: Option<Temperament>,
+    /// Robust spread of the pipes around the fitted table (median
+    /// absolute residual), cents: tuning drift, or "this instrument
+    /// holds two pitch standards" when it is large.
+    pub spread_cents: f64,
+    /// Pipes whose fundamental measured, and pipes looked at.
+    pub measured: usize,
+    pub pipes: usize,
+}
+
+impl HomeTuning {
+    /// RMS distance under which the measured table is called by a
+    /// named temperament: Werckmeister and Kirnberger III sit ~4 cents
+    /// RMS apart, so the threshold stays under half that.
+    pub const MATCH_CENTS: f64 = 1.75;
+
+    /// Fit the home tuning from per-pipe measurements: `(pitch class
+    /// of the sounding pitch, deviation from the equal ladder in
+    /// cents, whether the pipe's nominal lies on that ladder)`. Pipes
+    /// off the ladder (mutations) count towards the anchor spread but
+    /// not the class table. `None` without a single measurement.
+    pub fn fit(pipes: impl IntoIterator<Item = (usize, f64, bool)>, total: usize) -> Option<HomeTuning> {
+        let mut classes: [Vec<f64>; 12] = Default::default();
+        let mut all = Vec::new();
+        for (class, deviation, on_ladder) in pipes {
+            if !deviation.is_finite() {
+                continue;
+            }
+            all.push(deviation);
+            if on_ladder {
+                classes[class % 12].push(deviation);
+            }
+        }
+        if all.is_empty() {
+            return None;
+        }
+        // A-referenced: the A class anchors when it measured, else the
+        // instrument's median stands in for it.
+        let measured = all.len();
+        let overall = median(&mut all).unwrap_or(0.0);
+        let a = median(&mut classes[9].clone()).unwrap_or(overall);
+        let mut offsets_cents = [0.0; 12];
+        for (class, values) in classes.iter_mut().enumerate() {
+            offsets_cents[class] = median(values).map_or(0.0, |m| m - a);
+        }
+        let mut residuals: Vec<f64> = classes
+            .iter()
+            .enumerate()
+            .flat_map(|(class, values)| {
+                values
+                    .iter()
+                    .map(move |v| (v - a - offsets_cents[class]).abs())
+            })
+            .collect();
+        let spread_cents = median(&mut residuals).unwrap_or(0.0);
+        let temperament = Temperament::ALL
+            .iter()
+            .map(|t| {
+                let table = t.offsets_cents();
+                let rms = (0..12)
+                    .map(|c| (offsets_cents[c] - table[c] as f64).powi(2))
+                    .sum::<f64>()
+                    .sqrt()
+                    / 12f64.sqrt();
+                (*t, rms)
+            })
+            .filter(|(_, rms)| *rms <= Self::MATCH_CENTS)
+            .min_by(|x, y| x.1.total_cmp(&y.1))
+            .map(|(t, _)| t);
+        Some(HomeTuning {
+            a4_hz: 440.0 * (a / 1200.0).exp2(),
+            offsets_cents,
+            temperament,
+            spread_cents,
+            measured,
+            pipes: total,
+        })
+    }
+
+    /// The a′ shift alone: how far the instrument's pitch standard
+    /// sits from 440, cents.
+    pub fn anchor_cents(&self) -> f64 {
+        1200.0 * (self.a4_hz / 440.0).log2()
+    }
+
+    /// Where this tuning puts manual key `key` relative to the equal
+    /// A440 ladder, cents — the same contract as
+    /// [`Tuning::deviation_cents`], for the organ as recorded.
+    pub fn deviation_cents(&self, key: u16) -> f64 {
+        self.anchor_cents() + self.offsets_cents[(key % 12) as usize]
+    }
+
+    /// The pitch anchor that names this tuning on `key`: the Hz the
+    /// recorded organ sounds there.
+    pub fn reference(&self, key: u8) -> PitchReference {
+        PitchReference {
+            key,
+            hz: PitchReference::ladder_hz(key as f64)
+                * (self.deviation_cents(key as u16) / 1200.0).exp2(),
+        }
+    }
+}
+
+/// Median of a slice, sorting it in place; `None` when empty.
+pub(crate) fn median(values: &mut [f64]) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_by(f64::total_cmp);
+    let mid = values.len() / 2;
+    Some(if values.len().is_multiple_of(2) {
+        (values[mid - 1] + values[mid]) / 2.0
+    } else {
+        values[mid]
+    })
 }
 
 /// A Scala scale with its keyboard mapping, loaded and ready — one
@@ -164,7 +318,7 @@ impl PitchReference {
     pub const A440: PitchReference = PitchReference { key: 69, hz: 440.0 };
 
     /// The pitch the samples' own 12-EDO/A440 ladder gives `key`.
-    fn ladder_hz(key: f64) -> f64 {
+    pub(crate) fn ladder_hz(key: f64) -> f64 {
         440.0 * ((key - 69.0) / 12.0).exp2()
     }
 
@@ -234,6 +388,11 @@ pub struct Tuning {
     /// Semitones added to incoming keys before routing — a transposer
     /// selects different pipes, like the real console gadget.
     pub transpose: i8,
+    /// What the organ was recorded in, when its pipes measured — the
+    /// console stamps this into every tuning it installs. Under
+    /// `Original` it is what the reference is measured against; under
+    /// a target it only names the starting point.
+    pub home: Option<std::sync::Arc<HomeTuning>>,
 }
 
 /// The one legal range for a divisions-per-octave count: 1 (octaves
@@ -243,11 +402,12 @@ pub const EDO_RANGE: std::ops::RangeInclusive<u16> = 1..=311;
 impl Default for Tuning {
     fn default() -> Self {
         Tuning {
-            temperament: Temperament::Equal,
+            temperament: Temperament::Original,
             edo: 12,
             scale: None,
             reference: PitchReference::A440,
             transpose: 0,
+            home: None,
         }
     }
 }
@@ -264,6 +424,12 @@ impl Tuning {
     /// temperament says that, but a Scala keyboard mapping's unmapped
     /// keys will.
     pub fn deviation_cents(&self, key: u16) -> Option<f64> {
+        if !self.corrects_pipes() {
+            // As recorded: every key is its own pipe as the samples
+            // have it, moved only by how far the reference was pulled
+            // from where the recording puts that key.
+            return Some(self.original_shift_cents());
+        }
         if let Some(scale) = &self.scale {
             let hz =
                 aristide_model::scala::key_frequency(&scale.scale, &scale.mapping, key as i32)?;
@@ -287,6 +453,35 @@ impl Tuning {
         let class = (key % 12) as usize;
         let reference_class = (reference_key % 12) as usize;
         Some(offsets[class] as f64 - offsets[reference_class] as f64 + anchor)
+    }
+
+    /// Whether this tuning is a *target* that retunes each pipe from
+    /// its measured pitch (a temperament table, a division count, a
+    /// scale), or the organ as recorded (`Original` at 12), where the
+    /// console leaves every pipe's own pitch alone and
+    /// [`Tuning::deviation_cents`] is one whole-instrument shift.
+    pub fn corrects_pipes(&self) -> bool {
+        !(self.temperament == Temperament::Original && self.scale.is_none() && self.edo == 12)
+    }
+
+    /// Under `Original`: how far the reference pulls the instrument
+    /// from its recorded pitch — zero while the reference is the
+    /// organ's own (the default), +100 for a 415 set asked for 440.
+    fn original_shift_cents(&self) -> f64 {
+        let recorded = self
+            .home
+            .as_ref()
+            .map_or(0.0, |home| home.deviation_cents(self.reference.key as u16));
+        self.reference.anchor_cents() - recorded
+    }
+
+    /// The reference that says "as recorded" on `key`: the organ's own
+    /// pitch there when it measured, else the equal ladder's.
+    pub fn home_reference(&self, key: u8) -> PitchReference {
+        match &self.home {
+            Some(home) => home.reference(key),
+            None => PitchReference { key, hz: PitchReference::ladder_hz(key as f64) },
+        }
     }
 
     /// How many keys step one octave under this tuning: the scale's
@@ -441,6 +636,67 @@ mod tests {
         assert_eq!(tuning.steps_per_octave(), 12);
     }
 
+    /// A synthetic organ recorded at a′ = 415 in ¼-comma meantone,
+    /// with tuning drift, fits back to exactly that — and a target
+    /// tuning then prices each key from the equal ladder as before,
+    /// while `Original` prices only the reference's pull.
+    #[test]
+    fn home_fit_names_a_baroque_organ() {
+        let table = Temperament::Meantone4.offsets_cents();
+        let anchor = 1200.0 * (415.0f64 / 440.0).log2();
+        let pipes = (36u16..=96).map(|key| {
+            let drift = ((key * 7) % 11) as f64 * 0.1 - 0.5;
+            let class = (key % 12) as usize;
+            (class, anchor + table[class] as f64 + drift, true)
+        });
+        let home = HomeTuning::fit(pipes, 61).expect("fits");
+        assert!((home.a4_hz - 415.0).abs() < 0.5, "a′ = {}", home.a4_hz);
+        assert_eq!(home.temperament, Some(Temperament::Meantone4), "{home:?}");
+        assert!(home.spread_cents < 1.6, "spread {}", home.spread_cents);
+        assert_eq!((home.measured, home.pipes), (61, 61));
+        // C4 sits where meantone at 415 puts it.
+        let c4 = home.reference(60);
+        let expected = 440.0 * ((60.0 - 69.0) / 12.0 + (anchor + table[0] as f64) / 1200.0).exp2();
+        assert!((c4.hz - expected).abs() < 0.01, "{c4:?} vs {expected}");
+
+        let home = std::sync::Arc::new(home);
+        let mut tuning = Tuning {
+            reference: home.reference(69),
+            home: Some(home.clone()),
+            ..Tuning::default()
+        };
+        assert!(!tuning.corrects_pipes());
+        for key in [36u16, 60, 69, 73] {
+            assert!(tuning.deviation_cents(key).unwrap().abs() < 1e-9, "as recorded = no shift");
+        }
+        // Asked for a′ = 440 in its own temperament: one +100 shift.
+        tuning.reference = PitchReference::A440;
+        assert!((tuning.deviation_cents(60).unwrap() + anchor).abs() < 0.2);
+        // A target temperament prices from the ladder, home or not.
+        tuning.temperament = Temperament::Equal;
+        assert!(tuning.corrects_pipes());
+        assert_eq!(tuning.deviation_cents(60), Some(0.0));
+    }
+
+    /// A modern equal-tempered organ reads as equal at its a′; a
+    /// table nothing names stays unnamed.
+    #[test]
+    fn home_fit_distinguishes_named_from_unequal() {
+        let equal = HomeTuning::fit((0..48).map(|i| (i % 12, 2.0 + (i % 3) as f64 * 0.5, true)), 48)
+            .expect("fits");
+        assert_eq!(equal.temperament, Some(Temperament::Equal));
+        let a4_cents = 1200.0 * (equal.a4_hz / 440.0).log2();
+        assert!((2.0..=3.0).contains(&a4_cents), "a′ sits {a4_cents} cents sharp");
+        let odd = HomeTuning::fit(
+            (0..48).map(|i| (i % 12, if i % 12 == 4 { -30.0 } else { 0.0 }, true)),
+            48,
+        )
+        .expect("fits");
+        assert_eq!(odd.temperament, None, "{odd:?}");
+        assert_eq!(odd.offsets_cents[4], -30.0);
+        assert_eq!(HomeTuning::fit(std::iter::empty(), 10), None);
+    }
+
     #[test]
     fn parse_accepts_friendly_names() {
         assert_eq!(
@@ -448,6 +704,8 @@ mod tests {
             Some(Temperament::Werckmeister3)
         );
         assert_eq!(Temperament::parse("meantone"), Some(Temperament::Meantone4));
+        assert_eq!(Temperament::parse("Original"), Some(Temperament::Original));
+        assert_eq!(Temperament::parse("as recorded"), Some(Temperament::Original));
         assert_eq!(Temperament::parse("nonsense"), None);
     }
 }

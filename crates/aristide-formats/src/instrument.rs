@@ -2516,7 +2516,7 @@ a4_hz = 415.0
         assert_eq!(definition.sources.len(), 2);
         assert_eq!(definition.manuals[0].name, "Great");
         assert_eq!(definition.midi.inputs[0].device, "KeyLab 61");
-        assert_eq!(definition.to_sidecar().tuning.reference_hz, 415.0);
+        assert_eq!(definition.to_sidecar().tuning.reference_hz, Some(415.0));
         assert_eq!(definition.couplers.define[0].routes[0].shift, -12);
     }
 }

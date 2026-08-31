@@ -4223,7 +4223,7 @@ device = "Keys"
         let parsed = def(&path);
         assert_eq!(parsed.tuning.temperament, "meantone4");
         assert_eq!(parsed.tuning.edo, 12, "the default divisions, absent from the file");
-        assert_eq!(parsed.tuning.reference_hz, 415.0);
+        assert_eq!(parsed.tuning.reference_hz, Some(415.0));
         assert_eq!(parsed.tuning.reference_key.midi_note(), Some(69));
         assert_eq!(parsed.tuning.transpose, -2);
         assert_eq!(parsed.tuning.scale, None);
@@ -4251,7 +4251,7 @@ device = "Keys"
         assert_eq!(parsed.tuning.scale.as_deref(), Some("19edo.scl"));
         assert_eq!(parsed.tuning.keymap.as_deref(), Some("19edo.kbm"));
         assert_eq!(parsed.tuning.edo, 12, "a scale supersedes the division count too");
-        assert_eq!(parsed.tuning.temperament, "equal", "the file's default, absent");
+        assert_eq!(parsed.tuning.temperament, "original", "the file's default, absent");
 
         write_composite_tuning(
             &path,
@@ -4269,7 +4269,7 @@ device = "Keys"
         assert_eq!(parsed.tuning.scale, None, "naming a division count drops the scale");
         assert_eq!(parsed.tuning.edo, 19);
         assert_eq!(
-            parsed.tuning.temperament, "equal",
+            parsed.tuning.temperament, "original",
             "temperaments are 12-EDO vocabulary, dormant away from it"
         );
 
@@ -4348,7 +4348,7 @@ volume = 0.7
         let def: aristide_formats::instrument::Definition =
             toml::from_str(&text).expect("parses");
         assert_eq!(def.tuning.temperament, "meantone4");
-        assert_eq!(def.tuning.reference_hz, 440.0);
+        assert_eq!(def.tuning.reference_hz, Some(440.0));
         assert!(!text.contains("a4_hz"), "the old spelling is rewritten: {text}");
         assert!(text.contains("reference_key = \"A4\""), "{text}");
         assert_eq!(def.reverb.wet, 0.5);

@@ -624,8 +624,12 @@ impl Default for ReverbConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TuningConfig {
-    /// equal | werckmeister3 | kirnberger3 | meantone4 | pythagorean
-    /// — twelve-class vocabulary, meaningful only when `edo = 12`.
+    /// original | equal | werckmeister3 | kirnberger3 | meantone4 |
+    /// pythagorean — twelve-class vocabulary, meaningful only when
+    /// `edo = 12`. `original` (the default) is the organ as recorded:
+    /// whatever pitch standard and temperament the samples hold,
+    /// which the server measures at load; the others are targets
+    /// every pipe is retuned to from its measured pitch.
     #[serde(default = "default_temperament")]
     pub temperament: String,
     /// Equal divisions of the octave the keys walk (12 unless said
@@ -639,10 +643,13 @@ pub struct TuningConfig {
     /// C wants `reference_key = "C4"` outright.
     #[serde(default = "default_reference_key")]
     pub reference_key: KeySpec,
-    /// What the reference key sounds, in Hz. `a4_hz` is the older
-    /// spelling (an A4 anchor) and still reads.
-    #[serde(default = "default_reference_hz", alias = "a4_hz")]
-    pub reference_hz: f64,
+    /// What the reference key sounds, in Hz. Unsaid, the reference
+    /// key sounds what the recording has there under `original`
+    /// (the organ's own a′), and the equal-ladder 440 pitch under a
+    /// target. `a4_hz` is the older spelling (an A4 anchor) and still
+    /// reads.
+    #[serde(default, alias = "a4_hz")]
+    pub reference_hz: Option<f64>,
     /// Semitones added to incoming keys (a transposer).
     #[serde(default)]
     pub transpose: i8,
@@ -657,7 +664,7 @@ pub struct TuningConfig {
 }
 
 fn default_temperament() -> String {
-    "equal".into()
+    "original".into()
 }
 
 fn default_edo() -> u16 {
@@ -668,17 +675,13 @@ fn default_reference_key() -> KeySpec {
     KeySpec::Name("A4".into())
 }
 
-fn default_reference_hz() -> f64 {
-    440.0
-}
-
 impl Default for TuningConfig {
     fn default() -> Self {
         TuningConfig {
             temperament: default_temperament(),
             edo: default_edo(),
             reference_key: default_reference_key(),
-            reference_hz: default_reference_hz(),
+            reference_hz: None,
             transpose: 0,
             scale: None,
             keymap: None,
@@ -969,14 +972,14 @@ default = ["Bourdon 16'", "Montre 8'", "Prestant 4'", "Plein jeu III"]
     fn tuning_reference_defaults_to_a440_and_reads_the_old_spelling() {
         let tuning: TuningConfig = toml::from_str("").expect("parses");
         assert_eq!(tuning.reference_key.midi_note(), Some(69));
-        assert_eq!(tuning.reference_hz, 440.0);
+        assert_eq!(tuning.reference_hz, None);
         let old: TuningConfig = toml::from_str("a4_hz = 415.0").expect("parses");
         assert_eq!(old.reference_key.midi_note(), Some(69));
-        assert_eq!(old.reference_hz, 415.0);
+        assert_eq!(old.reference_hz, Some(415.0));
         let anchored: TuningConfig =
             toml::from_str("reference_key = \"C4\"\nreference_hz = 256.0").expect("parses");
         assert_eq!(anchored.reference_key.midi_note(), Some(60));
-        assert_eq!(anchored.reference_hz, 256.0);
+        assert_eq!(anchored.reference_hz, Some(256.0));
         let numbered: TuningConfig = toml::from_str("reference_key = 60").expect("parses");
         assert_eq!(numbered.reference_key.midi_note(), Some(60));
     }

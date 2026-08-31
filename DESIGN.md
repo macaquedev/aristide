@@ -331,6 +331,37 @@ keyboard. When several sets load ad hoc, the console offers its save-as popover
 once — the combination has no file yet, and saving writes the composite file
 that from then on owns the instrument.
 
+**Home pitch is measured, never assumed (locked 2026-08-31):** no set is
+taken to sit on the 12-EDO/A440 ladder. At load the engine measures every
+looped pipe's fundamental (a coarse one-cycle autocorrelation scan ±600 cents
+around where the set's own voicing says the recording should be, refined over
+up to 24 cycles — the same number the release aligner tracks phase with), and
+the bank fits the organ's *home tuning* from it: per-rank pitch anchor (a rank
+comes from one set, and a composite may hold a 415 Positif beside a 440
+Great), an instrument-wide a-referenced 12-class table from the octave-class
+ranks (mutations are tuned pure to their unison and would smear the class they
+land on), the named temperament the table matches within 1.75 ¢ RMS if any,
+and the spread. Each pipe carries `home_cents` — how far it really sounds from
+its nominal — with the fitted model standing in for pipes that could not
+measure. `temperament = "original"` (the new default; GO's "Original
+temperament" is the same idea) plays every pipe as recorded, and its reference
+reads the organ's *own* pitch on the reference key (a 415 set says
+"A4 = 415.3", not a 440 it never sounded); pulling that reference moves the
+whole instrument as one, intervals and drift intact. Every other tuning is a
+*target* — a table, a division count, a Scala scale — and bends each pipe from
+its measured pitch, so "440 equal" on a 415 meantone set is exact per pipe,
+Hauptwerk-style, not a guess applied on top of an unknown. Naming `original`
+returns the reference to the organ's own; naming a target keeps the reference
+it had (a temperament change never jumps the pitch a semitone on its own);
+`reference_hz = home` releases a pulled reference. Measurement also decides
+key placement: a pipe more than 50 ¢ from where its rank's anchor plus the
+class table puts it is a file at another key (a borrowed neighbour, a mis-keyed
+sample), moved onto the model from its measured pitch; the `smpl`/ODF metadata
+path survives only as the fallback for pipes that cannot be measured
+(percussives, noises, loops too short). The unsaid `reference_hz` in a file
+means "the organ's own" under `original` and 440-ladder under a target; the
+console writes whatever is live.
+
 **Two scopes, two surfaces (locked 2026-08-28):** user preferences and organ
 settings never share a surface. The Preferences dialog (Aristide menu, Ctrl+,)
 is the *player's* — appearance today, per-machine audio settings tomorrow —

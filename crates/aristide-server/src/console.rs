@@ -194,6 +194,10 @@ pub struct Console {
     /// its donor demand the SAME pipe, not two. Pipes absent here are
     /// their own physical selves.
     physical: HashMap<(RankId, u16), (RankId, u16)>,
+    /// What the samples were recorded in, when they measured —
+    /// stamped into every tuning installed here, so `Original` knows
+    /// what the reference is pulling against.
+    home: Option<std::sync::Arc<crate::tuning::HomeTuning>>,
 }
 
 /// One speaking pipe's voice, with the pitch bookkeeping live retuning
@@ -211,6 +215,9 @@ struct Speaking {
     rate: f32,
     deviation: f64,
     bend: f64,
+    /// The pipe's measured offset from its nominal (`home_cents`):
+    /// what a target tuning subtracts, and `Original` leaves alone.
+    home: f64,
     /// Where the pitch was priced: sounding manual index + the (post-
     /// transpose) MIDI key on it. Live retuning re-prices exactly this
     /// coordinate, so a later transpose change — which reroutes future
@@ -237,6 +244,7 @@ struct KeyVoice {
     pipe: u16,
     key: PipeKey,
     deviation: f64,
+    home: f64,
     target: usize,
     ladder_key: i16,
     spec: VoiceSpec,
@@ -280,6 +288,7 @@ impl Console {
             coupler_links: Vec::new(),
             tuning: Tuning::default(),
             manual_tuning: Vec::new(),
+            home: None,
             noise_stops: Vec::new(),
             stop_noise: HashMap::new(),
             coupler_noise: HashMap::new(),
@@ -513,8 +522,26 @@ impl Console {
         }
     }
 
-    pub fn set_tuning(&mut self, tuning: Tuning) {
+    pub fn set_tuning(&mut self, mut tuning: Tuning) {
+        tuning.home = self.home.clone();
         self.tuning = tuning;
+    }
+
+    /// Install what the samples were recorded in (from the bank's
+    /// fit): every tuning held here, now and later, is stamped with
+    /// it. The instrument's reference, if it still reads as the
+    /// default a′ = 440, becomes the organ's own a′ — "as recorded"
+    /// means exactly that until the player pulls it elsewhere.
+    pub fn set_home(&mut self, home: Option<std::sync::Arc<crate::tuning::HomeTuning>>) {
+        self.home = home.clone();
+        self.tuning.home = home.clone();
+        for tuning in self.manual_tuning.iter_mut().flatten() {
+            tuning.home = home.clone();
+        }
+    }
+
+    pub fn home(&self) -> Option<std::sync::Arc<crate::tuning::HomeTuning>> {
+        self.home.clone()
     }
 
     pub fn tuning(&self) -> Tuning {
@@ -525,9 +552,12 @@ impl Console {
     /// to the console's. Applies from the next note on; callers that
     /// want held voices to follow call `retune_held` after and forward
     /// the updates as ramped SetVoiceRate commands.
-    pub fn set_manual_tuning(&mut self, manual_index: usize, tuning: Option<Tuning>) {
+    pub fn set_manual_tuning(&mut self, manual_index: usize, mut tuning: Option<Tuning>) {
         if manual_index >= self.organ.manuals.len() {
             return;
+        }
+        if let Some(tuning) = tuning.as_mut() {
+            tuning.home = self.home.clone();
         }
         if self.manual_tuning.len() < self.organ.manuals.len() {
             self.manual_tuning.resize(self.organ.manuals.len(), None);
@@ -708,19 +738,21 @@ impl Console {
     /// was (note-off still finds it); a pipe several keys share
     /// follows the holder that started it.
     pub fn retune_held(&mut self) -> Vec<(u64, f32)> {
-        let voices: Vec<(PipeKey, usize, i16)> = self
+        let voices: Vec<(PipeKey, usize, i16, f64)> = self
             .speaking
             .iter()
-            .map(|(&at, voice)| (at, voice.target, voice.ladder_key))
+            .map(|(&at, voice)| (at, voice.target, voice.ladder_key, voice.home))
             .collect();
         let mut updates = Vec::new();
-        for (at, target, ladder_key) in voices {
-            let Some(deviation) = self
-                .effective_tuning(target)
-                .deviation_cents(ladder_key.max(0) as u16)
-            else {
+        for (at, target, ladder_key, home) in voices {
+            let tuning = self.effective_tuning(target);
+            let Some(deviation) = tuning.deviation_cents(ladder_key.max(0) as u16) else {
                 continue;
             };
+            // Priced net of the pipe's own offset under a target, as
+            // at note-on — so leaving `Original` for "440 equal" pulls
+            // each held pipe from where it really is.
+            let deviation = deviation - if tuning.corrects_pipes() { home } else { 0.0 };
             let Some(voice) = self.speaking.get_mut(&at) else {
                 continue;
             };
@@ -1125,12 +1157,14 @@ impl Console {
             // leaves unmapped sounds nothing here. Temperaments deviate
             // well under a semitone, so for them shift is always 0 and
             // this is exactly the old behaviour.
-            let Some(deviation) = self
-                .effective_tuning(target)
-                .deviation_cents(midi_key.max(0) as u16)
-            else {
+            let tuning = self.effective_tuning(target);
+            let Some(deviation) = tuning.deviation_cents(midi_key.max(0) as u16) else {
                 continue;
             };
+            // A target tuning is exact: each pipe is bent from where
+            // it was measured to sound, not from the nominal the
+            // ladder assumes. `Original` leaves every pipe as it is.
+            let corrects_pipes = tuning.corrects_pipes();
             // Negative below the set's own bottom key: the rank ladder
             // is extrapolated in both directions, so keep the sign.
             let key_index = midi_key - self.organ.manuals[target].first_midi_note as i16;
@@ -1148,10 +1182,14 @@ impl Console {
                 // drawn at 4' comes from the pipes an octave up, not
                 // from doubling the tape speed.
                 let adjust = self.stop_adjust.get(&stop.id).copied();
-                let priced = deviation + adjust.map_or(0.0, |(_, cents)| cents);
-                let shift = (priced / 100.0).round() as i16;
-                let bend_cents = priced - shift as f64 * 100.0;
-                let bend_ratio = ((bend_cents / 1200.0).exp2()) as f32;
+                let adjust_cents = adjust.map_or(0.0, |(_, cents)| cents);
+                let priced = deviation + adjust_cents;
+                // As recorded, a key IS its pipe: pulling the organ's
+                // pitch bends that pipe however far, never a
+                // neighbour — only the stop's own footage re-anchors.
+                let anchored_on = if corrects_pipes { priced } else { adjust_cents };
+                let shift = (anchored_on / 100.0).round() as i16;
+                let key_bend_cents = priced - shift as f64 * 100.0;
                 for range in &stop.ranks {
                     // Coverage is judged at the played key — a divided
                     // register is a decision about the keyboard, not
@@ -1167,6 +1205,9 @@ impl Console {
                     let Some(spec) = self.specs.get(&(range.rank, pipe)) else {
                         continue;
                     };
+                    let home = if corrects_pipes { spec.home_cents as f64 } else { 0.0 };
+                    let bend_cents = key_bend_cents - home;
+                    let bend_ratio = ((bend_cents / 1200.0).exp2()) as f32;
                     // Routing is a property of the STOP (its speakers,
                     // its speaking delay), stamped here so borrowed
                     // pipes travel with the stop that sounds them.
@@ -1202,7 +1243,8 @@ impl Console {
                         rank: range.rank,
                         pipe,
                         key,
-                        deviation,
+                        deviation: deviation - home,
+                        home: spec.home_cents as f64,
                         target,
                         ladder_key: midi_key,
                         spec: self.voiced(spec, ratio * bend_ratio),
@@ -1431,6 +1473,7 @@ impl Console {
                         rate: voice.spec.rate,
                         deviation: voice.deviation,
                         bend: 0.0,
+                        home: voice.home,
                         target: voice.target,
                         ladder_key: voice.ladder_key,
                     },
@@ -2243,6 +2286,7 @@ mod tests {
                         wind_weight: 1.0,
                         brightness: 0.02,
                         nominal_hz: 440.0,
+                        home_cents: 0.0,
                         enclosure: aristide_engine::enclosure::ENCLOSURE_NONE,
                         bus: 0,
                         delay_frames: 0,
@@ -2694,6 +2738,7 @@ mod tests {
                     wind_weight: 1.0,
                     brightness: 0.02,
                     nominal_hz: 440.0,
+                    home_cents: 0.0,
                     enclosure: aristide_engine::enclosure::ENCLOSURE_NONE,
                     bus: 0,
                     delay_frames: 0,
@@ -3045,6 +3090,7 @@ mod tests {
                         wind_weight: 1.0,
                         brightness: 0.0,
                         nominal_hz: 440.0,
+                        home_cents: 0.0,
                         enclosure: aristide_engine::enclosure::ENCLOSURE_NONE,
                         bus: 0,
                         delay_frames: 0,
@@ -3347,6 +3393,87 @@ mod tests {
         console.note_off_manual(0, 37);
     }
 
+    /// The organ as recorded is the default and touches nothing: a set
+    /// whose pipes all measured a semitone flat plays them as they
+    /// are. A target tuning bends each pipe from where it *measured*,
+    /// so "440 equal" lands exactly there; `Original` with the
+    /// reference pulled to 440 moves the whole instrument as one; and
+    /// a held note follows the switch live.
+    #[test]
+    fn targets_bend_from_the_measured_pitch_and_original_leaves_it() {
+        let mut console = test_console();
+        let anchor = 1200.0 * (415.0f64 / 440.0).log2();
+        for spec in console.specs.values_mut() {
+            spec.home_cents = anchor as f32;
+        }
+        let home = std::sync::Arc::new(crate::tuning::HomeTuning {
+            a4_hz: 415.0,
+            offsets_cents: [0.0; 12],
+            temperament: Some(crate::tuning::Temperament::Equal),
+            spread_cents: 0.0,
+            measured: 61,
+            pipes: 61,
+        });
+        console.set_home(Some(home.clone()));
+        let rate_of = |console: &mut Console| {
+            let rate = console.note_on_manual(0, 60, 127).0[0].spec.rate;
+            console.note_off_manual(0, 60);
+            rate
+        };
+        let cents = |rate: f32| 1200.0 * (rate as f64).log2();
+
+        // As recorded, at the organ's own a′: untouched.
+        console.set_tuning(crate::tuning::Tuning {
+            reference: home.reference(69),
+            ..crate::tuning::Tuning::default()
+        });
+        assert!(console.tuning().home.is_some(), "the console stamps its home");
+        assert!(cents(rate_of(&mut console)).abs() < 1e-3, "as recorded");
+
+        // As recorded, pulled to a′ = 440: the whole organ up 101 cents.
+        console.set_tuning(crate::tuning::Tuning {
+            reference: crate::tuning::PitchReference::A440,
+            ..crate::tuning::Tuning::default()
+        });
+        assert!((cents(rate_of(&mut console)) + anchor).abs() < 0.01, "pulled as one");
+
+        // Equal at 440: exact, from the measured pitch — the same 101
+        // cents here, but per pipe (a tempered set would differ).
+        console.set_tuning(crate::tuning::Tuning {
+            temperament: crate::tuning::Temperament::Equal,
+            reference: crate::tuning::PitchReference::A440,
+            ..crate::tuning::Tuning::default()
+        });
+        assert!((cents(rate_of(&mut console)) + anchor).abs() < 0.01, "target is exact");
+
+        // Meantone at 440: C sits +10.265 above equal, from measured.
+        console.set_tuning(crate::tuning::Tuning {
+            temperament: crate::tuning::Temperament::Meantone4,
+            reference: crate::tuning::PitchReference::A440,
+            ..crate::tuning::Tuning::default()
+        });
+        assert!((cents(rate_of(&mut console)) + anchor - 10.265).abs() < 0.01);
+
+        // Held under Original, switched to 440 equal: glides the same
+        // 101 cents.
+        console.set_tuning(crate::tuning::Tuning {
+            reference: home.reference(69),
+            ..crate::tuning::Tuning::default()
+        });
+        let started = console.note_on_manual(0, 60, 127).0[0].spec.rate;
+        console.set_tuning(crate::tuning::Tuning {
+            temperament: crate::tuning::Temperament::Equal,
+            reference: crate::tuning::PitchReference::A440,
+            ..crate::tuning::Tuning::default()
+        });
+        let moved = console.retune_held();
+        assert_eq!(moved.len(), 2, "both drawn stops' voices move");
+        for (_, rate) in moved {
+            assert!((cents(rate / started) + anchor).abs() < 0.01, "held voice follows");
+        }
+        console.note_off_manual(0, 60);
+    }
+
     #[test]
     fn tuning_retunes_and_transposes() {
         let mut console = test_console();
@@ -3362,6 +3489,7 @@ mod tests {
             scale: None,
             reference: crate::tuning::PitchReference::A440,
             transpose: 0,
+            home: None,
         });
         let meantone_c = console.note_on_manual(0, 60, 127).0[0].spec.rate;
         let expected = (10.265f32 / 1200.0).exp2();
@@ -3379,6 +3507,7 @@ mod tests {
             scale: None,
             reference: crate::tuning::PitchReference::A440,
             transpose: 2,
+            home: None,
         });
         let (transposed, _) = console.note_on_manual(0, 60, 127);
         assert_eq!(transposed.len(), 2, "both drawn stops sound");
@@ -3404,6 +3533,7 @@ mod tests {
                 scale: None,
                 reference: crate::tuning::PitchReference::A440,
                 transpose: 0,
+                home: None,
             }),
         );
         console.set_coupler(0, true); // II/I: playing the Great adds the Swell
@@ -3428,6 +3558,7 @@ mod tests {
                 scale: None,
                 reference: crate::tuning::PitchReference::A440,
                 transpose: 2,
+                home: None,
             }),
         );
         assert!(console.note_on_manual(0, 96, 127).0.is_empty(), "96+2 runs off the Great");
@@ -3460,6 +3591,7 @@ mod tests {
             })),
             reference: crate::tuning::PitchReference::A440,
             transpose: 0,
+            home: None,
         };
         let mut console = coupled_console();
         console.set_manual_tuning(0, Some(tuning));
@@ -3553,6 +3685,7 @@ mod tests {
             })),
             reference: crate::tuning::PitchReference::A440,
             transpose: 0,
+            home: None,
         };
         let mut console = coupled_console();
         let (starts, _) = console.note_on_manual(0, 74, 127);
@@ -3631,6 +3764,7 @@ mod tests {
             })),
             reference: crate::tuning::PitchReference::A440,
             transpose: 0,
+            home: None,
         };
         let mut console = coupled_console();
         console.set_manual_tuning(0, Some(tuning));
@@ -3793,6 +3927,7 @@ mod tests {
                         wind_weight: 1.0,
                         brightness: 0.0,
                         nominal_hz: 440.0,
+                        home_cents: 0.0,
                         enclosure: aristide_engine::enclosure::ENCLOSURE_NONE,
                         bus: 0,
                         delay_frames: 0,
