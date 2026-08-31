@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use aristide_engine::bank::Sample;
 
 /// Bump on ANY layout change here or in `Sample::write_cache`.
-const MAGIC: &[u8; 8] = b"ARISBK01";
+const MAGIC: &[u8; 8] = b"ARISBK02";
 
 /// What one decoded file's cache entry restores. `info` is present for
 /// attacks (the pitch metadata the spec pipeline needs) and absent for

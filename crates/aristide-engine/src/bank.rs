@@ -252,59 +252,128 @@ impl Sample {
     /// (long lag divides the peak-position error), parabolic-refined.
     /// Returns `None` when the material doesn't correlate with itself
     /// (unpitched noises) or the loop is too short to measure.
-    fn refine_period(&self, nominal: f64) -> Option<f64> {
-        let (loop_start, loop_end) = self.sustain_loop?;
+    /// Normalized cross-correlation between the `window` frames at
+    /// `start` and the same length `lag` frames later — 1 when the
+    /// waveform repeats exactly at that lag.
+    fn correlation(&self, start: u64, window: u64, lag: i64) -> f64 {
         let ch = self.channels as usize;
-        let loop_len = (loop_end - loop_start) as f64;
-        if !(nominal >= 4.0) || loop_len < nominal * 2.5 {
-            return None;
-        }
-        let window = (2048.0_f64).min(loop_len / 2.0) as u64;
-        // As many whole periods of lag as the loop accommodates.
-        let cycles = (((loop_len - window as f64) / nominal).floor() as u32).clamp(1, 24);
-        let base_lag = cycles as f64 * nominal;
-        let half_span = (nominal / 2.0).ceil() as i64;
-
         let sample_at = |frame: u64| self.data.get(frame as usize * ch);
-        let score = |lag: i64| -> f64 {
-            let mut dot = 0.0f64;
-            let mut energy_a = 0.0f64;
-            let mut energy_b = 0.0f64;
-            for i in 0..window {
-                let a = sample_at(loop_start + i) as f64;
-                let b = sample_at((loop_start as i64 + lag) as u64 + i) as f64;
-                dot += a * b;
-                energy_a += a * a;
-                energy_b += b * b;
-            }
-            dot / (energy_a * energy_b).sqrt().max(1e-12)
-        };
+        let mut dot = 0.0f64;
+        let mut energy_a = 0.0f64;
+        let mut energy_b = 0.0f64;
+        for i in 0..window {
+            let a = sample_at(start + i) as f64;
+            let b = sample_at((start as i64 + lag) as u64 + i) as f64;
+            dot += a * b;
+            energy_a += a * a;
+            energy_b += b * b;
+        }
+        dot / (energy_a * energy_b).sqrt().max(1e-12)
+    }
 
-        let center = base_lag.round() as i64;
-        let mut best_lag = center;
-        let mut best = f64::MIN;
-        for lag in (center - half_span)..=(center + half_span) {
-            if lag <= 0 || (loop_start as i64 + lag) as u64 + window > loop_end {
-                continue;
+    /// The best-correlating lag in `lags` (stepping by `step`) and its
+    /// score, parabolically interpolated to sub-frame resolution.
+    fn peak_lag(
+        &self,
+        start: u64,
+        window: u64,
+        end: u64,
+        lags: std::ops::RangeInclusive<i64>,
+        step: i64,
+    ) -> Option<(f64, f64)> {
+        let fits = |lag: i64| lag > 0 && (start as i64 + lag) as u64 + window <= end;
+        let mut best: Option<(i64, f64)> = None;
+        let mut lag = *lags.start();
+        while lag <= *lags.end() {
+            if fits(lag) {
+                let value = self.correlation(start, window, lag);
+                if best.is_none_or(|(_, score)| value > score) {
+                    best = Some((lag, value));
+                }
             }
-            let value = score(lag);
-            if value > best {
-                best = value;
-                best_lag = lag;
-            }
+            lag += step.max(1);
         }
-        if best < 0.5 {
-            return None; // not periodic enough to align
+        let (best_lag, best_score) = best?;
+        if !(fits(best_lag - 1) && fits(best_lag + 1)) {
+            return Some((best_lag as f64, best_score));
         }
-        // Parabolic interpolation around the integer peak.
-        let (left, right) = (score(best_lag - 1), score(best_lag + 1));
-        let denominator = left - 2.0 * best + right;
+        let (left, right) = (
+            self.correlation(start, window, best_lag - 1),
+            self.correlation(start, window, best_lag + 1),
+        );
+        let denominator = left - 2.0 * best_score + right;
         let offset = if denominator.abs() > 1e-12 {
             (0.5 * (left - right) / denominator).clamp(-0.5, 0.5)
         } else {
             0.0
         };
-        Some((best_lag as f64 + offset) / cycles as f64)
+        Some((best_lag as f64 + offset, best_score))
+    }
+
+    /// Measure the fundamental period (in this sample's own frames)
+    /// from the sustain loop, searching ±600 cents around `expected`
+    /// frames. `None` when the sample has no loop long enough or the
+    /// material doesn't repeat (unpitched noises).
+    ///
+    /// Staged: a coarse one-cycle scan over the whole window finds
+    /// the right cycle wherever the recording actually sits — a set
+    /// recorded at a′ = 415 is 6 % long of its nominal period, and a
+    /// long-lag search centred on the nominal would lock onto the
+    /// wrong cycle count and return garbage with confidence. Then the
+    /// lag is re-measured over as many whole cycles as the loop holds
+    /// (24 at most), each stage only searching the frames the previous
+    /// one could still be wrong by, for sub-1e-5 relative accuracy:
+    /// alignment tracks phase over hundreds of periods, and tuning
+    /// wants the pitch to a fraction of a cent.
+    pub fn measure_period(&self, expected: f64) -> Option<f64> {
+        let (loop_start, loop_end) = self.sustain_loop?;
+        let loop_len = (loop_end - loop_start) as f64;
+        if !(expected >= 4.0) || loop_len < expected * 2.5 {
+            return None;
+        }
+        let window = (2048.0_f64).min(loop_len / 2.0) as u64;
+        let peak = |lags: std::ops::RangeInclusive<i64>, step: i64| {
+            self.peak_lag(loop_start, window, loop_end, lags, step)
+        };
+
+        let spread = std::f64::consts::SQRT_2;
+        let low = (expected / spread).floor().max(1.0) as i64;
+        let high = (expected * spread).ceil() as i64;
+        let step = (expected / 256.0).floor().max(1.0) as i64;
+        let (coarse, _) = peak(low..=high, step)?;
+        let (mut period, mut score) = if step > 1 {
+            let centre = coarse.round() as i64;
+            peak((centre - step)..=(centre + step), 1)?
+        } else {
+            (coarse, 0.0)
+        };
+
+        // Each further stage measures `cycles` periods at once; the
+        // interpolated estimate before it is good to a fraction of a
+        // frame per cycle it measured, so the search spans only that
+        // residue — and never half a period, which would let a
+        // neighbouring multiple of a short period (high pipes: a
+        // handful of frames) tie with the right one.
+        let max_cycles = (((loop_len - window as f64) / period).floor() as u32).clamp(1, 24);
+        let mut measured_cycles = 1u32;
+        for cycles in [4u32, max_cycles] {
+            if cycles <= measured_cycles || cycles > max_cycles {
+                continue;
+            }
+            let centre = (cycles as f64 * period).round() as i64;
+            let residue = (cycles as f64 * 0.25 / measured_cycles as f64).ceil() as i64;
+            let span = residue.max(2).min(((period / 2.0).floor() as i64 - 1).max(1));
+            let Some((lag, value)) = peak((centre - span)..=(centre + span), 1) else {
+                break;
+            };
+            period = lag / cycles as f64;
+            score = value;
+            measured_cycles = cycles;
+        }
+        if measured_cycles == 1 {
+            score = self.correlation(loop_start, window, period.round() as i64);
+        }
+        (score >= 0.5).then_some(period)
     }
 
     /// Mean absolute value (mono-summed) over `window` frames from
@@ -436,7 +505,7 @@ impl Sample {
         // relative accuracy, or give up on alignment when the material
         // doesn't correlate (unpitched noises).
         let nominal = self.sample_rate_hz as f64 / fundamental_hz as f64;
-        let Some(period) = self.refine_period(nominal) else {
+        let Some(period) = self.measure_period(nominal) else {
             return;
         };
         self.measured_period = Some(period);
@@ -896,5 +965,84 @@ impl SampleBank {
     /// Total decoded audio held, in bytes.
     pub fn resident_bytes(&self) -> usize {
         self.samples.iter().map(|s| s.data.bytes()).sum()
+    }
+}
+
+#[cfg(test)]
+mod period_tests {
+    use super::Sample;
+
+    /// A looped tone at `period` frames (48 kHz), with the harmonics
+    /// given as (number, amplitude), plus white noise at `noise`.
+    fn tone(period: f64, harmonics: &[(u32, f64)], noise: f64) -> Sample {
+        let frames = (period * 200.0).ceil() as usize + 4096;
+        let mut seed = 0x2545_F491_4F6C_DD1Du64;
+        let mut rand = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0
+        };
+        let data: Vec<f32> = (0..frames)
+            .map(|n| {
+                let phase = std::f64::consts::TAU * n as f64 / period;
+                let tone: f64 = harmonics
+                    .iter()
+                    .map(|&(h, amplitude)| amplitude * (phase * h as f64).sin())
+                    .sum();
+                (tone + noise * rand()) as f32
+            })
+            .collect();
+        let loop_end = frames as u64 - 1024;
+        Sample::new(data, 1, 48000.0, Some((1024, loop_end)), loop_end).expect("sample")
+    }
+
+    fn cents(measured: f64, truth: f64) -> f64 {
+        1200.0 * (truth / measured).log2()
+    }
+
+    /// The measurement finds the recording's own period wherever it
+    /// sits within ±600 cents of the expected one — low pipes, high
+    /// pipes, strong upper harmonics — to a fraction of a cent.
+    #[test]
+    fn measures_the_period_wherever_the_recording_sits() {
+        let ratio = |cents: f64| (cents / 1200.0).exp2();
+        let cases: [(f64, f64, &[(u32, f64)]); 6] = [
+            (109.09, -100.0, &[(1, 1.0)]),
+            (109.09, 0.0, &[(1, 1.0), (2, 0.9), (3, 0.5)]),
+            (1468.0, -100.0, &[(1, 1.0), (2, 0.3), (3, 0.6)]),
+            (12.0, 450.0, &[(1, 1.0), (2, 0.4)]),
+            (12.0, -550.0, &[(1, 1.0)]),
+            (300.0, 590.0, &[(1, 0.5), (2, 1.0), (4, 0.7)]),
+        ];
+        for (expected, offset, harmonics) in cases {
+            let truth = expected * ratio(-offset);
+            let sample = tone(truth, harmonics, 0.02);
+            let measured = sample
+                .measure_period(expected)
+                .unwrap_or_else(|| panic!("no period for {expected} @ {offset:+} cents"));
+            let error = cents(measured, truth);
+            assert!(
+                error.abs() < 0.3,
+                "{expected} frames @ {offset:+} cents: measured {measured}, off by {error:.3} cents"
+            );
+        }
+    }
+
+    #[test]
+    fn noise_has_no_period() {
+        let sample = tone(200.0, &[], 1.0);
+        assert_eq!(sample.measure_period(200.0), None);
+    }
+
+    /// Release alignment now stores the measured period even when the
+    /// recording is well off its nominal pitch.
+    #[test]
+    fn alignment_measures_an_off_pitch_recording() {
+        let truth = 115.66; // a′ = 415 at 48 kHz
+        let mut sample = tone(truth, &[(1, 1.0), (2, 0.5)], 0.01);
+        sample.align_release(48000.0 / 109.09);
+        let period = sample.measured_period().expect("measured");
+        assert!(cents(period, truth).abs() < 0.3, "{period} vs {truth}");
     }
 }
