@@ -51,6 +51,29 @@ const KEYBOARD_KINDS = [
   ["microtonal", "Microtonal keyboard"],
 ];
 
+/// What opening one of `Editor.popovers`' kinds has always closed among
+/// the others — asymmetric on purpose in spots, not tidied here into a
+/// blanket "close everything": the settings cluster (tuning, midi,
+/// compass, room, bindings, save) never touches trem or the stop
+/// editor; trem closes only tuning/hex/coupler; hex closes only
+/// tuning/coupler; the stop and coupler editors close everything else.
+/// `openingPopover()` reads this so no openXForm hand-lists its own
+/// subset of closeYForm() calls. The save-as dialog is a modal, not
+/// here — it only ever closes the plain save form (openSaveAsForm
+/// does that itself) and nothing closes it back from this table.
+const POPOVER_CLOSES = {
+  tuning: ["hex", "coupler", "midi", "compass", "room", "bindings", "save"],
+  midi: ["tuning", "hex", "coupler", "compass", "room", "bindings", "save"],
+  compass: ["tuning", "hex", "coupler", "midi", "room", "bindings", "save"],
+  room: ["tuning", "hex", "coupler", "midi", "compass", "bindings", "save"],
+  bindings: ["tuning", "hex", "coupler", "midi", "compass", "room", "save"],
+  save: ["tuning", "hex", "coupler", "midi", "compass", "room", "bindings"],
+  trem: ["tuning", "hex", "coupler"],
+  stop: ["tuning", "hex", "coupler", "trem", "midi", "compass", "room", "bindings", "save"],
+  coupler: ["tuning", "hex", "trem", "stop", "midi", "compass", "room", "bindings", "save"],
+  hex: ["tuning", "coupler"],
+};
+
 /// How far the pointer travels before a press on a drag source becomes
 /// a drag rather than a click — GTK's threshold. A mouse button's own
 /// travel wobbles the pointer a few pixels (more on a high-DPI mouse),
@@ -1532,12 +1555,7 @@ export class Editor {
   /// scope object) is still accepted as shorthand for {kind:"organ"}.
   openTuningForm(scope, x, y) {
     if (scope === "organ") scope = { kind: "organ" };
-    this.closeAdd();
-    this.closeDivisionMenu();
-    this.closeKeyboardMenu();
-    this.closeHexForm();
-    this.closeCouplerForm();
-    this.closeSettingsPopovers();
+    this.openingPopover("tuning");
     this.tuningScope = scope;
     this.hideTuningError();
     this.closeTuningBrowse();
@@ -1964,13 +1982,7 @@ export class Editor {
   }
 
   openMidiForm(idx, x, y) {
-    this.closeAdd();
-    this.closeDivisionMenu();
-    this.closeKeyboardMenu();
-    this.closeTuningForm();
-    this.closeHexForm();
-    this.closeCouplerForm();
-    this.closeSettingsPopovers();
+    this.openingPopover("midi");
     this.midiManual = idx;
     resetRender(this.el.midi);
     this.syncMidiForm();
@@ -2075,13 +2087,7 @@ export class Editor {
   }
 
   openCompassForm(idx, x, y) {
-    this.closeAdd();
-    this.closeDivisionMenu();
-    this.closeKeyboardMenu();
-    this.closeTuningForm();
-    this.closeHexForm();
-    this.closeCouplerForm();
-    this.closeSettingsPopovers();
+    this.openingPopover("compass");
     this.compassManual = idx;
     resetRender(this.el.compass);
     this.hideCompassError();
@@ -2238,13 +2244,7 @@ export class Editor {
   }
 
   openRoomForm(x, y) {
-    this.closeAdd();
-    this.closeDivisionMenu();
-    this.closeKeyboardMenu();
-    this.closeTuningForm();
-    this.closeHexForm();
-    this.closeCouplerForm();
-    this.closeSettingsPopovers();
+    this.openingPopover("room");
     this.roomOpen = true;
     this.syncRoomForm();
     this.el.room.classList.remove("hidden");
@@ -2289,13 +2289,7 @@ export class Editor {
   }
 
   openBindingsForm(x, y) {
-    this.closeAdd();
-    this.closeDivisionMenu();
-    this.closeKeyboardMenu();
-    this.closeTuningForm();
-    this.closeHexForm();
-    this.closeCouplerForm();
-    this.closeSettingsPopovers();
+    this.openingPopover("bindings");
     this.bindingsOpen = true;
     resetRender(this.el.bindings);
     this.syncBindingsForm();
@@ -2356,13 +2350,7 @@ export class Editor {
   openSaveForm(x, y) {
     const setup = this.lastSnapshot?.setup;
     if (!setup || setup.file) return; // nothing unsaved to write
-    this.closeAdd();
-    this.closeDivisionMenu();
-    this.closeKeyboardMenu();
-    this.closeTuningForm();
-    this.closeHexForm();
-    this.closeCouplerForm();
-    this.closeSettingsPopovers();
+    this.openingPopover("save");
     this.saveOpen = true;
     this.el.savePath.value = "";
     this.hideSaveError();
@@ -2546,6 +2534,59 @@ export class Editor {
     this.closeSaveForm();
   }
 
+  // ---- the popover registry: one source of truth for what's open ----------
+  //
+  // Every popover's kind, its element, and how to close it — so a
+  // closer needn't be named again every place one popover has to make
+  // way for another. `POPOVER_CLOSES` (top of file) is the only place
+  // that says what opening one closes; every openXForm below calls
+  // `openingPopover(kind)` instead of hand-listing closeYForm() calls.
+
+  get popovers() {
+    return {
+      tuning: { el: this.el.tuning, close: () => this.closeTuningForm() },
+      midi: { el: this.el.midi, close: () => this.closeMidiForm() },
+      compass: { el: this.el.compass, close: () => this.closeCompassForm() },
+      room: { el: this.el.room, close: () => this.closeRoomForm() },
+      bindings: { el: this.el.bindings, close: () => this.closeBindingsForm() },
+      save: { el: this.el.save, close: () => this.closeSaveForm() },
+      trem: { el: this.el.trem, close: () => this.closeTremForm() },
+      stop: { el: this.el.stop, close: () => this.closeStopForm() },
+      coupler: { el: this.el.coupler, close: () => this.closeCouplerForm() },
+      hex: { el: this.el.hex, close: () => this.closeHexForm() },
+      saveAs: { el: this.el.saveAs, close: () => this.closeSaveAsForm() },
+    };
+  }
+
+  /// The three quick menus every popover below makes way for — never
+  /// each other, since a division/keyboard-menu item is how most of
+  /// these popovers open in the first place.
+  closeQuickMenus() {
+    this.closeAdd();
+    this.closeDivisionMenu();
+    this.closeKeyboardMenu();
+  }
+
+  /// Closes the quick menus and whatever `POPOVER_CLOSES[kind]` says
+  /// this kind has always closed, in place of the openXForm functions
+  /// each hand-listing their own subset of closeYForm() calls.
+  openingPopover(kind) {
+    this.closeQuickMenus();
+    const registry = this.popovers;
+    for (const other of POPOVER_CLOSES[kind] ?? []) registry[other].close();
+  }
+
+  /// Every popover and quick menu, closed at once — a click outside
+  /// all of them, or Escape. Never the save-as dialog: it's a modal,
+  /// closed only by its own Escape/Cancel/backdrop handling.
+  closeAllPopovers() {
+    this.closeQuickMenus();
+    this.closeCouplersMenu();
+    for (const kind of Object.keys(this.popovers)) {
+      if (kind !== "saveAs") this.popovers[kind].close();
+    }
+  }
+
   // ---- the tremulant-shape popover: right-click the Tremblant knob --------
   //
   // A tremulant is a valve venting the wind, so its shape is spoken in
@@ -2596,12 +2637,7 @@ export class Editor {
   openTremForm(x, y) {
     const trem = this.shapeableTrem();
     if (!trem) return;
-    this.closeAdd();
-    this.closeDivisionMenu();
-    this.closeKeyboardMenu();
-    this.closeTuningForm();
-    this.closeHexForm();
-    this.closeCouplerForm();
+    this.openingPopover("trem");
     this.tremOpen = trem.idx;
     this.hideTremError();
     this.syncTremForm();
@@ -2770,14 +2806,7 @@ export class Editor {
   }
 
   openStopForm(id, x, y) {
-    this.closeAdd();
-    this.closeDivisionMenu();
-    this.closeKeyboardMenu();
-    this.closeTuningForm();
-    this.closeHexForm();
-    this.closeTremForm();
-    this.closeCouplerForm();
-    this.closeSettingsPopovers();
+    this.openingPopover("stop");
     this.stopOpen = id;
     resetRender(this.el.stopPistons);
     this.hideStopError();
@@ -3129,14 +3158,7 @@ export class Editor {
   openCouplerForm(idx, x, y) {
     const coupler = this.lastSnapshot?.couplers.find((c) => c.idx === idx);
     if (!coupler) return;
-    this.closeAdd();
-    this.closeDivisionMenu();
-    this.closeKeyboardMenu();
-    this.closeTuningForm();
-    this.closeHexForm();
-    this.closeTremForm();
-    this.closeStopForm();
-    this.closeSettingsPopovers();
+    this.openingPopover("coupler");
     this.couplerOpen = idx;
     resetRender(this.el.couplerPistons);
     this.hideCouplerError();
@@ -3506,11 +3528,7 @@ export class Editor {
   }
 
   openHexForm(idx, x, y) {
-    this.closeAdd();
-    this.closeDivisionMenu();
-    this.closeKeyboardMenu();
-    this.closeTuningForm();
-    this.closeCouplerForm();
+    this.openingPopover("hex");
     this.hexManual = idx;
     this.hideHexError();
     this.syncHexForm();
@@ -4387,32 +4405,14 @@ export class Editor {
       this.el.add,
       this.el.divisionMenu,
       this.el.keyboardMenu,
-      this.el.tuning,
-      this.el.hex,
-      this.el.trem,
-      this.el.stop,
-      this.el.coupler,
       this.el.couplersMenu,
-      this.el.midi,
-      this.el.compass,
-      this.el.room,
-      this.el.bindings,
-      this.el.save,
+      ...Object.entries(this.popovers)
+        .filter(([kind]) => kind !== "saveAs")
+        .map(([, entry]) => entry.el),
     ]) {
       el.addEventListener("click", (event) => event.stopPropagation());
     }
-    window.addEventListener("click", () => {
-      this.closeAdd();
-      this.closeDivisionMenu();
-      this.closeKeyboardMenu();
-      this.closeTuningForm();
-      this.closeHexForm();
-      this.closeTremForm();
-      this.closeStopForm();
-      this.closeCouplerForm();
-      this.closeCouplersMenu();
-      this.closeSettingsPopovers();
-    });
+    window.addEventListener("click", () => this.closeAllPopovers());
     window.addEventListener("keydown", (event) => {
       if (event.key !== "Escape") return;
       // The dialog is modal: Escape means it, and nothing under it.
@@ -4421,16 +4421,7 @@ export class Editor {
         this.closeSaveAsForm();
         return;
       }
-      this.closeAdd();
-      this.closeDivisionMenu();
-      this.closeKeyboardMenu();
-      this.closeTuningForm();
-      this.closeHexForm();
-      this.closeTremForm();
-      this.closeStopForm();
-      this.closeCouplerForm();
-      this.closeCouplersMenu();
-      this.closeSettingsPopovers();
+      this.closeAllPopovers();
     });
   }
 
