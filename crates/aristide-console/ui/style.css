@@ -2240,17 +2240,21 @@ body.editing .division-add { display: block; }
   --sharp-w: calc(15px * var(--kb-scale, 1));
 }
 
-/* the cheek's lettering rides --kb-scale with the keys (kb-scale.js
-   solves the panel's width with that in mind); the gap to the keys
-   stays chrome */
+/* The cheek's lettering rides --kb-scale with the keys (kb-scale.js
+   solves the panel's width with that in mind) but never runs past the
+   key field: console.js's fitLabels measures each name's run in ems
+   (--cheek-em) and the size caps at what --kb-h has room for — a long
+   name engraves smaller, as on any real cheek, instead of stretching
+   the panel or hanging off its ends. The gap to the keys stays chrome. */
 .cheek {
   writing-mode: vertical-rl;
   transform: rotate(180deg);
   text-align: center;
+  white-space: nowrap;
   margin-right: 10px;
-  font-size: calc(10px * var(--kb-scale, 1));
+  font-size: min(calc(10px * var(--kb-scale, 1)), calc(var(--kb-h, 1000px) / var(--cheek-em, 1)));
   text-transform: uppercase;
-  letter-spacing: calc(2px * var(--kb-scale, 1));
+  letter-spacing: 0.2em;
   color: var(--text-dim);
 }
 
@@ -2322,15 +2326,16 @@ body.editing .division-add { display: block; }
    the row step (3/4 of a hex's height) matches the corner cut, so
    adjacent rows interlock edge to edge; odd rows sit half a hex to the
    right (see console.js's hexKeys, which sets --hx/--hy per key and
-   --hex-rows/--hex-cols on the field). Keys outside the compass render
+   --hex-rows/--hex-cols on the board). Keys outside the compass render
    dead — the board keeps its shape, they just don't play. */
 .keyboard.microtonal {
   --hex-w: calc(30px * var(--kb-scale, 1));
   --hex-h: calc(34px * var(--kb-scale, 1));
+  --kb-h: calc((var(--hex-rows) - 1) * var(--hex-h) * 0.75 + var(--hex-h));
 }
 .keyboard.microtonal .keys {
   width: calc((var(--hex-cols) + 0.5) * var(--hex-w));
-  height: calc((var(--hex-rows) - 1) * var(--hex-h) * 0.75 + var(--hex-h));
+  height: var(--kb-h);
 }
 
 .key.hex {

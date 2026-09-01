@@ -167,12 +167,28 @@ export class Console {
   /// Long stop names ("Trompette", "Tremblant") must never break
   /// mid-word; instead the engraving shrinks until the widest word fits
   /// on the knob face. Measured, not guessed, so it holds under any font.
+  /// A cheek's lettering likewise never runs past its key field: its
+  /// run is measured once in ems — a number that survives every zoom,
+  /// density and --kb-scale — and style.css does the fitting from
+  /// there, so no re-measure is ever needed when the keys change size.
   fitLabels() {
     for (const label of this.root.querySelectorAll(".stop-name")) {
       label.style.fontSize = "";
       for (let size = 10.5; label.scrollWidth > label.clientWidth && size > 7.5; ) {
         size -= 0.5;
         label.style.fontSize = `${size}px`;
+      }
+    }
+    for (const cheek of this.root.querySelectorAll(".cheek")) {
+      cheek.style.removeProperty("--cheek-em");
+      const run = document.createRange();
+      run.selectNodeContents(cheek);
+      const length = run.getBoundingClientRect().height; // vertical text: the run is tall
+      const px = parseFloat(getComputedStyle(cheek).fontSize);
+      if (length > 0 && px > 0) {
+        // 6 % over the measure: hinted glyphs at small device sizes
+        // run a touch longer than the fractional advances say.
+        cheek.style.setProperty("--cheek-em", ((length / px) * 1.06).toFixed(3));
       }
     }
   }
@@ -398,7 +414,7 @@ export class Console {
     const last = manual.first_key + manual.key_count;
 
     if (kind === "microtonal") {
-      this.hexKeys(keys, manual, last);
+      this.hexKeys(board, keys, manual, last);
     } else {
       let naturals = 0;
       for (let midi = manual.first_key; midi < last; midi++) if (!isSharp(midi)) naturals++;
@@ -433,7 +449,7 @@ export class Console {
   /// state is matched by `data-midi`, they light together. Hexes whose
   /// key falls outside the compass render dead: present, dimmed,
   /// unplayable, so the board's shape never depends on the compass.
-  hexKeys(keys, manual, last) {
+  hexKeys(board, keys, manual, last) {
     const hex = manual.hex ?? {
       rows: 1,
       cols: manual.key_count,
@@ -441,8 +457,10 @@ export class Console {
       upright: 0,
       anchor: manual.first_key,
     };
-    keys.style.setProperty("--hex-rows", hex.rows);
-    keys.style.setProperty("--hex-cols", hex.cols);
+    // On the board, not the field: the cheek beside the field needs
+    // the row count too (style.css derives --kb-h from it).
+    board.style.setProperty("--hex-rows", hex.rows);
+    board.style.setProperty("--hex-cols", hex.cols);
     for (let row = 0; row < hex.rows; row++) {
       for (let col = 0; col < hex.cols; col++) {
         const key = document.createElement("div");
