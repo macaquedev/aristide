@@ -270,6 +270,19 @@ struct Builder<'a> {
     pending_borrows: Vec<PendingBorrow>,
 }
 
+/// Mutable state threaded across the per-manual stop/coupler loop: the
+/// chest gain chains ranks and inline stops fall back to, the inline-
+/// rank id counter old-style stops draw from, and the (manual index,
+/// 1-based stop slot) → first-rank address space `REF:` borrows
+/// resolve against.
+struct ManualLoopState<'a> {
+    windchest_chains: &'a HashMap<i64, GainChain>,
+    organ_chain: GainChain,
+    next_stop_id: u32,
+    next_inline_rank_id: u32,
+    stop_first_rank: HashMap<(i64, i64), RankId>,
+}
+
 impl Builder<'_> {
     fn build(mut self) -> Result<LoadResult, OdfError> {
         let organ_section = self.ini.section("Organ")?;
@@ -281,11 +294,53 @@ impl Builder<'_> {
 
         let organ_chain = GainChain::read(&organ_section, ROOT_CHAIN)?;
 
-        // Enclosures: name + closed-amplitude floor; the engine decides
-        // taper and filtering (docs/research/enclosure-modeling.md).
         let enclosure_count = organ_section.int_or("NumberOfEnclosures", 0)?;
+        let enclosures = self.read_enclosures(enclosure_count)?;
+
+        let tremulant_count = organ_section.int_or("NumberOfTremulants", 0)?;
+        let tremulants = self.read_tremulants(tremulant_count)?;
+
+        let (windchest_chains, windchests) =
+            self.read_windchests(windchest_count, enclosure_count, tremulant_count, organ_chain)?;
+
+        let mut organ = Organ {
+            name,
+            base_path: std::mem::take(&mut self.base_path),
+            enclosures,
+            windchests,
+            tremulants,
+            ..Organ::default()
+        };
+
+        organ.ranks = self.read_ranks(rank_count, &windchest_chains, organ_chain)?;
+
+        let first_manual = if has_pedals { 0 } else { 1 };
+        let mut state = ManualLoopState {
+            windchest_chains: &windchest_chains,
+            organ_chain,
+            next_stop_id: 0,
+            next_inline_rank_id: 1000, // clear of the [RankNNN] id space
+            // (manual index, 1-based stop slot) → the stop's first rank,
+            // the address space REF: borrows resolve against.
+            stop_first_rank: HashMap::new(),
+        };
+        for manual_index in first_manual..=manual_count {
+            self.read_manual(&mut organ, manual_index, &mut state)?;
+        }
+
+        self.resolve_borrows(&mut organ, &state.stop_first_rank);
+
+        Ok(LoadResult {
+            organ,
+            warnings: self.warnings,
+        })
+    }
+
+    /// Enclosures: name + closed-amplitude floor; the engine decides
+    /// taper and filtering (docs/research/enclosure-modeling.md).
+    fn read_enclosures(&self, count: i64) -> Result<Vec<aristide_model::Enclosure>, OdfError> {
         let mut enclosures = Vec::new();
-        for index in 1..=enclosure_count {
+        for index in 1..=count {
             let section = self.ini.section(&format!("Enclosure{index:03}"))?;
             let midi_input = section.int_or("MIDIInputNumber", 0)?;
             enclosures.push(aristide_model::Enclosure {
@@ -295,15 +350,17 @@ impl Builder<'_> {
                 displayed: section.bool_or("Displayed", true)?,
             });
         }
+        Ok(enclosures)
+    }
 
-        // Tremulants: name + how they undulate. Synth trems carry their
-        // modulation figures in the ODF (Period is *milliseconds* per
-        // cycle — GOSoundProviderSynthedTrem computes 1000/period Hz);
-        // Wave trems have no fields of their own here, the pipes' own
-        // IsTremulant sample variants carry the sound.
-        let tremulant_count = organ_section.int_or("NumberOfTremulants", 0)?;
+    /// Tremulants: name + how they undulate. Synth trems carry their
+    /// modulation figures in the ODF (Period is *milliseconds* per
+    /// cycle — GOSoundProviderSynthedTrem computes 1000/period Hz);
+    /// Wave trems have no fields of their own here, the pipes' own
+    /// IsTremulant sample variants carry the sound.
+    fn read_tremulants(&mut self, count: i64) -> Result<Vec<aristide_model::Tremulant>, OdfError> {
         let mut tremulants = Vec::new();
-        for index in 1..=tremulant_count {
+        for index in 1..=count {
             let section = self.ini.section(&format!("Tremulant{index:03}"))?;
             let name = section
                 .get("Name")
@@ -343,7 +400,20 @@ impl Builder<'_> {
             };
             tremulants.push(aristide_model::Tremulant { name, kind });
         }
+        Ok(tremulants)
+    }
 
+    /// Windchest groups: enclosure/tremulant membership (1-based global
+    /// references, out-of-range ones dropped with a warning) plus each
+    /// chest's own gain chain, falling back to the organ's when the
+    /// section is missing.
+    fn read_windchests(
+        &mut self,
+        windchest_count: i64,
+        enclosure_count: i64,
+        tremulant_count: i64,
+        organ_chain: GainChain,
+    ) -> Result<(HashMap<i64, GainChain>, Vec<aristide_model::Windchest>), OdfError> {
         let mut windchest_chains = HashMap::new();
         let mut windchests = Vec::new();
         for index in 1..=windchest_count {
@@ -406,18 +476,20 @@ impl Builder<'_> {
             windchest_chains.insert(index, chain);
             windchests.push(windchest);
         }
+        Ok((windchest_chains, windchests))
+    }
 
-        let mut organ = Organ {
-            name,
-            base_path: std::mem::take(&mut self.base_path),
-            enclosures,
-            windchests,
-            tremulants,
-            ..Organ::default()
-        };
-
-        // Standalone [RankNNN] sections (new-style organs).
+    /// Standalone `[RankNNN]` sections (new-style organs).
+    fn read_ranks(
+        &mut self,
+        rank_count: i64,
+        windchest_chains: &HashMap<i64, GainChain>,
+        organ_chain: GainChain,
+    ) -> Result<Vec<Rank>, OdfError> {
+        // First-rank MIDI notes, kept for parity with the sequential
+        // reader; nothing downstream currently consults it.
         let mut rank_first_midi = HashMap::new();
+        let mut ranks = Vec::new();
         for index in 1..=rank_count {
             let section = self.ini.section(&format!("Rank{index:03}"))?;
             let windchest = section.int_or("WindchestGroup", 1)?;
@@ -428,129 +500,159 @@ impl Builder<'_> {
             let first_midi = section.int("FirstMidiNoteNumber")?;
             let rank = self.read_rank(&section, RankId(index as u32), first_midi, chain)?;
             rank_first_midi.insert(index, first_midi);
-            organ.ranks.push(rank);
+            ranks.push(rank);
         }
+        Ok(ranks)
+    }
 
-        let first_manual = if has_pedals { 0 } else { 1 };
-        let mut next_stop_id = 0u32;
-        let mut next_inline_rank_id = 1000u32; // clear of the [RankNNN] id space
+    /// One manual: its own section, the stops it declares, and the
+    /// couplers reaching from it.
+    fn read_manual(
+        &mut self,
+        organ: &mut Organ,
+        manual_index: i64,
+        state: &mut ManualLoopState<'_>,
+    ) -> Result<(), OdfError> {
+        let section = self.ini.section(&format!("Manual{manual_index:03}"))?;
+        let manual_id = ManualId(manual_index as u32);
+        let first_accessible_logical = section.int("FirstAccessibleKeyLogicalKeyNumber")?;
+        let first_midi_note = section.int("FirstAccessibleKeyMIDINoteNumber")?;
+        let accessible_keys = section.int("NumberOfAccessibleKeys")?;
+        organ.manuals.push(Manual {
+            id: manual_id,
+            name: section.string("Name")?.to_string(),
+            first_midi_note: first_midi_note as u8,
+            key_count: accessible_keys as u16,
+            kind: if manual_index == 0 {
+                ManualKind::Pedal
+            } else {
+                ManualKind::Manual
+            },
+            // GO has no generalized-keyboard concept.
+            hex: None,
+        });
+        // MIDI note of logical key 1 (see notes §2) — the pitch origin
+        // that old-style stops derive their rank numbering from.
+        let first_logical_midi = first_midi_note - first_accessible_logical + 1;
 
-        // (manual index, 1-based stop slot) → the stop's first rank,
-        // the address space REF: borrows resolve against.
-        let mut stop_first_rank: HashMap<(i64, i64), RankId> = HashMap::new();
+        self.read_manual_stops(
+            organ,
+            &section,
+            manual_index,
+            manual_id,
+            first_accessible_logical,
+            first_logical_midi,
+            state,
+        )?;
+        self.read_manual_couplers(organ, &section, manual_id)?;
+        Ok(())
+    }
 
-        for manual_index in first_manual..=manual_count {
-            let section = self.ini.section(&format!("Manual{manual_index:03}"))?;
-            let manual_id = ManualId(manual_index as u32);
-            let first_accessible_logical = section.int("FirstAccessibleKeyLogicalKeyNumber")?;
-            let first_midi_note = section.int("FirstAccessibleKeyMIDINoteNumber")?;
-            let accessible_keys = section.int("NumberOfAccessibleKeys")?;
-            organ.manuals.push(Manual {
-                id: manual_id,
-                name: section.string("Name")?.to_string(),
-                first_midi_note: first_midi_note as u8,
-                key_count: accessible_keys as u16,
-                kind: if manual_index == 0 {
-                    ManualKind::Pedal
-                } else {
-                    ManualKind::Manual
-                },
-                // GO has no generalized-keyboard concept.
-                hex: None,
-            });
-            // MIDI note of logical key 1 (see notes §2) — the pitch origin
-            // that old-style stops derive their rank numbering from.
-            let first_logical_midi = first_midi_note - first_accessible_logical + 1;
-
-            let stop_count = section.int("NumberOfStops")?;
-            for slot in 1..=stop_count {
-                let target = section.int(&format!("Stop{slot:03}"))?;
-                let stop_section = self.ini.section(&format!("Stop{target:03}"))?;
-                next_stop_id += 1;
-                let stop = self.read_stop(
-                    &stop_section,
-                    StopId(next_stop_id),
-                    manual_id,
-                    first_accessible_logical,
-                    first_logical_midi,
-                    &windchest_chains,
-                    organ_chain,
-                    &mut next_inline_rank_id,
-                    &mut organ.ranks,
-                )?;
-                if let Some(range) = stop.ranks.first() {
-                    stop_first_rank.insert((manual_index, slot), range.rank);
-                }
-                organ.stops.push(stop);
+    #[allow(clippy::too_many_arguments)]
+    fn read_manual_stops(
+        &mut self,
+        organ: &mut Organ,
+        section: &SectionReader<'_>,
+        manual_index: i64,
+        manual_id: ManualId,
+        first_accessible_logical: i64,
+        first_logical_midi: i64,
+        state: &mut ManualLoopState<'_>,
+    ) -> Result<(), OdfError> {
+        let stop_count = section.int("NumberOfStops")?;
+        for slot in 1..=stop_count {
+            let target = section.int(&format!("Stop{slot:03}"))?;
+            let stop_section = self.ini.section(&format!("Stop{target:03}"))?;
+            state.next_stop_id += 1;
+            let stop = self.read_stop(
+                &stop_section,
+                StopId(state.next_stop_id),
+                manual_id,
+                first_accessible_logical,
+                first_logical_midi,
+                state.windchest_chains,
+                state.organ_chain,
+                &mut state.next_inline_rank_id,
+                &mut organ.ranks,
+            )?;
+            if let Some(range) = stop.ranks.first() {
+                state
+                    .stop_first_rank
+                    .insert((manual_index, slot), range.rank);
             }
+            organ.stops.push(stop);
+        }
+        Ok(())
+    }
 
-            let coupler_count = section.int_or("NumberOfCouplers", 0)?;
-            for slot in 1..=coupler_count {
-                let target = section.int(&format!("Coupler{slot:03}"))?;
-                let coupler_section = self.ini.section(&format!("Coupler{target:03}"))?;
-                let name = coupler_section.get("Name").unwrap_or("Coupler").to_string();
-                if coupler_section.bool_or("UnisonOff", false)? {
-                    // The manual's own sound is silenced while it still
-                    // drives other couplers: a route with no target.
-                    organ.couplers.push(Coupler {
-                        name,
-                        routes: vec![CouplerRoute {
-                            from_manual: manual_id,
-                            low_key: None,
-                            high_key: None,
-                            unison_off: true,
-                            scope: CouplerScope::AllKeys,
-                            target: None,
-                        }],
-                    });
-                    continue;
-                }
-                let kind = coupler_section.get("CouplerType").unwrap_or("Normal");
-                let scope = if kind.eq_ignore_ascii_case("Bass") {
-                    CouplerScope::Bass
-                } else if kind.eq_ignore_ascii_case("Melody") {
-                    CouplerScope::Melody
-                } else {
-                    if !kind.eq_ignore_ascii_case("Normal") {
-                        self.warn(format!(
-                            "[{}]: unknown CouplerType {kind:?}, treated as Normal",
-                            coupler_section.name
-                        ));
-                    }
-                    CouplerScope::AllKeys
-                };
-                // GO restricts a coupler to source notes in
-                // [FirstMIDINoteNumber, FirstMIDINoteNumber+NumberOfKeys);
-                // the defaults (0, 127) cover any keyboard, so only a
-                // set value becomes a bound.
-                let first = coupler_section.int_or("FirstMIDINoteNumber", 0)?;
-                let count = coupler_section.int_or("NumberOfKeys", 127)?;
-                let last = first + count - 1;
+    /// This manual's couplers, including the inline `UnisonOff`/scope/
+    /// key-range parsing GO folds into the same `[CouplerNNN]` section.
+    fn read_manual_couplers(
+        &mut self,
+        organ: &mut Organ,
+        section: &SectionReader<'_>,
+        manual_id: ManualId,
+    ) -> Result<(), OdfError> {
+        let coupler_count = section.int_or("NumberOfCouplers", 0)?;
+        for slot in 1..=coupler_count {
+            let target = section.int(&format!("Coupler{slot:03}"))?;
+            let coupler_section = self.ini.section(&format!("Coupler{target:03}"))?;
+            let name = coupler_section.get("Name").unwrap_or("Coupler").to_string();
+            if coupler_section.bool_or("UnisonOff", false)? {
+                // The manual's own sound is silenced while it still
+                // drives other couplers: a route with no target.
                 organ.couplers.push(Coupler {
                     name,
                     routes: vec![CouplerRoute {
                         from_manual: manual_id,
-                        low_key: (first > 0).then_some(first.clamp(0, 127) as u8),
-                        high_key: (last < 127).then_some(last.clamp(0, 127) as u8),
-                        unison_off: false,
-                        scope,
-                        target: Some(CouplerTarget {
-                            manual: ManualId(coupler_section.int("DestinationManual")? as u32),
-                            key_shift: coupler_section.int("DestinationKeyshift")? as i16,
-                            repitch: None,
-                            own_pipes: false,
-                        }),
+                        low_key: None,
+                        high_key: None,
+                        unison_off: true,
+                        scope: CouplerScope::AllKeys,
+                        target: None,
                     }],
                 });
+                continue;
             }
+            let kind = coupler_section.get("CouplerType").unwrap_or("Normal");
+            let scope = if kind.eq_ignore_ascii_case("Bass") {
+                CouplerScope::Bass
+            } else if kind.eq_ignore_ascii_case("Melody") {
+                CouplerScope::Melody
+            } else {
+                if !kind.eq_ignore_ascii_case("Normal") {
+                    self.warn(format!(
+                        "[{}]: unknown CouplerType {kind:?}, treated as Normal",
+                        coupler_section.name
+                    ));
+                }
+                CouplerScope::AllKeys
+            };
+            // GO restricts a coupler to source notes in
+            // [FirstMIDINoteNumber, FirstMIDINoteNumber+NumberOfKeys);
+            // the defaults (0, 127) cover any keyboard, so only a
+            // set value becomes a bound.
+            let first = coupler_section.int_or("FirstMIDINoteNumber", 0)?;
+            let count = coupler_section.int_or("NumberOfKeys", 127)?;
+            let last = first + count - 1;
+            organ.couplers.push(Coupler {
+                name,
+                routes: vec![CouplerRoute {
+                    from_manual: manual_id,
+                    low_key: (first > 0).then_some(first.clamp(0, 127) as u8),
+                    high_key: (last < 127).then_some(last.clamp(0, 127) as u8),
+                    unison_off: false,
+                    scope,
+                    target: Some(CouplerTarget {
+                        manual: ManualId(coupler_section.int("DestinationManual")? as u32),
+                        key_shift: coupler_section.int("DestinationKeyshift")? as i16,
+                        repitch: None,
+                        own_pipes: false,
+                    }),
+                }],
+            });
         }
-
-        self.resolve_borrows(&mut organ, &stop_first_rank);
-
-        Ok(LoadResult {
-            organ,
-            warnings: self.warnings,
-        })
+        Ok(())
     }
 
     /// Patch every recorded `REF:` borrow now that all stops exist.
