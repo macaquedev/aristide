@@ -243,6 +243,22 @@ pub enum Control {
     Organ(Console),
 }
 
+impl Control {
+    pub fn organ(&self) -> Option<&Console> {
+        match self {
+            Control::Organ(console) => Some(console),
+            Control::Tone => None,
+        }
+    }
+
+    pub fn organ_mut(&mut self) -> Option<&mut Console> {
+        match self {
+            Control::Organ(console) => Some(console),
+            Control::Tone => None,
+        }
+    }
+}
+
 /// A binding resolved against the loaded organ: the message it answers
 /// to, and what it does, with every name already looked up so the MIDI
 /// callback never searches for one.
@@ -720,6 +736,22 @@ pub struct Setup {
 }
 
 impl State {
+    /// The loaded organ's console, if an organ (not the tone
+    /// generator) is what input drives.
+    pub fn console(&self) -> Option<&Console> {
+        self.control.organ()
+    }
+
+    pub fn console_mut(&mut self) -> Option<&mut Console> {
+        self.control.organ_mut()
+    }
+
+    /// An organ is loading or queued to load: the file-writing edits
+    /// refuse while this holds, since the file is about to be replaced.
+    pub fn is_loading(&self) -> bool {
+        self.loading.is_some() || self.pending_load.is_some()
+    }
+
     pub fn manual_names(&self) -> Vec<String> {
         match &self.control {
             Control::Organ(console) => console
@@ -985,7 +1017,7 @@ impl State {
                     engine.send(Command::StopVoice { handle });
                 }
                 for start in starts {
-                    engine.send(start_command(&start));
+                    engine.send(start.command());
                 }
             } else {
                 let (stopped, starts) =
@@ -995,7 +1027,7 @@ impl State {
                 }
                 // A Bass/Melody coupler retargeting onto another held key.
                 for start in starts {
-                    engine.send(start_command(&start));
+                    engine.send(start.command());
                 }
             }
         }
@@ -1335,7 +1367,7 @@ impl State {
                     send(Command::StopVoice { handle });
                 }
                 for start in starts {
-                    send(start_command(&start));
+                    send(start.command());
                 }
             }
             (control::Action::Coupler(_), Subject::Coupler(index)) => {
@@ -1348,7 +1380,7 @@ impl State {
                     send(Command::StopVoice { handle });
                 }
                 for start in starts {
-                    send(start_command(&start));
+                    send(start.command());
                 }
             }
             (control::Action::Tremulant(_), Subject::Tremulant(index)) => {
@@ -1515,7 +1547,7 @@ impl State {
                         engine.send(Command::StopVoice { handle });
                     }
                     for start in starts {
-                        engine.send(start_command(&start));
+                        engine.send(start.command());
                     }
                 }
             }
@@ -1545,7 +1577,7 @@ impl State {
                         engine.send(Command::StopVoice { handle });
                     }
                     for start in starts {
-                        engine.send(start_command(&start));
+                        engine.send(start.command());
                     }
                 }
             }
@@ -1641,7 +1673,7 @@ impl State {
         if let Control::Organ(console) = control {
             let (start, stop) = console.tremulant_toggle_noise(on);
             if let Some(start) = start {
-                engine.send(start_command(&start));
+                engine.send(start.command());
             }
             if let Some(handle) = stop {
                 engine.send(Command::StopVoice { handle });
@@ -1905,7 +1937,7 @@ impl State {
             engine.send(Command::StopVoice { handle });
         }
         for start in starts {
-            engine.send(start_command(&start));
+            engine.send(start.command());
         }
         self.setup
             .moves
@@ -1936,7 +1968,7 @@ impl State {
             engine.send(Command::StopVoice { handle });
         }
         for start in starts {
-            engine.send(start_command(&start));
+            engine.send(start.command());
         }
         let dropped: Vec<String> = console
             .coupler_states()
@@ -2643,7 +2675,7 @@ impl State {
             self.engine.send(Command::StopVoice { handle });
         }
         for start in starts {
-            self.engine.send(start_command(&start));
+            self.engine.send(start.command());
         }
         if voicing.is_neutral() {
             self.stop_voicing.remove(&stop);
@@ -2725,7 +2757,7 @@ impl State {
             engine.send(Command::StopVoice { handle });
         }
         for start in starts {
-            engine.send(start_command(&start));
+            engine.send(start.command());
         }
         Ok(())
     }
@@ -2887,7 +2919,7 @@ impl State {
             engine.send(Command::StopVoice { handle });
         }
         for start in starts {
-            engine.send(start_command(&start));
+            engine.send(start.command());
         }
         config::write_composite_coupler_link(&path, &a, &b, on)
     }
@@ -4409,19 +4441,7 @@ fn handle_midi(message: &[u8], port: usize, state: &Mutex<State>) {
                         send(Command::StopVoice { handle });
                     }
                     for start in starts {
-                        send(Command::StartVoice {
-                            handle: start.handle,
-                            sample: start.spec.sample,
-                            rate: start.spec.rate,
-                            gain: start.spec.gain,
-                            group: start.spec.group,
-                            wind_weight: start.spec.wind_weight,
-                            brightness: start.spec.brightness,
-                            enclosure: start.spec.enclosure,
-                            bus: start.spec.bus,
-                            delay_frames: start.spec.delay_frames,
-                            nominal_hz: start.spec.nominal_hz,
-                        });
+                        send(start.command());
                     }
                 }
                 if bend_range.is_some() {
@@ -4459,19 +4479,7 @@ fn handle_midi(message: &[u8], port: usize, state: &Mutex<State>) {
                     // A Bass/Melody coupler retargeting onto another
                     // held key.
                     for start in starts {
-                        send(Command::StartVoice {
-                            handle: start.handle,
-                            sample: start.spec.sample,
-                            rate: start.spec.rate,
-                            gain: start.spec.gain,
-                            group: start.spec.group,
-                            wind_weight: start.spec.wind_weight,
-                            brightness: start.spec.brightness,
-                            enclosure: start.spec.enclosure,
-                            bus: start.spec.bus,
-                            delay_frames: start.spec.delay_frames,
-                            nominal_hz: start.spec.nominal_hz,
-                        });
+                        send(start.command());
                     }
                 }
             }
@@ -4559,23 +4567,6 @@ fn matching_bindings(
         .filter(|binding| binding.action.is_continuous() || status & 0xF0 != 0x80)
         .collect();
     Some(acting)
-}
-
-/// The engine command that starts one console voice.
-fn start_command(start: &console::VoiceStart) -> Command {
-    Command::StartVoice {
-        handle: start.handle,
-        sample: start.spec.sample,
-        rate: start.spec.rate,
-        gain: start.spec.gain,
-        group: start.spec.group,
-        wind_weight: start.spec.wind_weight,
-        brightness: start.spec.brightness,
-        enclosure: start.spec.enclosure,
-        bus: start.spec.bus,
-        delay_frames: start.spec.delay_frames,
-        nominal_hz: start.spec.nominal_hz,
-    }
 }
 
 /// Tone mode's key→pitch: the plain equal ladder, control-side, so

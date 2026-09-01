@@ -13,7 +13,8 @@ use aristide_model::units::{cents_to_ratio, ratio_to_cents};
 use aristide_engine::Command;
 use tiny_http::{Header, Method, Response, Server};
 
-use crate::{Control, State};
+use crate::console::Console;
+use crate::State;
 
 const PAGE: &str = include_str!("console.html");
 
@@ -85,7 +86,7 @@ fn respond(
                 let State {
                     engine, control, ..
                 } = &mut *state;
-                if let Control::Organ(console) = control {
+                if let Some(console) = control.organ_mut() {
                     for handle in console.cancel() {
                         engine.send(Command::StopVoice { handle });
                     }
@@ -103,7 +104,7 @@ fn respond(
                         let State {
                             engine, control, ..
                         } = &mut *state;
-                        if let Control::Organ(console) = control {
+                        if let Some(console) = control.organ_mut() {
                             let (stopped, starts) = console.set_coupler(index, on);
                             for handle in stopped {
                                 engine.send(Command::StopVoice { handle });
@@ -126,14 +127,14 @@ fn respond(
                 // file is about to be replaced out from under the
                 // write, so refuse like every file-writing edit does.
                 // A live-only change stays welcome throughout.
-                if persist && (state.loading.is_some() || state.pending_load.is_some()) {
+                if persist && state.is_loading() {
                     return bad_request("an organ is already loading");
                 }
                 let composite_path = state.composite_path.clone();
                 let State {
                     engine, control, ..
                 } = &mut *state;
-                if let Control::Organ(console) = control {
+                if let Some(console) = control.organ_mut() {
                     let (mut enabled, mut volume) = console.noises();
                     if let Some(on) = param(query, "on") {
                         enabled = on == "1";
@@ -211,7 +212,7 @@ fn respond(
                         // persist mid-rebuild is refused, a live-only
                         // change is not.
                         if param(query, "persist") == Some("1")
-                            && (state.loading.is_some() || state.pending_load.is_some())
+                            && state.is_loading()
                         {
                             return bad_request("an organ is already loading");
                         }
@@ -239,7 +240,7 @@ fn respond(
                 // [tuning]; mid-rebuild the file is about to be replaced
                 // out from under that write, so refuse exactly as the
                 // organ-pane editor's own file-writing edits do.
-                if state.loading.is_some() || state.pending_load.is_some() {
+                if state.is_loading() {
                     return bad_request("an organ is already loading");
                 }
                 // The scope: `stop` (+ `rank` for one rank within it),
@@ -359,7 +360,7 @@ fn respond(
                 };
                 match (stop, source, manual) {
                     (Some(stop), _, _) => {
-                        let Control::Organ(console) = &state.control else {
+                        let Some(console) = state.console() else {
                             return bad_request("no organ is loaded");
                         };
                         if let Some(rank) = rank {
@@ -401,7 +402,7 @@ fn respond(
                         }
                     }
                     (None, Some(alias), _) => {
-                        let Control::Organ(console) = &state.control else {
+                        let Some(console) = state.console() else {
                             return bad_request("no organ is loaded");
                         };
                         let back = reset || follow.as_deref() == Some("organ");
@@ -416,12 +417,9 @@ fn respond(
                     }
                     (None, None, Some(manual)) => {
                         let reset = reset || follow.as_deref() == Some("organ");
-                        let current = match &state.control {
-                            Control::Organ(console) => Some(
-                                console.manual_tuning(manual).unwrap_or(console.tuning()),
-                            ),
-                            Control::Tone => None,
-                        };
+                        let current = state
+                            .console()
+                            .map(|console| console.manual_tuning(manual).unwrap_or(console.tuning()));
                         if let Some(current) = current {
                             let tuning = match (!reset).then(|| patched(current)).transpose() {
                                 Ok(tuning) => tuning,
@@ -431,7 +429,7 @@ fn respond(
                         }
                     }
                     (None, None, None) => {
-                        if let Control::Organ(console) = &mut state.control {
+                        if let Some(console) = state.console_mut() {
                             match patched(console.tuning()) {
                                 Ok(tuning) => console.set_tuning(tuning),
                                 Err(err) => return bad_request(&err),
@@ -450,10 +448,7 @@ fn respond(
                     .and_then(|v| v.parse::<f32>().ok())
                     .unwrap_or(150.0)
                     .clamp(0.0, 60_000.0);
-                let retuned = match &mut state.control {
-                    Control::Organ(console) => console.retune_held(),
-                    Control::Tone => Vec::new(),
-                };
+                let retuned = state.console_mut().map(Console::retune_held).unwrap_or_default();
                 for (handle, rate) in retuned {
                     state.engine.send(Command::SetVoiceRate {
                         handle,
@@ -472,7 +467,7 @@ fn respond(
             // Live, but it writes manual NAMES to the file — mid-rebuild
             // the console's names can be stale (a rename just rewrote
             // them), and a stale [[move]] leaves the file unloadable.
-            if state.loading.is_some() || state.pending_load.is_some() {
+            if state.is_loading() {
                 return bad_request("an organ is already loading");
             }
             match (
@@ -573,7 +568,7 @@ fn respond(
                 return bad_request("low is above high");
             }
             let mut state = state.lock().expect("state poisoned");
-            if state.loading.is_some() || state.pending_load.is_some() {
+            if state.is_loading() {
                 return bad_request("an organ is already loading");
             }
             match state.add_manual(&name, low, high, kind) {
@@ -583,7 +578,7 @@ fn respond(
         }
         (Method::Post, "/api/organ/manual/kind") => {
             let mut state = state.lock().expect("state poisoned");
-            if state.loading.is_some() || state.pending_load.is_some() {
+            if state.is_loading() {
                 return bad_request("an organ is already loading");
             }
             match (
@@ -604,7 +599,7 @@ fn respond(
         // declaration so the derived default returns.
         (Method::Post, "/api/organ/manual/hex") => {
             let mut state = state.lock().expect("state poisoned");
-            if state.loading.is_some() || state.pending_load.is_some() {
+            if state.is_loading() {
                 return bad_request("an organ is already loading");
             }
             let Some(manual) = param(query, "manual").and_then(|v| v.parse::<usize>().ok())
@@ -617,7 +612,7 @@ fn respond(
                     Err(err) => bad_request(&err),
                 };
             }
-            let Control::Organ(console) = &state.control else {
+            let Some(console) = state.console() else {
                 return bad_request("no organ");
             };
             let Some(mut layout) = console.manual_hex(manual) else {
@@ -705,7 +700,7 @@ fn respond(
         }
         (Method::Post, "/api/organ/manual/rename") => {
             let mut state = state.lock().expect("state poisoned");
-            if state.loading.is_some() || state.pending_load.is_some() {
+            if state.is_loading() {
                 return bad_request("an organ is already loading");
             }
             match (
@@ -721,7 +716,7 @@ fn respond(
         }
         (Method::Post, "/api/organ/manual/remove") => {
             let mut state = state.lock().expect("state poisoned");
-            if state.loading.is_some() || state.pending_load.is_some() {
+            if state.is_loading() {
                 return bad_request("an organ is already loading");
             }
             match param(query, "manual").and_then(|v| v.parse::<usize>().ok()) {
@@ -734,7 +729,7 @@ fn respond(
         }
         (Method::Post, "/api/organ/manual/order") => {
             let mut state = state.lock().expect("state poisoned");
-            if state.loading.is_some() || state.pending_load.is_some() {
+            if state.is_loading() {
                 return bad_request("an organ is already loading");
             }
             match (
@@ -760,7 +755,7 @@ fn respond(
         }
         (Method::Post, "/api/organ/pull") => {
             let mut state = state.lock().expect("state poisoned");
-            if state.loading.is_some() || state.pending_load.is_some() {
+            if state.is_loading() {
                 return bad_request("an organ is already loading");
             }
             match (
@@ -780,7 +775,7 @@ fn respond(
         }
         (Method::Post, "/api/organ/unpull") => {
             let mut state = state.lock().expect("state poisoned");
-            if state.loading.is_some() || state.pending_load.is_some() {
+            if state.is_loading() {
                 return bad_request("an organ is already loading");
             }
             match param(query, "stop").and_then(|v| v.parse::<u32>().ok()) {
@@ -796,7 +791,7 @@ fn respond(
         // addresses file lines by names a rebuild may be changing.
         (Method::Post, "/api/organ/stop/rename") => {
             let mut state = state.lock().expect("state poisoned");
-            if state.loading.is_some() || state.pending_load.is_some() {
+            if state.is_loading() {
                 return bad_request("an organ is already loading");
             }
             match (
@@ -820,7 +815,7 @@ fn respond(
         // file's [[voicing.adjust]]; no rebuild.
         (Method::Post, "/api/organ/stop/voice") => {
             let mut state = state.lock().expect("state poisoned");
-            if state.loading.is_some() || state.pending_load.is_some() {
+            if state.is_loading() {
                 return bad_request("an organ is already loading");
             }
             let Some(stop) = param(query, "stop").and_then(|v| v.parse::<u32>().ok()) else {
@@ -872,7 +867,7 @@ fn respond(
         // A label, so it lands live — no rebuild.
         (Method::Post, "/api/organ/stop/label") => {
             let mut state = state.lock().expect("state poisoned");
-            if state.loading.is_some() || state.pending_load.is_some() {
+            if state.is_loading() {
                 return bad_request("an organ is already loading");
             }
             let Some(stop) = param(query, "stop").and_then(|v| v.parse::<u32>().ok()) else {
@@ -897,7 +892,7 @@ fn respond(
         // held keys re-derive — and is kept in the organ file.
         (Method::Post, "/api/organ/stop/own_pipes") => {
             let mut state = state.lock().expect("state poisoned");
-            if state.loading.is_some() || state.pending_load.is_some() {
+            if state.is_loading() {
                 return bad_request("an organ is already loading");
             }
             let Some(stop) = param(query, "stop").and_then(|v| v.parse::<u32>().ok()) else {
@@ -915,7 +910,7 @@ fn respond(
         // rename; the file keeps it and name-keyed references follow.
         (Method::Post, "/api/organ/coupler/rename") => {
             let mut state = state.lock().expect("state poisoned");
-            if state.loading.is_some() || state.pending_load.is_some() {
+            if state.is_loading() {
                 return bad_request("an organ is already loading");
             }
             match (
@@ -936,7 +931,7 @@ fn respond(
         // rebuilds.
         (Method::Post, "/api/organ/coupler/routes") => {
             let mut state = state.lock().expect("state poisoned");
-            if state.loading.is_some() || state.pending_load.is_some() {
+            if state.is_loading() {
                 return bad_request("an organ is already loading");
             }
             let Some(index) = param(query, "idx").and_then(|v| v.parse::<usize>().ok()) else {
@@ -958,7 +953,7 @@ fn respond(
         // structural contract.
         (Method::Post, "/api/organ/coupler/add") => {
             let mut state = state.lock().expect("state poisoned");
-            if state.loading.is_some() || state.pending_load.is_some() {
+            if state.is_loading() {
                 return bad_request("an organ is already loading");
             }
             let Some(name) = param(query, "name").map(unescape) else {
@@ -981,7 +976,7 @@ fn respond(
         // instead, restorable from the Organ preferences.
         (Method::Post, "/api/organ/coupler/remove") => {
             let mut state = state.lock().expect("state poisoned");
-            if state.loading.is_some() || state.pending_load.is_some() {
+            if state.is_loading() {
                 return bad_request("an organ is already loading");
             }
             match param(query, "idx").and_then(|v| v.parse::<usize>().ok()) {
@@ -996,7 +991,7 @@ fn respond(
         // live and in the file's [couplers] link, no rebuild.
         (Method::Post, "/api/organ/coupler/link") => {
             let mut state = state.lock().expect("state poisoned");
-            if state.loading.is_some() || state.pending_load.is_some() {
+            if state.is_loading() {
                 return bad_request("an organ is already loading");
             }
             match (
@@ -1017,7 +1012,7 @@ fn respond(
         // default), never, or always. Display only — live, no rebuild.
         (Method::Post, "/api/organ/coupler/keys") => {
             let mut state = state.lock().expect("state poisoned");
-            if state.loading.is_some() || state.pending_load.is_some() {
+            if state.is_loading() {
                 return bad_request("an organ is already loading");
             }
             let mode = match param(query, "mode") {
@@ -1037,7 +1032,7 @@ fn respond(
         // pull the coupled keys down on screen. Display only — live.
         (Method::Post, "/api/organ/coupled_keys") => {
             let mut state = state.lock().expect("state poisoned");
-            if state.loading.is_some() || state.pending_load.is_some() {
+            if state.is_loading() {
                 return bad_request("an organ is already loading");
             }
             match param(query, "on").map(|v| v != "0") {
@@ -1053,7 +1048,7 @@ fn respond(
         // rewritten), so the organ rebuilds.
         (Method::Post, "/api/organ/stop/source") => {
             let mut state = state.lock().expect("state poisoned");
-            if state.loading.is_some() || state.pending_load.is_some() {
+            if state.is_loading() {
                 return bad_request("an organ is already loading");
             }
             match (
@@ -1081,7 +1076,7 @@ fn respond(
                 return bad_request("missing name");
             };
             let mut state = state.lock().expect("state poisoned");
-            if state.loading.is_some() || state.pending_load.is_some() {
+            if state.is_loading() {
                 return bad_request("an organ is already loading");
             }
             match state.add_enclosure(&name) {
@@ -1094,7 +1089,7 @@ fn respond(
                 return bad_request("missing name");
             };
             let mut state = state.lock().expect("state poisoned");
-            if state.loading.is_some() || state.pending_load.is_some() {
+            if state.is_loading() {
                 return bad_request("an organ is already loading");
             }
             match state.remove_enclosure(&name) {
@@ -1105,7 +1100,7 @@ fn respond(
         // Put a stop in a swell box (`in=1`) or take it out (`in=0`).
         (Method::Post, "/api/organ/enclosure/assign") => {
             let mut state = state.lock().expect("state poisoned");
-            if state.loading.is_some() || state.pending_load.is_some() {
+            if state.is_loading() {
                 return bad_request("an organ is already loading");
             }
             match (
@@ -1131,7 +1126,7 @@ fn respond(
         // never queues a rebuild.
         (Method::Post, "/api/organ/panel/place") => {
             let mut state = state.lock().expect("state poisoned");
-            if state.loading.is_some() || state.pending_load.is_some() {
+            if state.is_loading() {
                 return bad_request("an organ is already loading");
             }
             let size = match (
@@ -1166,7 +1161,7 @@ fn respond(
         // stops-only spelling and still accepted.
         (Method::Post, "/api/organ/stop/order") => {
             let mut state = state.lock().expect("state poisoned");
-            if state.loading.is_some() || state.pending_load.is_some() {
+            if state.is_loading() {
                 return bad_request("an organ is already loading");
             }
             let items: Option<Result<Vec<crate::RankItem>, ()>> = match (
@@ -1475,10 +1470,7 @@ fn respond(
             let slot = param(query, "slot").and_then(|v| v.parse::<usize>().ok());
             match (manual, slot) {
                 (Some(manual), Some(slot)) => {
-                    let manuals = match &state.control {
-                        Control::Organ(console) => console.manual_states().len(),
-                        Control::Tone => 0,
-                    };
+                    let manuals = state.console().map_or(0, |console| console.manual_states().len());
                     if manual >= manuals {
                         return bad_request("no such manual");
                     }
@@ -1616,7 +1608,7 @@ fn respond(
             let on = param(query, "repitch") == Some("1");
             {
                 let mut state = state.lock().expect("state poisoned");
-                if let Control::Organ(console) = &mut state.control {
+                if let Some(console) = state.console_mut() {
                     console.set_coupler_repitch(on);
                     tracing::info!("couplers: repitch {}", if on { "on" } else { "off" });
                 }
@@ -1644,7 +1636,7 @@ fn respond(
             let State {
                 engine, control, ..
             } = &mut *state;
-            if let Control::Organ(console) = control {
+            if let Some(console) = control.organ_mut() {
                 console.all_off();
             }
             engine.send(Command::AllNotesOff);
@@ -1719,7 +1711,7 @@ fn respond(
                         let State {
                             engine, control, ..
                         } = &mut *state;
-                        if let Control::Organ(console) = control {
+                        if let Some(console) = control.organ_mut() {
                             if let Some((enclosure, position)) =
                                 console.set_enclosure(index, value)
                             {
@@ -1756,7 +1748,7 @@ fn apply_note(state: &Mutex<State>, manual: usize, key: u16, on: bool) {
     let State {
         engine, control, ..
     } = &mut *state;
-    if let Control::Organ(console) = control {
+    if let Some(console) = control.organ_mut() {
         if on {
             let (starts, retriggered) = console.note_on_manual(manual, key, 127);
             for handle in retriggered {
@@ -1783,7 +1775,7 @@ fn apply_stop(state: &Mutex<State>, id: u32, on: bool) {
     let State {
         engine, control, ..
     } = &mut *state;
-    if let Control::Organ(console) = control {
+    if let Some(console) = control.organ_mut() {
         let (stopped, starts) = console.set_drawn(aristide_model::StopId(id), on);
         for handle in stopped {
             engine.send(Command::StopVoice { handle });
@@ -1797,19 +1789,7 @@ fn apply_stop(state: &Mutex<State>, id: u32, on: bool) {
 /// Start a control-noise one-shot (drawstop thump, coupler clack).
 fn send_start(engine: &mut aristide_engine::EngineHandle, noise: Option<crate::console::VoiceStart>) {
     if let Some(start) = noise {
-        engine.send(Command::StartVoice {
-            handle: start.handle,
-            sample: start.spec.sample,
-            rate: start.spec.rate,
-            gain: start.spec.gain,
-            group: start.spec.group,
-            wind_weight: start.spec.wind_weight,
-            brightness: start.spec.brightness,
-            enclosure: start.spec.enclosure,
-            bus: start.spec.bus,
-            delay_frames: start.spec.delay_frames,
-            nominal_hz: start.spec.nominal_hz,
-        });
+        engine.send(start.command());
     }
 }
 
@@ -1827,7 +1807,7 @@ fn state_json_locked(state: &State) -> String {
     let mut coupler_seats: Vec<Option<usize>> = Vec::new();
     let mut division_ranks: Vec<Vec<String>> = Vec::new();
     let mut coupled_keys: Vec<Vec<u16>> = Vec::new();
-    if let Control::Organ(console) = &state.control {
+    if let Some(console) = state.console() {
         let manuals: Vec<(usize, String)> = console
             .manual_states()
             .into_iter()
@@ -1896,7 +1876,7 @@ fn state_json_locked(state: &State) -> String {
             console.coupled_display_keys(&|index| show.get(index).copied().unwrap_or(false));
     }
     let mut out = String::from("{\"stops\":[");
-    if let Control::Organ(console) = &state.control {
+    if let Some(console) = state.console() {
         // The player's drawknob order ([console.order]): listed stops
         // first in their listed order, the rest after in assembled
         // order — a stable sort per manual, so a stale name simply
@@ -2002,7 +1982,7 @@ fn state_json_locked(state: &State) -> String {
         }
     }
     out.push_str("],\"couplers\":[");
-    if let Control::Organ(console) = &state.control {
+    if let Some(console) = state.console() {
         let mut first = true;
         for (index, name, engaged, available) in console.coupler_states() {
             if !first {
@@ -2086,7 +2066,7 @@ fn state_json_locked(state: &State) -> String {
         }
     }
     out.push_str("],\"manuals\":[");
-    if let Control::Organ(console) = &state.control {
+    if let Some(console) = state.console() {
         let mut first = true;
         for (idx, name, first_key, key_count, held) in console.manual_states() {
             if !first {
@@ -2190,7 +2170,7 @@ fn state_json_locked(state: &State) -> String {
         state.setter_armed,
         state.master_gain
     ));
-    if let Control::Organ(console) = &state.control {
+    if let Some(console) = state.console() {
         out.push_str(&format!(",\"organ\":{}", json_string(console.organ_name())));
     }
     // The picker's world: what could be loaded, what is loading now,
@@ -2228,7 +2208,7 @@ fn state_json_locked(state: &State) -> String {
         ));
     }
     out.push(']');
-    if let Control::Organ(console) = &state.control {
+    if let Some(console) = state.console() {
         // A tuning as its JSON object; a scale rides along when one
         // stands in for the temperament, named for the popover.
         let tuning_json = |tuning: &crate::tuning::Tuning| {
@@ -2376,7 +2356,7 @@ fn state_json_locked(state: &State) -> String {
         json_string(crate::COMPUTER_KEYBOARD)
     ));
     out.push_str("],\"manuals\":[");
-    if let Control::Organ(console) = &state.control {
+    if let Some(console) = state.console() {
         for (position, (idx, name, _, _, _)) in console.manual_states().iter().enumerate() {
             if position > 0 {
                 out.push(',');
@@ -2536,13 +2516,13 @@ fn state_json_locked(state: &State) -> String {
             keyboard.manual, keyboard.transpose, keyboard.compass.0, keyboard.compass.1
         ));
     }
-    if let Control::Organ(_) = &state.control {
+    if state.console().is_some() {
         // The organ-wide coupled-keys default, for the console's own
         // organ-scoped settings (per-coupler overrides ride each
         // coupler's `keys` field).
         out.push_str(&format!(",\"coupled_keys\":{}", state.coupled_keys));
     }
-    if let Control::Organ(console) = &state.control {
+    if let Some(console) = state.console() {
         out.push_str(&format!(
             ",\"coupler_repitch\":{}",
             console.coupler_repitch()
@@ -2911,6 +2891,7 @@ fn parse_reference_key(spec: &str) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Control;
     use std::path::Path;
 
     fn demo_state() -> Option<Arc<Mutex<State>>> {
@@ -3150,7 +3131,7 @@ mod tests {
         respond(&state, &Method::Post, "/api/organ/coupler?idx=0&keep=0");
         let (stop, stop_name, target) = {
             let state = state.lock().expect("state poisoned");
-            let Control::Organ(console) = &state.control else {
+            let Some(console) = state.console() else {
                 unreachable!()
             };
             let (id, name, _, from, _) = console.stop_states()[0];
@@ -3219,7 +3200,7 @@ mod tests {
                 .map(|(index, name)| (0, name.clone(), index))
                 .collect();
             state.setup.implicit = true;
-            let Control::Organ(console) = &state.control else { unreachable!() };
+            let Some(console) = state.console() else { unreachable!() };
             let states = console.stop_states();
             let (id, ..) = states[0];
             let (other, ..) = states[1];
@@ -3287,7 +3268,7 @@ mod tests {
             &Method::Post,
             &format!("/api/tuning?stop={}&rank={}&temperament=werckmeister", other.0, {
                 let state = state.lock().expect("state poisoned");
-                let Control::Organ(console) = &state.control else { unreachable!() };
+                let Some(console) = state.console() else { unreachable!() };
                 console.stop_ranks(other)[0].0.0
             }),
         );

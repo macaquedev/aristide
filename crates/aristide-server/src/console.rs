@@ -10,6 +10,8 @@ use aristide_model::{
 };
 
 use aristide_model::units::{cents_between, cents_to_ratio};
+use aristide_engine::Command;
+
 use crate::bank::VoiceSpec;
 use crate::tuning::Tuning;
 
@@ -34,6 +36,25 @@ pub struct CouplerRouteView {
 pub struct VoiceStart {
     pub handle: u64,
     pub spec: VoiceSpec,
+}
+
+impl VoiceStart {
+    /// The engine command that starts this voice.
+    pub fn command(&self) -> Command {
+        Command::StartVoice {
+            handle: self.handle,
+            sample: self.spec.sample,
+            rate: self.spec.rate,
+            gain: self.spec.gain,
+            group: self.spec.group,
+            wind_weight: self.spec.wind_weight,
+            brightness: self.spec.brightness,
+            enclosure: self.spec.enclosure,
+            bus: self.spec.bus,
+            delay_frames: self.spec.delay_frames,
+            nominal_hz: self.spec.nominal_hz,
+        }
+    }
 }
 
 /// One place a played key lands after coupling: the manual and key
