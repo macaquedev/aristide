@@ -2240,14 +2240,17 @@ body.editing .division-add { display: block; }
   --sharp-w: calc(15px * var(--kb-scale, 1));
 }
 
+/* the cheek's lettering rides --kb-scale with the keys (kb-scale.js
+   solves the panel's width with that in mind); the gap to the keys
+   stays chrome */
 .cheek {
   writing-mode: vertical-rl;
   transform: rotate(180deg);
   text-align: center;
   margin-right: 10px;
-  font-size: 10px;
+  font-size: calc(10px * var(--kb-scale, 1));
   text-transform: uppercase;
-  letter-spacing: 2px;
+  letter-spacing: calc(2px * var(--kb-scale, 1));
   color: var(--text-dim);
 }
 

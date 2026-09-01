@@ -12,6 +12,7 @@
 // structural rebuild (see console.js's `decorate` hook); `update(snapshot)`
 // is called on every poll, the same as the other panels.
 
+import { keyboardScale, measureKeyboard } from "./kb-scale.js";
 import { commands, localFetch } from "./api.js";
 import { setText } from "./dom.js";
 import { menuItem } from "./menu.js";
@@ -1070,26 +1071,17 @@ export class Editor {
     }
   }
 
-  /// A keyboard's resize: the chrome (cheek, padding) doesn't scale,
-  /// so the factor is solved against the key field alone — the same
-  /// math console.js's scaleKeyboard applies when the stored size
-  /// comes back off the file.
+  /// A keyboard's resize: measured once at the start (kb-scale.js —
+  /// the same math console.js's scaleKeyboard applies when the stored
+  /// size comes back off the file), then solved per move.
   startKeyboardResize(panel, event) {
-    const keys = panel.querySelector(".keys");
-    if (!keys) return;
-    const start = {
-      x: event.clientX,
-      w: panel.offsetWidth,
-      chrome: panel.offsetWidth - keys.offsetWidth,
-      natural:
-        keys.offsetWidth / (parseFloat(panel.style.getPropertyValue("--kb-scale")) || 1),
-    };
-    if (!(start.natural > 0)) return;
+    const measured = measureKeyboard(panel);
+    if (!measured) return;
+    const start = { x: event.clientX, w: panel.offsetWidth, ...measured };
     panel.dataset.dragging = "1"; // layoutPanels leaves a mid-gesture panel alone
     const move = (e) => {
       const target = start.w + e.clientX - start.x;
-      const scale = Math.max(0.35, Math.min(3, (target - start.chrome) / start.natural));
-      panel.style.setProperty("--kb-scale", scale.toFixed(4));
+      panel.style.setProperty("--kb-scale", keyboardScale(start, target));
     };
     const up = () => {
       window.removeEventListener("pointermove", move);

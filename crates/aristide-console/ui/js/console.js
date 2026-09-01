@@ -14,6 +14,7 @@
 // stacked mid-case, pedalboard below, shoes beside it. Moving panels
 // is the editor's job (editor.js); this file only draws and places.
 
+import { keyboardScale, measureKeyboard } from "./kb-scale.js";
 import { commands } from "./api.js";
 import { renderIfChanged, setText } from "./dom.js";
 import { formatFootage, keyName } from "./pitch.js";
@@ -584,25 +585,16 @@ export class Console {
     }
   }
 
-  /// Scales a keyboard panel's keys so the panel comes out `targetPx`
-  /// wide (null = natural size). The chrome around the keys — cheek,
-  /// padding — doesn't scale, so the factor is solved against the key
-  /// field alone; --kb-scale multiplies the key-geometry vars in
-  /// style.css. Clamped: a keyboard shrunk past legibility or blown
-  /// past the canvas helps nobody.
+  /// Scales a keyboard panel so it comes out `targetPx` wide (null =
+  /// natural size); the math is kb-scale.js's, shared with the editor's
+  /// grip drag.
   scaleKeyboard(el, targetPx) {
-    const keys = el.querySelector(".keys");
-    if (!keys) return;
-    const current = parseFloat(el.style.getPropertyValue("--kb-scale")) || 1;
     if (targetPx == null) {
-      if (current !== 1) el.style.removeProperty("--kb-scale");
+      el.style.removeProperty("--kb-scale");
       return;
     }
-    const chrome = el.offsetWidth - keys.offsetWidth;
-    const natural = keys.offsetWidth / current;
-    if (!(natural > 0)) return;
-    const scale = Math.max(0.35, Math.min(3, (targetPx - chrome) / natural));
-    el.style.setProperty("--kb-scale", scale.toFixed(4));
+    const measured = measureKeyboard(el);
+    if (measured) el.style.setProperty("--kb-scale", keyboardScale(measured, targetPx));
   }
 
   /// The classic console, derived rather than hard-coded: coupler rail
