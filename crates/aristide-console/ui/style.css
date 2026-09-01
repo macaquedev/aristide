@@ -686,8 +686,14 @@ input[type="range"]:hover::-webkit-slider-thumb { filter: brightness(1.15); }
   background: #ffffff08;
 }
 
-.compass-field { display: flex; align-items: center; gap: 6px; }
-.compass-field input { width: 58px; }
+/* wider than the other add-forms so both bounds, their echo labels,
+   Set and Native share one line. The bound inputs are id-scoped to
+   outrank .editor-add-form's 100%-width text-input default, and pinned
+   against flex shrinking — either squeezes "C2" to one visible
+   character. */
+#editor-compass .editor-add-form { width: 360px; }
+.compass-field { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
+#editor-compass .compass-field input { width: 58px; flex: 0 0 auto; }
 .compass-field input.invalid { border-color: #b58a2e; }
 .compass-field i { font-style: normal; font-size: 10.5px; color: var(--text-dim); min-width: 26px; }
 
