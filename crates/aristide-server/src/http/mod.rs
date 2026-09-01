@@ -715,7 +715,7 @@ mod tests {
         );
         assert_eq!(saved.sidecar.tuning.stops.len(), 2, "{:?}", saved.sidecar.tuning.stops);
         assert!(saved.sidecar.tuning.stops.iter().any(|row| row.rank.is_some()));
-        let reloaded = crate::load::prepare(&[path.clone()], &[], 48_000.0, &|_| {})
+        let reloaded = crate::load::prepare(std::slice::from_ref(&path), &[], 48_000.0, &|_| {})
             .expect("the scoped file loads");
         assert!(reloaded.console.source_tuning("s1").is_some());
         assert_eq!(reloaded.console.stop_tunings().len(), 1);

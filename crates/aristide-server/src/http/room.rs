@@ -186,15 +186,13 @@ pub(super) fn enclosure(state: &Mutex<State>, query: &str) -> Reply {
                 let State {
                     engine, control, ..
                 } = &mut *state;
-                if let Some(console) = control.organ_mut() {
-                    if let Some((enclosure, position)) =
-                        console.set_enclosure(index, value)
-                    {
-                        engine.send(Command::SetEnclosurePosition {
-                            enclosure,
-                            position,
-                        });
-                    }
+                if let Some(console) = control.organ_mut()
+                    && let Some((enclosure, position)) = console.set_enclosure(index, value)
+                {
+                    engine.send(Command::SetEnclosurePosition {
+                        enclosure,
+                        position,
+                    });
                 }
             }
             json(state_json(state))

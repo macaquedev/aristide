@@ -416,7 +416,7 @@ pub(super) fn create(state: &Mutex<State>, query: &str) -> Reply {
         Ok(path) => {
             state.loading = Some("loading…".to_string());
             state.load_error = None;
-    state.load_warnings.clear();
+            state.load_warnings.clear();
             state.pending_load = Some(crate::LoadRequest {
                 paths: vec![path],
                 stops: Vec::new(),
