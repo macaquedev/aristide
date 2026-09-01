@@ -105,6 +105,10 @@ pub struct LoadedBank {
 /// RAM) or anything else = f32. Quantization happens after each file's
 /// analysis so periods, phase maps and tail measurements keep the full
 /// decode precision.
+/// `sample_bits`: resident audio resolution — 16 (default, half the
+/// RAM) or anything else = f32. Quantization happens after each file's
+/// analysis so periods, phase maps and tail measurements keep the full
+/// decode precision.
 pub fn build(
     organ: &Organ,
     device_rate: f32,
@@ -113,18 +117,81 @@ pub fn build(
 ) -> Result<LoadedBank> {
     let quantize = sample_bits == 16;
     let mut bank = SampleBank::default();
-    let mut specs: HashMap<(RankId, u16), VoiceSpec> = HashMap::new();
     let mut attack_options: HashMap<(RankId, u16), Vec<AttackOption>> = HashMap::new();
     let mut skipped = Vec::new();
-    // path → Ok(bank index + source metadata) or failure already noted.
-    let mut decoded: HashMap<PathBuf, Option<DecodedInfo>> = HashMap::new();
 
-    // Separate release files, deduplicated independently of attacks.
-    let mut release_cache: HashMap<PathBuf, Option<u32>> = HashMap::new();
+    let chest_enclosures = resolve_chest_enclosures(organ, &mut skipped);
 
-    // Windchest number → enclosure engine index. A voice carries ONE
-    // enclosure; GO multiplies when a chest sits in several boxes, but
-    // no real set seen does — warn and take the first.
+    let jobs = collect_decode_jobs(organ);
+    let plan = plan_cache(organ, cache_path, quantize, jobs);
+    let outcomes = decode_misses(organ, quantize, plan.misses);
+    let mut maps = finish_decode(
+        cache_path,
+        plan.hits,
+        plan.miss_stamps,
+        plan.total_jobs,
+        plan.any_misses,
+        outcomes,
+    );
+
+    // Every sampled pipe, decoded and measured, awaiting the pitch
+    // decisions that need the whole instrument in view.
+    let mut cache = DecodeCache {
+        decoded: HashMap::new(),
+        release_cache: HashMap::new(),
+    };
+    let mut staged: Vec<StagedPipe> = Vec::new();
+    for (rank_index, rank) in organ.ranks.iter().enumerate() {
+        let enclosure = chest_enclosures
+            .get(&rank.windchest)
+            .copied()
+            .unwrap_or(aristide_engine::enclosure::ENCLOSURE_NONE);
+        // Pipes decode first, then pitch decisions settle rank-wide
+        // (the junk-metadata guard below needs the whole rank in view)
+        // before specs are built.
+        let pending = decode_rank_attacks(
+            rank,
+            &mut bank,
+            &mut skipped,
+            &mut attack_options,
+            &mut cache,
+            &mut maps,
+        );
+        staged.extend(stage_rank_pipes(
+            rank,
+            rank_index,
+            enclosure,
+            pending,
+            &mut skipped,
+            &bank,
+        ));
+    }
+
+    let (home, rank_anchor) = fit_home_tuning(organ, &staged);
+    let mut specs = assign_voice_specs(
+        organ,
+        device_rate,
+        home.as_ref(),
+        &rank_anchor,
+        staged,
+        &mut skipped,
+    );
+    assign_borrowed_pipe_specs(organ, &mut specs, &mut attack_options, &mut skipped);
+
+    Ok(LoadedBank {
+        bank,
+        specs,
+        attack_options,
+        skipped,
+        home,
+        rank_anchors: rank_anchor,
+    })
+}
+
+/// Windchest number → enclosure engine index. A voice carries ONE
+/// enclosure; GO multiplies when a chest sits in several boxes, but
+/// no real set seen does — warn and take the first.
+fn resolve_chest_enclosures(organ: &Organ, skipped: &mut Vec<String>) -> HashMap<u32, u8> {
     let mut chest_enclosures: HashMap<u32, u8> = HashMap::new();
     for chest in &organ.windchests {
         let Some(&first) = chest.enclosures.first() else {
@@ -141,68 +208,97 @@ pub fn build(
         let index = (first as usize).min(aristide_engine::enclosure::MAX_ENCLOSURES - 1) as u8;
         chest_enclosures.insert(chest.number, index);
     }
+    chest_enclosures
+}
 
-    // Every unique file decodes — and runs its expensive analysis:
-    // period refinement, phase maps, tail measurement — on a worker
-    // pool. Decode is embarrassingly parallel per file and dominated
-    // load time single-threaded; assembly below stays sequential.
-    enum Job<'a> {
-        Attack {
-            path: &'a PathBuf,
-            attack: &'a aristide_model::AttackSample,
-            nominal_hz: f64,
-        },
-        Release {
-            path: &'a PathBuf,
-            release: &'a aristide_model::ReleaseSample,
-        },
-    }
-    enum Outcome {
-        Attack(Result<(Sample, DecodedInfo), String>),
-        Release(Result<Sample, String>),
-    }
+/// One file waiting to decode — an attack (with the pitch its recording
+/// should sit at) or a release — dispatched to the worker pool in
+/// [`decode_misses`].
+enum Job<'a> {
+    Attack {
+        path: &'a PathBuf,
+        attack: &'a aristide_model::AttackSample,
+        nominal_hz: f64,
+    },
+    Release {
+        path: &'a PathBuf,
+        release: &'a aristide_model::ReleaseSample,
+    },
+}
+
+/// A decoded [`Job`], still keyed by its path for the caller to file
+/// away.
+enum Outcome {
+    Attack(Result<(Sample, DecodedInfo), String>),
+    Release(Result<Sample, String>),
+}
+
+/// Every unique file that must decode — and run its expensive analysis:
+/// period refinement, phase maps, tail measurement — on a worker pool.
+/// Decode is embarrassingly parallel per file and dominates load time
+/// single-threaded; assembly stays sequential.
+fn collect_decode_jobs(organ: &Organ) -> Vec<Job<'_>> {
     let mut jobs: Vec<Job> = Vec::new();
-    {
-        let mut seen_attacks = std::collections::HashSet::new();
-        let mut seen_releases = std::collections::HashSet::new();
-        for rank in &organ.ranks {
-            for pipe in &rank.pipes {
-                let PipeSource::Sampled { attacks, releases } = &pipe.source else {
-                    continue;
-                };
-                for attack in attacks {
-                    if seen_attacks.insert(&attack.path) {
-                        jobs.push(Job::Attack {
-                            path: &attack.path,
-                            attack,
-                            // Where the recording should sit: the
-                            // pipe's nominal, less what the set's own
-                            // voicing shifts it by (a mixture rank
-                            // repitched a tritone records a tritone
-                            // away). Shared files share the pitch: the
-                            // first referencing pipe measures, exactly
-                            // as the sequential decode did.
-                            nominal_hz: pipe.nominal_frequency_hz
-                                * (-(pipe.pitch_tuning_cents + attack.pitch_offset_cents)
-                                    / 1200.0)
-                                    .exp2(),
-                        });
-                    }
+    let mut seen_attacks = std::collections::HashSet::new();
+    let mut seen_releases = std::collections::HashSet::new();
+    for rank in &organ.ranks {
+        for pipe in &rank.pipes {
+            let PipeSource::Sampled { attacks, releases } = &pipe.source else {
+                continue;
+            };
+            for attack in attacks {
+                if seen_attacks.insert(&attack.path) {
+                    jobs.push(Job::Attack {
+                        path: &attack.path,
+                        attack,
+                        // Where the recording should sit: the
+                        // pipe's nominal, less what the set's own
+                        // voicing shifts it by (a mixture rank
+                        // repitched a tritone records a tritone
+                        // away). Shared files share the pitch: the
+                        // first referencing pipe measures, exactly
+                        // as the sequential decode did.
+                        nominal_hz: pipe.nominal_frequency_hz
+                            * (-(pipe.pitch_tuning_cents + attack.pitch_offset_cents)
+                                / 1200.0)
+                                .exp2(),
+                    });
                 }
-                for release in releases {
-                    if seen_releases.insert(&release.path) {
-                        jobs.push(Job::Release {
-                            path: &release.path,
-                            release,
-                        });
-                    }
+            }
+            for release in releases {
+                if seen_releases.insert(&release.path) {
+                    jobs.push(Job::Release {
+                        path: &release.path,
+                        release,
+                    });
                 }
             }
         }
     }
-    // The load cache (§3b): entries whose file stamp and decode inputs
-    // still match skip decode+analysis entirely; the rest decode below
-    // and the cache is rewritten with the union.
+    jobs
+}
+
+/// The load cache's verdict on one load's jobs (§3b): which are still
+/// current on disk, which must decode, and what a fresh decode needs
+/// to remember to be written back (see [`finish_decode`]).
+struct CachePlan<'a> {
+    total_jobs: usize,
+    any_misses: bool,
+    hits: Vec<(PathBuf, crate::cache::Entry)>,
+    misses: Vec<Job<'a>>,
+    /// path → (meta hash, mtime, size) for entries a fresh decode earns.
+    miss_stamps: HashMap<PathBuf, (u64, u64, u64)>,
+}
+
+/// The load cache (§3b): entries whose file stamp and decode inputs
+/// still match skip decode+analysis entirely; the rest decode below
+/// and the cache is rewritten with the union.
+fn plan_cache<'a>(
+    organ: &Organ,
+    cache_path: Option<&std::path::Path>,
+    quantize: bool,
+    jobs: Vec<Job<'a>>,
+) -> CachePlan<'a> {
     let mut stored: HashMap<PathBuf, crate::cache::Entry> = match cache_path {
         Some(path) => match crate::cache::read(path) {
             Ok(entries) => entries,
@@ -263,7 +359,17 @@ pub fn build(
         }
     }
     let any_misses = !misses.is_empty();
+    CachePlan {
+        total_jobs,
+        any_misses,
+        hits,
+        misses,
+        miss_stamps,
+    }
+}
 
+/// Decode every cache-miss job on a worker pool sized to the machine.
+fn decode_misses(organ: &Organ, quantize: bool, misses: Vec<Job<'_>>) -> Vec<(PathBuf, Outcome)> {
     let queue = std::sync::Mutex::new(misses);
     let results = std::sync::Mutex::new(Vec::new());
     let workers = std::thread::available_parallelism()
@@ -310,6 +416,28 @@ pub fn build(
             });
         }
     });
+    results.into_inner().expect("results")
+}
+
+/// Every unique file, decoded and keyed by path, awaiting assembly.
+/// Fresh decodes and cache hits both end up here identically.
+struct DecodedMaps {
+    predecoded: HashMap<PathBuf, Result<(Sample, DecodedInfo), String>>,
+    prereleased: HashMap<PathBuf, Result<Sample, String>>,
+}
+
+/// Turn fresh decode outcomes and surviving cache hits into one set of
+/// decoded files, and rewrite the cache with the union — surviving
+/// hits plus fresh successes, all borrowed in place: no sample is ever
+/// cloned to be cached.
+fn finish_decode(
+    cache_path: Option<&std::path::Path>,
+    hits: Vec<(PathBuf, crate::cache::Entry)>,
+    miss_stamps: HashMap<PathBuf, (u64, u64, u64)>,
+    total_jobs: usize,
+    any_misses: bool,
+    outcomes: Vec<(PathBuf, Outcome)>,
+) -> DecodedMaps {
     if !hits.is_empty() {
         tracing::info!("sample cache: {} of {total_jobs} files hot", hits.len());
     }
@@ -318,7 +446,7 @@ pub fn build(
     // at assembly as always.
     let mut predecoded: HashMap<PathBuf, Result<(Sample, DecodedInfo), String>> = HashMap::new();
     let mut prereleased: HashMap<PathBuf, Result<Sample, String>> = HashMap::new();
-    for (path, outcome) in results.into_inner().expect("results") {
+    for (path, outcome) in outcomes {
         match outcome {
             Outcome::Attack(result) => {
                 predecoded.insert(path, result);
@@ -397,226 +525,282 @@ pub fn build(
             }
         }
     }
+    DecodedMaps {
+        predecoded,
+        prereleased,
+    }
+}
 
-    // Every sampled pipe, decoded and measured, awaiting the pitch
-    // decisions that need the whole instrument in view.
-    let mut staged: Vec<StagedPipe> = Vec::new();
-    for (rank_index, rank) in organ.ranks.iter().enumerate() {
-        let enclosure = chest_enclosures
-            .get(&rank.windchest)
-            .copied()
-            .unwrap_or(aristide_engine::enclosure::ENCLOSURE_NONE);
-        // Pipes decode first, then pitch decisions settle rank-wide
-        // (the junk-metadata guard below needs the whole rank in view)
-        // before specs are built.
-        let mut pending: Vec<PendingPipe> = Vec::new();
-        for (pipe_index, pipe) in rank.pipes.iter().enumerate() {
-            let PipeSource::Sampled { attacks, releases } = &pipe.source else {
-                continue;
-            };
-            if attacks.is_empty() {
-                skipped.push(format!("{} pipe {pipe_index}: no attacks", rank.name));
-                continue;
-            }
-            // Decode every attack variant; the first that decodes is
-            // the pipe's primary (its metadata drives the rank-wide
-            // pitch decision), the rest join the selection table.
-            let mut variants: Vec<(usize, DecodedInfo)> = Vec::new();
-            for (attack_index, attack) in attacks.iter().enumerate() {
-                let entry = decoded.entry(attack.path.clone()).or_insert_with(|| {
-                    match predecoded.remove(&attack.path) {
-                        Some(Ok((mut sample, info))) => {
-                            // Separate recorded releases become their own
-                            // one-shot bank entries, attached with hold-time
-                            // bounds, trem state, and cross-file phase maps
-                            // — to every attack variant, so a note started
-                            // on any of them can splice out.
-                            for release in releases {
-                                let release_index = *release_cache
-                                    .entry(release.path.clone())
-                                    .or_insert_with(|| {
-                                        match prereleased.remove(&release.path) {
-                                            Some(Ok(release_sample)) => {
-                                                Some(bank.push(release_sample))
-                                            }
-                                            Some(Err(reason)) => {
-                                                skipped.push(format!(
-                                                    "{}: {reason}",
-                                                    release.path.display()
-                                                ));
-                                                None
-                                            }
-                                            None => None,
-                                        }
-                                    });
-                                if let Some(index) = release_index {
-                                    if let Some(target) = bank.get(index) {
-                                        sample.attach_release(
-                                            target,
-                                            index,
-                                            release.max_key_press_ms,
-                                            release.wave_tremulant,
-                                            release.release_crossfade_ms,
-                                        );
-                                    }
-                                }
-                            }
-                            let index = bank.push(sample);
-                            Some(DecodedInfo { index, ..info })
-                        }
-                        Some(Err(reason)) => {
-                            skipped.push(format!("{}: {reason}", attack.path.display()));
-                            None
-                        }
-                        None => None,
-                    }
-                });
-                if let Some(info) = *entry {
-                    variants.push((attack_index, info));
-                }
-            }
-            let Some(&(primary_index, info)) = variants.first() else {
-                continue;
-            };
-            let attack = &attacks[primary_index];
-            if variants.len() > 1 {
-                let options = variants
-                    .iter()
-                    .map(|&(index, variant)| AttackOption {
-                        sample: variant.index,
-                        rate_factor: (variant.sample_rate / info.sample_rate) as f32,
-                        wave_tremulant: attacks[index].wave_tremulant,
-                        min_velocity: attacks[index].min_velocity,
-                        max_since_release_ms: attacks[index].max_time_since_last_release_ms,
-                    })
-                    .collect();
-                attack_options.insert((rank.id, pipe_index as u16), options);
-            }
+/// Attack/release dedup state threaded across every rank: a file
+/// shared by several pipes (borrowed pipes, shared samples) decodes
+/// and enters the bank once.
+struct DecodeCache {
+    /// path → Ok(bank index + source metadata) or failure already noted.
+    decoded: HashMap<PathBuf, Option<DecodedInfo>>,
+    /// Separate release files, deduplicated independently of attacks.
+    release_cache: HashMap<PathBuf, Option<u32>>,
+}
 
-            // Where the recording's pitch claim comes from: an explicit
-            // ODF MIDIKeyNumber wins (and silences the file's own
-            // fraction — GO's rule), else the file's smpl chunk.
-            let (sample_key, fraction_cents, from_smpl) =
-                match (pipe.midi_key_number, pipe.midi_pitch_fraction_cents) {
-                    (Some(key), fraction) => (Some(key), fraction.unwrap_or(0.0), false),
-                    (None, Some(fraction)) => (info.unity_note, fraction, true),
-                    (None, None) => (info.unity_note, info.unity_fraction_cents, true),
-                };
-            let original_cents = pipe.pitch_tuning_cents + attack.pitch_offset_cents;
-            let auto_cents = sample_key.map(|key| {
-                let recorded_hz = equal_ladder_hz(key as f64 + fraction_cents / 100.0);
-                cents_between(recorded_hz, pipe.nominal_frequency_hz)
-                    + pipe.pitch_correction_cents
-                    + attack.pitch_offset_cents
-            });
-            pending.push(PendingPipe {
-                pipe_index: pipe_index as u16,
-                info,
-                path: attack.path.clone(),
-                original_cents,
-                auto_cents,
-                from_smpl,
-                unity: from_smpl.then_some(sample_key).flatten(),
-            });
-        }
-
-        // Junk-metadata guard: several *distinct* files all claiming
-        // the same smpl unity note across a rank whose slots span
-        // different pitches is an editor's default (unity=60 stamped
-        // everywhere), not a measurement — no honest rank records two
-        // different keys at one pitch. Distrust the whole rank's smpl
-        // pitch (explicit ODF MIDIKeyNumber declarations still count).
-        let smpl_claims: HashMap<&PathBuf, u8> = pending
-            .iter()
-            .filter_map(|p| p.unity.map(|unity| (&p.path, unity)))
-            .collect();
-        let one_unity = smpl_claims.len() >= 3
-            && smpl_claims.values().collect::<std::collections::HashSet<_>>().len() == 1;
-        let distrust_smpl = one_unity && {
-            let nominals: Vec<f64> = pending
-                .iter()
-                .filter(|p| p.unity.is_some())
-                .map(|p| rank.pipes[p.pipe_index as usize].nominal_frequency_hz)
-                .collect();
-            nominals.iter().any(|&hz| (hz - nominals[0]).abs() > 1e-6)
+/// Decode every sampled pipe in one rank into its bank entries: the
+/// first attack variant that decodes becomes the pipe's primary (its
+/// metadata drives the rank-wide pitch decision), the rest join the
+/// selection table, and each attack's recorded releases attach as
+/// splice targets. Attack and release files dedup by path via `cache`.
+fn decode_rank_attacks(
+    rank: &aristide_model::Rank,
+    bank: &mut SampleBank,
+    skipped: &mut Vec<String>,
+    attack_options: &mut HashMap<(RankId, u16), Vec<AttackOption>>,
+    cache: &mut DecodeCache,
+    maps: &mut DecodedMaps,
+) -> Vec<PendingPipe> {
+    let mut pending: Vec<PendingPipe> = Vec::new();
+    for (pipe_index, pipe) in rank.pipes.iter().enumerate() {
+        let PipeSource::Sampled { attacks, releases } = &pipe.source else {
+            continue;
         };
-        if distrust_smpl {
-            skipped.push(format!(
-                "{}: ignoring embedded pitch metadata (distinct files share one \
-                 unity note across differing keys — an editor default, not a \
-                 measurement)",
-                rank.name
-            ));
+        if attacks.is_empty() {
+            skipped.push(format!("{} pipe {pipe_index}: no attacks", rank.name));
+            continue;
+        }
+        // Decode every attack variant; the first that decodes is
+        // the pipe's primary (its metadata drives the rank-wide
+        // pitch decision), the rest join the selection table.
+        let mut variants: Vec<(usize, DecodedInfo)> = Vec::new();
+        for (attack_index, attack) in attacks.iter().enumerate() {
+            let entry = cache.decoded.entry(attack.path.clone()).or_insert_with(|| {
+                match maps.predecoded.remove(&attack.path) {
+                    Some(Ok((mut sample, info))) => {
+                        // Separate recorded releases become their own
+                        // one-shot bank entries, attached with hold-time
+                        // bounds, trem state, and cross-file phase maps
+                        // — to every attack variant, so a note started
+                        // on any of them can splice out.
+                        for release in releases {
+                            let release_index = *cache
+                                .release_cache
+                                .entry(release.path.clone())
+                                .or_insert_with(|| {
+                                    match maps.prereleased.remove(&release.path) {
+                                        Some(Ok(release_sample)) => {
+                                            Some(bank.push(release_sample))
+                                        }
+                                        Some(Err(reason)) => {
+                                            skipped.push(format!(
+                                                "{}: {reason}",
+                                                release.path.display()
+                                            ));
+                                            None
+                                        }
+                                        None => None,
+                                    }
+                                });
+                            if let Some(index) = release_index
+                                && let Some(target) = bank.get(index)
+                            {
+                                sample.attach_release(
+                                    target,
+                                    index,
+                                    release.max_key_press_ms,
+                                    release.wave_tremulant,
+                                    release.release_crossfade_ms,
+                                );
+                            }
+                        }
+                        let index = bank.push(sample);
+                        Some(DecodedInfo { index, ..info })
+                    }
+                    Some(Err(reason)) => {
+                        skipped.push(format!("{}: {reason}", attack.path.display()));
+                        None
+                    }
+                    None => None,
+                }
+            });
+            if let Some(info) = *entry {
+                variants.push((attack_index, info));
+            }
+        }
+        let Some(&(primary_index, info)) = variants.first() else {
+            continue;
+        };
+        let attack = &attacks[primary_index];
+        if variants.len() > 1 {
+            let options = variants
+                .iter()
+                .map(|&(index, variant)| AttackOption {
+                    sample: variant.index,
+                    rate_factor: (variant.sample_rate / info.sample_rate) as f32,
+                    wave_tremulant: attacks[index].wave_tremulant,
+                    min_velocity: attacks[index].min_velocity,
+                    max_since_release_ms: attacks[index].max_time_since_last_release_ms,
+                })
+                .collect();
+            attack_options.insert((rank.id, pipe_index as u16), options);
         }
 
-        for p in pending {
-            let pipe = &rank.pipes[p.pipe_index as usize];
-            // What the metadata alone would decide — the fallback for
-            // a pipe whose recording cannot be measured (no loop, or
-            // material that doesn't repeat). The recording plays as
-            // the set voiced it (as recorded + PitchTuning) unless
-            // its own declared pitch says that lands somewhere else
-            // entirely — then the set relies on retuning from
-            // metadata (unit/extended ranks, borrowed top octaves,
-            // HW-style sets). A pipe (or rank) declaring
-            // AcceptsRetuning=N plays as voiced no matter what the
-            // metadata claims.
-            let metadata = match p.auto_cents.filter(|_| pipe.accepts_retuning) {
-                Some(auto) if (auto - p.original_cents).abs() > RETUNE_TOLERANCE_CENTS => {
-                    if auto.abs() > 1800.0 {
-                        // GO refuses retunes past 1800 cents; a claim
-                        // that far out is junk metadata, not intent.
-                        skipped.push(format!(
-                            "{} pipe {}: embedded pitch asks for a {auto:.0}-cent \
-                             retune; ignored",
-                            rank.name, p.pipe_index
-                        ));
-                        None
-                    } else if p.from_smpl && distrust_smpl {
-                        None
-                    } else {
-                        Some(auto)
-                    }
-                }
-                _ => None,
+        // Where the recording's pitch claim comes from: an explicit
+        // ODF MIDIKeyNumber wins (and silences the file's own
+        // fraction — GO's rule), else the file's smpl chunk.
+        let (sample_key, fraction_cents, from_smpl) =
+            match (pipe.midi_key_number, pipe.midi_pitch_fraction_cents) {
+                (Some(key), fraction) => (Some(key), fraction.unwrap_or(0.0), false),
+                (None, Some(fraction)) => (info.unity_note, fraction, true),
+                (None, None) => (info.unity_note, info.unity_fraction_cents, true),
             };
-            // The recording's own fundamental, as the engine measured
-            // it for release alignment: the truth every pitch decision
-            // below works from.
-            let measured_cents = bank
-                .get(p.info.index)
-                .and_then(|sample| sample.measured_period())
-                .map(|period| {
-                    let recorded_hz = p.info.sample_rate / period;
-                    let voiced_hz = recorded_hz * cents_to_ratio(p.original_cents);
-                    cents_between(pipe.nominal_frequency_hz, voiced_hz)
-                })
-                .filter(|cents| cents.is_finite());
-            staged.push(StagedPipe {
-                rank: rank.id,
-                rank_index,
-                pipe_index: p.pipe_index,
-                info: p.info,
-                original_cents: p.original_cents,
-                metadata_cents: metadata,
-                measured_cents,
-                enclosure,
-            });
-        }
+        let original_cents = pipe.pitch_tuning_cents + attack.pitch_offset_cents;
+        let auto_cents = sample_key.map(|key| {
+            let recorded_hz = equal_ladder_hz(key as f64 + fraction_cents / 100.0);
+            cents_between(recorded_hz, pipe.nominal_frequency_hz)
+                + pipe.pitch_correction_cents
+                + attack.pitch_offset_cents
+        });
+        pending.push(PendingPipe {
+            pipe_index: pipe_index as u16,
+            info,
+            path: attack.path.clone(),
+            original_cents,
+            auto_cents,
+            from_smpl,
+            unity: from_smpl.then_some(sample_key).flatten(),
+        });
+    }
+    pending
+}
+
+/// Settle one rank's pitch decisions (the junk-metadata guard needs
+/// the whole rank in view) and stage its pipes for the instrument-wide
+/// tuning fit.
+fn stage_rank_pipes(
+    rank: &aristide_model::Rank,
+    rank_index: usize,
+    enclosure: u8,
+    pending: Vec<PendingPipe>,
+    skipped: &mut Vec<String>,
+    bank: &SampleBank,
+) -> Vec<StagedPipe> {
+    let mut staged = Vec::new();
+    // Junk-metadata guard: several *distinct* files all claiming
+    // the same smpl unity note across a rank whose slots span
+    // different pitches is an editor's default (unity=60 stamped
+    // everywhere), not a measurement — no honest rank records two
+    // different keys at one pitch. Distrust the whole rank's smpl
+    // pitch (explicit ODF MIDIKeyNumber declarations still count).
+    let smpl_claims: HashMap<&PathBuf, u8> = pending
+        .iter()
+        .filter_map(|p| p.unity.map(|unity| (&p.path, unity)))
+        .collect();
+    let one_unity = smpl_claims.len() >= 3
+        && smpl_claims.values().collect::<std::collections::HashSet<_>>().len() == 1;
+    let distrust_smpl = one_unity && {
+        let nominals: Vec<f64> = pending
+            .iter()
+            .filter(|p| p.unity.is_some())
+            .map(|p| rank.pipes[p.pipe_index as usize].nominal_frequency_hz)
+            .collect();
+        nominals.iter().any(|&hz| (hz - nominals[0]).abs() > 1e-6)
+    };
+    if distrust_smpl {
+        skipped.push(format!(
+            "{}: ignoring embedded pitch metadata (distinct files share one \
+             unity note across differing keys — an editor default, not a \
+             measurement)",
+            rank.name
+        ));
     }
 
-    // The organ's home tuning, from every pipe that measured: what the
-    // samples were recorded in. Each rank anchors on its own median
-    // (a composite may hold a 415 Positif beside a 440 Great, and a
-    // rank comes from one set); the class table is instrument-wide.
-    let sounding_class = |hz: f64| -> (usize, bool) {
-        let semitones = 12.0 * (hz / 440.0).log2();
-        let nearest = semitones.round();
-        (
-            (nearest as i64 + 69).rem_euclid(12) as usize,
-            (semitones - nearest).abs() < 0.005,
-        )
-    };
+    for p in pending {
+        let pipe = &rank.pipes[p.pipe_index as usize];
+        // What the metadata alone would decide — the fallback for
+        // a pipe whose recording cannot be measured (no loop, or
+        // material that doesn't repeat). The recording plays as
+        // the set voiced it (as recorded + PitchTuning) unless
+        // its own declared pitch says that lands somewhere else
+        // entirely — then the set relies on retuning from
+        // metadata (unit/extended ranks, borrowed top octaves,
+        // HW-style sets). A pipe (or rank) declaring
+        // AcceptsRetuning=N plays as voiced no matter what the
+        // metadata claims.
+        let metadata = match p.auto_cents.filter(|_| pipe.accepts_retuning) {
+            Some(auto) if (auto - p.original_cents).abs() > RETUNE_TOLERANCE_CENTS => {
+                if auto.abs() > 1800.0 {
+                    // GO refuses retunes past 1800 cents; a claim
+                    // that far out is junk metadata, not intent.
+                    skipped.push(format!(
+                        "{} pipe {}: embedded pitch asks for a {auto:.0}-cent \
+                         retune; ignored",
+                        rank.name, p.pipe_index
+                    ));
+                    None
+                } else if p.from_smpl && distrust_smpl {
+                    None
+                } else {
+                    Some(auto)
+                }
+            }
+            _ => None,
+        };
+        // The recording's own fundamental, as the engine measured
+        // it for release alignment: the truth every pitch decision
+        // below works from.
+        let measured_cents = bank
+            .get(p.info.index)
+            .and_then(|sample| sample.measured_period())
+            .map(|period| {
+                let recorded_hz = p.info.sample_rate / period;
+                let voiced_hz = recorded_hz * cents_to_ratio(p.original_cents);
+                cents_between(pipe.nominal_frequency_hz, voiced_hz)
+            })
+            .filter(|cents| cents.is_finite());
+        staged.push(StagedPipe {
+            rank: rank.id,
+            rank_index,
+            pipe_index: p.pipe_index,
+            info: p.info,
+            original_cents: p.original_cents,
+            metadata_cents: metadata,
+            measured_cents,
+            enclosure,
+        });
+    }
+    staged
+}
+
+/// A pipe's sounding pitch class against the 440 ladder (0 = A), plus
+/// whether it sits exactly on a semitone.
+fn sounding_class(hz: f64) -> (usize, bool) {
+    let semitones = 12.0 * (hz / 440.0).log2();
+    let nearest = semitones.round();
+    (
+        (nearest as i64 + 69).rem_euclid(12) as usize,
+        (semitones - nearest).abs() < 0.005,
+    )
+}
+
+/// Where the organ's own tuning puts a pipe: its rank's pitch standard
+/// plus the instrument's tempering of its class.
+fn model_of(
+    organ: &Organ,
+    home: &crate::tuning::HomeTuning,
+    anchors: &HashMap<RankId, f64>,
+    p: &StagedPipe,
+) -> f64 {
+    let (class, _) = sounding_class(nominal_of(organ, p));
+    anchors
+        .get(&p.rank)
+        .copied()
+        .unwrap_or_else(|| home.anchor_cents())
+        + home.offsets_cents[class]
+}
+
+/// The organ's home tuning, from every pipe that measured: what the
+/// samples were recorded in. Each rank anchors on its own median (a
+/// composite may hold a 415 Positif beside a 440 Great, and a rank
+/// comes from one set); the class table is instrument-wide.
+fn fit_home_tuning(
+    organ: &Organ,
+    staged: &[StagedPipe],
+) -> (Option<crate::tuning::HomeTuning>, HashMap<RankId, f64>) {
     let total = staged.len();
     let measured_total = staged.iter().filter(|p| p.measured_cents.is_some()).count();
     let fit = |keep: &dyn Fn(&StagedPipe) -> bool| {
@@ -641,25 +825,13 @@ pub fn build(
             .collect();
         (home, anchors)
     };
-    // Where the organ's own tuning puts a pipe: its rank's pitch
-    // standard plus the instrument's tempering of its class.
-    let model_of = |home: &crate::tuning::HomeTuning,
-                    anchors: &HashMap<RankId, f64>,
-                    p: &StagedPipe| {
-        let (class, _) = sounding_class(nominal_of(organ, p));
-        anchors
-            .get(&p.rank)
-            .copied()
-            .unwrap_or_else(|| home.anchor_cents())
-            + home.offsets_cents[class]
-    };
     // Two passes: the first fit finds the pipes sitting at another key
     // (see REANCHOR_TOLERANCE_CENTS), the second leaves them out so a
     // mis-keyed file cannot skew the class it lands in.
     let (mut home, rank_anchor) = match fit(&|_| true) {
         (Some(first), first_anchors) => fit(&|p| {
             p.measured_cents.is_none_or(|measured| {
-                (measured - model_of(&first, &first_anchors, p)).abs()
+                (measured - model_of(organ, &first, &first_anchors, p)).abs()
                     <= REANCHOR_TOLERANCE_CENTS
             })
         }),
@@ -668,13 +840,28 @@ pub fn build(
     if let Some(home) = home.as_mut() {
         home.measured = measured_total;
     }
+    (home, rank_anchor)
+}
 
+/// Turn every staged pipe into its playback spec, moving pipes that
+/// sat at another key onto the organ's tuning by measurement and
+/// retuning unmeasured ones from their embedded metadata when it
+/// applies (see `fit_home_tuning` and `RETUNE_TOLERANCE_CENTS`).
+fn assign_voice_specs(
+    organ: &Organ,
+    device_rate: f32,
+    home: Option<&crate::tuning::HomeTuning>,
+    rank_anchor: &HashMap<RankId, f64>,
+    staged: Vec<StagedPipe>,
+    skipped: &mut Vec<String>,
+) -> HashMap<(RankId, u16), VoiceSpec> {
+    let mut specs = HashMap::new();
     let mut reanchored: HashMap<RankId, (usize, f64)> = HashMap::new();
     let mut retuned: HashMap<RankId, (usize, f64)> = HashMap::new();
     for p in staged {
         let rank = &organ.ranks[p.rank_index];
         let pipe = &rank.pipes[p.pipe_index as usize];
-        let model = home.as_ref().map(|home| model_of(home, &rank_anchor, &p));
+        let model = home.map(|home| model_of(organ, home, rank_anchor, &p));
         let (cents, home_cents) = match (p.measured_cents, model) {
             // Within the tolerance the pipe is where the organ's
             // tuning has it — temperament and drift, kept exactly.
@@ -749,8 +936,16 @@ pub fn build(
             ));
         }
     }
+    specs
+}
 
-    // Borrowed pipes sound their target pipe verbatim.
+/// Borrowed pipes sound their target pipe verbatim.
+fn assign_borrowed_pipe_specs(
+    organ: &Organ,
+    specs: &mut HashMap<(RankId, u16), VoiceSpec>,
+    attack_options: &mut HashMap<(RankId, u16), Vec<AttackOption>>,
+    skipped: &mut Vec<String>,
+) {
     for rank in &organ.ranks {
         for (pipe_index, pipe) in rank.pipes.iter().enumerate() {
             if !matches!(pipe.source, PipeSource::Borrowed(_)) {
@@ -772,15 +967,6 @@ pub fn build(
             }
         }
     }
-
-    Ok(LoadedBank {
-        bank,
-        specs,
-        attack_options,
-        skipped,
-        home,
-        rank_anchors: rank_anchor,
-    })
 }
 
 /// How far a recording's declared pitch may sit from where the set's
@@ -1022,7 +1208,7 @@ fn resolve_borrow(organ: &Organ, pipe: &Pipe) -> Option<PipeRef> {
 /// hinge (HW had to disable bass brightness modulation for distortion;
 /// a 150 Hz floor sidesteps that). Percussive noises skip the filter.
 pub(crate) fn brightness_coefficient(frequency_hz: f64, device_rate: f32, percussive: bool) -> f32 {
-    if percussive || !(frequency_hz > 0.0) {
+    if percussive || frequency_hz <= 0.0 {
         return 0.0;
     }
     let hinge_hz = (2.0 * frequency_hz).clamp(150.0, 8000.0);
@@ -1034,7 +1220,7 @@ pub(crate) fn brightness_coefficient(frequency_hz: f64, device_rate: f32, percus
 /// 8'/4'/2' as 1.0/0.5/0.25), i.e. weight ∝ 1/f, normalized to 1.0 at
 /// ~150 Hz. Percussive one-shots (action noises) draw nothing.
 pub(crate) fn wind_weight(frequency_hz: f64, percussive: bool) -> f32 {
-    if percussive || !(frequency_hz > 0.0) {
+    if percussive || frequency_hz <= 0.0 {
         return 0.0;
     }
     ((150.0 / frequency_hz) as f32).clamp(0.1, 4.0)
@@ -2432,7 +2618,7 @@ mod tests {
             let second = b * block / 48000;
             let phase_in_second = (b * block) % 48000;
             if phase_in_second < block {
-                send_chord(&mut console, &mut handle, second % 2 == 0);
+                send_chord(&mut console, &mut handle, second.is_multiple_of(2));
             }
             let t0 = std::time::Instant::now();
             engine.process(&mut buffer, 2);
@@ -2773,10 +2959,10 @@ mod tests {
         let mut cents = -60.0f64;
         while cents <= 60.0 {
             let hz = coarse * (cents / 1200.0).exp2();
-            if let Some(m) = mag(hz) {
-                if m > fine.1 {
-                    fine = (hz, m);
-                }
+            if let Some(m) = mag(hz)
+                && m > fine.1
+            {
+                fine = (hz, m);
             }
             cents += 5.0;
         }
