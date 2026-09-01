@@ -48,8 +48,8 @@ pub struct EnclosureParams {
     /// Shelf corner fully closed, Hz. HW CODM starting value: 1 kHz.
     pub corner_closed_hz: f32,
     /// Exponent on closedness for both dB laws: 1 = dB-linear (HW).
-    /// >1 concentrates change near closed (raw-physics lean), <1 the
-    /// opposite.
+    /// `>1` concentrates change near closed (raw-physics lean), `<1`
+    /// the opposite.
     pub taper: f32,
     /// Full-sweep settle time of the shutter inertia model, seconds.
     /// ≤0 disables (pedal drives the shutters directly).
