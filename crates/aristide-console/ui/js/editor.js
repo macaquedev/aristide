@@ -27,6 +27,13 @@ import {
   openCouplerAddForm,
 } from "./editor/add-menu.js";
 import {
+  wireStopForm,
+  openStopForm,
+  closeStopForm,
+  syncStopForm,
+  syncPistonRow,
+} from "./editor/stop-editor.js";
+import {
   formatFootage,
   keyName,
   keySpellings,
@@ -2599,379 +2606,26 @@ export class Editor {
   }
 
   // ---- the stop-editor popover: right-click any drawknob ------------------
-  //
-  // Name and voicing (footage, cents, gain) post live, field by field —
-  // no rebuild, exactly the tuning popover's contract. Retargeting a
-  // stop's source is structural, so picking one swaps a subview in over
-  // the form (`openStopSrcView`/`closeStopSrcView`), the same idiom as
-  // the tuning popover's own scale browser.
+  // See editor/stop-editor.js.
 
   wireStopForm() {
-    this.el.stopClose.addEventListener("click", () => this.closeStopForm());
-    this.el.stopSrcChange.addEventListener("click", () => this.openStopSrcView());
-    this.el.stopSrcCancel.addEventListener("click", () => this.closeStopSrcView());
-
-    // Deleting is the drag-to-bin gesture as a button: the stop comes
-    // off the console, its source still offers it — no confirm, same
-    // as the bin.
-    this.el.stopDelete.addEventListener("click", () => {
-      if (this.stopOpen == null) return;
-      const id = this.stopOpen;
-      this.closeStopForm();
-      this.organCommand(commands.organUnpull(id));
-    });
-
-    // Every field commits on change already — Enter in the name field
-    // must not also reload the page.
-    this.el.stopForm.addEventListener("submit", (event) => event.preventDefault());
-
-    this.el.stopName.addEventListener("change", () => {
-      if (this.stopOpen == null) return;
-      const stop = this.lastSnapshot?.stops.find((s) => s.id === this.stopOpen);
-      const name = this.el.stopName.value.trim();
-      if (!stop || !name || name === stop.name) return;
-      // A hand-typed name supersedes any pending rename offer.
-      this.hideStopLabelSync();
-      this.stopCommand(commands.organStopRename(this.stopOpen, name));
-    });
-
-    this.el.stopFootage.addEventListener("change", async () => {
-      if (this.stopOpen == null) return;
-      const stop = this.lastSnapshot?.stops.find((s) => s.id === this.stopOpen);
-      const text = this.el.stopFootage.value.trim();
-      const ok = await this.stopCommand(commands.organStopVoice(this.stopOpen, { footage: text || "native" }));
-      if (ok && stop) this.offerStopLabelSync(stop, text);
-    });
-
-    this.el.stopCents.addEventListener("change", () => {
-      if (this.stopOpen == null) return;
-      const cents = Number(this.el.stopCents.value);
-      if (!Number.isFinite(cents)) return;
-      this.stopCommand(commands.organStopVoice(this.stopOpen, { cents }));
-    });
-
-    this.el.stopGain.addEventListener("change", () => {
-      if (this.stopOpen == null) return;
-      const gain = Number(this.el.stopGain.value);
-      if (!Number.isFinite(gain)) return;
-      this.stopCommand(commands.organStopVoice(this.stopOpen, { gain }));
-    });
-
-    this.el.stopReset.addEventListener("click", async () => {
-      if (this.stopOpen == null) return;
-      const stop = this.lastSnapshot?.stops.find((s) => s.id === this.stopOpen);
-      const ok = await this.stopCommand(commands.organStopVoice(this.stopOpen, { reset: 1 }));
-      if (ok && stop) this.offerStopLabelSync(stop, "native");
-    });
-
-    // The rename offer's answers (see offerStopLabelSync). Yes renames
-    // the stop to its name minus the footage tail — the server's
-    // rename carries every file reference along — and, if a custom or
-    // hidden engraving was set, returns it to auto so the knob face
-    // reads the footage off the real pitch from now on. No remembers
-    // the refusal for this stop so later edits don't nag.
-    this.el.stopLabelSyncYes.addEventListener("click", async () => {
-      const pending = this.stopLabelSync;
-      this.hideStopLabelSync();
-      if (!pending || pending.id !== this.stopOpen) return;
-      const ok = await this.stopCommand(commands.organStopRename(pending.id, pending.base));
-      if (ok && pending.relabel) {
-        this.stopCommand(commands.organStopLabel(pending.id, { auto: 1 }));
-      }
-    });
-    this.el.stopLabelSyncNo.addEventListener("click", () => {
-      if (this.stopLabelSync) this.stopLabelSyncDeclined.add(this.stopLabelSync.id);
-      this.hideStopLabelSync();
-    });
-
-    this.el.stopLabelMode.addEventListener("change", () => {
-      if (this.stopOpen == null) return;
-      const mode = this.el.stopLabelMode.value;
-      this.el.stopLabelText.classList.toggle("hidden", mode !== "custom");
-      if (mode === "auto") {
-        this.stopCommand(commands.organStopLabel(this.stopOpen, { auto: 1 }));
-      } else if (mode === "none") {
-        this.stopCommand(commands.organStopLabel(this.stopOpen, { label: "" }));
-      } else {
-        // "custom" posts nothing yet — reveal the text field and let
-        // the player type the engraving; it commits on its own change.
-        this.el.stopLabelText.focus();
-      }
-    });
-
-    this.el.stopLabelText.addEventListener("change", () => {
-      if (this.stopOpen == null) return;
-      this.stopCommand(commands.organStopLabel(this.stopOpen, { label: this.el.stopLabelText.value }));
-    });
-
-    this.el.stopOwnPipes.addEventListener("change", () => {
-      if (this.stopOpen == null) return;
-      this.stopCommand(commands.organStopOwnPipes(this.stopOpen, this.el.stopOwnPipes.checked));
-    });
-
-    this.el.stopTuningEdit.addEventListener("click", () => {
-      if (this.stopOpen == null) return;
-      const id = this.stopOpen;
-      const rect = this.el.stop.getBoundingClientRect();
-      this.closeStopForm();
-      this.openTuningForm({ kind: "stop", id }, rect.left, rect.top);
-    });
+    wireStopForm(this);
   }
 
   openStopForm(id, x, y) {
-    this.openingPopover("stop");
-    this.stopOpen = id;
-    resetRender(this.el.stopPistons);
-    this.hideStopError();
-    this.hideStopLabelSync();
-    this.closeStopSrcView();
-    this.syncStopForm();
-    this.el.stop.classList.remove("hidden");
-    this.positionPopover(this.el.stop, x, y);
+    openStopForm(this, id, x, y);
   }
 
   closeStopForm() {
-    this.stopOpen = null;
-    this.el.stop.classList.add("hidden");
-    this.hideStopError();
-    this.hideStopLabelSync();
-    this.closeStopSrcView();
+    closeStopForm(this);
   }
 
-  /// Refills the form from the snapshot's stop entry — on open and on
-  /// every later poll, so a rebuild's or another session's edit lands
-  /// in the fields. Never touches the source-picker subview — a poll
-  /// landing mid-navigation must not yank it shut (the tuning popover's
-  /// browse idiom).
   syncStopForm() {
-    const stop = this.lastSnapshot?.stops.find((s) => s.id === this.stopOpen);
-    if (!stop) {
-      this.closeStopForm();
-      return;
-    }
-    setText(this.el.stopTitle, stop.name);
-    const pitch = stop.pitch ?? {};
-    this.el.stopReset.classList.toggle("hidden", !pitch.own);
-
-    if (this.root.activeElement !== this.el.stopName) this.el.stopName.value = stop.name;
-
-    if (this.root.activeElement !== this.el.stopFootage) {
-      this.el.stopFootage.value = formatFootage(pitch.footage ?? pitch.native);
-    }
-    // A mixture speaks several footages at once — there is no single
-    // number the footage field could hold, so it's disabled and the
-    // stop is voiced in cents alone.
-    const mixture = pitch.native == null;
-    this.el.stopFootage.disabled = mixture;
-    this.el.stopFootage.title = mixture
-      ? "A mixture speaks several footages — tune it in cents"
-      : "";
-
-    if (this.root.activeElement !== this.el.stopCents) this.el.stopCents.value = pitch.cents ?? 0;
-    if (this.root.activeElement !== this.el.stopGain) this.el.stopGain.value = pitch.gain ?? 0;
-
-    // label absent = auto, "" = hidden, anything else = that exact text.
-    const labelMode = stop.label == null ? "auto" : stop.label === "" ? "none" : "custom";
-    if (this.root.activeElement !== this.el.stopLabelMode) this.el.stopLabelMode.value = labelMode;
-    this.el.stopLabelText.classList.toggle("hidden", labelMode !== "custom");
-    if (labelMode === "custom" && this.root.activeElement !== this.el.stopLabelText) {
-      this.el.stopLabelText.value = stop.label;
-    }
-
-    this.el.stopOwnPipes.checked = !!stop.own_pipes;
-
-    const src = stop.src;
-    setText(
-      this.el.stopSrc,
-      src ? `${src.from} · ${src.manual}${src.stop ? ` · ${src.stop}` : ""}` : "—"
-    );
-
-    setText(this.el.stopTuningSummary, this.stopTuningLine(stop));
-
-    // A mixture's individual ranks, only when there's more than one to
-    // tell apart — a single-rank stop's tuning is the row above, in full.
-    const ranks = stop.ranks ?? [];
-    const rankStatus = (rank) =>
-      rank.own
-        ? `own · ${this.tuningLabel((this.lastSnapshot?.rank_tuning ?? []).find(
-            (t) => t.stop === stop.id && t.rank === rank.id
-          ))}`
-        : "follows stop";
-    const shown = ranks.length > 1 ? ranks : [];
-    const rankRows = shown.map((r) => [r.id, r.name, rankStatus(r)]);
-    renderIfChanged(this.el.stopRanks, JSON.stringify([stop.id, rankRows]), () => {
-      this.el.stopRanks.replaceChildren();
-      for (const rank of shown) {
-        const row = document.createElement("div");
-        row.className = "stop-rank-row";
-        const name = document.createElement("span");
-        name.className = "stop-rank-name";
-        name.textContent = rank.name;
-        const status = document.createElement("span");
-        status.className = "stop-rank-status";
-        status.textContent = rankStatus(rank);
-        const edit = document.createElement("button");
-        edit.type = "button";
-        edit.className = "ghost";
-        edit.textContent = "Edit…";
-        edit.addEventListener("click", () => {
-          const rect = this.el.stop.getBoundingClientRect();
-          this.closeStopForm();
-          this.openTuningForm({ kind: "rank", stop: stop.id, rank: rank.id }, rect.left, rect.top);
-        });
-        row.append(name, status, edit);
-        this.el.stopRanks.append(row);
-      }
-    });
-
-    this.syncPistonRow(this.el.stopPistons, `stop:${stop.name}`);
+    syncStopForm(this);
   }
 
-  /// One popover's quick piston row, rebuilt only when the bindings it
-  /// shows (or the quick-bind in flight) change — a poll must never
-  /// recreate the Listen button under the pointer.
   syncPistonRow(container, action) {
-    const listening = this.quickBind?.action === action && this.quickBind?.manual == null;
-    const bound = (this.lastSnapshot?.controls ?? []).filter((c) => c.action === action);
-    const signature = JSON.stringify([action, bound, listening]);
-    renderIfChanged(container, signature, () => {
-      container.replaceChildren(
-        pistonRow(
-          { snapshot: this.lastSnapshot, send: this.send, listening },
-          action,
-          (act, cancelling) => this.quickBindListen(act, null, cancelling)
-        )
-      );
-    });
-  }
-
-  /// Sends a stop field update directly (not through the app-wide
-  /// `send()`), so a 400's reason lands in this popover rather than the
-  /// global status strip — the same local-fetch idiom `tremCommand` uses.
-  async stopCommand(query) {
-    this.hideStopError();
-    const { ok, error } = await this.organCommandResult(query);
-    if (error != null) this.showStopError(error);
-    return ok;
-  }
-
-  /// After a footage edit lands: if the stop's *name* still carries a
-  /// footage tail that no longer reads as what the stop now speaks
-  /// ("Montre 8'" revoiced to 16'), offer to move the footage out of
-  /// the name. The knob face is already honest — auto engraving strips
-  /// the name's tail and writes the real pitch — but the name itself
-  /// would keep saying 8' in the popover title, piston bindings and
-  /// stop lists. Yes renames to the bare name and returns a custom or
-  /// hidden engraving to auto, so the footage is thereafter inferred
-  /// from the pitch alone; the answer machinery is in wireStopForm.
-  /// `text` is the footage the edit sent — "native" or the field's text.
-  offerStopLabelSync(stop, text) {
-    this.hideStopLabelSync();
-    if (this.stopLabelSyncDeclined.has(stop.id)) return;
-    const split = splitFootageName(stop.name);
-    if (!split) return;
-    const feet =
-      !text || /^native$/i.test(text) ? stop.pitch?.native : parseFootage(text);
-    if (feet == null || formatFootage(feet) === formatFootage(split.feet)) return;
-    this.stopLabelSync = { id: stop.id, base: split.base, relabel: stop.label != null };
-    const em = (words) => {
-      const el = document.createElement("em");
-      el.textContent = words;
-      return el;
-    };
-    this.el.stopLabelSyncText.replaceChildren(
-      "The name still says ",
-      em(`${split.tail}`),
-      " — rename the stop ",
-      em(split.base),
-      ` and engrave the ${formatFootage(feet)}' it now speaks?`
-    );
-    this.el.stopLabelSync.classList.remove("hidden");
-  }
-
-  hideStopLabelSync() {
-    this.stopLabelSync = null;
-    this.el.stopLabelSync.classList.add("hidden");
-  }
-
-  showStopError(text) {
-    this.el.stopError.textContent = text;
-    this.el.stopError.classList.remove("hidden");
-  }
-
-  hideStopError() {
-    this.el.stopError.classList.add("hidden");
-    this.el.stopError.textContent = "";
-  }
-
-  /// Swaps the source-picker subview in over the form: every source's
-  /// every division's every stop, including already-pulled ones —
-  /// retargeting a stop at one already on the console is legal
-  /// borrowing, not a claim that has to be free first.
-  async openStopSrcView() {
-    if (this.stopOpen == null) return;
-    this.stopSrcOpen = true;
-    this.el.stopForm.classList.add("hidden");
-    this.el.stopSrcView.classList.remove("hidden");
-    this.el.stopSrcList.replaceChildren(emptyNote("Reading the sources…"));
-    if (!this.offerings) await this.fetchOfferings(false);
-    this.renderStopSrcList();
-  }
-
-  closeStopSrcView() {
-    this.stopSrcOpen = false;
-    this.el.stopSrcView.classList.add("hidden");
-    this.el.stopForm.classList.remove("hidden");
-  }
-
-  renderStopSrcList() {
-    this.el.stopSrcList.replaceChildren();
-    const sources = this.offerings;
-    if (sources == null) {
-      this.el.stopSrcList.append(emptyNote("Couldn't read this organ's sources."));
-      return;
-    }
-    const stop = this.lastSnapshot?.stops.find((s) => s.id === this.stopOpen);
-    const current = stop?.src;
-    let any = false;
-    for (const source of sources) {
-      for (const manual of source.manuals ?? []) {
-        const stops = manual.stops ?? [];
-        if (!stops.length) continue;
-        any = true;
-        const title = document.createElement("span");
-        title.className = "organ-stop-group-title";
-        title.textContent = `${source.alias} · ${manual.name}`;
-        this.el.stopSrcList.append(title);
-        for (const srcStop of stops) {
-          const isCurrent =
-            !!current &&
-            current.from === source.alias &&
-            current.manual === manual.name &&
-            current.stop === srcStop.name;
-          const row = menuItem(srcStop.name, {
-            checked: isCurrent,
-            disabled: isCurrent,
-            onClick: async () => {
-              if (this.stopOpen == null) return;
-              const { ok, error } = await this.organCommandResult(
-                commands.organStopSource(this.stopOpen, source.alias, manual.name, srcStop.name)
-              );
-              // The response is a snapshot mid-rebuild, not the settled
-              // result — the popover stays open and the next poll's
-              // syncStopForm() will re-sync its source line once the
-              // rebuild lands.
-              if (error != null) this.showStopError(error);
-              else this.closeStopSrcView();
-            },
-          });
-          this.el.stopSrcList.append(row);
-        }
-      }
-    }
-    if (!any) {
-      this.el.stopSrcList.append(emptyNote("The sources have nothing to offer."));
-    }
+    syncPistonRow(this, container, action);
   }
 
   // ---- the coupler-route popover: right-click any coupler rocker ----------
