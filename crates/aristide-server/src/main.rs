@@ -638,7 +638,8 @@ fn perform_load(
     Ok(())
 }
 
-pub(crate) static SHUTDOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub(crate) static SHUTDOWN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 #[cfg(unix)]
 extern "C" fn handle_sigint(_signal: libc::c_int) {

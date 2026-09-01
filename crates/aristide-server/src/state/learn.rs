@@ -972,7 +972,12 @@ impl State {
 
     /// One control pressed while listening: the row it was waiting for
     /// takes this device, channel and trigger, and keeps its action.
-    pub(crate) fn learn_control(&mut self, device: &str, channel: Option<u8>, trigger: control::Trigger) {
+    pub(crate) fn learn_control(
+        &mut self,
+        device: &str,
+        channel: Option<u8>,
+        trigger: control::Trigger,
+    ) {
         let Some(learn) = self.control_learning() else {
             return;
         };
