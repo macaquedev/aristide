@@ -14,6 +14,7 @@
 
 import { commands, localFetch } from "./api.js";
 import { renderIfChanged, resetRender, setText } from "./dom.js";
+import { menuItem } from "./menu.js";
 import {
   formatFootage,
   keyName,
@@ -1186,14 +1187,11 @@ export class Editor {
     const manual = snapshot?.manuals.find((m) => m.idx === idx);
     if (!manual) return;
 
-    const addStop = document.createElement("button");
-    addStop.className = "menu-item";
-    addStop.innerHTML = "<span>Add a stop&hellip;</span>";
-    addStop.addEventListener("click", async (event) => {
-      event.stopPropagation();
-      await this.showDivisionStops(menu, manual);
-    });
-    menu.append(addStop);
+    menu.append(
+      menuItem("Add a stop…", {
+        onClick: async () => await this.showDivisionStops(menu, manual),
+      })
+    );
 
     // "No enclosure already": none of this division's stops are boxed
     // and no box carries its name. The box takes the whole division.
@@ -1201,18 +1199,18 @@ export class Editor {
     const enclosed = stops.some((s) => (s.enc ?? []).length);
     const named = (snapshot.enclosures ?? []).some((e) => e.name === manual.name);
     if (stops.length && !enclosed && !named) {
-      const addBox = document.createElement("button");
-      addBox.className = "menu-item";
-      addBox.innerHTML = "<span>Enclose in a swell box</span>";
-      addBox.addEventListener("click", () => {
-        this.closeDivisionMenu();
-        // One rebuild each; runQueue waits each rebuild out.
-        this.runQueue([
-          commands.organEnclosureAdd(manual.name),
-          ...stops.map((stop) => commands.organEnclosureAssign(manual.name, stop.id, true)),
-        ]);
-      });
-      menu.append(addBox);
+      menu.append(
+        menuItem("Enclose in a swell box", {
+          onClick: () => {
+            this.closeDivisionMenu();
+            // One rebuild each; runQueue waits each rebuild out.
+            this.runQueue([
+              commands.organEnclosureAdd(manual.name),
+              ...stops.map((stop) => commands.organEnclosureAssign(manual.name, stop.id, true)),
+            ]);
+          },
+        })
+      );
     }
   }
 
@@ -1241,16 +1239,13 @@ export class Editor {
         title.textContent = `${source.alias} · ${srcManual.name}`;
         group.append(title);
         for (const stop of remaining) {
-          const row = document.createElement("button");
-          row.type = "button";
-          row.className = "menu-item";
-          row.innerHTML = `<span>${stop.name}</span>`;
-          row.addEventListener("click", (event) => {
-            event.stopPropagation();
-            row.disabled = true; // optimistic: pulled now
-            this.organCommand(
-              commands.organPull(source.alias, srcManual.name, manual.name, stop.name)
-            );
+          const row = menuItem(stop.name, {
+            onClick: () => {
+              row.disabled = true; // optimistic: pulled now
+              this.organCommand(
+                commands.organPull(source.alias, srcManual.name, manual.name, stop.name)
+              );
+            },
           });
           group.append(row);
         }
@@ -1299,82 +1294,77 @@ export class Editor {
     menu.append(heading);
 
     for (const [kind, label] of KEYBOARD_KINDS) {
-      const item = document.createElement("button");
-      item.className = "menu-item radio";
-      item.classList.toggle("checked", kind === currentKind);
-      item.innerHTML = `<span>${label}</span>`;
-      item.addEventListener("click", (event) => {
-        event.stopPropagation();
-        this.closeKeyboardMenu();
-        if (kind !== currentKind) this.organCommand(commands.organManualKind(idx, kind));
-      });
-      menu.append(item);
+      menu.append(
+        menuItem(label, {
+          radio: true,
+          checked: kind === currentKind,
+          onClick: () => {
+            this.closeKeyboardMenu();
+            if (kind !== currentKind) this.organCommand(commands.organManualKind(idx, kind));
+          },
+        })
+      );
     }
 
     menu.append(document.createElement("hr"));
 
     // The bin gesture as a menu item — same confirm, same command.
-    const remove = document.createElement("button");
-    remove.className = "menu-item";
-    remove.innerHTML = "<span>Remove keyboard&hellip;</span>";
-    remove.addEventListener("click", (event) => {
-      event.stopPropagation();
-      this.closeKeyboardMenu();
-      const stopCount = (this.lastSnapshot?.stops ?? []).filter((s) => s.midx === idx).length;
-      this.showRemoveConfirm("manual", { idx, name: manual.name, stopCount });
-    });
-    menu.append(remove);
+    menu.append(
+      menuItem("Remove keyboard…", {
+        onClick: () => {
+          this.closeKeyboardMenu();
+          const stopCount = (this.lastSnapshot?.stops ?? []).filter((s) => s.midx === idx).length;
+          this.showRemoveConfirm("manual", { idx, name: manual.name, stopCount });
+        },
+      })
+    );
 
     // The manual's own wiring and reach, popovers of their own. Both
     // sit above "Change tuning…" so the tuning item stays the menu's
     // last (harness-hooks.js counts on that).
-    const midi = document.createElement("button");
-    midi.className = "menu-item";
-    midi.innerHTML = "<span>MIDI input&hellip;</span>";
-    midi.addEventListener("click", (event) => {
-      event.stopPropagation();
-      const rect = menu.getBoundingClientRect();
-      this.closeKeyboardMenu();
-      this.openMidiForm(idx, rect.left, rect.top);
-    });
-    menu.append(midi);
+    menu.append(
+      menuItem("MIDI input…", {
+        onClick: () => {
+          const rect = menu.getBoundingClientRect();
+          this.closeKeyboardMenu();
+          this.openMidiForm(idx, rect.left, rect.top);
+        },
+      })
+    );
 
-    const compass = document.createElement("button");
-    compass.className = "menu-item";
-    compass.innerHTML = "<span>Compass&hellip;</span>";
-    compass.addEventListener("click", (event) => {
-      event.stopPropagation();
-      const rect = menu.getBoundingClientRect();
-      this.closeKeyboardMenu();
-      this.openCompassForm(idx, rect.left, rect.top);
-    });
-    menu.append(compass);
+    menu.append(
+      menuItem("Compass…", {
+        onClick: () => {
+          const rect = menu.getBoundingClientRect();
+          this.closeKeyboardMenu();
+          this.openCompassForm(idx, rect.left, rect.top);
+        },
+      })
+    );
 
     // A hex field is a microtonal-manual fact; the other kinds have
     // no layout to offer.
     if (currentKind === "microtonal") {
-      const hex = document.createElement("button");
-      hex.className = "menu-item";
-      hex.innerHTML = "<span>Hex layout&hellip;</span>";
-      hex.addEventListener("click", (event) => {
-        event.stopPropagation();
-        const rect = menu.getBoundingClientRect();
-        this.closeKeyboardMenu();
-        this.openHexForm(idx, rect.left, rect.top);
-      });
-      menu.append(hex);
+      menu.append(
+        menuItem("Hex layout…", {
+          onClick: () => {
+            const rect = menu.getBoundingClientRect();
+            this.closeKeyboardMenu();
+            this.openHexForm(idx, rect.left, rect.top);
+          },
+        })
+      );
     }
 
-    const tuning = document.createElement("button");
-    tuning.className = "menu-item";
-    tuning.innerHTML = "<span>Change tuning&hellip;</span>";
-    tuning.addEventListener("click", (event) => {
-      event.stopPropagation();
-      const rect = menu.getBoundingClientRect();
-      this.closeKeyboardMenu();
-      this.openTuningForm({ kind: "division", idx }, rect.left, rect.top);
-    });
-    menu.append(tuning);
+    menu.append(
+      menuItem("Change tuning…", {
+        onClick: () => {
+          const rect = menu.getBoundingClientRect();
+          this.closeKeyboardMenu();
+          this.openTuningForm({ kind: "division", idx }, rect.left, rect.top);
+        },
+      })
+    );
   }
 
   closeKeyboardMenu() {
@@ -3020,23 +3010,21 @@ export class Editor {
             current.from === source.alias &&
             current.manual === manual.name &&
             current.stop === srcStop.name;
-          const row = document.createElement("button");
-          row.type = "button";
-          row.className = "menu-item";
-          row.classList.toggle("checked", isCurrent);
-          row.disabled = isCurrent;
-          row.innerHTML = `<span>${srcStop.name}</span>`;
-          row.addEventListener("click", async () => {
-            if (this.stopOpen == null) return;
-            const { ok, error } = await this.organCommandResult(
-              commands.organStopSource(this.stopOpen, source.alias, manual.name, srcStop.name)
-            );
-            // The response is a snapshot mid-rebuild, not the settled
-            // result — the popover stays open and the next poll's
-            // syncStopForm() will re-sync its source line once the
-            // rebuild lands.
-            if (error != null) this.showStopError(error);
-            else this.closeStopSrcView();
+          const row = menuItem(srcStop.name, {
+            checked: isCurrent,
+            disabled: isCurrent,
+            onClick: async () => {
+              if (this.stopOpen == null) return;
+              const { ok, error } = await this.organCommandResult(
+                commands.organStopSource(this.stopOpen, source.alias, manual.name, srcStop.name)
+              );
+              // The response is a snapshot mid-rebuild, not the settled
+              // result — the popover stays open and the next poll's
+              // syncStopForm() will re-sync its source line once the
+              // rebuild lands.
+              if (error != null) this.showStopError(error);
+              else this.closeStopSrcView();
+            },
           });
           this.el.stopSrcList.append(row);
         }
