@@ -32,7 +32,7 @@ use crate::bank::Sample;
 const BASE_TAPS: usize = 16;
 /// Fractional-position resolution. With inter-row interpolation the
 /// phase-quantization error sits far below any kernel's own floor.
-pub const PHASES: usize = 512;
+pub(crate) const PHASES: usize = 512;
 
 /// Stack window for dequantizing 16-bit residents on the fast path:
 /// the widest kernel (4× bucket, 64 taps) at stereo. Only the scalar

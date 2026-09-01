@@ -712,17 +712,12 @@ pub fn load(path: &Path) -> Result<MidiConfig, String> {
     toml::from_str(&text).map_err(|err| format!("{}: {err}", path.display()))
 }
 
-/// Write via a temporary file and rename, so a crash mid-write cannot
-/// leave a half-written config behind.
 pub fn save(path: &Path, config: &MidiConfig) -> Result<(), String> {
     let body = toml::to_string_pretty(config).map_err(|err| err.to_string())?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|err| format!("{}: {err}", parent.display()))?;
     }
-    let temporary = path.with_extension("toml.tmp");
-    std::fs::write(&temporary, format!("{HEADER}{body}"))
-        .map_err(|err| format!("{}: {err}", temporary.display()))?;
-    std::fs::rename(&temporary, path).map_err(|err| format!("{}: {err}", path.display()))
+    write_atomically(path, format!("{HEADER}{body}"))
 }
 
 /// A composite organ file's `[midi]` wiring in the shape the server
@@ -826,10 +821,7 @@ pub fn write_composite_midi(path: &Path, organ: Option<&OrganConfig>) -> Result<
     } else {
         midi["control"] = toml_edit::Item::ArrayOfTables(controls);
     }
-    let temporary = path.with_extension("toml.tmp");
-    std::fs::write(&temporary, doc.to_string())
-        .map_err(|err| format!("{}: {err}", temporary.display()))?;
-    std::fs::rename(&temporary, path).map_err(|err| format!("{}: {err}", path.display()))
+    write_atomically(path, doc.to_string())
 }
 
 /// A manual's own tuning as the file spells it: temperament name,
@@ -937,10 +929,7 @@ pub fn save_composite(
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent).map_err(|err| format!("{}: {err}", parent.display()))?;
     }
-    let temporary = path.with_extension("toml.tmp");
-    std::fs::write(&temporary, doc.to_string())
-        .map_err(|err| format!("{}: {err}", temporary.display()))?;
-    std::fs::rename(&temporary, path).map_err(|err| format!("{}: {err}", path.display()))
+    write_atomically(path, doc.to_string())
 }
 
 /// Update (or with `None` remove) one declared manual's compass in a
@@ -3114,6 +3103,8 @@ pub fn write_sidecar_name(set: &Path, name: &str) -> Result<(), String> {
     write_atomically(&path, doc.to_string())
 }
 
+/// Write via a temporary file and rename, so a crash mid-write cannot
+/// leave a half-written file behind.
 fn write_atomically(path: &Path, body: String) -> Result<(), String> {
     let temporary = path.with_extension("toml.tmp");
     std::fs::write(&temporary, body)

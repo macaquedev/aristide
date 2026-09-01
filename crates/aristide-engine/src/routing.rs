@@ -19,7 +19,7 @@ pub const MAX_BUSES: usize = 8;
 /// processed in slices so bus scratch can be sized once, up front.
 pub const MAX_CHUNK_FRAMES: usize = 4096;
 /// Longest configurable bus delay.
-pub const MAX_DELAY_SECONDS: f32 = 2.0;
+pub(crate) const MAX_DELAY_SECONDS: f32 = 2.0;
 
 /// One bus's delay node. `mix` is the wet level added to the dry
 /// signal (0 bypasses the node entirely); `dry` scales the undelayed

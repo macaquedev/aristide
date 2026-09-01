@@ -10,7 +10,7 @@
 //! storage behind this API rather than the API itself.
 
 /// Phase buckets per waveform period in a [`ReleaseAlignment`] table.
-pub const ALIGNMENT_BUCKETS: usize = 64;
+pub(crate) const ALIGNMENT_BUCKETS: usize = 64;
 
 /// Phase-aligned release splicing: precomputed control-side, indexed by
 /// the RT thread in O(1) on note-off.
@@ -545,11 +545,6 @@ impl Sample {
     }
 
     #[inline]
-    pub fn release_alignment(&self) -> Option<&ReleaseAlignment> {
-        self.release_alignment.as_ref()
-    }
-
-    #[inline]
     pub fn frames(&self) -> u64 {
         (self.data.len() / self.channels as usize) as u64
     }
@@ -562,6 +557,11 @@ impl Sample {
     #[inline]
     pub fn sample_rate_hz(&self) -> f32 {
         self.sample_rate_hz
+    }
+
+    #[inline]
+    pub(crate) fn release_alignment(&self) -> Option<&ReleaseAlignment> {
+        self.release_alignment.as_ref()
     }
 
     #[inline]
