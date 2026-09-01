@@ -25,6 +25,7 @@ pub mod wind;
 
 use std::sync::Arc;
 
+use aristide_model::units::cents_to_ratio;
 use bank::{Sample, SampleBank};
 use enclosure::{Enclosure, EnclosureParams, ENCLOSURE_NONE, MAX_ENCLOSURES};
 use resample::SincTables;
@@ -757,7 +758,7 @@ impl SampledVoice {
                     // Depth grows with pipe pitch: ~35 cents at 1 kHz+,
                     // ~15 at 250 Hz, negligible for big pipes.
                     let cents = (4.0 * (f0 / 100.0).sqrt()).clamp(1.0, 12.0);
-                    self.release_bend_depth = 1.0 - (-(cents as f32) / 1200.0).exp2();
+                    self.release_bend_depth = 1.0 - cents_to_ratio(-cents) as f32;
                     // Pressure collapse: ~12 periods, 15-80 ms.
                     let tau_s = (12.0 * period / sample.sample_rate_hz() as f64)
                         .clamp(0.015, 0.080);

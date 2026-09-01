@@ -9,6 +9,7 @@
 
 use std::sync::{Arc, Mutex};
 
+use aristide_model::units::{cents_to_ratio, ratio_to_cents};
 use aristide_engine::Command;
 use tiny_http::{Header, Method, Response, Server};
 
@@ -1695,7 +1696,7 @@ fn respond(
                 let kp =
                     aristide_engine::wind::WindParams::default().pitch_exponent as f64;
                 params.depth =
-                    (2f64.powf(cents.clamp(0.0, 30.0) / (1200.0 * kp)) - 1.0) as f32;
+                    (cents_to_ratio(cents.clamp(0.0, 30.0) / kp) - 1.0) as f32;
             }
             if let Some(ramp) = param(query, "ramp").and_then(|v| v.parse::<f32>().ok()) {
                 params.ramp_seconds = ramp.clamp(0.05, 3.0);
@@ -2160,7 +2161,7 @@ fn state_json_locked(state: &State) -> String {
             ",\"wave\":true".to_string()
         } else {
             let kp = aristide_engine::wind::WindParams::default().pitch_exponent as f64;
-            let cents = 1200.0 * kp * (1.0 + trem.params.depth as f64).log2();
+            let cents = kp * ratio_to_cents(1.0 + trem.params.depth as f64);
             format!(
                 ",\"rate\":{:.1},\"depth\":{:.1},\"ramp\":{:.2},\"wobble\":{:.0}",
                 trem.params.rate_hz,

@@ -11,6 +11,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use aristide_engine::bank::SampleBank;
 use aristide_formats::instrument;
+use aristide_model::units::{cents_between, cents_to_ratio};
 use aristide_model::{Organ, StopId};
 
 use crate::console::Console;
@@ -579,7 +580,7 @@ pub fn prepare(
     // sag_cents is what the user hears; invert P^kp to pressure.
     let sag_cents = sidecar.wind.sag_cents.clamp(0.0, 50.0);
     let wind = Some(aristide_engine::wind::WindParams {
-        sag_depth: (1.0 - 2f64.powf(-sag_cents / (1200.0 * kp))) as f32,
+        sag_depth: (1.0 - cents_to_ratio(-sag_cents / kp)) as f32,
         natural_hz: sidecar.wind.bounce_hz.clamp(0.5, 12.0) as f32,
         damping: sidecar.wind.damping.clamp(0.2, 1.5) as f32,
         flow_noise: (sidecar.wind.flow_noise_percent / 100.0).clamp(0.0, 0.1) as f32,
@@ -602,7 +603,7 @@ pub fn prepare(
             wave: false,
             params: aristide_engine::wind::TremulantParams {
                 rate_hz: declared.rate_hz.clamp(0.5, 12.0) as f32,
-                depth: (2f64.powf(depth_cents / (1200.0 * kp)) - 1.0) as f32,
+                depth: (cents_to_ratio(depth_cents / kp) - 1.0) as f32,
                 ramp_seconds: declared.ramp_s.clamp(0.05, 3.0) as f32,
                 wobble: (declared.wobble_pct / 100.0).clamp(0.0, 0.25) as f32,
             },
@@ -1210,7 +1211,7 @@ pub fn prepare(
                     let footage_cents = match feet {
                         None => 0.0,
                         Some(feet) => match console.stop_native_footage(stop_ids[at].0) {
-                            Some(native) => 1200.0 * (native / feet).log2(),
+                            Some(native) => cents_between(feet, native),
                             None => {
                                 load_warnings.push(format!(
                                     "voicing.adjust: {:?} speaks no single footage — \

@@ -12,6 +12,7 @@ use std::time::Instant;
 use anyhow::Result;
 use aristide_engine::bank::{Sample, SampleBank};
 use aristide_formats::wav;
+use aristide_model::units::{cents_between, cents_to_ratio, db_to_linear, equal_ladder_hz};
 use aristide_model::{Organ, Pipe, PipeRef, PipeSource, RankId};
 
 /// Playback parameters for one sounding pipe, precomputed against the
@@ -503,8 +504,8 @@ pub fn build(
                 };
             let original_cents = pipe.pitch_tuning_cents + attack.pitch_offset_cents;
             let auto_cents = sample_key.map(|key| {
-                let recorded_hz = ladder_hz(key as f64 + fraction_cents / 100.0);
-                1200.0 * (pipe.nominal_frequency_hz / recorded_hz).log2()
+                let recorded_hz = equal_ladder_hz(key as f64 + fraction_cents / 100.0);
+                cents_between(recorded_hz, pipe.nominal_frequency_hz)
                     + pipe.pitch_correction_cents
                     + attack.pitch_offset_cents
             });
@@ -587,8 +588,8 @@ pub fn build(
                 .and_then(|sample| sample.measured_period())
                 .map(|period| {
                     let recorded_hz = p.info.sample_rate / period;
-                    let voiced_hz = recorded_hz * (p.original_cents / 1200.0).exp2();
-                    1200.0 * (voiced_hz / pipe.nominal_frequency_hz).log2()
+                    let voiced_hz = recorded_hz * cents_to_ratio(p.original_cents);
+                    cents_between(pipe.nominal_frequency_hz, voiced_hz)
                 })
                 .filter(|cents| cents.is_finite());
             staged.push(StagedPipe {
@@ -710,11 +711,11 @@ pub fn build(
             (rank.id, p.pipe_index),
             VoiceSpec {
                 sample: p.info.index,
-                rate: (p.info.sample_rate / device_rate as f64 * (cents / 1200.0).exp2()) as f32,
+                rate: (p.info.sample_rate / device_rate as f64 * cents_to_ratio(cents)) as f32,
                 nominal_hz: pipe.nominal_frequency_hz as f32,
                 home_cents: home_cents as f32,
                 model_cents: model.unwrap_or(home_cents) as f32,
-                gain: db_to_linear(pipe.gain_db),
+                gain: db_to_linear(pipe.gain_db) as f32,
                 velocity: rank.velocity_volume,
                 percussive: p.info.percussive,
                 group: (rank.windchest.saturating_sub(1))
@@ -835,14 +836,6 @@ struct StagedPipe {
 
 fn nominal_of(organ: &Organ, staged: &StagedPipe) -> f64 {
     organ.ranks[staged.rank_index].pipes[staged.pipe_index as usize].nominal_frequency_hz
-}
-
-/// The 12-EDO/A440 MIDI ladder that `smpl` unity notes and ODF
-/// MIDIKeyNumber values are defined against. A format fact about the
-/// metadata, not the tuning seam — live key→pitch policy stays in
-/// `tuning.rs`.
-fn ladder_hz(midi: f64) -> f64 {
-    440.0 * ((midi - 69.0) / 12.0).exp2()
 }
 
 #[derive(Clone, Copy)]
@@ -1021,10 +1014,6 @@ fn resolve_borrow(organ: &Organ, pipe: &Pipe) -> Option<PipeRef> {
         }
     }
     None
-}
-
-fn db_to_linear(db: f64) -> f32 {
-    10f64.powf(db / 20.0) as f32
 }
 
 /// One-pole coefficient for the voice's brightness tilt, hinged around
@@ -1224,7 +1213,7 @@ mod tests {
         let anchor = 1200.0 * (415.0f64 / 440.0).log2();
         let recorded = |midi: u8| {
             let class = (midi % 12) as usize;
-            ladder_hz(midi as f64) * ((anchor + table[class] as f64) / 1200.0).exp2()
+            equal_ladder_hz(midi as f64) * ((anchor + table[class] as f64) / 1200.0).exp2()
         };
         let mut pipes = Vec::new();
         for midi in 36u8..=71 {
@@ -1234,7 +1223,7 @@ mod tests {
             let hz = if midi == 65 { recorded(64) } else { recorded(midi) };
             write_tone_wav(&dir.join(&name), hz);
             pipes.push(aristide_model::Pipe {
-                nominal_frequency_hz: ladder_hz(midi as f64),
+                nominal_frequency_hz: equal_ladder_hz(midi as f64),
                 pitch_tuning_cents: 0.0,
                 pitch_correction_cents: 0.0,
                 gain_db: 0.0,

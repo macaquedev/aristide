@@ -15,6 +15,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use aristide_engine::{Command, Engine, EngineHandle};
 use aristide_formats::instrument;
+use aristide_model::units::{cents_between, equal_ladder_hz, ratio_to_cents};
 use aristide_model::StopId;
 use console::Console;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -1590,7 +1591,7 @@ impl State {
         }
         if let Some(path) = self.composite_path.clone() {
             let kp = aristide_engine::wind::WindParams::default().pitch_exponent as f64;
-            let depth_cents = 1200.0 * kp * (1.0 + params.depth as f64).log2();
+            let depth_cents = kp * ratio_to_cents(1.0 + params.depth as f64);
             match config::write_composite_tremulant(
                 &path,
                 params.rate_hz as f64,
@@ -2631,7 +2632,7 @@ impl State {
                          tune it in cents instead"
                     ));
                 };
-                1200.0 * (native / feet).log2()
+                cents_between(feet, native)
             }
         };
         let gain = 10f32.powf((voicing.gain_db.clamp(-40.0, 20.0) as f32) / 20.0);
@@ -4577,11 +4578,11 @@ fn start_command(start: &console::VoiceStart) -> Command {
     }
 }
 
-/// 12-EDO A440 lives HERE, control-side, as one replaceable default —
-/// the RT engine only ever sees frequencies. (Tone mode only; sampled
-/// pipes carry their own pitch.)
+/// Tone mode's key→pitch: the plain equal ladder, control-side, so
+/// the RT engine only ever sees frequencies. (Sampled pipes carry
+/// their own pitch; the tuning layer decides theirs.)
 fn midi_note_to_hz(key: u8) -> f32 {
-    440.0 * 2f32.powf((key as f32 - 69.0) / 12.0)
+    equal_ladder_hz(key as f64) as f32
 }
 
 #[cfg(test)]

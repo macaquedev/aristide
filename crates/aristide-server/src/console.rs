@@ -9,6 +9,7 @@ use aristide_model::{
     CouplerRoute, CouplerScope, ManualId, Organ, PipeSource, RankId, RankRange, StopId,
 };
 
+use aristide_model::units::{cents_between, cents_to_ratio};
 use crate::bank::VoiceSpec;
 use crate::tuning::Tuning;
 
@@ -256,7 +257,7 @@ struct Speaking {
 impl Speaking {
     /// The rate the engine should run: base rate with the bend on top.
     fn bent_rate(&self) -> f32 {
-        self.rate * ((self.bend / 1200.0).exp2()) as f32
+        self.rate * cents_to_ratio(self.bend) as f32
     }
 }
 
@@ -986,7 +987,7 @@ impl Console {
             };
             match footage {
                 None => footage = Some(feet),
-                Some(seen) if (1200.0 * (seen / feet).log2()).abs() <= 50.0 => {}
+                Some(seen) if cents_between(feet, seen).abs() <= 50.0 => {}
                 Some(_) => return None,
             }
         }
@@ -1045,7 +1046,7 @@ impl Console {
             if delta.abs() < 1e-3 {
                 continue;
             }
-            voice.rate *= ((delta / 1200.0).exp2()) as f32;
+            voice.rate *= cents_to_ratio(delta) as f32;
             voice.deviation = deviation;
             updates.push((voice.handle, voice.bent_rate()));
         }
@@ -1503,7 +1504,7 @@ impl Console {
                     };
                     let home = tuning.pipe_offset(spec.home_cents as f64, spec.model_cents as f64);
                     let bend_cents = key_bend_cents - home;
-                    let bend_ratio = ((bend_cents / 1200.0).exp2()) as f32;
+                    let bend_ratio = cents_to_ratio(bend_cents) as f32;
                     // Routing is a property of the STOP (its speakers,
                     // its speaking delay), stamped here so borrowed
                     // pipes travel with the stop that sounds them.

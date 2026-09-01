@@ -23,6 +23,8 @@
 //! runs on the audio thread with fixed state — no allocation; one
 //! `powf`+`exp` pair per box per block.
 
+use aristide_model::units::db_to_linear;
+
 /// Enclosures the engine tracks; matches `MAX_WIND_GROUPS` in spirit —
 /// real organs rarely exceed a handful of boxes.
 pub const MAX_ENCLOSURES: usize = 16;
@@ -133,8 +135,8 @@ impl Enclosure {
         }
 
         let closed = (1.0 - self.position).max(0.0).powf(p.taper.max(0.05));
-        self.gain = db_to_linear(p.floor_db * closed);
-        self.hi_gain = db_to_linear(p.shelf_db * closed);
+        self.gain = db_to_linear((p.floor_db * closed) as f64) as f32;
+        self.hi_gain = db_to_linear((p.shelf_db * closed) as f64) as f32;
         // Corner slides geometrically (log-frequency is the perceptual
         // axis, and slit-transmission cutoff scales ~1/opening, which
         // geometric interpolation tracks far better than HW's linear
@@ -171,10 +173,6 @@ impl Enclosure {
     }
 }
 
-#[inline]
-fn db_to_linear(db: f32) -> f32 {
-    10.0f32.powf(db / 20.0)
-}
 
 #[cfg(test)]
 mod tests {

@@ -12,6 +12,8 @@
 //! nothing here assumes 12 steps to the period or even that the period
 //! is a 2/1 octave (Bohlen–Pierce's 3/1 "tritave" parses the same way).
 
+use crate::units::{cents_to_ratio, ratio_to_cents};
+
 /// Non-comment lines of a Scala file, trimmed, paired with their
 /// 1-based line number for error messages. A line is a comment iff its
 /// trimmed text starts with `!` — that's the whole rule; blank lines
@@ -156,7 +158,7 @@ fn parse_scale_value(line_no: usize, line: &str) -> Result<f64, String> {
     if numerator <= 0 || denominator <= 0 {
         return Err(format!("line {line_no}: ratio must be positive in {token:?}"));
     }
-    Ok(1200.0 * (numerator as f64 / denominator as f64).log2())
+    Ok(ratio_to_cents(numerator as f64 / denominator as f64))
 }
 
 /// A `.kbm` keyboard mapping: how MIDI key numbers correspond to a
@@ -317,7 +319,7 @@ pub fn key_frequency(scale: &Scale, mapping: &KeyboardMapping, key: i32) -> Opti
     let key_degree = mapping.degree_of(key)?;
     let reference_degree = mapping.reference_degree();
     let cents = scale.degree_cents(key_degree) - scale.degree_cents(reference_degree);
-    Some(mapping.reference_hz * 2f64.powf(cents / 1200.0))
+    Some(mapping.reference_hz * cents_to_ratio(cents))
 }
 
 #[cfg(test)]

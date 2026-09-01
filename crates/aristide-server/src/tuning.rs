@@ -9,6 +9,8 @@
 //! cent-deviation tables (hpschd.nu/tech/tun/cents.html) and the
 //! tonalsoft encyclopedia entries for Werckmeister/Kirnberger.
 
+use aristide_model::units::{cents_between, cents_to_ratio, equal_ladder_hz};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Temperament {
     /// The organ's own tuning, as recorded: every pipe plays exactly
@@ -186,7 +188,7 @@ impl HomeTuning {
             .min_by(|x, y| x.1.total_cmp(&y.1))
             .map(|(t, _)| t);
         Some(HomeTuning {
-            a4_hz: 440.0 * (a / 1200.0).exp2(),
+            a4_hz: 440.0 * cents_to_ratio(a),
             offsets_cents,
             temperament,
             spread_cents,
@@ -201,7 +203,7 @@ impl HomeTuning {
     /// at its own pitch (a 415 Positif beside a 440 Great).
     pub fn at_anchor(&self, anchor_cents: f64) -> HomeTuning {
         HomeTuning {
-            a4_hz: 440.0 * (anchor_cents / 1200.0).exp2(),
+            a4_hz: 440.0 * cents_to_ratio(anchor_cents),
             ..self.clone()
         }
     }
@@ -209,7 +211,7 @@ impl HomeTuning {
     /// The a′ shift alone: how far the instrument's pitch standard
     /// sits from 440, cents.
     pub fn anchor_cents(&self) -> f64 {
-        1200.0 * (self.a4_hz / 440.0).log2()
+        cents_between(440.0, self.a4_hz)
     }
 
     /// Where this tuning puts manual key `key` relative to the equal
@@ -224,8 +226,7 @@ impl HomeTuning {
     pub fn reference(&self, key: u8) -> PitchReference {
         PitchReference {
             key,
-            hz: PitchReference::ladder_hz(key as f64)
-                * (self.deviation_cents(key as u16) / 1200.0).exp2(),
+            hz: equal_ladder_hz(key as f64) * cents_to_ratio(self.deviation_cents(key as u16)),
         }
     }
 }
@@ -421,11 +422,6 @@ pub struct PitchReference {
 impl PitchReference {
     pub const A440: PitchReference = PitchReference { key: 69, hz: 440.0 };
 
-    /// The pitch the samples' own 12-EDO/A440 ladder gives `key`.
-    pub(crate) fn ladder_hz(key: f64) -> f64 {
-        440.0 * ((key - 69.0) / 12.0).exp2()
-    }
-
     /// The a′ this anchor implies on the equal ladder — 415 for "A4 =
     /// 415", 430.5 for "C4 = 256": the one number that says how far
     /// the whole instrument is being pulled from its recorded pitch,
@@ -442,7 +438,7 @@ impl PitchReference {
     pub fn clamped(self) -> PitchReference {
         let key = self.key;
         if !(self.hz.is_finite() && self.hz > 0.0) {
-            return PitchReference { key, hz: Self::ladder_hz(key as f64) };
+            return PitchReference { key, hz: equal_ladder_hz(key as f64) };
         }
         let implied = self.implied_a4_hz();
         let allowed = implied.clamp(300.0, 500.0);
@@ -453,7 +449,7 @@ impl PitchReference {
     /// cents — the shift every branch of [`Tuning::deviation_cents`]
     /// adds on top of its own interval arithmetic.
     fn anchor_cents(&self) -> f64 {
-        1200.0 * (self.hz / Self::ladder_hz(self.key as f64)).log2()
+        cents_between(equal_ladder_hz(self.key as f64), self.hz)
     }
 
     /// The linear Scala mapping this anchor stands for: successive
@@ -543,8 +539,7 @@ impl Tuning {
                 aristide_model::scala::key_frequency(&scale.scale, &scale.mapping, key as i32)?;
             // Distance from the 12-EDO/A440 pitch this key's nominal
             // pipe was recorded at.
-            let ladder_hz = 440.0 * (((key as f64) - 69.0) / 12.0).exp2();
-            return Some(1200.0 * (hz / ladder_hz).log2());
+            return Some(cents_between(equal_ladder_hz(key as f64), hz));
         }
         let anchor = self.reference.anchor_cents();
         let reference_key = self.reference.key as u16;
@@ -602,7 +597,7 @@ impl Tuning {
     pub fn home_reference(&self, key: u8) -> PitchReference {
         match &self.home {
             Some(home) => home.reference(key),
-            None => PitchReference { key, hz: PitchReference::ladder_hz(key as f64) },
+            None => PitchReference { key, hz: equal_ladder_hz(key as f64) },
         }
     }
 
@@ -636,7 +631,7 @@ impl Tuning {
     /// bend — callers that re-anchor to a nearer pipe split it instead.
     pub fn rate_multiplier(&self, key: u16) -> f32 {
         let cents = self.deviation_cents(key).unwrap_or(0.0);
-        ((cents / 1200.0).exp2()) as f32
+        cents_to_ratio(cents) as f32
     }
 }
 
@@ -699,7 +694,7 @@ mod tests {
             ..Tuning::default()
         };
         let hz = |tuning: &Tuning, key: u16| {
-            PitchReference::ladder_hz(key as f64) * tuning.rate_multiplier(key) as f64
+            equal_ladder_hz(key as f64) * tuning.rate_multiplier(key) as f64
         };
         for temperament in Temperament::ALL {
             tuning.temperament = temperament;

@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod lumatone;
 pub mod scala;
+pub mod units;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ManualId(pub u32);

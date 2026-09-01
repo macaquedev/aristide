@@ -9,6 +9,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use aristide_model::units::equal_ladder_hz;
 use aristide_model::{
     AttackSample, Coupler, CouplerRoute, CouplerScope, CouplerTarget, Manual, ManualId, ManualKind,
     Organ,
@@ -779,7 +780,7 @@ impl Builder<'_> {
             // The true sounding pitch: the key's ladder pitch times the
             // harmonic ratio (8 = unison). GO's expected-pitch formula
             // log2(H/8)·1200 cents, folded into Hz here.
-            nominal_frequency_hz: midi_to_hz(nominal_midi as f64) * (harmonic as f64 / 8.0),
+            nominal_frequency_hz: equal_ladder_hz(nominal_midi as f64) * (harmonic as f64 / 8.0),
             pitch_tuning_cents: chain.pitch_tuning_cents,
             pitch_correction_cents: chain.pitch_correction_cents,
             gain_db: chain.total_gain_db(),
@@ -949,10 +950,6 @@ fn set_pipe_source(organ: &mut Organ, at: PipeRef, source: PipeSource) {
     }
 }
 
-fn midi_to_hz(midi: f64) -> f64 {
-    440.0 * ((midi - 69.0) / 12.0).exp2()
-}
-
 /// A `HarmonicNumber` key: GO accepts 1–1024 (GOSoundingPipe::Load).
 fn read_harmonic(
     section: &SectionReader<'_>,
@@ -1077,7 +1074,8 @@ Pipe002=037-Cis.wav
         assert_eq!(organ.ranks[0].name, "Subbass 16");
         assert_eq!(organ.ranks[0].pipes.len(), 2);
         // Derived first MIDI note should equal the manual's first note.
-        assert!((organ.ranks[0].pipes[0].nominal_frequency_hz - midi_to_hz(36.0)).abs() < 1e-9);
+        let low_c = organ.ranks[0].pipes[0].nominal_frequency_hz;
+        assert!((low_c - equal_ladder_hz(36.0)).abs() < 1e-9);
         assert_eq!(organ.stops[0].ranks[0].key_count, 2);
     }
 
@@ -1187,7 +1185,7 @@ FirstAccessiblePipeLogicalPipeNumber=1
         assert_eq!(rank.pipes.len(), 85);
         // Pitch origin: logical key 1 = MIDI 24, an octave below the
         // keyboard's lowest key — those twelve pipes are the extension.
-        assert!((rank.pipes[0].nominal_frequency_hz - midi_to_hz(24.0)).abs() < 1e-9);
+        assert!((rank.pipes[0].nominal_frequency_hz - equal_ladder_hz(24.0)).abs() < 1e-9);
 
         let range = &organ.stops[0].ranks[0];
         assert_eq!(range.first_key, 0, "range starts at the lowest key");
@@ -1200,10 +1198,10 @@ FirstAccessiblePipeLogicalPipeNumber=1
             let key_midi = f64::from(manual.first_midi_note) + f64::from(key_index);
             let pipe = &rank.pipes[(range.first_pipe + key_index) as usize];
             assert!(
-                (pipe.nominal_frequency_hz - midi_to_hz(key_midi)).abs() < 1e-9,
+                (pipe.nominal_frequency_hz - equal_ladder_hz(key_midi)).abs() < 1e-9,
                 "key {key_midi} sounds {} Hz, want {} Hz",
                 pipe.nominal_frequency_hz,
-                midi_to_hz(key_midi)
+                equal_ladder_hz(key_midi)
             );
         }
     }
@@ -1382,9 +1380,9 @@ Pipe002PitchCorrection=1
         let organ = parse_str(text).organ;
         let pipes = &organ.ranks[0].pipes;
         // A 4′ rank (harmonic 16) sounds the key's octave: C4 key → C5.
-        assert!((pipes[0].nominal_frequency_hz - midi_to_hz(72.0)).abs() < 1e-9);
+        assert!((pipes[0].nominal_frequency_hz - equal_ladder_hz(72.0)).abs() < 1e-9);
         // The per-pipe override doubles it again (2′-equivalent).
-        assert!((pipes[1].nominal_frequency_hz - midi_to_hz(85.0)).abs() < 1e-9);
+        assert!((pipes[1].nominal_frequency_hz - equal_ladder_hz(85.0)).abs() < 1e-9);
         // PitchCorrection adds through the chain: 7 + 3 − 4 (+1).
         assert!((pipes[0].pitch_correction_cents - 6.0).abs() < 1e-9);
         assert!((pipes[1].pitch_correction_cents - 7.0).abs() < 1e-9);
