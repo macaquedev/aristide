@@ -632,53 +632,24 @@ fn perform_load(
     }
 
     let mut state = state.lock().expect("state poisoned");
-    // Assignments are per organ, so the loaded set's own name is the
-    // key its wiring is stored under.
-    state.organ_key = console.organ_name().to_string();
-    // A composite file owns its MIDI wiring: whatever it says replaces
-    // anything the user config remembers under this organ's name, and
-    // every later change is written back into the file.
-    if let Some((_, midi)) = &composite {
-        let organ_key = state.organ_key.clone();
-        state
-            .midi_config
-            .organs
-            .insert(organ_key, config::organ_config_from_file(midi));
-    }
-    // Every source lands in the library, so the picker can offer it
-    // next time without the command line.
-    for (label, path) in &setup.sources {
-        state.midi_config.remember(label, path);
-    }
-    state.engine = handle;
-    state.control = Control::Organ(console);
-    state.suggested_channels = suggested_channels;
-    state.trems = trems;
-    state.setter_armed = false;
-    state.reverb_wet = reverb.map(|(_, wet)| wet);
-    state.expression_cc = expression_cc;
-    state.composite_path = composite.map(|(path, _)| path);
-    state.setup = setup;
-    state.provenance = provenance;
-    state.stop_voicing = stop_voicing;
-    state.stop_labels = stop_labels;
-    state.stop_order = stop_order;
-    state.compass_overrides = Vec::new();
-    state.layout = layout;
-    state.coupled_keys = coupled_keys;
-    state.coupler_key_modes = coupler_key_modes;
-    state.learn = None;
-    state.control_learn = None;
-    state.pending = None;
-    // A pick queued while this one loaded is already the next load;
-    // its narration stays up until that one lands too.
-    if state.pending_load.is_none() {
-        state.loading = None;
-    }
-    state.load_error = None;
-    state.load_warnings = warnings;
-    state.resolve_routes();
-    state.persist();
+    state.install(state::Installed {
+        engine: handle,
+        console,
+        suggested_channels,
+        trems,
+        reverb_wet: reverb.map(|(_, wet)| wet),
+        expression_cc,
+        composite,
+        setup,
+        provenance,
+        stop_voicing,
+        stop_labels,
+        stop_order,
+        layout,
+        coupled_keys,
+        coupler_key_modes,
+        load_warnings: warnings,
+    });
     tracing::info!("organ ready: {}", state.organ_key);
     Ok(())
 }

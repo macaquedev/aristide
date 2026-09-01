@@ -287,7 +287,92 @@ pub struct Setup {
     pub adopted: bool,
 }
 
+/// Everything a completed load hands to the running `State`: the new
+/// engine and console, and every organ-derived field a source's
+/// sidecar or the organ's own file can carry. `perform_load` builds
+/// one of these once `load::prepare` and the engine swap have both
+/// succeeded, and [`State::install`] is the one place they land —
+/// symmetric with the constructor that sets their blank defaults at
+/// startup, so a future field can't be added to one path and
+/// forgotten in the other.
+pub struct Installed {
+    pub engine: EngineHandle,
+    pub console: Console,
+    pub suggested_channels: Vec<Option<u8>>,
+    pub trems: Vec<TremControl>,
+    pub reverb_wet: Option<f32>,
+    pub expression_cc: u8,
+    /// Set when the loaded organ is a composite file loaded alone:
+    /// that file's MIDI wiring replaces whatever this organ's name
+    /// carried before.
+    pub composite: Option<(PathBuf, instrument::MidiDef)>,
+    pub setup: Setup,
+    pub provenance: std::collections::HashMap<StopId, instrument::StopProvenance>,
+    pub stop_voicing: std::collections::HashMap<StopId, load::StopVoicing>,
+    pub stop_labels: std::collections::HashMap<StopId, String>,
+    pub stop_order: std::collections::BTreeMap<String, Vec<String>>,
+    pub layout: std::collections::BTreeMap<String, instrument::PanelPos>,
+    pub coupled_keys: bool,
+    pub coupler_key_modes: std::collections::BTreeMap<String, String>,
+    pub load_warnings: Vec<String>,
+}
+
 impl State {
+    /// Swap a freshly loaded instrument in: the engine, the console,
+    /// and every organ-derived field, in the one place `perform_load`
+    /// touches `State` directly instead of going through an edit
+    /// method. Resolves routes and persists afterwards, exactly as
+    /// every other edit path does.
+    pub fn install(&mut self, loaded: Installed) {
+        // Assignments are per organ, so the loaded set's own name is
+        // the key its wiring is stored under.
+        self.organ_key = loaded.console.organ_name().to_string();
+        // A composite file owns its MIDI wiring: whatever it says
+        // replaces anything the user config remembers under this
+        // organ's name, and every later change is written back into
+        // the file.
+        if let Some((_, midi)) = &loaded.composite {
+            let organ_key = self.organ_key.clone();
+            self.midi_config
+                .organs
+                .insert(organ_key, config::organ_config_from_file(midi));
+        }
+        // Every source lands in the library, so the picker can offer
+        // it next time without the command line.
+        for (label, path) in &loaded.setup.sources {
+            self.midi_config.remember(label, path);
+        }
+        self.engine = loaded.engine;
+        self.control = Control::Organ(loaded.console);
+        self.suggested_channels = loaded.suggested_channels;
+        self.trems = loaded.trems;
+        self.setter_armed = false;
+        self.reverb_wet = loaded.reverb_wet;
+        self.expression_cc = loaded.expression_cc;
+        self.composite_path = loaded.composite.map(|(path, _)| path);
+        self.setup = loaded.setup;
+        self.provenance = loaded.provenance;
+        self.stop_voicing = loaded.stop_voicing;
+        self.stop_labels = loaded.stop_labels;
+        self.stop_order = loaded.stop_order;
+        self.compass_overrides = Vec::new();
+        self.layout = loaded.layout;
+        self.coupled_keys = loaded.coupled_keys;
+        self.coupler_key_modes = loaded.coupler_key_modes;
+        self.learn = None;
+        self.control_learn = None;
+        self.pending = None;
+        // A pick queued while this one loaded is already the next
+        // load; its narration stays up until that one lands too.
+        if self.pending_load.is_none() {
+            self.loading = None;
+        }
+        self.load_error = None;
+        self.load_warnings = loaded.load_warnings;
+        self.resolve_routes();
+        self.persist();
+    }
+
     /// The loaded organ's console, if an organ (not the tone
     /// generator) is what input drives.
     pub fn console(&self) -> Option<&Console> {
