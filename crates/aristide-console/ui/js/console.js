@@ -140,6 +140,7 @@ export class Console {
     }
     this.buildPanels(snapshot);
     this.fitLabels();
+    this.fitCheeks();
     this.decorate?.(snapshot);
   }
 
@@ -167,10 +168,6 @@ export class Console {
   /// Long stop names ("Trompette", "Tremblant") must never break
   /// mid-word; instead the engraving shrinks until the widest word fits
   /// on the knob face. Measured, not guessed, so it holds under any font.
-  /// A cheek's lettering likewise never runs past its key field: its
-  /// run is measured once in ems — a number that survives every zoom,
-  /// density and --kb-scale — and style.css does the fitting from
-  /// there, so no re-measure is ever needed when the keys change size.
   fitLabels() {
     for (const label of this.root.querySelectorAll(".stop-name")) {
       label.style.fontSize = "";
@@ -179,16 +176,28 @@ export class Console {
         label.style.fontSize = `${size}px`;
       }
     }
+  }
+
+  /// A cheek's lettering never runs past its key field: the run is
+  /// measured against the room as actually rendered — after every
+  /// build, and again from layoutPanels whenever the room or the
+  /// rendering may have changed (a resized keyboard, a zoom, a density)
+  /// — and shrunk until it fits. Rendered, not predicted: hinted glyphs
+  /// at small device sizes come out longer than any em count says, so
+  /// one measurement at build time was not a promise the desktop kept.
+  /// The cheek's box is the key field's height regardless (style.css),
+  /// so even mid-fit nothing stretches the panel or hangs off its ends.
+  fitCheeks() {
     for (const cheek of this.root.querySelectorAll(".cheek")) {
-      cheek.style.removeProperty("--cheek-em");
-      const run = document.createRange();
-      run.selectNodeContents(cheek);
-      const length = run.getBoundingClientRect().height; // vertical text: the run is tall
-      const px = parseFloat(getComputedStyle(cheek).fontSize);
-      if (length > 0 && px > 0) {
-        // 6 % over the measure: hinted glyphs at small device sizes
-        // run a touch longer than the fractional advances say.
-        cheek.style.setProperty("--cheek-em", ((length / px) * 1.06).toFixed(3));
+      cheek.style.removeProperty("--cheek-fit");
+      const room = cheek.clientHeight;
+      if (!room) continue;
+      let fit = 1;
+      // one step straight from the overrun, then nudges — shrinking is
+      // not quite linear at the sizes where hinting bites
+      for (let i = 0; i < 8 && cheek.scrollHeight > room; i++) {
+        fit *= i === 0 ? room / cheek.scrollHeight : 0.97;
+        cheek.style.setProperty("--cheek-fit", fit.toFixed(3));
       }
     }
   }
@@ -592,6 +601,7 @@ export class Console {
       el.classList.toggle("sized", sized);
       el.style.width = sized ? `${Math.round(placed[id].w * W)}px` : "";
     }
+    this.fitCheeks();
     const defaults = this.defaultLayout(snapshot, W, H);
     for (const [id, el] of this.panels) {
       if (el.dataset.dragging) continue;

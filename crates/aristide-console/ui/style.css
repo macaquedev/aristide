@@ -2242,17 +2242,19 @@ body.editing .division-add { display: block; }
 
 /* The cheek's lettering rides --kb-scale with the keys (kb-scale.js
    solves the panel's width with that in mind) but never runs past the
-   key field: console.js's fitLabels measures each name's run in ems
-   (--cheek-em) and the size caps at what --kb-h has room for — a long
-   name engraves smaller, as on any real cheek, instead of stretching
-   the panel or hanging off its ends. The gap to the keys stays chrome. */
+   key field: the box IS the field's height, clipping as the last
+   resort, and console.js's fitCheeks shrinks the type (--cheek-fit)
+   until the rendered run fits inside — a long name engraves smaller,
+   as on any real cheek. The gap to the keys stays chrome. */
 .cheek {
   writing-mode: vertical-rl;
   transform: rotate(180deg);
   text-align: center;
   white-space: nowrap;
+  height: var(--kb-h);
+  overflow: hidden;
   margin-right: 10px;
-  font-size: min(calc(10px * var(--kb-scale, 1)), calc(var(--kb-h, 1000px) / var(--cheek-em, 1)));
+  font-size: calc(10px * var(--kb-scale, 1) * var(--cheek-fit, 1));
   text-transform: uppercase;
   letter-spacing: 0.2em;
   color: var(--text-dim);
