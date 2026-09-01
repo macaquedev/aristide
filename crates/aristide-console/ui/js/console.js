@@ -15,6 +15,7 @@
 // is the editor's job (editor.js); this file only draws and places.
 
 import { commands } from "./api.js";
+import { setText } from "./dom.js";
 import { formatFootage, keyName } from "./pitch.js";
 
 const SHARPS = new Set([1, 3, 6, 8, 10]);
@@ -738,10 +739,15 @@ export class Console {
     // "C4 = 261.6" rather than "a′ NNN Hz": the anchor is a key/Hz pair
     // now, not a 12-EDO-only concept — up to one decimal, no trailing ".0".
     const hz = tuning ? tuning.reference.hz.toFixed(1).replace(/\.0$/, "") : "";
-    this.el.tuning.textContent = tuning
-      ? `${governs} · ${keyName(tuning.reference.key)} = ${hz}` +
-        (tuning.transpose ? ` · ${tuning.transpose > 0 ? "+" : ""}${tuning.transpose}` : "")
-      : "";
+    // Through setText: this button is repainted every poll, and a text
+    // node swapped under a press costs the click on WebKit (dom.js).
+    setText(
+      this.el.tuning,
+      tuning
+        ? `${governs} · ${keyName(tuning.reference.key)} = ${hz}` +
+          (tuning.transpose ? ` · ${tuning.transpose > 0 ? "+" : ""}${tuning.transpose}` : "")
+        : ""
+    );
     this.el.tuning.classList.toggle("hidden", !tuning);
   }
 

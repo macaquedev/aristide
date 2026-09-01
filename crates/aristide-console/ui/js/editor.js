@@ -13,6 +13,7 @@
 // is called on every poll, the same as the other panels.
 
 import { commands } from "./api.js";
+import { renderIfChanged, setText } from "./dom.js";
 import {
   formatFootage,
   keyName,
@@ -507,7 +508,7 @@ export class Editor {
 
     const showStatus = !!snapshot.organ && !!snapshot.loading;
     this.el.status.classList.toggle("hidden", !showStatus);
-    this.el.statusText.textContent = snapshot.loading ?? "";
+    setText(this.el.statusText, snapshot.loading ?? "");
 
     // A load that failed with the picker closed (an organ picked from
     // the menu's Recent list) would otherwise fail into silence: the
@@ -690,7 +691,7 @@ export class Editor {
         });
         board.append(chip);
       }
-      chip.textContent = this.tuningSummary(own);
+      setText(chip, this.tuningSummary(own));
       chip.title = "This keyboard's division plays its own tuning — click to edit";
     }
 
@@ -1577,14 +1578,16 @@ export class Editor {
   /// the full auto/division/source/organ/own cascade; rank: the stop or
   /// own). `pairs` is `[value, label]`.
   setFollowOptions(pairs) {
-    this.el.tuningFollow.replaceChildren(
-      ...pairs.map(([value, label]) => {
-        const option = document.createElement("option");
-        option.value = value;
-        option.textContent = label;
-        return option;
-      })
-    );
+    renderIfChanged(this.el.tuningFollow, JSON.stringify(pairs), () => {
+      this.el.tuningFollow.replaceChildren(
+        ...pairs.map(([value, label]) => {
+          const option = document.createElement("option");
+          option.value = value;
+          option.textContent = label;
+          return option;
+        })
+      );
+    });
   }
 
   /// The short label a tuning reads by — a scale's name, an EDO count,
@@ -1658,18 +1661,22 @@ export class Editor {
   /// the common tail every following (non-own) scope shares. `link`
   /// jumps this same popover to the scope that actually governs.
   setResolvedLines(primaryLabel, link, tuning, chainText) {
-    this.el.tuningResolvedPrimary.replaceChildren(`Plays ${primaryLabel}'s tuning: ${this.tuningSummary(tuning)} — `);
-    const open = document.createElement("button");
-    open.type = "button";
-    open.className = "tuning-open-link";
-    open.textContent = "open →";
-    open.addEventListener("click", () => {
-      const rect = this.el.tuning.getBoundingClientRect();
-      this.openTuningForm(link, rect.left, rect.top);
+    const primary = this.el.tuningResolvedPrimary;
+    const lead = `Plays ${primaryLabel}'s tuning: ${this.tuningSummary(tuning)} — `;
+    renderIfChanged(primary, JSON.stringify([lead, link]), () => {
+      primary.replaceChildren(lead);
+      const open = document.createElement("button");
+      open.type = "button";
+      open.className = "tuning-open-link";
+      open.textContent = "open →";
+      open.addEventListener("click", () => {
+        const rect = this.el.tuning.getBoundingClientRect();
+        this.openTuningForm(link, rect.left, rect.top);
+      });
+      primary.append(open);
     });
-    this.el.tuningResolvedPrimary.append(open);
-    this.el.tuningResolvedPrimary.classList.remove("hidden");
-    this.el.tuningResolvedChain.textContent = chainText ?? "";
+    primary.classList.remove("hidden");
+    setText(this.el.tuningResolvedChain, chainText ?? "");
     this.el.tuningResolvedChain.classList.toggle("hidden", !chainText);
   }
 
@@ -1715,12 +1722,12 @@ export class Editor {
     this.el.tuningTransposeRow.classList.toggle("hidden", scope.kind === "source" || scope.kind === "stop" || scope.kind === "rank");
 
     if (scope.kind === "organ") {
-      this.el.tuningTitle.textContent = "Whole instrument";
+      setText(this.el.tuningTitle, "Whole instrument");
       tuning = snap.tuning;
     } else if (scope.kind === "division") {
       const manual = snap.manuals.find((m) => m.idx === scope.idx);
       if (!manual) return this.closeTuningForm();
-      this.el.tuningTitle.textContent = manual.name;
+      setText(this.el.tuningTitle, manual.name);
       const own = (snap.manual_tuning ?? []).find((t) => t.idx === scope.idx);
       this.setFollowOptions([["organ", "Whole instrument"], ["own", "Own tuning"]]);
       if (this.root.activeElement !== this.el.tuningFollow) this.el.tuningFollow.value = own ? "own" : "organ";
@@ -1737,7 +1744,7 @@ export class Editor {
       // on it), and the alias is otherwise all this scope needs — the
       // display name just falls back to the bare alias until it lands.
       const name = this.sourceDisplayName(scope.alias);
-      this.el.tuningTitle.textContent = `${name} · sample set`;
+      setText(this.el.tuningTitle, `${name} · sample set`);
       const own = (snap.source_tuning ?? []).find((t) => t.source === scope.alias);
       this.setFollowOptions([["organ", "Whole instrument"], ["own", "Own tuning"]]);
       if (this.root.activeElement !== this.el.tuningFollow) this.el.tuningFollow.value = own ? "own" : "organ";
@@ -1752,7 +1759,7 @@ export class Editor {
       const stop = snap.stops.find((s) => s.id === scope.id);
       if (!stop) return this.closeTuningForm();
       const manual = snap.manuals.find((m) => m.idx === stop.midx);
-      this.el.tuningTitle.textContent = `${stop.name} · ${manual?.name ?? ""}`;
+      setText(this.el.tuningTitle, `${stop.name} · ${manual?.name ?? ""}`);
       const info = stop.tuning ?? { scope: "organ", follow: "auto" };
       const divOwn = (snap.manual_tuning ?? []).find((t) => t.idx === stop.midx);
       const srcAlias = stop.src?.from;
@@ -1793,7 +1800,7 @@ export class Editor {
       const stop = snap.stops.find((s) => s.id === scope.stop);
       const rankInfo = stop?.ranks?.find((r) => r.id === scope.rank);
       if (!stop || !rankInfo) return this.closeTuningForm();
-      this.el.tuningTitle.textContent = `${rankInfo.name} · ${stop.name}`;
+      setText(this.el.tuningTitle, `${rankInfo.name} · ${stop.name}`);
       this.setFollowOptions([["stop", "This stop"], ["own", "Own tuning"]]);
       if (this.root.activeElement !== this.el.tuningFollow) this.el.tuningFollow.value = rankInfo.own ? "own" : "stop";
       if (rankInfo.own) {
@@ -1838,13 +1845,15 @@ export class Editor {
       if (setHome) home = { ...home, a4_hz: setHome.a4_hz };
     }
     if (!home) {
-      this.el.tuningHome.textContent = "Recorded: not measured (assuming A4 = 440 equal)";
+      setText(this.el.tuningHome, "Recorded: not measured (assuming A4 = 440 equal)");
     } else {
       const name = HOME_TEMPERAMENT_NAMES[home.temperament] ?? "unequal (unnamed)";
       const mixed = home.spread_cents > 8 ? " · mixed pitch standards?" : "";
-      this.el.tuningHome.textContent =
+      setText(
+        this.el.tuningHome,
         `Recorded: A4 = ${home.a4_hz.toFixed(1).replace(/\.0$/, "")} Hz · ${name} · ` +
-        `±${home.spread_cents.toFixed(1).replace(/\.0$/, "")} ¢ · ${home.measured} of ${home.pipes} pipes${mixed}`;
+          `±${home.spread_cents.toFixed(1).replace(/\.0$/, "")} ¢ · ${home.measured} of ${home.pipes} pipes${mixed}`
+      );
     }
     // The ↺ button next to Reference: only worth showing when it would
     // actually move something — when the reference isn't already
@@ -1863,7 +1872,7 @@ export class Editor {
     this.el.tuningScalePick.classList.toggle("hidden", !!scale);
     this.el.tuningScaleActive.classList.toggle("hidden", !scale);
     if (scale) {
-      this.el.tuningScaleName.textContent = `${scale.name} · ${scale.notes} notes`;
+      setText(this.el.tuningScaleName, `${scale.name} · ${scale.notes} notes`);
       this.el.tuningScaleName.title = scale.scl;
     }
 
@@ -2644,7 +2653,7 @@ export class Editor {
       this.closeTremForm();
       return;
     }
-    this.el.tremTitle.textContent = trem.name;
+    setText(this.el.tremTitle, trem.name);
     for (const [input, value] of [
       [this.el.tremRate, trem.rate],
       [this.el.tremDepth, trem.depth],
@@ -2830,7 +2839,7 @@ export class Editor {
       this.closeStopForm();
       return;
     }
-    this.el.stopTitle.textContent = stop.name;
+    setText(this.el.stopTitle, stop.name);
     const pitch = stop.pitch ?? {};
     this.el.stopReset.classList.toggle("hidden", !pitch.own);
 
@@ -2862,18 +2871,27 @@ export class Editor {
     this.el.stopOwnPipes.checked = !!stop.own_pipes;
 
     const src = stop.src;
-    this.el.stopSrc.textContent = src
-      ? `${src.from} · ${src.manual}${src.stop ? ` · ${src.stop}` : ""}`
-      : "—";
+    setText(
+      this.el.stopSrc,
+      src ? `${src.from} · ${src.manual}${src.stop ? ` · ${src.stop}` : ""}` : "—"
+    );
 
-    this.el.stopTuningSummary.textContent = this.stopTuningLine(stop);
+    setText(this.el.stopTuningSummary, this.stopTuningLine(stop));
 
     // A mixture's individual ranks, only when there's more than one to
     // tell apart — a single-rank stop's tuning is the row above, in full.
-    this.el.stopRanks.replaceChildren();
     const ranks = stop.ranks ?? [];
-    if (ranks.length > 1) {
-      for (const rank of ranks) {
+    const rankStatus = (rank) =>
+      rank.own
+        ? `own · ${this.tuningLabel((this.lastSnapshot?.rank_tuning ?? []).find(
+            (t) => t.stop === stop.id && t.rank === rank.id
+          ))}`
+        : "follows stop";
+    const shown = ranks.length > 1 ? ranks : [];
+    const rankRows = shown.map((r) => [r.id, r.name, rankStatus(r)]);
+    renderIfChanged(this.el.stopRanks, JSON.stringify([stop.id, rankRows]), () => {
+      this.el.stopRanks.replaceChildren();
+      for (const rank of shown) {
         const row = document.createElement("div");
         row.className = "stop-rank-row";
         const name = document.createElement("span");
@@ -2881,11 +2899,7 @@ export class Editor {
         name.textContent = rank.name;
         const status = document.createElement("span");
         status.className = "stop-rank-status";
-        status.textContent = rank.own
-          ? `own · ${this.tuningLabel((this.lastSnapshot?.rank_tuning ?? []).find(
-              (t) => t.stop === stop.id && t.rank === rank.id
-            ))}`
-          : "follows stop";
+        status.textContent = rankStatus(rank);
         const edit = document.createElement("button");
         edit.type = "button";
         edit.className = "ghost";
@@ -2898,7 +2912,7 @@ export class Editor {
         row.append(name, status, edit);
         this.el.stopRanks.append(row);
       }
-    }
+    });
 
     this.syncPistonRow(this.el.stopPistons, `stop:${stop.name}`, "stopPistonsSignature");
   }
@@ -3162,7 +3176,7 @@ export class Editor {
     this.hideCouplerError();
     this.couplerRoutes = structuredClone(coupler.routes ?? []);
     this.renderCouplerRoutes();
-    this.el.couplerTitle.textContent = coupler.name;
+    setText(this.el.couplerTitle, coupler.name);
     if (this.root.activeElement !== this.el.couplerName) this.el.couplerName.value = coupler.name;
     this.el.coupler.classList.remove("hidden");
     this.positionPopover(this.el.coupler, x, y);
@@ -3237,7 +3251,7 @@ export class Editor {
       this.closeCouplerForm();
       return;
     }
-    this.el.couplerTitle.textContent = coupler.name;
+    setText(this.el.couplerTitle, coupler.name);
     if (this.root.activeElement !== this.el.couplerName) this.el.couplerName.value = coupler.name;
     if (this.root.activeElement !== this.el.couplerKeys) {
       this.el.couplerKeys.value = coupler.keys ?? "auto";
@@ -3258,29 +3272,33 @@ export class Editor {
   }
 
   /// The popover's linked-partners lines: one per linked coupler,
-  /// with its undo. Rebuilt from the snapshot on every sync — links
-  /// change rarely and never under the pointer mid-gesture.
+  /// with its undo. Synced from the snapshot on every poll but rebuilt
+  /// only when the links change — the Unlink button is under the
+  /// pointer when it matters.
   renderCouplerLinks(coupler) {
     const box = this.el.couplerLinkedBox;
-    box.replaceChildren();
-    for (const linkedIdx of coupler.linked ?? []) {
-      const partner = this.lastSnapshot?.couplers.find((c) => c.idx === linkedIdx);
-      if (!partner) continue;
-      const row = document.createElement("div");
-      row.className = "coupler-linked";
-      const label = document.createElement("span");
-      label.textContent = `Linked with ${partner.name} — either control moves both.`;
-      const unlink = document.createElement("button");
-      unlink.type = "button";
-      unlink.className = "ghost";
-      unlink.textContent = "Unlink";
-      unlink.addEventListener("click", () => {
-        if (this.couplerOpen == null) return;
-        this.couplerCommand(commands.organCouplerLink(this.couplerOpen, linkedIdx, false));
-      });
-      row.append(label, unlink);
-      box.append(row);
-    }
+    const partners = (coupler.linked ?? [])
+      .map((idx) => [idx, this.lastSnapshot?.couplers.find((c) => c.idx === idx)])
+      .filter(([, partner]) => partner);
+    renderIfChanged(box, JSON.stringify([coupler.idx, partners.map(([i, p]) => [i, p.name])]), () => {
+      box.replaceChildren();
+      for (const [linkedIdx, partner] of partners) {
+        const row = document.createElement("div");
+        row.className = "coupler-linked";
+        const label = document.createElement("span");
+        label.textContent = `Linked with ${partner.name} — either control moves both.`;
+        const unlink = document.createElement("button");
+        unlink.type = "button";
+        unlink.className = "ghost";
+        unlink.textContent = "Unlink";
+        unlink.addEventListener("click", () => {
+          if (this.couplerOpen == null) return;
+          this.couplerCommand(commands.organCouplerLink(this.couplerOpen, linkedIdx, false));
+        });
+        row.append(label, unlink);
+        box.append(row);
+      }
+    });
   }
 
   /// Rebuilds the route blocks from `this.couplerRoutes` — the local
@@ -3556,7 +3574,7 @@ export class Editor {
       this.closeHexForm();
       return;
     }
-    this.el.hexTitle.textContent = `${manual.name} · hex layout`;
+    setText(this.el.hexTitle, `${manual.name} · hex layout`);
     const fields = [
       [this.el.hexRight, manual.hex.right],
       [this.el.hexUpright, manual.hex.upright],
