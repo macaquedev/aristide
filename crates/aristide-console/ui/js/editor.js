@@ -13,7 +13,7 @@
 // is called on every poll, the same as the other panels.
 
 import { commands, localFetch } from "./api.js";
-import { renderIfChanged, resetRender, setText } from "./dom.js";
+import { setText } from "./dom.js";
 import { menuItem } from "./menu.js";
 import { popovers, closeQuickMenus, openingPopover, closeAllPopovers } from "./editor/popovers.js";
 import { wireDragSource } from "./editor/drag-controller.js";
@@ -55,15 +55,34 @@ import {
   closeTuningBrowse,
   tuningBrowse,
 } from "./editor/tuning-popover.js";
-import { keyName, parseKeyName } from "./pitch.js";
 import {
-  buildManualInputs,
-  buildControlsList,
-  pistonRow,
-  keyboardNote,
-  PITCH_ACTIONS,
-  emptyNote,
-} from "./wiring.js";
+  wireMidiForm,
+  openMidiForm,
+  closeMidiForm,
+  syncMidiForm,
+  wireCompassForm,
+  openCompassForm,
+  closeCompassForm,
+  syncCompassForm,
+  wireRoomForm,
+  openRoomForm,
+  closeRoomForm,
+  syncRoomForm,
+  wireBindingsForm,
+  openBindingsForm,
+  closeBindingsForm,
+  syncBindingsForm,
+  wireSaveForm,
+  openSaveForm,
+  closeSaveForm,
+  syncSaveForm,
+  wireSaveAsForm,
+  openSaveAsForm,
+  closeSaveAsForm,
+  syncSaveAsForm,
+} from "./editor/settings-popovers.js";
+import { keyName, parseKeyName } from "./pitch.js";
+import { PITCH_ACTIONS, emptyNote } from "./wiring.js";
 
 /// The keyboard context menu's "Change type" radio group, in the order
 /// they're offered — the same vocabulary the add menu and the server's
@@ -1395,561 +1414,103 @@ export class Editor {
     await tuningBrowse(this, dir);
   }
 
-  // ---- the MIDI-input popover: what plays this manual ---------------------
-  //
-  // "What drives the Récit?" is asked at the Récit: the keyboard menu's
-  // "MIDI input…" (or the silent badge an unwired keyboard wears) opens
-  // this manual's own input rows — device, channel, shift, bend, Listen
-  // — plus quick piston rows for the pitch actions that shift it. The
-  // wiring is an organ fact and lands in the organ's file; the rows are
-  // the shared builders in wiring.js.
+  // ---- the MIDI-input, compass, Room & noises, Bindings, save and --------
+  // save-as popovers -- see editor/settings-popovers.js.
 
   wireMidiForm() {
-    this.el.midiClose.addEventListener("click", () => this.closeMidiForm());
-    this.el.midiRescan.addEventListener("click", () => this.send(commands.midiRescan()));
+    wireMidiForm(this);
   }
 
   openMidiForm(idx, x, y) {
-    this.openingPopover("midi");
-    this.midiManual = idx;
-    resetRender(this.el.midi);
-    this.syncMidiForm();
-    this.el.midi.classList.remove("hidden");
-    this.positionPopover(this.el.midi, x, y);
+    openMidiForm(this, idx, x, y);
   }
 
   closeMidiForm() {
-    if (this.midiManual == null) return;
-    // Leaving the popover ends any wait for a key: the next thing the
-    // player touches should sound, not be swallowed as an assignment.
-    if (this.lastSnapshot?.midi?.learning) this.send(commands.midiLearn(null));
-    this.midiManual = null;
-    resetRender(this.el.midi);
-    this.el.midi.classList.add("hidden");
+    closeMidiForm(this);
   }
 
-  /// Rebuilt only when something the rows depend on changes — the same
-  /// signature discipline the old dialog kept, so a poll never tears a
-  /// select out from under the pointer.
   syncMidiForm() {
-    const idx = this.midiManual;
-    const midi = this.lastSnapshot?.midi ?? { ports: [], manuals: [] };
-    const entry = midi.manuals.find((m) => m.idx === idx);
-    if (!entry) {
-      this.closeMidiForm();
-      return;
-    }
-    const keyboardSpan = this.lastSnapshot?.keyboard
-      ? [this.lastSnapshot.keyboard.low, this.lastSnapshot.keyboard.high]
-      : null;
-    const pitchBindings = (this.lastSnapshot?.controls ?? []).filter(
-      (c) => PITCH_ACTIONS.includes(c.action) && c.manual === entry.name
-    );
-    const signature = JSON.stringify([
-      midi.ports, entry, midi.learning ?? null, keyboardSpan, pitchBindings, this.quickBind,
-    ]);
-    renderIfChanged(this.el.midi, signature, () => {
-      this.el.midiTitle.textContent = `${entry.name} · MIDI input`;
-      this.el.midiInputs.replaceChildren();
-      buildManualInputs(this.el.midiInputs, {
-        midi,
-        manualEntry: entry,
-        keyboardSpan,
-        send: this.send,
-      });
-
-      // The pitch actions that shift *this* keyboard, as quick piston
-      // rows. Bindings that shift "the same keyboard" (no manual of
-      // their own) live in the Bindings popover, where the whole list is.
-      this.el.midiPistons.replaceChildren();
-      const heading = document.createElement("span");
-      heading.className = "menu-heading";
-      heading.textContent = "Pistons";
-      this.el.midiPistons.append(heading);
-      for (const [action, label] of [
-        ["octave-up", "Octave up"],
-        ["octave-down", "Octave down"],
-        ["transpose-up", "Transpose up"],
-        ["transpose-down", "Transpose down"],
-      ]) {
-        const ctx = {
-          snapshot: this.lastSnapshot,
-          send: this.send,
-          manual: entry.name,
-          listening: this.quickBind?.action === action && this.quickBind?.manual === entry.name,
-        };
-        const row = document.createElement("div");
-        row.className = "settings-row";
-        const name = document.createElement("span");
-        name.className = "rail-label";
-        name.textContent = label;
-        row.append(
-          name,
-          pistonRow(ctx, action, (act, cancelling) =>
-            this.quickBindListen(act, entry.name, cancelling)
-          )
-        );
-        this.el.midiPistons.append(row);
-      }
-
-      this.el.midiPorts.replaceChildren();
-      if (!midi.ports.length) {
-        this.el.midiPorts.append(
-          emptyNote("No MIDI inputs. Plug the console in — the list finds it by itself.")
-        );
-      }
-      for (const port of midi.ports) {
-        const row = document.createElement("div");
-        row.className = "midi-port";
-        row.textContent = port.name;
-        row.title = port.name;
-        this.el.midiPorts.append(row);
-      }
-    });
+    syncMidiForm(this);
   }
-
-  // ---- the compass popover: how far this manual reaches -------------------
 
   wireCompassForm() {
-    this.el.compassClose.addEventListener("click", () => this.closeCompassForm());
+    wireCompassForm(this);
   }
 
   openCompassForm(idx, x, y) {
-    this.openingPopover("compass");
-    this.compassManual = idx;
-    resetRender(this.el.compass);
-    this.hideCompassError();
-    this.syncCompassForm();
-    this.el.compass.classList.remove("hidden");
-    this.positionPopover(this.el.compass, x, y);
+    openCompassForm(this, idx, x, y);
   }
 
   closeCompassForm() {
-    this.compassManual = null;
-    resetRender(this.el.compass);
-    this.el.compass.classList.add("hidden");
-    this.hideCompassError();
+    closeCompassForm(this);
   }
 
   syncCompassForm() {
-    const idx = this.compassManual;
-    const manual = this.lastSnapshot?.manuals.find((m) => m.idx === idx);
-    const compass = (this.lastSnapshot?.setup?.compass ?? []).find((c) => c.idx === idx);
-    if (!manual || !compass) {
-      this.closeCompassForm();
-      return;
-    }
-    const signature = JSON.stringify([manual.name, compass]);
-    renderIfChanged(this.el.compass, signature, () => {
-      this.el.compassTitle.textContent = `${manual.name} · compass`;
-      this.el.compassRow.replaceChildren(this.compassRow(manual, compass));
-    });
+    syncCompassForm(this);
   }
-
-  /// One manual's compass: two editable bounds and the two ways to
-  /// change them — type new values and press Set, or fall back to
-  /// whatever the sample set itself declares.
-  compassRow(manual, compass) {
-    const row = document.createElement("div");
-    row.className = "organ-compass-row";
-
-    const low = this.compassField(compass.low ?? compass.native_low, compass.native_low);
-    const high = this.compassField(compass.high ?? compass.native_high, compass.native_high);
-    row.append(low.wrap, high.wrap);
-
-    const set = document.createElement("button");
-    set.className = "ghost";
-    set.textContent = "Set";
-    set.title = "Declare this manual's compass";
-    set.addEventListener("click", () => {
-      const lo = parseKeyName(low.input.value);
-      const hi = parseKeyName(high.input.value);
-      // A bound that doesn't name a note stays marked by its own field;
-      // nothing is sent until both read as pitches.
-      if (lo == null || hi == null) return;
-      low.input.value = keyName(lo);
-      high.input.value = keyName(hi);
-      this.compassCommand(commands.organCompass(manual.idx, lo, hi));
-    });
-    row.append(set);
-
-    if (compass.declared) {
-      const native = document.createElement("button");
-      native.className = "ghost";
-      native.textContent = "Native";
-      native.title = "Go back to the sample set's own compass";
-      native.addEventListener("click", () =>
-        this.compassCommand(commands.organCompass(manual.idx))
-      );
-      row.append(native);
-    }
-
-    return row;
-  }
-
-  /// A bound of the compass as a note name — "C2", "F♯4" — never as a
-  /// MIDI number. The echo confirms what a nonstandard spelling ("bb2")
-  /// reads as and flags text that names no note at all. Purely local
-  /// until Set is pressed: typing here never sends anything.
-  compassField(value, native) {
-    const wrap = document.createElement("span");
-    wrap.className = "compass-field";
-
-    const input = document.createElement("input");
-    input.type = "text";
-    input.autocomplete = "off";
-    input.spellcheck = false;
-    input.value = keyName(value);
-    input.placeholder = keyName(native);
-    input.title = `Sample set's own: ${keyName(native)} · C4 is middle C`;
-
-    const note = document.createElement("i");
-    input.addEventListener("input", () => {
-      const parsed = parseKeyName(input.value);
-      input.classList.toggle("invalid", parsed == null);
-      const canonical = parsed == null ? null : keyName(parsed);
-      note.textContent = parsed == null ? "?" : canonical === input.value.trim() ? "" : canonical;
-    });
-
-    wrap.append(input, note);
-    return { wrap, input };
-  }
-
-  async compassCommand(query) {
-    this.hideCompassError();
-    const { ok, error } = await this.organCommandResult(query);
-    if (error != null) this.showCompassError(error);
-    return ok;
-  }
-
-  showCompassError(text) {
-    this.el.compassError.textContent = text;
-    this.el.compassError.classList.remove("hidden");
-  }
-
-  hideCompassError() {
-    this.el.compassError.classList.add("hidden");
-    this.el.compassError.textContent = "";
-  }
-
-  // ---- the Room & noises popover: organ-wide sound character --------------
-  //
-  // Reverb wet and the mechanism noises are the organ's, not the
-  // player's: both live in the organ's file and travel with it. The
-  // sliders report live while they move (~30 commands/s) and persist
-  // only on release, so a drag never writes the file per frame.
 
   wireRoomForm() {
-    this.el.roomClose.addEventListener("click", () => this.closeRoomForm());
-
-    this.throttledRoomSlider(this.el.roomReverb, "reverb", (persist) =>
-      this.send(commands.reverb(this.el.roomReverb.value, persist))
-    );
-    const sendNoises = (persist) =>
-      this.send(
-        commands.noises(this.el.roomNoisesOn.checked, this.el.roomNoisesVol.value, persist)
-      );
-    this.el.roomNoisesOn.addEventListener("change", () => sendNoises(true));
-    this.throttledRoomSlider(this.el.roomNoisesVol, "noises-vol", sendNoises);
-  }
-
-  /// A slider that reports while it moves: ~30 commands/s during the
-  /// drag, one final, persisted value on release.
-  throttledRoomSlider(slider, key, send) {
-    let lastSent = 0;
-    slider.addEventListener("pointerdown", () => this.roomDragging.add(key));
-    slider.addEventListener("input", () => {
-      const now = performance.now();
-      if (now - lastSent > 33) {
-        lastSent = now;
-        send(false);
-      }
-    });
-    slider.addEventListener("change", () => {
-      this.roomDragging.delete(key);
-      send(true);
-    });
+    wireRoomForm(this);
   }
 
   openRoomForm(x, y) {
-    this.openingPopover("room");
-    this.roomOpen = true;
-    this.syncRoomForm();
-    this.el.room.classList.remove("hidden");
-    this.positionPopover(this.el.room, x, y);
+    openRoomForm(this, x, y);
   }
 
   closeRoomForm() {
-    this.roomOpen = false;
-    this.el.room.classList.add("hidden");
+    closeRoomForm(this);
   }
 
   syncRoomForm() {
-    const snapshot = this.lastSnapshot ?? {};
-    this.el.roomReverbRow.classList.toggle("hidden", snapshot.reverb == null);
-    if (snapshot.reverb != null && !this.roomDragging.has("reverb")) {
-      this.el.roomReverb.value = snapshot.reverb;
-    }
-    this.el.roomNoisesRow.classList.toggle("hidden", !snapshot.noises);
-    if (snapshot.noises) {
-      this.el.roomNoisesOn.checked = snapshot.noises.on;
-      if (!this.roomDragging.has("noises-vol")) {
-        this.el.roomNoisesVol.value = snapshot.noises.vol;
-      }
-    }
+    syncRoomForm(this);
   }
 
-  // ---- the Bindings popover: the whole flat list --------------------------
-  //
-  // Every piston, pedal and key this organ answers to, in one place —
-  // the piston rows on stop and coupler editors are filtered views
-  // over this same list. Action-first, not manual-first: a binding
-  // doesn't belong to a manual, so a flat list is the honest shape.
-
   wireBindingsForm() {
-    this.el.bindingsClose.addEventListener("click", () => this.closeBindingsForm());
-    // A new slot doesn't exist on the server until either a bind or a
-    // learned trigger names it; learning one past the end is enough —
-    // learn_control defaults a slot with nothing saved to "octave-up".
-    this.el.bindingsAdd.addEventListener("click", () =>
-      this.send(commands.controlLearn((this.lastSnapshot?.controls ?? []).length))
-    );
+    wireBindingsForm(this);
   }
 
   openBindingsForm(x, y) {
-    this.openingPopover("bindings");
-    this.bindingsOpen = true;
-    resetRender(this.el.bindings);
-    this.syncBindingsForm();
-    this.el.bindings.classList.remove("hidden");
-    this.positionPopover(this.el.bindings, x, y);
+    openBindingsForm(this, x, y);
   }
 
   closeBindingsForm() {
-    if (!this.bindingsOpen) return;
-    // Same contract as the MIDI popover: leaving ends any wait for a key.
-    if (this.lastSnapshot?.control_learning != null && !this.quickBind) {
-      this.send(commands.controlLearn(null));
-    }
-    this.bindingsOpen = false;
-    resetRender(this.el.bindings);
-    this.el.bindings.classList.add("hidden");
+    closeBindingsForm(this);
   }
 
   syncBindingsForm() {
-    const snapshot = this.lastSnapshot;
-    if (!snapshot) return;
-    const learning = snapshot.control_learning ?? null;
-    const signature = JSON.stringify([
-      snapshot.controls ?? [],
-      snapshot.actions ?? [],
-      learning,
-      (snapshot.stops ?? []).map((s) => s.name),
-      (snapshot.couplers ?? []).map((c) => c.name),
-      (snapshot.enclosures ?? []).map((e) => e.name),
-      (snapshot.manuals ?? []).map((m) => m.name),
-      snapshot.keyboard ?? null,
-    ]);
-    renderIfChanged(this.el.bindings, signature, () => {
-      this.el.bindingsList.replaceChildren();
-      buildControlsList(this.el.bindingsList, { snapshot, learning, send: this.send });
-      this.el.bindingsKeyboard.textContent = keyboardNote(snapshot);
-    });
+    syncBindingsForm(this);
   }
 
-  // ---- the save-as popover: an ad-hoc combination becomes a file ----------
-  //
-  // Opened from the organ-name menu, and once, automatically, for an
-  // organ combined on the command line. Saving bypasses send()/poll:
-  // a bad path has a specific, useful reason the server already wrote
-  // out, and it belongs in this popover.
-
   wireSaveForm() {
-    this.el.saveClose.addEventListener("click", () => this.closeSaveForm());
-    this.el.saveBtn.addEventListener("click", () => this.saveOrgan());
-    this.el.savePath.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") {
-        event.preventDefault();
-        this.saveOrgan();
-      }
-    });
+    wireSaveForm(this);
   }
 
   openSaveForm(x, y) {
-    const setup = this.lastSnapshot?.setup;
-    if (!setup || setup.file) return; // nothing unsaved to write
-    this.openingPopover("save");
-    this.saveOpen = true;
-    this.el.savePath.value = "";
-    this.hideSaveError();
-    this.el.save.classList.remove("hidden");
-    this.positionPopover(
-      this.el.save,
-      x ?? window.innerWidth / 2 - 180,
-      y ?? 96
-    );
-    requestAnimationFrame(() => this.el.savePath.focus());
+    openSaveForm(this, x, y);
   }
 
   closeSaveForm() {
-    this.saveOpen = false;
-    this.el.save.classList.add("hidden");
-    this.hideSaveError();
+    closeSaveForm(this);
   }
 
-  /// The popover only makes sense while the organ has no file — once
-  /// the save lands (this session's or another's), it closes itself.
   syncSaveForm() {
-    const setup = this.lastSnapshot?.setup;
-    if (!setup || setup.file) this.closeSaveForm();
+    syncSaveForm(this);
   }
-
-  async saveOrgan() {
-    const path = this.el.savePath.value.trim();
-    if (!path) {
-      this.showSaveError("Give it a path first.");
-      return;
-    }
-    this.el.saveBtn.disabled = true;
-    const { ok, error } = await localFetch(this.base, commands.organSave(path), { method: "POST" });
-    if (!ok) {
-      this.showSaveError(error);
-    } else {
-      // The next poll picks up the now-saved organ; syncSaveForm sees
-      // setup.file and closes the popover.
-      this.hideSaveError();
-    }
-    this.el.saveBtn.disabled = false;
-  }
-
-  showSaveError(text) {
-    this.el.saveError.textContent = text;
-    this.el.saveError.classList.remove("hidden");
-  }
-
-  hideSaveError() {
-    this.el.saveError.classList.add("hidden");
-    this.el.saveError.textContent = "";
-  }
-
-  // ---- the save-as dialog: a set's own organ becomes the player's --------
-  //
-  // A sample set's own organ (its file marked `adopted`) is kept exactly
-  // as the set defines it: the server answers every change with 409,
-  // and main.js routes that here with the refused command in hand.
-  // Saving copies the file under the new name, the server switches to
-  // the copy, and the refused command is sent again — so the player's
-  // gesture lands after all, on an organ that is theirs. The same
-  // dialog is the organ-name menu's "Save as…" for any organ with a
-  // file, with nothing to replay.
 
   wireSaveAsForm() {
-    for (const closer of this.el.saveAs.querySelectorAll("[data-close]")) {
-      closer.addEventListener("click", () => this.closeSaveAsForm());
-    }
-    this.el.saveAsCancel.addEventListener("click", () => this.closeSaveAsForm());
-    this.el.saveAsBtn.addEventListener("click", () => this.saveOrganAs());
-    this.el.saveAsName.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") {
-        event.preventDefault();
-        this.saveOrganAs();
-      }
-    });
+    wireSaveAsForm(this);
   }
 
-  /// `pending` is the refused command, if a refusal opened the dialog.
   openSaveAsForm(pending = null) {
-    const snapshot = this.lastSnapshot;
-    if (!snapshot?.setup?.file || !snapshot.organ) return;
-    const organ = snapshot.organ;
-    const adopted = Boolean(snapshot.setup.adopted);
-    // A refused rename IS this dialog: the name goes on the copy, and
-    // there is nothing left to send again.
-    const rename = pending?.match(/^\/api\/organ\/rename\?name=([^&]*)/);
-    this.saveAsPending = rename ? null : pending;
-    this.saveAsFor = organ;
-    this.saveAsOpen = true;
-    this.closeSaveForm();
-    const strong = (text) => Object.assign(document.createElement("strong"), { textContent: text });
-    this.el.saveAsNote.replaceChildren(
-      ...(adopted
-        ? [
-            strong(organ),
-            " is the sample set's own organ, and Aristide keeps it exactly as the set " +
-              "defines it. Save it under a different name and the copy is yours to change" +
-              (pending && !rename ? " — this change and every one after it." : ".") +
-              " The set's own organ stays as it was.",
-          ]
-        : [
-            "Save a copy of ",
-            strong(organ),
-            " under a new name and carry on playing the copy. ",
-            strong(organ),
-            " stays as it is.",
-          ])
-    );
-    this.el.saveAsName.value = rename
-      ? decodeURIComponent(rename[1].replace(/\+/g, " "))
-      : `My ${organ}`;
-    this.hideSaveAsError();
-    this.el.saveAs.classList.remove("hidden");
-    this.root.body.classList.add("modal-open");
-    requestAnimationFrame(() => {
-      this.el.saveAsName.focus();
-      this.el.saveAsName.select();
-    });
+    openSaveAsForm(this, pending);
   }
 
   closeSaveAsForm() {
-    if (!this.saveAsOpen) return;
-    this.saveAsOpen = false;
-    this.saveAsPending = null;
-    this.saveAsFor = null;
-    this.el.saveAs.classList.add("hidden");
-    this.root.body.classList.remove("modal-open");
-    this.hideSaveAsError();
+    closeSaveAsForm(this);
   }
 
-  /// The dialog is about one organ: if another loads under it, or the
-  /// one it is about has been saved elsewhere already, it no longer
-  /// applies.
   syncSaveAsForm() {
-    const snapshot = this.lastSnapshot;
-    if (!snapshot?.setup?.file || snapshot.organ !== this.saveAsFor) this.closeSaveAsForm();
-  }
-
-  async saveOrganAs() {
-    const name = this.el.saveAsName.value.trim();
-    if (!name) {
-      this.showSaveAsError("Give it a name first.");
-      return;
-    }
-    if (name === this.saveAsFor) {
-      this.showSaveAsError("Give the copy a name of its own.");
-      return;
-    }
-    const pending = this.saveAsPending;
-    this.el.saveAsBtn.disabled = true;
-    const { ok, error } = await localFetch(this.base, commands.organSaveAs(name), { method: "POST" });
-    if (!ok) {
-      this.showSaveAsError(error);
-    } else {
-      this.closeSaveAsForm();
-      // The server has switched to the copy; the change it refused a
-      // moment ago goes through now. The next poll shows the new name.
-      if (pending) this.send(pending);
-    }
-    this.el.saveAsBtn.disabled = false;
-  }
-
-  showSaveAsError(text) {
-    this.el.saveAsError.textContent = text;
-    this.el.saveAsError.classList.remove("hidden");
-  }
-
-  hideSaveAsError() {
-    this.el.saveAsError.classList.add("hidden");
-    this.el.saveAsError.textContent = "";
+    syncSaveAsForm(this);
   }
 
   /// The settings popovers as a family, closed whenever another
