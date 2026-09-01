@@ -12,7 +12,7 @@
 // structural rebuild (see console.js's `decorate` hook); `update(snapshot)`
 // is called on every poll, the same as the other panels.
 
-import { commands } from "./api.js";
+import { commands, localFetch } from "./api.js";
 import { renderIfChanged, resetRender, setText } from "./dom.js";
 import {
   formatFootage,
@@ -1943,18 +1943,13 @@ export class Editor {
   async tuningCommand(fields) {
     this.hideTuningError();
     const query = commands.tuning(fields);
-    try {
-      const response = await fetch(this.base + query, { method: "POST" });
-      if (!response.ok) {
-        if (this.deferToSaveAs(response, query)) return false;
-        this.showTuningError((await response.text()) || `${response.status} ${response.statusText}`);
-        return false;
-      }
-      return true;
-    } catch (err) {
-      this.showTuningError(String(err));
+    const { ok, status, error } = await localFetch(this.base, query, { method: "POST" });
+    if (!ok) {
+      if (this.deferToSaveAs(status, query)) return false;
+      this.showTuningError(error);
       return false;
     }
+    return true;
   }
 
   showTuningError(text) {
@@ -2413,20 +2408,15 @@ export class Editor {
       return;
     }
     this.el.saveBtn.disabled = true;
-    try {
-      const response = await fetch(this.base + commands.organSave(path), { method: "POST" });
-      if (!response.ok) {
-        this.showSaveError((await response.text()) || `${response.status} ${response.statusText}`);
-        return;
-      }
+    const { ok, error } = await localFetch(this.base, commands.organSave(path), { method: "POST" });
+    if (!ok) {
+      this.showSaveError(error);
+    } else {
       // The next poll picks up the now-saved organ; syncSaveForm sees
       // setup.file and closes the popover.
       this.hideSaveError();
-    } catch (err) {
-      this.showSaveError(String(err));
-    } finally {
-      this.el.saveBtn.disabled = false;
     }
+    this.el.saveBtn.disabled = false;
   }
 
   showSaveError(text) {
@@ -2537,21 +2527,16 @@ export class Editor {
     }
     const pending = this.saveAsPending;
     this.el.saveAsBtn.disabled = true;
-    try {
-      const response = await fetch(this.base + commands.organSaveAs(name), { method: "POST" });
-      if (!response.ok) {
-        this.showSaveAsError((await response.text()) || `${response.status} ${response.statusText}`);
-        return;
-      }
+    const { ok, error } = await localFetch(this.base, commands.organSaveAs(name), { method: "POST" });
+    if (!ok) {
+      this.showSaveAsError(error);
+    } else {
       this.closeSaveAsForm();
       // The server has switched to the copy; the change it refused a
       // moment ago goes through now. The next poll shows the new name.
       if (pending) this.send(pending);
-    } catch (err) {
-      this.showSaveAsError(String(err));
-    } finally {
-      this.el.saveAsBtn.disabled = false;
     }
+    this.el.saveAsBtn.disabled = false;
   }
 
   showSaveAsError(text) {
@@ -3629,24 +3614,17 @@ export class Editor {
   }
 
   async tuningBrowse(dir) {
-    try {
-      const query = dir ? `/api/browse?dir=${encodeURIComponent(dir)}` : "/api/browse";
-      const response = await fetch(this.base + query);
-      if (!response.ok) {
-        this.tuningBrowseError = (await response.text()) || `${response.status} ${response.statusText}`;
-        this.renderTuningBrowse();
-        return;
-      }
-      const data = await response.json();
+    const query = dir ? `/api/browse?dir=${encodeURIComponent(dir)}` : "/api/browse";
+    const { ok, data, error } = await localFetch(this.base, query, { json: true });
+    if (!ok) {
+      this.tuningBrowseError = error;
+    } else {
       this.tuningBrowseDir = data.dir;
       this.tuningBrowseParent = data.parent;
       this.tuningBrowseEntries = data.entries;
       this.tuningBrowseError = null;
-      this.renderTuningBrowse();
-    } catch (err) {
-      this.tuningBrowseError = String(err);
-      this.renderTuningBrowse();
     }
+    this.renderTuningBrowse();
   }
 
   renderTuningBrowse() {
@@ -4164,8 +4142,8 @@ export class Editor {
   /// A 409 is the sample set's own organ refusing to change: not an
   /// error to show, but the save-as dialog to open with the refused
   /// command in hand (see openSaveAsForm). True when handled that way.
-  deferToSaveAs(response, query) {
-    if (response.status !== 409) return false;
+  deferToSaveAs(status, query) {
+    if (status !== 409) return false;
     this.openSaveAsForm(query);
     return true;
   }
@@ -4174,23 +4152,19 @@ export class Editor {
   /// went through, or the save-as dialog has taken it over.
   async organCommandResult(query) {
     this.hideError();
-    try {
-      const response = await fetch(this.base + query, { method: "POST" });
-      if (!response.ok) {
-        if (this.deferToSaveAs(response, query)) return { ok: false, error: null };
-        return { ok: false, error: (await response.text()) || `${response.status} ${response.statusText}` };
-      }
-      // Any successful edit can change what the sources offer (a new
-      // source, a pull claiming a stop) — the cached offerings are
-      // stale now whether or not the drawer is up to show it. The
-      // division menu reads this cache, so a kept stale [] would keep
-      // insisting there are no sources right after one was added.
-      this.offerings = null;
-      if (this.drawerOpen) this.fetchOfferings();
-      return { ok: true, error: null };
-    } catch (err) {
-      return { ok: false, error: String(err) };
+    const { ok, status, error } = await localFetch(this.base, query, { method: "POST" });
+    if (!ok) {
+      if (this.deferToSaveAs(status, query)) return { ok: false, error: null };
+      return { ok: false, error };
     }
+    // Any successful edit can change what the sources offer (a new
+    // source, a pull claiming a stop) — the cached offerings are
+    // stale now whether or not the drawer is up to show it. The
+    // division menu reads this cache, so a kept stale [] would keep
+    // insisting there are no sources right after one was added.
+    this.offerings = null;
+    if (this.drawerOpen) this.fetchOfferings();
+    return { ok: true, error: null };
   }
 
   /// Runs structural edits back to back. Each one rebuilds the organ,
@@ -4259,12 +4233,8 @@ export class Editor {
   }
 
   async fetchOfferings(render = true) {
-    try {
-      const response = await fetch(this.base + commands.organOfferings());
-      this.offerings = response.ok ? ((await response.json()).sources ?? []) : null;
-    } catch {
-      this.offerings = null;
-    }
+    const { ok, data } = await localFetch(this.base, commands.organOfferings(), { json: true });
+    this.offerings = ok ? (data.sources ?? []) : null;
     if (render) this.buildOfferings(this.offerings);
   }
 
@@ -4783,24 +4753,17 @@ export class Editor {
   /// snapshot-driven, and picking a file adds it as a source outright
   /// rather than loading it.
   async addBrowse(dir) {
-    try {
-      const query = dir ? `/api/browse?dir=${encodeURIComponent(dir)}` : "/api/browse";
-      const response = await fetch(this.base + query);
-      if (!response.ok) {
-        this.addBrowseError = (await response.text()) || `${response.status} ${response.statusText}`;
-        this.renderAddBrowse();
-        return;
-      }
-      const data = await response.json();
+    const query = dir ? `/api/browse?dir=${encodeURIComponent(dir)}` : "/api/browse";
+    const { ok, data, error } = await localFetch(this.base, query, { json: true });
+    if (!ok) {
+      this.addBrowseError = error;
+    } else {
       this.addBrowseDir = data.dir;
       this.addBrowseParent = data.parent;
       this.addBrowseEntries = data.entries;
       this.addBrowseError = null;
-      this.renderAddBrowse();
-    } catch (err) {
-      this.addBrowseError = String(err);
-      this.renderAddBrowse();
     }
+    this.renderAddBrowse();
   }
 
   renderAddBrowse() {

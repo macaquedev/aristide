@@ -15,7 +15,7 @@
 // its file stays (Browse's "Your organs" shortcut still reaches it)
 // and loading its set finds it again.
 
-import { commands } from "./api.js";
+import { commands, localFetch } from "./api.js";
 
 // What the native open dialog offers: everything the server can load,
 // or is meant to — GrandOrgue sets, unencrypted Hauptwerk definitions,
@@ -331,25 +331,18 @@ export class Picker {
   // and re-fetched on navigation, never on a poll tick.
 
   async browse(dir) {
-    try {
-      const query = dir ? `/api/browse?dir=${encodeURIComponent(dir)}` : "/api/browse";
-      const response = await fetch(this.base + query);
-      if (!response.ok) {
-        this.browseError = (await response.text()) || `${response.status} ${response.statusText}`;
-        this.renderBrowse();
-        return;
-      }
-      const data = await response.json();
+    const query = dir ? `/api/browse?dir=${encodeURIComponent(dir)}` : "/api/browse";
+    const { ok, data, error } = await localFetch(this.base, query, { json: true });
+    if (!ok) {
+      this.browseError = error;
+    } else {
       this.dir = data.dir;
       this.browseParent = data.parent;
       this.browseOrgans = data.organs ?? null;
       this.browseEntries = data.entries;
       this.browseError = null;
-      this.renderBrowse();
-    } catch (err) {
-      this.browseError = String(err);
-      this.renderBrowse();
     }
+    this.renderBrowse();
   }
 
   renderBrowse() {

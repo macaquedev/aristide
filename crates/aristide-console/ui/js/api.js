@@ -254,6 +254,32 @@ export const commands = {
   organCoupledKeys: (on) => `/api/organ/coupled_keys?on=${on ? 1 : 0}`,
 };
 
+/// One request outside the poll/command machinery — a popover's own
+/// error strip, a picker's own browse pane — whose refusal needs
+/// handling right where it was made, rather than through the app-wide
+/// status strip `send()` feeds. Resolves with `{ ok, status, data,
+/// error }`: `status` is the HTTP status, or null on a network
+/// failure; `error` is null on success, else either the response
+/// body's text (falling back to "<status> <statusText>") on a non-2xx
+/// response, or `String(err)` on a thrown exception — the exact
+/// strings the UI has always shown. `data` is the successful body,
+/// read as JSON when `opts.json` is set, else as text.
+export async function localFetch(base, path, opts = {}) {
+  const { json, ...fetchOpts } = opts;
+  try {
+    const response = await fetch(base + path, fetchOpts);
+    if (!response.ok) {
+      const error =
+        (await response.text().catch(() => "")) || `${response.status} ${response.statusText}`;
+      return { ok: false, status: response.status, data: null, error };
+    }
+    const data = json ? await response.json() : await response.text();
+    return { ok: true, status: response.status, data, error: null };
+  } catch (err) {
+    return { ok: false, status: null, data: null, error: String(err) };
+  }
+}
+
 /// Start the client. Calls `onState(snapshot)` for every fresh snapshot,
 /// `onError(message)` when the server is unreachable, and
 /// `onRefused(reason, status, query)` when it answered but said no (a
