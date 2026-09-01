@@ -28,92 +28,22 @@
 //      its action; the stop editor's piston row quick-binds a key to
 //      "stop:<name>".
 
-import { connect } from "./cdp.js";
-import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { connect, launchHarness } from "./cdp.js";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-const REPO = new URL("../..", import.meta.url).pathname;
 const SERVER_PORT = 9886;
 const UI_PORT = 9887;
 const CDP_PORT = 9233;
-const S = `http://127.0.0.1:${SERVER_PORT}`;
+const h = launchHarness({ name: "prefs-audit", serverPort: SERVER_PORT, uiPort: UI_PORT, cdpPort: CDP_PORT });
+const { REPO, S, demo, check, sleep, state, settled, post, waitForServer, done } = h;
 const OUT = join(REPO, "target", "prefs-split-audit");
-
-let failures = 0;
-const check = (ok, what) => {
-  console.log(`${ok ? "PASS" : "FAIL"}  ${what}`);
-  if (!ok) failures++;
-};
 const skip = (what) => console.log(`SKIP  ${what}`);
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const post = async (path) => {
-  const res = await fetch(S + path, { method: "POST" });
-  return { ok: res.ok, body: await res.text() };
-};
-const state = async () => (await fetch(S + "/api/state")).json();
-const settled = async () => {
-  for (let i = 0; i < 100; i++) {
-    const s = await state();
-    if (s.organ && !s.loading) return s;
-    await sleep(300);
-  }
-  throw new Error("organ never settled");
-};
-
-// ---- processes -------------------------------------------------------
-
-const serverBin = process.argv[2] ??
-  [join(REPO, "target/release/aristide-server"), join(REPO, "target/debug/aristide-server")]
-    .find(existsSync);
-if (!serverBin) {
-  console.error("no server binary — cargo build -p aristide-server first");
-  process.exit(2);
-}
-const demo = join(REPO, "testsets/grandorgue-demo/demo.organ");
-if (!existsSync(demo)) {
-  console.error("no demo set — see CLAUDE.md's testsets note");
-  process.exit(2);
-}
-
-const scratch = mkdtempSync(join(tmpdir(), "aristide-prefs-audit-"));
-const server = spawn(serverBin, ["--http-port", String(SERVER_PORT)], {
-  stdio: ["ignore", "ignore", "pipe"],
-  env: { ...process.env, XDG_CONFIG_HOME: join(scratch, "config") },
-});
-let serverLog = "";
-server.stderr.on("data", (d) => (serverLog += d));
-
-const ui = Bun.serve({
-  port: UI_PORT,
-  fetch(req) {
-    const path = new URL(req.url).pathname;
-    const file = Bun.file(join(REPO, "crates/aristide-console/ui", path === "/" ? "index.html" : path));
-    return file.exists().then((ok) => (ok ? new Response(file) : new Response("nope", { status: 404 })));
-  },
-});
-
-const chrome = spawn("chromium", [
-  "--headless", "--disable-gpu", `--remote-debugging-port=${CDP_PORT}`,
-  `--window-size=1500,950`,
-  `--user-data-dir=${join(scratch, "chrome")}`, "about:blank",
-], { stdio: "ignore" });
-
-const done = async (code) => {
-  try { chrome.kill(); } catch {}
-  try { server.kill(); } catch {}
-  try { ui.stop(true); } catch {}
-  try { rmSync(scratch, { recursive: true, force: true }); } catch {}
-  process.exit(code);
-};
 
 try {
   // Wait for the server, then load the demo set — adoption writes the
   // wrapper organ file under the throwaway config dir.
-  for (let i = 0; i < 100; i++) {
-    try { await state(); break; } catch { await sleep(200); }
-  }
+  await waitForServer();
   await post(`/api/organ/load?path=${encodeURIComponent(demo)}`);
   let snap = await settled();
   const organFile = snap.setup?.file;
@@ -327,11 +257,11 @@ try {
   );
   await drive.shot(join(OUT, "stop-piston.png"));
 
-  console.log(failures ? `\n${failures} FAILURES` : "\nall green");
-  if (failures) console.log("server log tail:\n" + serverLog.slice(-2000));
-  await done(failures ? 1 : 0);
+  console.log(h.failures ? `\n${h.failures} FAILURES` : "\nall green");
+  if (h.failures) console.log("server log tail:\n" + h.serverLog.slice(-2000));
+  await done(h.failures ? 1 : 0);
 } catch (err) {
   console.error("audit crashed:", err);
-  console.log("server log tail:\n" + serverLog.slice(-2000));
+  console.log("server log tail:\n" + h.serverLog.slice(-2000));
   await done(2);
 }
