@@ -96,6 +96,7 @@ export class Console {
       // the type rendered into it, so the field observer below stays
       // quiet and the cheeks are refitted from here.
       this.fitCheeks();
+      this.fitShoes();
     });
     // Each keyboard's key field is watched for size changes — density,
     // a resize drag, a stored width landing — and its cheek refitted
@@ -156,6 +157,7 @@ export class Console {
     }
     this.buildPanels(snapshot);
     this.fitLabels();
+    this.fitShoes();
     this.decorate?.(snapshot);
   }
 
@@ -216,6 +218,31 @@ export class Console {
 
   fitCheeks() {
     for (const cheek of this.root.querySelectorAll(".cheek")) this.fitCheek(cheek);
+  }
+
+  /// A shoe's scribble strip is a fixed width and two lines deep
+  /// (style.css), so a long box name is shrunk to fit it — measured
+  /// like the stop faces and the cheeks — until its longest word spans
+  /// the strip and the whole name sits within the lines. The floor is
+  /// the smallest legible size; past it the strip ellipsizes and the
+  /// tooltip carries the whole name.
+  fitShoe(label) {
+    label.style.removeProperty("--shoe-fit");
+    if (!label.clientWidth) return;
+    const tooWide = () => label.scrollWidth > label.clientWidth;
+    const tooTall = () => label.scrollHeight > label.clientHeight;
+    let fit = 1;
+    for (let i = 0; i < 8 && fit > 0.75 && (tooWide() || tooTall()); i++) {
+      // a word's overrun says exactly how far to shrink; a spilt third
+      // line only that it must shrink, so that one is nudged
+      const step = i === 0 && tooWide() ? label.clientWidth / label.scrollWidth : 0.97;
+      fit = Math.max(0.75, fit * step);
+      label.style.setProperty("--shoe-fit", fit.toFixed(3));
+    }
+  }
+
+  fitShoes() {
+    for (const label of this.root.querySelectorAll(".shoe-label")) this.fitShoe(label);
   }
 
   // ---- panels -------------------------------------------------------
@@ -544,6 +571,7 @@ export class Console {
       const label = document.createElement("span");
       label.className = "shoe-label";
       label.textContent = enclosure.name;
+      label.title = enclosure.name;
 
       shoe.append(track, label);
       this.wireShoe(track, enclosure.idx);

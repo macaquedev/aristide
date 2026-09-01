@@ -771,7 +771,7 @@ export class Editor {
       const idx = Number(shoe.dataset.enclosure);
       const label = shoe.querySelector(".shoe-label");
       if (!label) continue;
-      label.title = "Ctrl-drag to the bin to remove this swell box — its stops stay, unenclosed.";
+      label.title = `${label.textContent} — Ctrl-drag to the bin to remove this swell box; its stops stay, unenclosed.`;
       this.wireDragSource(label, () => {
         const enclosure = this.lastSnapshot?.enclosures.find((e) => e.idx === idx);
         if (!enclosure) return null;

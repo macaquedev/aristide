@@ -2391,11 +2391,16 @@ body[data-density="spacious"] .keyboard.microtonal {
 
 .shoes { display: flex; gap: 14px; }
 
+/* one strip per box, the width fixed like a mixer's channel strips:
+   the rack reads as a bank whatever the boxes are called, and a name
+   never widens its strip or gets squeezed into it */
 .shoe {
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 8px;
+  flex: 0 0 var(--shoe-w, 72px);
+  width: var(--shoe-w, 72px);
 }
 
 .shoe-track {
@@ -2439,10 +2444,23 @@ body[data-density="spacious"] .keyboard.microtonal {
   pointer-events: none;
 }
 
+/* the scribble strip under the fader: up to two lines, wrapped at
+   spaces only, the type shrunk by console.js's fitShoe (--shoe-fit)
+   until the longest word fits the strip and the name fits the lines.
+   Past the smallest legible size the clamp ellipsizes and the tooltip
+   carries the whole name. */
 .shoe-label {
-  font-size: 10px;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  max-width: 100%;
+  text-align: center;
+  line-height: 1.25;
+  font-size: calc(10px * var(--shoe-fit, 1));
   text-transform: uppercase;
-  letter-spacing: 2px;
+  letter-spacing: calc(1.5px * var(--shoe-fit, 1));
+  overflow-wrap: normal;
   color: var(--text-dim);
 }
 
@@ -2470,6 +2488,7 @@ body[data-density="compact"] .keyboard.pedal {
   --sharp-w: calc(13px * var(--kb-scale, 1));
 }
 body[data-density="compact"] .shoe-track { height: 108px; }
+body[data-density="compact"] .shoe { --shoe-w: 62px; }
 
 body[data-density="spacious"] .panel-jamb .panel-body { gap: 20px; padding: 20px 18px 22px; }
 body[data-density="spacious"] .division { gap: 13px; }
@@ -2481,6 +2500,7 @@ body[data-density="spacious"] .rocker { min-width: 70px; height: 36px; }
 body[data-density="spacious"] .keyboard.manual { --nat-w: 26px; --kb-h: 108px; --sharp-w: 15px; }
 body[data-density="spacious"] .keyboard.pedal { --nat-w: 30px; --kb-h: 94px; --sharp-w: 17px; }
 body[data-density="spacious"] .shoe-track { height: 146px; }
+body[data-density="spacious"] .shoe { --shoe-w: 82px; }
 
 /* organ-less: the loader is the whole interface */
 body.no-organ .console { visibility: hidden; }
