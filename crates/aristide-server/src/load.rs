@@ -591,62 +591,16 @@ fn assemble_organ(
     })
 }
 
-/// Assemble `paths` (sample sets and composite definitions; several are
-/// combined into one implicit composite), decode the samples, and build
-/// the console. `stops` are CLI registration patterns; empty means each
-/// source's sidecar default. `progress` is told what is happening, for
-/// a UI that is watching the load.
-pub fn prepare(
+/// Decode `organ`'s samples for the engine, honoring the sidecar's bit
+/// depth and on-disk cache. `progress` reports the current phase for a
+/// UI watching the load.
+fn decode_samples(
+    organ: &Organ,
+    sidecar: &aristide_formats::sidecar::Sidecar,
     paths: &[PathBuf],
-    stops: &[String],
     sample_rate: f32,
     progress: &dyn Fn(String),
-) -> Result<PreparedInstrument> {
-    anyhow::ensure!(!paths.is_empty(), "no sample set given");
-    let first_path = &paths[0];
-    let mut setup = Setup::default();
-    let mut load_warnings: Vec<String> = Vec::new();
-
-    // Every path is a source: a sample set with its sidecar, or a
-    // composite definition (`.toml`), which assembles first and then
-    // acts like any other source. Per-set decisions — sidecar couplers,
-    // the default registration, channel suggestions — resolve against
-    // each source's own names here, then ride the id maps across.
-    let Sources {
-        sources: source_list,
-        sidecars,
-        composite_midi,
-        mut single_provenance,
-        mut stop_labels,
-        manual_tuning_defs,
-        source_tuning_defs,
-        mut rank_sources,
-        console_order,
-        console_layout,
-        console_coupled_keys,
-        coupler_key_modes,
-    } = load_sources(paths, progress, &mut setup, &mut load_warnings)?;
-
-    let (per_source_drawn, per_source_suggested) =
-        register_and_suggest(&source_list, &sidecars, stops);
-    let suggested: Vec<Option<u8>> = per_source_suggested.concat();
-    // Engine-wide settings (wind, tremulant, reverb, tuning…) come from
-    // the first source.
-    let sidecar = sidecars[0].clone();
-
-    let (organ, drawn) = assemble_organ(
-        source_list,
-        per_source_drawn,
-        stops,
-        &mut setup,
-        &mut SourceExtras {
-            rank_sources: &mut rank_sources,
-            single_provenance: &mut single_provenance,
-            stop_labels: &mut stop_labels,
-        },
-        &mut load_warnings,
-    )?;
-
+) -> Result<bank::LoadedBank> {
     progress(format!("decoding samples for {}…", organ.name));
     let started = Instant::now();
     let sample_bits = match sidecar.samples.bits {
@@ -680,7 +634,7 @@ pub fn prepare(
     } else {
         None
     };
-    let loaded = bank::build(&organ, sample_rate, sample_bits, cache_path.as_deref())?;
+    let loaded = bank::build(organ, sample_rate, sample_bits, cache_path.as_deref())?;
     tracing::info!(
         "samples: {} files, {:.1} MiB resident, {} skipped, in {:.1?}",
         loaded.bank.len(),
@@ -691,25 +645,39 @@ pub fn prepare(
     for note in loaded.skipped.iter().take(10) {
         tracing::warn!("skipped: {note}");
     }
+    Ok(loaded)
+}
 
+/// The wind model from the sidecar's `[wind]` table, cents-based knobs
+/// converted to the engine's pressure-domain parameters.
+fn configure_wind(
+    sidecar: &aristide_formats::sidecar::Sidecar,
+) -> Option<aristide_engine::wind::WindParams> {
     let defaults = aristide_engine::wind::WindParams::default();
     let kp = defaults.pitch_exponent as f64;
     // sag_cents is what the user hears; invert P^kp to pressure.
     let sag_cents = sidecar.wind.sag_cents.clamp(0.0, 50.0);
-    let wind = Some(aristide_engine::wind::WindParams {
+    Some(aristide_engine::wind::WindParams {
         sag_depth: (1.0 - cents_to_ratio(-sag_cents / kp)) as f32,
         natural_hz: sidecar.wind.bounce_hz.clamp(0.5, 12.0) as f32,
         damping: sidecar.wind.damping.clamp(0.2, 1.5) as f32,
         flow_noise: (sidecar.wind.flow_noise_percent / 100.0).clamp(0.0, 0.1) as f32,
         ..defaults
-    });
+    })
+}
 
-    // Tremulants. Precedence: a hand-written sidecar `[tremulant]`
-    // replaces everything (explicit override); else the set's own
-    // `[Tremulant]` definitions each become an engageable control on
-    // their member chests; else the historical fallback — one default
-    // tremulant over every chest, so the `tremulant` binding always
-    // means something.
+/// Tremulants, ready for the engine. Precedence: a hand-written
+/// sidecar `[tremulant]` replaces everything (explicit override); else
+/// the set's own `[Tremulant]` definitions each become an engageable
+/// control on their member chests; else the historical fallback — one
+/// default tremulant over every chest, so the `tremulant` binding
+/// always means something.
+fn configure_tremulants(
+    sidecar: &aristide_formats::sidecar::Sidecar,
+    organ: &Organ,
+) -> Vec<TremulantSetup> {
+    let defaults = aristide_engine::wind::WindParams::default();
+    let kp = defaults.pitch_exponent as f64;
     let max_groups = aristide_engine::wind::MAX_WIND_GROUPS as u32;
     let group_of = |chest: u32| chest.saturating_sub(1).min(max_groups - 1) as u8;
     let sidecar_setup = |declared: &aristide_formats::sidecar::Tremulant| {
@@ -785,18 +753,24 @@ pub fn prepare(
             })
             .collect(),
     };
-    for setup_ in &tremulants {
-        if setup_.groups.is_empty() {
+    for setup in &tremulants {
+        if setup.groups.is_empty() {
             tracing::warn!(
                 "tremulant {:?}: no windchest references it — engaging it will do nothing",
-                setup_.name
+                setup.name
             );
         }
     }
+    tremulants
+}
 
-    // Enclosures: one engine box per ODF enclosure, floor from the
-    // set's AmpMinimumLevel unless the sidecar overrides, filter and
-    // inertia constants from the sidecar.
+/// One engine box per ODF enclosure: floor from the set's
+/// `AmpMinimumLevel` unless the sidecar overrides, filter and inertia
+/// constants from the sidecar. Also resolves the expression-pedal CC.
+fn configure_enclosures(
+    sidecar: &aristide_formats::sidecar::Sidecar,
+    organ: &Organ,
+) -> (Vec<(u8, aristide_engine::enclosure::EnclosureParams)>, u8) {
     let boxes = &sidecar.enclosures;
     let expression_cc = boxes.cc.min(119);
     let mut enclosures = Vec::new();
@@ -833,27 +807,50 @@ pub fn prepare(
             aristide_engine::enclosure::MAX_ENCLOSURES
         );
     }
+    (enclosures, expression_cc)
+}
 
-    let mut reverb = None;
-    if !sidecar.reverb.ir.is_empty() {
-        let wet = sidecar.reverb.wet.clamp(0.0, 2.0) as f32;
-        match load_impulse_response(&sidecar.reverb.ir, first_path, sample_rate) {
-            Ok(ir) => {
-                tracing::info!(
-                    "reverb: {} ({} partitions), wet {:.2}",
-                    sidecar.reverb.ir,
-                    ir.partition_count(),
-                    wet
-                );
-                reverb = Some((Arc::new(ir), wet));
-            }
-            Err(err) => tracing::warn!("reverb disabled: {err}"),
+/// The sidecar's `[reverb]`, loaded into an engine-ready impulse
+/// response. A missing or unreadable IR disables reverb with a
+/// warning rather than failing the load.
+fn configure_reverb(
+    sidecar: &aristide_formats::sidecar::Sidecar,
+    first_path: &Path,
+    sample_rate: f32,
+) -> Option<(Arc<aristide_engine::reverb::PreparedIr>, f32)> {
+    if sidecar.reverb.ir.is_empty() {
+        return None;
+    }
+    let wet = sidecar.reverb.wet.clamp(0.0, 2.0) as f32;
+    match load_impulse_response(&sidecar.reverb.ir, first_path, sample_rate) {
+        Ok(ir) => {
+            tracing::info!(
+                "reverb: {} ({} partitions), wet {:.2}",
+                sidecar.reverb.ir,
+                ir.partition_count(),
+                wet
+            );
+            Some((Arc::new(ir), wet))
+        }
+        Err(err) => {
+            tracing::warn!("reverb disabled: {err}");
+            None
         }
     }
+}
 
-    let mut console = Console::new(organ, loaded.specs, drawn, sample_rate);
-    console.set_attack_options(loaded.attack_options);
-    let home = loaded.home.map(std::sync::Arc::new);
+/// The instrument's recorded home tuning, logged and installed on the
+/// console, plus each source's own recorded pitch (its rank anchors'
+/// median) when more than one scope could plausibly want its own.
+fn install_home_tuning(
+    console: &mut Console,
+    home: Option<Arc<tuning::HomeTuning>>,
+    rank_anchors: &std::collections::HashMap<aristide_model::RankId, f64>,
+    rank_sources: &[String],
+    single_provenance: &std::collections::HashMap<StopId, instrument::StopProvenance>,
+    sources_len: usize,
+    source_tuning_defs_len: usize,
+) -> Option<Arc<tuning::HomeTuning>> {
     match &home {
         Some(home) => tracing::info!(
             "recorded tuning: a′ = {:.1} Hz, {} (±{:.1} cents over {} of {} pipes)",
@@ -874,10 +871,10 @@ pub fn prepare(
     // scope names the 415 the Positif was sampled at, not the
     // instrument's blend of 415 and 440. One set is the instrument.
     let source_homes: std::collections::HashMap<String, Arc<tuning::HomeTuning>> = match &home {
-        Some(home) if setup.sources.len() > 1 || source_tuning_defs.len() > 1 => {
+        Some(home) if sources_len > 1 || source_tuning_defs_len > 1 => {
             let mut per_source: std::collections::HashMap<String, Vec<f64>> =
                 std::collections::HashMap::new();
-            for (rank, anchor) in &loaded.rank_anchors {
+            for (rank, anchor) in rank_anchors {
                 if let Some(alias) = rank_sources.get(rank.0 as usize) {
                     per_source.entry(alias.clone()).or_default().push(*anchor);
                 }
@@ -892,12 +889,100 @@ pub fn prepare(
         }
         _ => Default::default(),
     };
-    console.set_scope_homes(source_homes, loaded.rank_anchors.clone());
+    console.set_scope_homes(source_homes, rank_anchors.clone());
     console.set_stop_sources(
         single_provenance
             .iter()
             .map(|(id, prov)| (*id, prov.source.clone()))
             .collect(),
+    );
+    home
+}
+
+/// Assemble `paths` (sample sets and composite definitions; several are
+/// combined into one implicit composite), decode the samples, and build
+/// the console. `stops` are CLI registration patterns; empty means each
+/// source's sidecar default. `progress` is told what is happening, for
+/// a UI that is watching the load.
+pub fn prepare(
+    paths: &[PathBuf],
+    stops: &[String],
+    sample_rate: f32,
+    progress: &dyn Fn(String),
+) -> Result<PreparedInstrument> {
+    anyhow::ensure!(!paths.is_empty(), "no sample set given");
+    let first_path = &paths[0];
+    let mut setup = Setup::default();
+    let mut load_warnings: Vec<String> = Vec::new();
+
+    // Every path is a source: a sample set with its sidecar, or a
+    // composite definition (`.toml`), which assembles first and then
+    // acts like any other source. Per-set decisions — sidecar couplers,
+    // the default registration, channel suggestions — resolve against
+    // each source's own names here, then ride the id maps across.
+    let Sources {
+        sources: source_list,
+        sidecars,
+        composite_midi,
+        mut single_provenance,
+        mut stop_labels,
+        manual_tuning_defs,
+        source_tuning_defs,
+        mut rank_sources,
+        console_order,
+        console_layout,
+        console_coupled_keys,
+        coupler_key_modes,
+    } = load_sources(paths, progress, &mut setup, &mut load_warnings)?;
+
+    let (per_source_drawn, per_source_suggested) =
+        register_and_suggest(&source_list, &sidecars, stops);
+    let suggested: Vec<Option<u8>> = per_source_suggested.concat();
+    // Engine-wide settings (wind, tremulant, reverb, tuning…) come from
+    // the first source.
+    let sidecar = sidecars[0].clone();
+
+    let (organ, drawn) = assemble_organ(
+        source_list,
+        per_source_drawn,
+        stops,
+        &mut setup,
+        &mut SourceExtras {
+            rank_sources: &mut rank_sources,
+            single_provenance: &mut single_provenance,
+            stop_labels: &mut stop_labels,
+        },
+        &mut load_warnings,
+    )?;
+
+    let loaded = decode_samples(&organ, &sidecar, paths, sample_rate, progress)?;
+    let bank::LoadedBank {
+        bank,
+        specs,
+        attack_options,
+        home,
+        rank_anchors,
+        ..
+    } = loaded;
+
+    let wind = configure_wind(&sidecar);
+    let tremulants = configure_tremulants(&sidecar, &organ);
+    let (enclosures, expression_cc) = configure_enclosures(&sidecar, &organ);
+    let reverb = configure_reverb(&sidecar, first_path, sample_rate);
+
+    let mut console = Console::new(organ, specs, drawn, sample_rate);
+    console.set_attack_options(attack_options);
+    let home = home.map(Arc::new);
+    let sources_len = setup.sources.len();
+    let source_tuning_defs_len = source_tuning_defs.len();
+    let home = install_home_tuning(
+        &mut console,
+        home,
+        &rank_anchors,
+        &rank_sources,
+        &single_provenance,
+        sources_len,
+        source_tuning_defs_len,
     );
     let temperament = tuning::Temperament::parse(&sidecar.tuning.temperament)
         .unwrap_or_else(|| {
@@ -1377,7 +1462,7 @@ pub fn prepare(
 
     Ok(PreparedInstrument {
         console,
-        bank: loaded.bank,
+        bank,
         wind,
         tremulants,
         enclosures,
