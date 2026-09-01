@@ -345,6 +345,16 @@ impl EnclosureState {
     }
 }
 
+/// What the onset delay says about this voice, this block.
+pub(crate) enum Onset {
+    /// Speaks from this frame of the chunk onward.
+    Speaks(usize),
+    /// Still waiting: renders nothing, draws no wind, does not age.
+    Waiting,
+    /// Released before the pallet ever opened — retire the slot.
+    NeverSpoke,
+}
+
 impl SampledVoice {
     #[inline]
     pub(crate) fn block_context(
@@ -352,17 +362,39 @@ impl SampledVoice {
         sample: &Sample,
         external: Option<&Sample>,
         rate_scale: f64,
+        lite: bool,
+        output_sr: f32,
     ) -> VoiceBlockContext {
         let current_loop = sample.loop_at(self.cursor.loop_index as usize);
         VoiceBlockContext {
-            lite: false,
+            lite,
             rate: self.cursor.rate * rate_scale,
             last: (sample.frames() - 1) as f64,
             tail_last: (external.unwrap_or(sample).frames() - 1) as f64,
             current_loop,
             looping: current_loop.is_some(),
-            output_sr: 44_100.0, // overridden by the block loop
+            output_sr,
         }
+    }
+
+    /// Onset delay: silent, un-aged, until it elapses — then the voice
+    /// speaks partway into this chunk. A voice killed while still
+    /// waiting never speaks: the pallet never opened.
+    #[inline]
+    pub(crate) fn take_onset(&mut self, frames: usize) -> Onset {
+        if self.onset == 0 {
+            return Onset::Speaks(0);
+        }
+        if self.phase != SamplePhase::Held {
+            return Onset::NeverSpoke;
+        }
+        if self.onset as usize >= frames {
+            self.onset -= frames as u32;
+            return Onset::Waiting;
+        }
+        let start = self.onset as usize;
+        self.onset = 0;
+        Onset::Speaks(start)
     }
 
     /// Track the voice's own loudness (pre-gain) for release level

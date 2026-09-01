@@ -36,8 +36,8 @@ use routing::{Bus, MAX_BUSES, MAX_CHUNK_FRAMES};
 use rtrb::{Consumer, Producer, RingBuffer};
 use tone::{ToneStage, ToneVoice, TONE_ATTACK_SECONDS, TONE_GAIN, TONE_RELEASE_SECONDS};
 use voice::{
-    Brightness, EnclosureState, PlaybackCursor, ReleaseState, SamplePhase, SampledVoice,
-    Voice, WindState,
+    Brightness, EnclosureState, Onset, PlaybackCursor, ReleaseState, SamplePhase,
+    SampledVoice, Voice, WindState,
 };
 use wind::{WindGroup, MAX_WIND_GROUPS};
 
@@ -74,6 +74,23 @@ const TAIL_SHED_PER_BLOCK: usize = 8;
 const LIMITER_CEILING: f32 = 0.97;
 const LIMITER_RELEASE_SECONDS: f32 = 0.2;
 
+
+/// [`Command::StartVoice`] unpacked: a pipe's identity plus
+/// everything the RT side needs to seed a voice from it.
+#[derive(Clone, Copy)]
+struct VoiceSpec {
+    handle: u64,
+    sample: u32,
+    rate: f32,
+    gain: f32,
+    group: u8,
+    wind_weight: f32,
+    brightness: f32,
+    enclosure: u8,
+    bus: u8,
+    delay_frames: u32,
+    nominal_hz: f32,
+}
 
 /// RT side. Owned by the audio callback; every method here upholds the
 /// no-alloc/no-lock/no-I/O invariants.
@@ -170,42 +187,7 @@ impl Engine {
         while let Ok(command) = self.commands.pop() {
             self.apply(command);
         }
-        // Apply the block's key releases in ONE pass over the pool
-        // (per-handle scans made mass releases O(handles × voices) —
-        // the measured 5 ms spike behind the release pops).
-        if !self.stop_batch.is_empty() {
-            self.stop_batch.sort_unstable();
-            let per_ms = self.sample_rate / 1000.0;
-            // Big releases spread wider (real tuttis do too): scale the
-            // pallet stagger with the batch so crossfades don't all
-            // land in the same two blocks.
-            let batch_scale = 1.0 + self.stop_batch.len() as f32 / 64.0;
-            let max_stagger =
-                (self.release_stagger_frames * batch_scale).min(0.025 * self.sample_rate);
-            for voice in self.voices.iter_mut() {
-                if let Voice::Sampled(sampled) = voice {
-                    if self.stop_batch.binary_search(&sampled.handle).is_ok() {
-                        let age_ms = (sampled.age_frames as f32 / per_ms) as u32;
-                        if sampled.onset > 0 {
-                            // Released before the onset delay elapsed:
-                            // the pallet never opened, so nothing ever
-                            // sounded and nothing should.
-                            sampled.phase = SamplePhase::FadeOut;
-                            sampled.release.amplitude = 0.0;
-                        } else if sampled.phase == SamplePhase::Held
-                            && sampled.release.pending.is_none()
-                        {
-                            let delay = (wind::xorshift_unit(&mut sampled.rng)
-                                * max_stagger) as u16;
-                            sampled.release.pending = Some((delay, age_ms));
-                        } else if let Some(sample) = self.bank.get(sampled.cursor.sample) {
-                            sampled.begin_release(sample, age_ms, self.sample_rate);
-                        }
-                    }
-                }
-            }
-            self.stop_batch.clear();
-        }
+        self.release_stopped_voices();
 
         buffer.fill(0.0);
         let channels = channels.max(1);
@@ -231,88 +213,152 @@ impl Engine {
         }
     }
 
-    fn render_chunk(&mut self, buffer: &mut [f32], channels: usize, frames: usize) {
-        let master = self.master_gain;
-
-        // Polyphony guard: bound the release-tail pileup (fast playing
-        // stacks seconds-long tails; the quietest are inaudible under
-        // the fresh attacks but still cost full render time).
-        let mut tail_count = 0usize;
-        for voice in self.voices.iter() {
-            if let Voice::Sampled(sampled) = voice {
-                if matches!(sampled.phase, SamplePhase::Tail | SamplePhase::Crossfade) {
-                    tail_count += 1;
-                }
-            }
+    /// Apply the block's key releases in ONE pass over the pool
+    /// (per-handle scans made mass releases O(handles × voices) —
+    /// the measured 5 ms spike behind the release pops).
+    fn release_stopped_voices(&mut self) {
+        if self.stop_batch.is_empty() {
+            return;
         }
-        if tail_count > TAIL_VOICE_BUDGET {
-            let to_shed = (tail_count - TAIL_VOICE_BUDGET).min(TAIL_SHED_PER_BLOCK);
-            for _ in 0..to_shed {
-                // Rank by audible contribution — envelope × voice gain —
-                // not raw sample level (a quiet recording with high gain
-                // outranks a hot recording turned down).
-                let mut quietest: Option<(usize, f32)> = None;
-                for (index, voice) in self.voices.iter().enumerate() {
-                    if let Voice::Sampled(sampled) = voice {
-                        let contribution = sampled.envelope * sampled.gain;
-                        if sampled.phase == SamplePhase::Tail
-                            && quietest.is_none_or(|(_, level)| contribution < level)
-                        {
-                            quietest = Some((index, contribution));
-                        }
+        self.stop_batch.sort_unstable();
+        let per_ms = self.sample_rate / 1000.0;
+        // Big releases spread wider (real tuttis do too): scale the
+        // pallet stagger with the batch so crossfades don't all
+        // land in the same two blocks.
+        let batch_scale = 1.0 + self.stop_batch.len() as f32 / 64.0;
+        let max_stagger =
+            (self.release_stagger_frames * batch_scale).min(0.025 * self.sample_rate);
+        for voice in self.voices.iter_mut() {
+            if let Voice::Sampled(sampled) = voice {
+                if self.stop_batch.binary_search(&sampled.handle).is_ok() {
+                    let age_ms = (sampled.age_frames as f32 / per_ms) as u32;
+                    if sampled.onset > 0 {
+                        // Released before the onset delay elapsed:
+                        // the pallet never opened, so nothing ever
+                        // sounded and nothing should.
+                        sampled.phase = SamplePhase::FadeOut;
+                        sampled.release.amplitude = 0.0;
+                    } else if sampled.phase == SamplePhase::Held
+                        && sampled.release.pending.is_none()
+                    {
+                        let delay = (wind::xorshift_unit(&mut sampled.rng)
+                            * max_stagger) as u16;
+                        sampled.release.pending = Some((delay, age_ms));
+                    } else if let Some(sample) = self.bank.get(sampled.cursor.sample) {
+                        sampled.begin_release(sample, age_ms, self.sample_rate);
                     }
                 }
-                let Some((index, _)) = quietest else { break };
-                if let Voice::Sampled(sampled) = &mut self.voices[index] {
-                    sampled.release.amplitude = 1.0;
-                    // Gentle ~150 ms fade: under 128 masking tails this
-                    // is inaudible; the 15 ms kill ramp is not.
-                    sampled.release.fade_scale = 0.1;
-                    sampled.phase = SamplePhase::FadeOut;
-                }
             }
         }
-
-        // Wind: one regulator step per block. Demand sums the wind
-        // weight of everything sounding on each chest, with young
-        // voices boosted (the pallet-opening gulp).
-        let mut demand = [0.0f32; MAX_WIND_GROUPS];
-        for voice in self.voices.iter() {
-            if let Voice::Sampled(sampled) = voice {
-                if sampled.onset > 0 {
-                    // A pipe waiting on its onset delay draws no wind:
-                    // the pallet hasn't opened yet.
-                    continue;
-                }
-                if sampled.phase != SamplePhase::Held {
-                    // A released or fading pipe draws none either: the
-                    // pallet has closed, only the tail is sounding —
-                    // pressure recovers while tails ring out.
-                    continue;
-                }
-                let params = self.wind[sampled.wind.group as usize].params();
-                let attack_frames = params.attack_ms * 0.001 * self.sample_rate;
-                let boost = if (sampled.age_frames as f32) < attack_frames {
-                    params.attack_boost * (1.0 - sampled.age_frames as f32 / attack_frames)
-                } else {
-                    0.0
-                };
-                demand[sampled.wind.group as usize] += sampled.wind.weight * (1.0 + boost);
-            }
-        }
+        self.stop_batch.clear();
+    }
+    /// One bounded slice of output: shed, regulate, tick every voice
+    /// onto its bus, mix the buses down, then the room and the ceiling.
+    fn render_chunk(&mut self, buffer: &mut [f32], channels: usize, frames: usize) {
+        self.shed_tail_voices();
+        let demand = self.aggregate_wind_demand();
         let dt = frames as f32 / self.sample_rate;
         if !self.lite {
-            for (group, wind) in self.wind.iter_mut().enumerate() {
-                wind.step(demand[group], dt);
-            }
-            for box_state in self.enclosures.iter_mut() {
-                box_state.step(dt, self.sample_rate);
+            self.step_wind_and_boxes(&demand, dt);
+        }
+        self.tick_voices(frames, dt);
+        self.mix_buses(buffer, channels, frames);
+        self.apply_reverb(buffer, channels);
+        self.limit(buffer, channels);
+    }
+
+    /// Polyphony guard: bound the release-tail pileup (fast playing
+    /// stacks seconds-long tails; the quietest are inaudible under the
+    /// fresh attacks but still cost full render time).
+    fn shed_tail_voices(&mut self) {
+        let mut tail_count = 0usize;
+        for voice in self.voices.iter() {
+            if let Voice::Sampled(sampled) = voice
+                && matches!(sampled.phase, SamplePhase::Tail | SamplePhase::Crossfade)
+            {
+                tail_count += 1;
             }
         }
+        if tail_count <= TAIL_VOICE_BUDGET {
+            return;
+        }
+        let to_shed = (tail_count - TAIL_VOICE_BUDGET).min(TAIL_SHED_PER_BLOCK);
+        for _ in 0..to_shed {
+            let Some(index) = self.quietest_tail() else {
+                break;
+            };
+            if let Voice::Sampled(sampled) = &mut self.voices[index] {
+                sampled.release.amplitude = 1.0;
+                // Gentle ~150 ms fade: under 128 masking tails this
+                // is inaudible; the 15 ms kill ramp is not.
+                sampled.release.fade_scale = 0.1;
+                sampled.phase = SamplePhase::FadeOut;
+            }
+        }
+    }
 
+    /// Rank by audible contribution — envelope × voice gain — not raw
+    /// sample level (a quiet recording with high gain outranks a hot
+    /// recording turned down).
+    fn quietest_tail(&self) -> Option<usize> {
+        let mut quietest: Option<(usize, f32)> = None;
+        for (index, voice) in self.voices.iter().enumerate() {
+            if let Voice::Sampled(sampled) = voice {
+                let contribution = sampled.envelope * sampled.gain;
+                if sampled.phase == SamplePhase::Tail
+                    && quietest.is_none_or(|(_, level)| contribution < level)
+                {
+                    quietest = Some((index, contribution));
+                }
+            }
+        }
+        quietest.map(|(index, _)| index)
+    }
+
+    /// What each chest is being asked for this block: the wind weight of
+    /// everything sounding on it, with young voices boosted (the
+    /// pallet-opening gulp).
+    fn aggregate_wind_demand(&self) -> [f32; MAX_WIND_GROUPS] {
+        let mut demand = [0.0f32; MAX_WIND_GROUPS];
+        for voice in self.voices.iter() {
+            let Voice::Sampled(sampled) = voice else {
+                continue;
+            };
+            // A pipe waiting on its onset delay draws no wind: the
+            // pallet hasn't opened yet. A released or fading pipe draws
+            // none either: the pallet has closed, only the tail is
+            // sounding — pressure recovers while tails ring out.
+            if sampled.onset > 0 || sampled.phase != SamplePhase::Held {
+                continue;
+            }
+            let params = self.wind[sampled.wind.group as usize].params();
+            let attack_frames = params.attack_ms * 0.001 * self.sample_rate;
+            let boost = if (sampled.age_frames as f32) < attack_frames {
+                params.attack_boost * (1.0 - sampled.age_frames as f32 / attack_frames)
+            } else {
+                0.0
+            };
+            demand[sampled.wind.group as usize] += sampled.wind.weight * (1.0 + boost);
+        }
+        demand
+    }
+
+    /// One regulator step and one shutter step per block.
+    fn step_wind_and_boxes(&mut self, demand: &[f32; MAX_WIND_GROUPS], dt: f32) {
+        for (group, wind) in self.wind.iter_mut().enumerate() {
+            wind.step(demand[group], dt);
+        }
+        for box_state in self.enclosures.iter_mut() {
+            box_state.step(dt, self.sample_rate);
+        }
+    }
+
+    /// Every live voice, one block, onto its bus's scratch.
+    fn tick_voices(&mut self, frames: usize, dt: f32) {
+        let master = self.master_gain;
         let lite = self.lite;
-        // Split borrows: voices mutably, bank/read-only params shared.
         let output_sr = self.sample_rate;
+        // Split borrows: voices mutably, bank/read-only params shared.
         let Engine {
             voices,
             buses,
@@ -352,24 +398,14 @@ impl Engine {
                     }
                 }
                 Voice::Sampled(sampled) => {
-                    // Onset delay: silent, un-aged, until it elapses —
-                    // then the voice speaks partway into this chunk. A
-                    // voice killed while still waiting never speaks.
-                    let start_frame = if sampled.onset > 0 {
-                        if sampled.phase != SamplePhase::Held {
+                    let start_frame = match sampled.take_onset(frames) {
+                        Onset::Speaks(frame) => frame,
+                        Onset::Waiting => continue,
+                        Onset::NeverSpoke => {
                             *voice = Voice::Idle;
                             free_slots.push(index as u16);
                             continue;
                         }
-                        if sampled.onset as usize >= frames {
-                            sampled.onset -= frames as u32;
-                            continue;
-                        }
-                        let start = sampled.onset as usize;
-                        sampled.onset = 0;
-                        start
-                    } else {
-                        0
                     };
                     let Some(sample) = bank.get(sampled.cursor.sample) else {
                         *voice = Voice::Idle;
@@ -385,7 +421,8 @@ impl Engine {
                     if !lite && sampled.phase == SamplePhase::Held {
                         let chest = &wind[sampled.wind.group as usize];
                         sampled.wind.follow_chest(chest, dt, &mut sampled.rng);
-                    }                    let (rate_scale, gain, treble) = if lite {
+                    }
+                    let (rate_scale, gain, treble) = if lite {
                         (1.0f64, master, 1.0f32)
                     } else {
                         (
@@ -394,7 +431,6 @@ impl Engine {
                             sampled.wind.treble,
                         )
                     };
-
                     // Bypass the tilt filter while it would do nothing:
                     // keeps untouched-pressure rendering bit-identical.
                     let tilting = sampled.brightness.a > 0.0 && (treble - 1.0).abs() > 1e-4;
@@ -415,6 +451,7 @@ impl Engine {
                     sampled.age_frames = sampled
                         .age_frames
                         .saturating_add((frames - start_frame) as u32);
+
                     // The voice can hand over to a separate release
                     // sample or switch loops mid-block; track the refs
                     // and per-block invariants it reads from.
@@ -423,9 +460,8 @@ impl Engine {
                     let mut current_loop_index = sampled.cursor.loop_index;
                     let mut current_external_id = sampled.cursor.external_release;
                     let mut external = current_external_id.and_then(|id| bank.get(id));
-                    let mut ctx = sampled.block_context(current, external, rate_scale);
-                    ctx.lite = lite;
-                    ctx.output_sr = output_sr;
+                    let mut ctx =
+                        sampled.block_context(current, external, rate_scale, lite, output_sr);
                     let scratch = buses[sampled.bus as usize].mix_target(frames);
                     for frame in start_frame..frames {
                         if sampled.cursor.sample != current_id {
@@ -436,9 +472,9 @@ impl Engine {
                                     external = None;
                                     current_external_id = None;
                                     current_loop_index = sampled.cursor.loop_index;
-                                    ctx = sampled.block_context(current, external, rate_scale);
-                                    ctx.lite = lite;
-                    ctx.output_sr = output_sr;
+                                    ctx = sampled.block_context(
+                                        current, external, rate_scale, lite, output_sr,
+                                    );
                                 }
                                 None => {
                                     *voice = Voice::Idle;
@@ -452,9 +488,9 @@ impl Engine {
                             current_loop_index = sampled.cursor.loop_index;
                             current_external_id = sampled.cursor.external_release;
                             external = current_external_id.and_then(|id| bank.get(id));
-                            ctx = sampled.block_context(current, external, rate_scale);
-                            ctx.lite = lite;
-                    ctx.output_sr = output_sr;
+                            ctx = sampled.block_context(
+                                current, external, rate_scale, lite, output_sr,
+                            );
                         }
                         match sampled.tick(
                             current,
@@ -487,27 +523,32 @@ impl Engine {
                 }
             }
         }
+    }
 
-        // Buses: insert effects, then land each on its output pair.
-        for bus in buses.iter_mut() {
+    /// Buses: insert effects, then land each on its output pair.
+    fn mix_buses(&mut self, buffer: &mut [f32], channels: usize, frames: usize) {
+        for bus in self.buses.iter_mut() {
             bus.finish_chunk(frames, buffer, channels);
         }
+    }
 
-        // Room: convolution reverb over the summed mix (wet trails dry
-        // by one internal block; see reverb.rs).
+    /// Room: convolution reverb over the summed mix (wet trails dry by
+    /// one internal block; see reverb.rs).
+    fn apply_reverb(&mut self, buffer: &mut [f32], channels: usize) {
         if let Some(reverb) = &mut self.reverb {
             reverb.process(buffer, channels);
         }
+    }
 
-        // Master limiter: instant attack, exponential release. Bit-exact
-        // passthrough while the bus stays under the ceiling.
+    /// Master limiter: instant attack, exponential release. Bit-exact
+    /// passthrough while the bus stays under the ceiling.
+    fn limit(&mut self, buffer: &mut [f32], channels: usize) {
         for frame in buffer.chunks_mut(channels) {
             let mut peak = 0.0f32;
             for value in frame.iter() {
                 peak = peak.max(value.abs());
             }
-            self.limiter_envelope =
-                peak.max(self.limiter_envelope * self.limiter_release);
+            self.limiter_envelope = peak.max(self.limiter_envelope * self.limiter_release);
             if self.limiter_envelope > LIMITER_CEILING {
                 let gain = LIMITER_CEILING / self.limiter_envelope;
                 for value in frame.iter_mut() {
@@ -515,7 +556,6 @@ impl Engine {
                 }
             }
         }
-
     }
 
     fn apply(&mut self, command: Command) {
@@ -532,121 +572,19 @@ impl Engine {
                 bus,
                 delay_frames,
                 nominal_hz,
-            } => {
-                let Some(start_position) = self
-                    .bank
-                    .get(sample)
-                    .map(|s| s.attack_start() as f64)
-                    .filter(|_| rate > 0.0)
-                else {
-                    return;
-                };
-                let enclosure = if (enclosure as usize) < MAX_ENCLOSURES {
-                    enclosure
-                } else {
-                    ENCLOSURE_NONE
-                };
-                // Voices born inside a box start at the box's CURRENT
-                // factors (starting at 1.0 would ramp every attack).
-                let box_state = self
-                    .enclosures
-                    .get(enclosure as usize)
-                    .copied()
-                    .unwrap_or_default();
-                // The pipe's own response to its chest. Sensitivity is
-                // a fixed per-voice spread (±25 %, hashed from the
-                // handle — no two pipes are voiced identically); the
-                // lag time constants scale with the pipe's period:
-                // pitch answers within a few periods, amplitude and
-                // timbre only over the speech time. Unpitched voices
-                // (nominal_hz = 0) take the chest unlagged.
-                let (wind_sens, wind_pitch_rate, wind_gain_rate) = if nominal_hz > 0.0 {
-                    let mut seed = (handle as u32).wrapping_mul(0x6C07_8965) | 1;
-                    let hz = nominal_hz.clamp(16.0, 8000.0);
-                    (
-                        0.75 + 0.5 * wind::xorshift_unit(&mut seed),
-                        1.0 / (4.0 / hz).clamp(0.004, 0.12),
-                        1.0 / (25.0 / hz).clamp(0.02, 0.6),
-                    )
-                } else {
-                    (1.0, f32::MAX, f32::MAX)
-                };
-                // Likewise a voice starts at its chest's current
-                // factors, in case it is released before its first
-                // Held block renders (frozen values must be real).
-                let group = group.min(MAX_WIND_GROUPS as u8 - 1);
-                let chest = &self.wind[group as usize];
-                let (wind_rate, wind_gain, wind_treble) = (
-                    1.0 + (chest.rate_factor() - 1.0) * wind_sens,
-                    1.0 + (chest.gain_factor() - 1.0) * wind_sens,
-                    (1.0 + (chest.brightness_factor() - 1.0) * wind_sens).clamp(0.75, 1.33),
-                );
-                if let Some(slot) = self.allocate_slot() {
-                    self.voices[slot] = Voice::Sampled(SampledVoice {
-                        handle,
-                        gain,
-                        envelope: 0.0,
-                        bus: bus.min(MAX_BUSES as u8 - 1),
-                        // Onset delays are bounded only against nonsense
-                        // (30 s covers any musical canon trick).
-                        onset: delay_frames.min((30.0 * self.sample_rate) as u32),
-                        age_frames: 0,
-                        rng: (handle as u32).wrapping_mul(0x9E37_79B9) | 1,
-                        phase: SamplePhase::Held,
-                        cursor: PlaybackCursor {
-                            sample,
-                            position: start_position,
-                            release_position: 0.0,
-                            rate: rate as f64,
-                            rate_target: rate as f64,
-                            glide_frames: 0,
-                            kernel: self.sinc.select(rate as f64),
-                            loop_index: 0,
-                            external_release: None,
-                            past_loop: false,
-                        },
-                        wind: WindState {
-                            group,
-                            weight: wind_weight.max(0.0),
-                            rate: wind_rate,
-                            gain: wind_gain,
-                            treble: wind_treble,
-                            sens: wind_sens,
-                            pitch_rate: wind_pitch_rate,
-                            gain_rate: wind_gain_rate,
-                            wander: wind::Wander::default(),
-                        },
-                        brightness: Brightness {
-                            a: brightness.clamp(0.0, 1.0),
-                            lowpass: [0.0; 2],
-                        },
-                        enclosure: EnclosureState {
-                            index: enclosure,
-                            gain: box_state.gain(),
-                            gain_target: box_state.gain(),
-                            hi_gain: box_state.hi_gain(),
-                            coeff: box_state.coeff(),
-                            lowpass: [0.0; 2],
-                        },
-                        release: ReleaseState {
-                            fade: 0.0,
-                            fade_step: 0.0,
-                            fade_scale: 1.0,
-                            amplitude: 1.0,
-                            tail_gain: 1.0,
-                            tail_decay: 1.0,
-                            charge: 1.0,
-                            charge_deficit: 0.0,
-                            charge_step: 1.0,
-                            bend: 0.0,
-                            bend_depth: 0.0,
-                            bend_step: 0.0,
-                            pending: None,
-                            wave_trem: self.wave_trems & (1u32 << u32::from(group).min(31)) != 0,
-                        },
-                    });
-                }
-            }
+            } => self.start_voice(VoiceSpec {
+                handle,
+                sample,
+                rate,
+                gain,
+                group,
+                wind_weight,
+                brightness,
+                enclosure,
+                bus,
+                delay_frames,
+                nominal_hz,
+            }),
             Command::SetBusDelay { bus, params } => {
                 if let Some(bus) = self.buses.get_mut(bus as usize) {
                     bus.set_delay(params);
@@ -678,22 +616,7 @@ impl Engine {
                 }
             }
             Command::SetWaveTremulant { group, engaged } => {
-                let bit = 1u32 << u32::from(group).min(31);
-                if engaged {
-                    self.wave_trems |= bit;
-                } else {
-                    self.wave_trems &= !bit;
-                }
-                // Held voices follow the switch so their eventual
-                // release matches the state at key-off; tails keep the
-                // state they released under.
-                for voice in self.voices.iter_mut() {
-                    if let Voice::Sampled(sampled) = voice {
-                        if sampled.wind.group == group && sampled.phase == SamplePhase::Held {
-                            sampled.release.wave_trem = engaged;
-                        }
-                    }
-                }
+                self.set_wave_tremulant(group, engaged);
             }
             Command::SetEnclosure { enclosure, params } => {
                 if let Some(box_state) = self.enclosures.get_mut(enclosure as usize) {
@@ -712,24 +635,7 @@ impl Engine {
                 handle,
                 rate,
                 glide_ms,
-            } => {
-                if !(rate > 0.0) || !glide_ms.is_finite() {
-                    return;
-                }
-                let glide_frames = (glide_ms.max(0.0) * 0.001 * self.sample_rate) as u32;
-                for voice in self.voices.iter_mut() {
-                    if let Voice::Sampled(sampled) = voice {
-                        if sampled.handle == handle {
-                            sampled.cursor.rate_target = rate as f64;
-                            sampled.cursor.glide_frames = glide_frames;
-                            if glide_frames == 0 {
-                                sampled.cursor.rate = rate as f64;
-                                sampled.cursor.kernel = self.sinc.select(sampled.cursor.rate);
-                            }
-                        }
-                    }
-                }
-            }
+            } => self.set_voice_rate(handle, rate, glide_ms),
             Command::StopVoice { handle } => {
                 // Batched: applied in one pool pass at the top of the
                 // next process() (same block — commands drain first).
@@ -737,58 +643,10 @@ impl Engine {
                     self.stop_batch.push(handle);
                 }
             }
-            Command::KillVoice { handle } => {
-                for voice in self.voices.iter_mut() {
-                    if let Voice::Sampled(sampled) = voice {
-                        if sampled.handle == handle && sampled.phase != SamplePhase::FadeOut {
-                            sampled.release.amplitude = 1.0;
-                            sampled.release.fade_scale = 1.0;
-                            sampled.phase = SamplePhase::FadeOut;
-                        }
-                    }
-                }
-            }
-            Command::NoteOn { key, freq_hz } => {
-                if let Some(slot) = self.allocate_slot() {
-                    self.voices[slot] = Voice::Tone(ToneVoice {
-                        key,
-                        phase: 0.0,
-                        phase_increment: freq_hz / self.sample_rate,
-                        envelope: 0.0,
-                        stage: ToneStage::Attack,
-                    });
-                }
-            }
-            Command::NoteOff { key } => {
-                for voice in self.voices.iter_mut() {
-                    if let Voice::Tone(tone) = voice {
-                        if tone.key == key
-                            && (tone.stage == ToneStage::Attack || tone.stage == ToneStage::Sustain)
-                        {
-                            tone.stage = ToneStage::Release;
-                        }
-                    }
-                }
-            }
-            Command::AllNotesOff => {
-                for voice in self.voices.iter_mut() {
-                    match voice {
-                        Voice::Idle => {}
-                        Voice::Tone(tone) => {
-                            if tone.stage != ToneStage::Idle {
-                                tone.stage = ToneStage::Release;
-                            }
-                        }
-                        Voice::Sampled(sampled) => {
-                            if sampled.phase != SamplePhase::FadeOut {
-                                sampled.release.amplitude = 1.0;
-                                sampled.release.fade_scale = 1.0;
-                                sampled.phase = SamplePhase::FadeOut;
-                            }
-                        }
-                    }
-                }
-            }
+            Command::KillVoice { handle } => self.kill_voice(handle),
+            Command::NoteOn { key, freq_hz } => self.note_on(key, freq_hz),
+            Command::NoteOff { key } => self.note_off(key),
+            Command::AllNotesOff => self.all_notes_off(),
             Command::SetMasterGain { linear } => {
                 if linear.is_finite() && (0.0..=4.0).contains(&linear) {
                     self.master_gain = linear;
@@ -797,6 +655,229 @@ impl Engine {
             Command::SetReverbWet { wet } => {
                 if let Some(reverb) = &mut self.reverb {
                     reverb.set_wet(wet);
+                }
+            }
+        }
+    }
+
+    /// [`Command::StartVoice`]: seed a voice from the pipe's identity
+    /// and the current state of the chest and box it sits in, then give
+    /// it a slot. A sample the bank hasn't got, or a non-positive rate,
+    /// starts nothing.
+    fn start_voice(&mut self, spec: VoiceSpec) {
+        let Some(start_position) = self
+            .bank
+            .get(spec.sample)
+            .map(|s| s.attack_start() as f64)
+            .filter(|_| spec.rate > 0.0)
+        else {
+            return;
+        };
+        let group = spec.group.min(MAX_WIND_GROUPS as u8 - 1);
+        let voice = SampledVoice {
+            handle: spec.handle,
+            gain: spec.gain,
+            envelope: 0.0,
+            bus: spec.bus.min(MAX_BUSES as u8 - 1),
+            // Onset delays are bounded only against nonsense (30 s
+            // covers any musical canon trick).
+            onset: spec.delay_frames.min((30.0 * self.sample_rate) as u32),
+            age_frames: 0,
+            rng: (spec.handle as u32).wrapping_mul(0x9E37_79B9) | 1,
+            phase: SamplePhase::Held,
+            cursor: PlaybackCursor {
+                sample: spec.sample,
+                position: start_position,
+                release_position: 0.0,
+                rate: spec.rate as f64,
+                rate_target: spec.rate as f64,
+                glide_frames: 0,
+                kernel: self.sinc.select(spec.rate as f64),
+                loop_index: 0,
+                external_release: None,
+                past_loop: false,
+            },
+            wind: self.seed_wind(&spec, group),
+            brightness: Brightness {
+                a: spec.brightness.clamp(0.0, 1.0),
+                lowpass: [0.0; 2],
+            },
+            enclosure: self.seed_enclosure(spec.enclosure),
+            release: ReleaseState {
+                fade: 0.0,
+                fade_step: 0.0,
+                fade_scale: 1.0,
+                amplitude: 1.0,
+                tail_gain: 1.0,
+                tail_decay: 1.0,
+                charge: 1.0,
+                charge_deficit: 0.0,
+                charge_step: 1.0,
+                bend: 0.0,
+                bend_depth: 0.0,
+                bend_step: 0.0,
+                pending: None,
+                wave_trem: self.wave_trems & (1u32 << u32::from(group).min(31)) != 0,
+            },
+        };
+        if let Some(slot) = self.allocate_slot() {
+            self.voices[slot] = Voice::Sampled(voice);
+        }
+    }
+
+    /// The pipe's own response to its chest. Sensitivity is a fixed
+    /// per-voice spread (±25 %, hashed from the handle — no two pipes
+    /// are voiced identically); the lag time constants scale with the
+    /// pipe's period: pitch answers within a few periods, amplitude and
+    /// timbre only over the speech time. Unpitched voices
+    /// (`nominal_hz` = 0) take the chest unlagged. The voice starts at
+    /// its chest's current factors, in case it is released before its
+    /// first Held block renders (frozen values must be real).
+    fn seed_wind(&self, spec: &VoiceSpec, group: u8) -> WindState {
+        let (sens, pitch_rate, gain_rate) = if spec.nominal_hz > 0.0 {
+            let mut seed = (spec.handle as u32).wrapping_mul(0x6C07_8965) | 1;
+            let hz = spec.nominal_hz.clamp(16.0, 8000.0);
+            (
+                0.75 + 0.5 * wind::xorshift_unit(&mut seed),
+                1.0 / (4.0 / hz).clamp(0.004, 0.12),
+                1.0 / (25.0 / hz).clamp(0.02, 0.6),
+            )
+        } else {
+            (1.0, f32::MAX, f32::MAX)
+        };
+        let chest = &self.wind[group as usize];
+        WindState {
+            group,
+            weight: spec.wind_weight.max(0.0),
+            rate: 1.0 + (chest.rate_factor() - 1.0) * sens,
+            gain: 1.0 + (chest.gain_factor() - 1.0) * sens,
+            treble: (1.0 + (chest.brightness_factor() - 1.0) * sens).clamp(0.75, 1.33),
+            sens,
+            pitch_rate,
+            gain_rate,
+            wander: wind::Wander::default(),
+        }
+    }
+
+    /// Voices born inside a box start at the box's CURRENT factors
+    /// (starting at 1.0 would ramp every attack).
+    fn seed_enclosure(&self, enclosure: u8) -> EnclosureState {
+        let index = if (enclosure as usize) < MAX_ENCLOSURES {
+            enclosure
+        } else {
+            ENCLOSURE_NONE
+        };
+        let box_state = self
+            .enclosures
+            .get(index as usize)
+            .copied()
+            .unwrap_or_default();
+        EnclosureState {
+            index,
+            gain: box_state.gain(),
+            gain_target: box_state.gain(),
+            hi_gain: box_state.hi_gain(),
+            coeff: box_state.coeff(),
+            lowpass: [0.0; 2],
+        }
+    }
+
+    /// [`Command::SetVoiceRate`]: only Held voices move — a release tail
+    /// is room decay that already left the pipe.
+    fn set_voice_rate(&mut self, handle: u64, rate: f32, glide_ms: f32) {
+        if rate.is_nan() || rate <= 0.0 || !glide_ms.is_finite() {
+            return;
+        }
+        let glide_frames = (glide_ms.max(0.0) * 0.001 * self.sample_rate) as u32;
+        for voice in self.voices.iter_mut() {
+            if let Voice::Sampled(sampled) = voice
+                && sampled.handle == handle
+            {
+                sampled.cursor.rate_target = rate as f64;
+                sampled.cursor.glide_frames = glide_frames;
+                if glide_frames == 0 {
+                    sampled.cursor.rate = rate as f64;
+                    sampled.cursor.kernel = self.sinc.select(sampled.cursor.rate);
+                }
+            }
+        }
+    }
+
+    /// [`Command::KillVoice`]: a short fade, no release tail.
+    fn kill_voice(&mut self, handle: u64) {
+        for voice in self.voices.iter_mut() {
+            if let Voice::Sampled(sampled) = voice
+                && sampled.handle == handle
+                && sampled.phase != SamplePhase::FadeOut
+            {
+                sampled.release.amplitude = 1.0;
+                sampled.release.fade_scale = 1.0;
+                sampled.phase = SamplePhase::FadeOut;
+            }
+        }
+    }
+
+    /// [`Command::SetWaveTremulant`]: Held voices follow the switch so
+    /// their eventual release matches the state at key-off; tails keep
+    /// the state they released under.
+    fn set_wave_tremulant(&mut self, group: u8, engaged: bool) {
+        let bit = 1u32 << u32::from(group).min(31);
+        if engaged {
+            self.wave_trems |= bit;
+        } else {
+            self.wave_trems &= !bit;
+        }
+        for voice in self.voices.iter_mut() {
+            if let Voice::Sampled(sampled) = voice
+                && sampled.wind.group == group
+                && sampled.phase == SamplePhase::Held
+            {
+                sampled.release.wave_trem = engaged;
+            }
+        }
+    }
+
+    /// [`Command::NoteOn`]: the built-in additive test tone.
+    fn note_on(&mut self, key: u8, freq_hz: f32) {
+        if let Some(slot) = self.allocate_slot() {
+            self.voices[slot] = Voice::Tone(ToneVoice {
+                key,
+                phase: 0.0,
+                phase_increment: freq_hz / self.sample_rate,
+                envelope: 0.0,
+                stage: ToneStage::Attack,
+            });
+        }
+    }
+
+    /// [`Command::NoteOff`]: release every test tone on that key.
+    fn note_off(&mut self, key: u8) {
+        for voice in self.voices.iter_mut() {
+            if let Voice::Tone(tone) = voice
+                && tone.key == key
+                && (tone.stage == ToneStage::Attack || tone.stage == ToneStage::Sustain)
+            {
+                tone.stage = ToneStage::Release;
+            }
+        }
+    }
+
+    /// [`Command::AllNotesOff`]: fade out everything sounding.
+    fn all_notes_off(&mut self) {
+        for voice in self.voices.iter_mut() {
+            match voice {
+                Voice::Idle => {}
+                Voice::Tone(tone) => {
+                    if tone.stage != ToneStage::Idle {
+                        tone.stage = ToneStage::Release;
+                    }
+                }
+                Voice::Sampled(sampled) => {
+                    if sampled.phase != SamplePhase::FadeOut {
+                        sampled.release.amplitude = 1.0;
+                        sampled.release.fade_scale = 1.0;
+                        sampled.phase = SamplePhase::FadeOut;
+                    }
                 }
             }
         }
