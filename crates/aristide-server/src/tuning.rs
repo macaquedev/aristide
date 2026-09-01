@@ -195,6 +195,17 @@ impl HomeTuning {
         })
     }
 
+    /// This tuning with its pitch standard moved to `anchor_cents`
+    /// from 440: the home of one set or one rank inside the
+    /// instrument, which shares the instrument's class table but sits
+    /// at its own pitch (a 415 Positif beside a 440 Great).
+    pub fn at_anchor(&self, anchor_cents: f64) -> HomeTuning {
+        HomeTuning {
+            a4_hz: 440.0 * (anchor_cents / 1200.0).exp2(),
+            ..self.clone()
+        }
+    }
+
     /// The a′ shift alone: how far the instrument's pitch standard
     /// sits from 440, cents.
     pub fn anchor_cents(&self) -> f64 {
@@ -262,6 +273,66 @@ impl PipeRetune {
         match self {
             PipeRetune::Original => "original",
             PipeRetune::Exact => "exact",
+        }
+    }
+}
+
+/// What a stop plays when it has no tuning of its own: which scope
+/// above it governs. Division and sample set are two axes that only
+/// meet at the stop, so `Auto` — the default — orders them: the
+/// division's own tuning wins (what a keyboard plays is a performance
+/// fact, and a keyboard silently playing the wrong scale on some stops
+/// is the worse failure), else the set's, else the instrument's. The
+/// named variants pin one scope and skip the others.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Follow {
+    #[default]
+    Auto,
+    Division,
+    Source,
+    Organ,
+}
+
+impl Follow {
+    pub fn parse(name: &str) -> Option<Follow> {
+        Some(match name.trim().to_lowercase().replace(['-', '_', ' '], "").as_str() {
+            "auto" | "automatic" => Follow::Auto,
+            "division" | "manual" => Follow::Division,
+            "source" | "set" | "sampleset" => Follow::Source,
+            "organ" | "instrument" => Follow::Organ,
+            _ => return None,
+        })
+    }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            Follow::Auto => "auto",
+            Follow::Division => "division",
+            Follow::Source => "source",
+            Follow::Organ => "organ",
+        }
+    }
+}
+
+/// The scope whose tuning a voice actually plays under — where
+/// resolution landed, for the console to say so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TuningScope {
+    Organ,
+    Source,
+    Division,
+    Stop,
+    Rank,
+}
+
+impl TuningScope {
+    pub fn name(&self) -> &'static str {
+        match self {
+            TuningScope::Organ => "organ",
+            TuningScope::Source => "source",
+            TuningScope::Division => "division",
+            TuningScope::Stop => "stop",
+            TuningScope::Rank => "rank",
         }
     }
 }

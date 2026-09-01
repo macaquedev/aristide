@@ -162,6 +162,11 @@ pub enum SourceDef {
         path: PathBuf,
         #[serde(default)]
         layout: bool,
+        /// A tuning of this set's own (`[sources.<alias>.tuning]`),
+        /// apart from the instrument's — its stops play it unless
+        /// their division has one of its own or they are pinned.
+        #[serde(default)]
+        tuning: Option<sidecar::TuningOverride>,
     },
 }
 
@@ -177,6 +182,13 @@ impl SourceDef {
         match self {
             SourceDef::Path(_) => false,
             SourceDef::Detailed { layout, .. } => *layout,
+        }
+    }
+
+    pub fn tuning(&self) -> Option<&sidecar::TuningOverride> {
+        match self {
+            SourceDef::Path(_) => None,
+            SourceDef::Detailed { tuning, .. } => tuning.as_ref().filter(|t| !t.is_empty()),
         }
     }
 }
@@ -547,6 +559,13 @@ pub struct Assembled {
     /// Declared manuals that carry a tuning of their own. Parsing the
     /// temperament is the server's business — the format stays a name.
     pub manual_tuning: Vec<ManualTuningDef>,
+    /// Sources that carry a tuning of their own, by alias — same
+    /// contract, names not yet parsed.
+    pub source_tuning: BTreeMap<String, sidecar::TuningOverride>,
+    /// Per assembled rank, indexed like `organ.ranks`: the alias of
+    /// the source it was pulled from — a rank comes from exactly one
+    /// set, which is what lets a set be tuned as a set.
+    pub rank_sources: Vec<String>,
     /// The file's `[console.layout]`, verbatim — cosmetic console-canvas
     /// positions, meaningful only when this definition is the organ's
     /// own file (never merged from a source, unlike everything else
@@ -962,8 +981,21 @@ pub fn assemble(
             pipes: manual.pipes.clone(),
         })
         .collect();
+    let source_tuning = def
+        .sources
+        .iter()
+        .filter_map(|(alias, source)| Some((alias.clone(), source.tuning()?.clone())))
+        .collect();
     let mut organ = assembly.finish(def.name.clone());
     apply_enclosure_defs(&mut organ, &def.enclosure_defs, &mut assembly.warnings);
+    let mut rank_sources = vec![String::new(); organ.ranks.len()];
+    for (&(source, _), &rank) in &assembly.rank_map {
+        if let (Some(slot), Some((alias, _))) =
+            (rank_sources.get_mut(rank.0 as usize), sources.get(source))
+        {
+            *slot = alias.clone();
+        }
+    }
     Ok(Assembled {
         organ,
         sidecar: def.to_sidecar(),
@@ -973,6 +1005,8 @@ pub fn assemble(
         provenance: assembly.provenance,
         pitch_labels: assembly.pitch_labels,
         manual_tuning,
+        source_tuning,
+        rank_sources,
         console_layout: def.console.layout.clone(),
         console_order: def.console.order.clone(),
         console_coupled_keys: def.console.coupled_keys,

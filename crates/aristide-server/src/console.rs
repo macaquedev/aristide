@@ -104,6 +104,28 @@ pub struct Console {
     /// the console's — a 415 Hz meantone Positif against a 440 equal
     /// Great in one instrument.
     manual_tuning: Vec<Option<Tuning>>,
+    /// Sample sets tuned apart from the instrument, by source alias:
+    /// what a set's stops play unless their division has a tuning of
+    /// its own or they are pinned elsewhere (see `Follow`).
+    source_tuning: HashMap<String, Tuning>,
+    /// Per stop: the alias of the source set it came from.
+    stop_source: HashMap<StopId, String>,
+    /// Per stop: what it follows when it has no tuning of its own —
+    /// absent is `Follow::Auto`.
+    stop_follow: HashMap<StopId, crate::tuning::Follow>,
+    /// Stops with a tuning of their own.
+    stop_tuning: HashMap<StopId, Tuning>,
+    /// Ranks tuned apart *within* a stop (a mixture's tierce rank on
+    /// its own): the stop is the unit the player sees, so a rank's
+    /// tuning is keyed by the stop it is heard through.
+    rank_tuning: HashMap<(StopId, RankId), Tuning>,
+    /// Each source set's own recorded pitch (the instrument's class
+    /// table at the set's anchor), stamped into set-scoped tunings so
+    /// "as recorded" at set scope reads the set's own a′.
+    source_home: HashMap<String, std::sync::Arc<crate::tuning::HomeTuning>>,
+    /// Each rank's measured pitch anchor, cents from the 440 ladder —
+    /// the same for rank-scoped tunings.
+    rank_anchor: HashMap<RankId, f64>,
     /// Stops classified as control noises (drawstop thumps etc.) —
     /// hidden from UIs, triggered by the control they belong to.
     noise_stops: Vec<StopId>,
@@ -220,12 +242,15 @@ struct Speaking {
     /// (one or the other, see `Tuning::pipe_offset`).
     home: f64,
     model: f64,
-    /// Where the pitch was priced: sounding manual index + the (post-
-    /// transpose) MIDI key on it. Live retuning re-prices exactly this
-    /// coordinate, so a later transpose change — which reroutes future
-    /// presses — never moves a held pipe.
-    target: usize,
+    /// Where the pitch was priced: the (post-transpose) MIDI key on the
+    /// sounding manual, and the stop and rank it sounded through —
+    /// which decide its tuning (a rank inside a mixture may have its
+    /// own). Live retuning re-prices exactly this coordinate, so a
+    /// later transpose change — which reroutes future presses — never
+    /// moves a held pipe.
     ladder_key: i16,
+    stop: StopId,
+    rank: RankId,
 }
 
 impl Speaking {
@@ -291,6 +316,13 @@ impl Console {
             coupler_links: Vec::new(),
             tuning: Tuning::default(),
             manual_tuning: Vec::new(),
+            source_tuning: HashMap::new(),
+            stop_source: HashMap::new(),
+            stop_follow: HashMap::new(),
+            stop_tuning: HashMap::new(),
+            rank_tuning: HashMap::new(),
+            source_home: HashMap::new(),
+            rank_anchor: HashMap::new(),
             home: None,
             noise_stops: Vec::new(),
             stop_noise: HashMap::new(),
@@ -537,14 +569,263 @@ impl Console {
     /// means exactly that until the player pulls it elsewhere.
     pub fn set_home(&mut self, home: Option<std::sync::Arc<crate::tuning::HomeTuning>>) {
         self.home = home.clone();
-        self.tuning.home = home.clone();
+        self.restamp_homes();
+    }
+
+    /// Each source set's own recorded pitch, by alias, and each rank's
+    /// measured anchor (cents from the 440 ladder) — what set- and
+    /// rank-scoped tunings measure "as recorded" against.
+    pub fn set_scope_homes(
+        &mut self,
+        sources: HashMap<String, std::sync::Arc<crate::tuning::HomeTuning>>,
+        ranks: HashMap<RankId, f64>,
+    ) {
+        self.source_home = sources;
+        self.rank_anchor = ranks;
+        self.restamp_homes();
+    }
+
+    fn restamp_homes(&mut self) {
+        self.tuning.home = self.home.clone();
         for tuning in self.manual_tuning.iter_mut().flatten() {
-            tuning.home = home.clone();
+            tuning.home = self.home.clone();
+        }
+        let sources: Vec<String> = self.source_tuning.keys().cloned().collect();
+        for alias in sources {
+            let home = self.source_home_of(&alias);
+            if let Some(tuning) = self.source_tuning.get_mut(&alias) {
+                tuning.home = home;
+            }
+        }
+        let stops: Vec<StopId> = self.stop_tuning.keys().copied().collect();
+        for stop in stops {
+            let home = self.stop_home_of(stop);
+            if let Some(tuning) = self.stop_tuning.get_mut(&stop) {
+                tuning.home = home;
+            }
+        }
+        let ranks: Vec<(StopId, RankId)> = self.rank_tuning.keys().copied().collect();
+        for at in ranks {
+            let home = self.rank_home_of(at.1);
+            if let Some(tuning) = self.rank_tuning.get_mut(&at) {
+                tuning.home = home;
+            }
         }
     }
 
     pub fn home(&self) -> Option<std::sync::Arc<crate::tuning::HomeTuning>> {
         self.home.clone()
+    }
+
+    /// A set's own recorded pitch, else the instrument's.
+    pub fn source_home_of(&self, alias: &str) -> Option<std::sync::Arc<crate::tuning::HomeTuning>> {
+        self.source_home.get(alias).cloned().or_else(|| self.home.clone())
+    }
+
+    fn stop_home_of(&self, stop: StopId) -> Option<std::sync::Arc<crate::tuning::HomeTuning>> {
+        match self.stop_source.get(&stop) {
+            Some(alias) => self.source_home_of(alias),
+            None => self.home.clone(),
+        }
+    }
+
+    /// A rank's own recorded pitch: the instrument's table at the
+    /// rank's measured anchor.
+    pub fn rank_home_of(&self, rank: RankId) -> Option<std::sync::Arc<crate::tuning::HomeTuning>> {
+        match (self.rank_anchor.get(&rank), &self.home) {
+            (Some(&anchor), Some(home)) => Some(std::sync::Arc::new(home.at_anchor(anchor))),
+            _ => self.home.clone(),
+        }
+    }
+
+    /// Which source set each stop was pulled from, by alias.
+    pub fn set_stop_sources(&mut self, sources: HashMap<StopId, String>) {
+        self.stop_source = sources;
+        self.restamp_homes();
+    }
+
+    pub fn stop_source(&self, stop: StopId) -> Option<&str> {
+        self.stop_source.get(&stop).map(String::as_str)
+    }
+
+    /// Give one sample set a tuning of its own, or with `None` return
+    /// it to the instrument's. Transposition is a keyboard's, so a
+    /// set's tuning never carries one.
+    pub fn set_source_tuning(&mut self, alias: &str, tuning: Option<Tuning>) {
+        match tuning {
+            Some(mut tuning) => {
+                tuning.transpose = 0;
+                tuning.home = self.source_home_of(alias);
+                self.source_tuning.insert(alias.to_string(), tuning);
+            }
+            None => {
+                self.source_tuning.remove(alias);
+            }
+        }
+    }
+
+    pub fn source_tuning(&self, alias: &str) -> Option<Tuning> {
+        self.source_tuning.get(alias).cloned()
+    }
+
+    /// Every set tuned apart, alias-sorted.
+    pub fn source_tunings(&self) -> Vec<(String, Tuning)> {
+        let mut all: Vec<(String, Tuning)> = self
+            .source_tuning
+            .iter()
+            .map(|(alias, tuning)| (alias.clone(), tuning.clone()))
+            .collect();
+        all.sort_by(|a, b| a.0.cmp(&b.0));
+        all
+    }
+
+    /// Pin what a stop follows (dropping any tuning of its own), or
+    /// give it a tuning of its own with `Err(tuning)` — hence the odd
+    /// shape: exactly one of the two is ever true of a stop.
+    pub fn set_stop_follow(&mut self, stop: StopId, follow: crate::tuning::Follow) {
+        self.stop_tuning.remove(&stop);
+        if follow == crate::tuning::Follow::Auto {
+            self.stop_follow.remove(&stop);
+        } else {
+            self.stop_follow.insert(stop, follow);
+        }
+    }
+
+    /// Give one stop a tuning of its own (its pin, if any, goes: a stop
+    /// with its own tuning follows nothing), or with `None` return it
+    /// to following automatically.
+    pub fn set_stop_tuning(&mut self, stop: StopId, tuning: Option<Tuning>) {
+        match tuning {
+            Some(mut tuning) => {
+                tuning.transpose = 0;
+                tuning.home = self.stop_home_of(stop);
+                self.stop_follow.remove(&stop);
+                self.stop_tuning.insert(stop, tuning);
+            }
+            None => {
+                self.stop_tuning.remove(&stop);
+                self.stop_follow.remove(&stop);
+            }
+        }
+    }
+
+    pub fn stop_follow(&self, stop: StopId) -> crate::tuning::Follow {
+        self.stop_follow.get(&stop).copied().unwrap_or_default()
+    }
+
+    pub fn stop_own_tuning(&self, stop: StopId) -> Option<Tuning> {
+        self.stop_tuning.get(&stop).cloned()
+    }
+
+    /// Stops pinned or tuned apart, in stop-id order: `(stop, follow,
+    /// own tuning)`.
+    pub fn stop_tunings(&self) -> Vec<(StopId, crate::tuning::Follow, Option<Tuning>)> {
+        let mut ids: Vec<StopId> = self
+            .stop_follow
+            .keys()
+            .chain(self.stop_tuning.keys())
+            .copied()
+            .collect();
+        ids.sort_by_key(|id| id.0);
+        ids.dedup();
+        ids.into_iter()
+            .map(|stop| (stop, self.stop_follow(stop), self.stop_own_tuning(stop)))
+            .collect()
+    }
+
+    /// Tune one rank apart within a stop, or with `None` return it to
+    /// the stop's tuning.
+    pub fn set_rank_tuning(&mut self, stop: StopId, rank: RankId, tuning: Option<Tuning>) {
+        match tuning {
+            Some(mut tuning) => {
+                tuning.transpose = 0;
+                tuning.home = self.rank_home_of(rank);
+                self.rank_tuning.insert((stop, rank), tuning);
+            }
+            None => {
+                self.rank_tuning.remove(&(stop, rank));
+            }
+        }
+    }
+
+    pub fn rank_tuning(&self, stop: StopId, rank: RankId) -> Option<Tuning> {
+        self.rank_tuning.get(&(stop, rank)).cloned()
+    }
+
+    /// Ranks tuned apart within their stops, sorted by (stop, rank).
+    pub fn rank_tunings(&self) -> Vec<(StopId, RankId, Tuning)> {
+        let mut all: Vec<(StopId, RankId, Tuning)> = self
+            .rank_tuning
+            .iter()
+            .map(|(&(stop, rank), tuning)| (stop, rank, tuning.clone()))
+            .collect();
+        all.sort_by_key(|(stop, rank, _)| (stop.0, rank.0));
+        all
+    }
+
+    /// The distinct ranks a stop sounds, in range order, with their
+    /// names — the units a mixture can be tuned by.
+    pub fn stop_ranks(&self, stop: StopId) -> Vec<(RankId, &str)> {
+        let Some(stop) = self.organ.stops.iter().find(|s| s.id == stop) else {
+            return Vec::new();
+        };
+        let mut seen = Vec::new();
+        for range in &stop.ranks {
+            if seen.iter().any(|(id, _)| *id == range.rank) {
+                continue;
+            }
+            let name = self
+                .organ
+                .rank(range.rank)
+                .map(|rank| rank.name.as_str())
+                .unwrap_or("");
+            seen.push((range.rank, name));
+        }
+        seen
+    }
+
+    /// What a stop plays under, resolved: its own tuning; else what its
+    /// pin names; else (automatically) its division's own, its set's
+    /// own, the instrument's — in that order. The division wins over
+    /// the set because what a keyboard plays is a performance decision
+    /// and a keyboard silently playing the wrong scale on some of its
+    /// stops is the worse failure; the pin is there for the set that
+    /// must not be retuned whatever its keyboard does.
+    pub fn stop_tuning_resolved(&self, stop: StopId) -> (&Tuning, crate::tuning::TuningScope) {
+        use crate::tuning::{Follow, TuningScope};
+        if let Some(own) = self.stop_tuning.get(&stop) {
+            return (own, TuningScope::Stop);
+        }
+        let division = self
+            .organ
+            .stops
+            .iter()
+            .find(|s| s.id == stop)
+            .and_then(|s| self.organ.manuals.iter().position(|m| m.id == s.manual))
+            .and_then(|index| self.manual_tuning.get(index))
+            .and_then(|tuning| tuning.as_ref())
+            .map(|tuning| (tuning, TuningScope::Division));
+        let source = self
+            .stop_source
+            .get(&stop)
+            .and_then(|alias| self.source_tuning.get(alias))
+            .map(|tuning| (tuning, TuningScope::Source));
+        let organ = (&self.tuning, TuningScope::Organ);
+        match self.stop_follow(stop) {
+            Follow::Auto => division.or(source).unwrap_or(organ),
+            Follow::Division => division.unwrap_or(organ),
+            Follow::Source => source.unwrap_or(organ),
+            Follow::Organ => organ,
+        }
+    }
+
+    /// The tuning one voice is priced under: the rank's own within
+    /// this stop, else the stop's resolution.
+    fn voice_tuning(&self, stop: StopId, rank: RankId) -> (&Tuning, crate::tuning::TuningScope) {
+        match self.rank_tuning.get(&(stop, rank)) {
+            Some(own) => (own, crate::tuning::TuningScope::Rank),
+            None => self.stop_tuning_resolved(stop),
+        }
     }
 
     pub fn tuning(&self) -> Tuning {
@@ -741,14 +1022,16 @@ impl Console {
     /// was (note-off still finds it); a pipe several keys share
     /// follows the holder that started it.
     pub fn retune_held(&mut self) -> Vec<(u64, f32)> {
-        let voices: Vec<(PipeKey, usize, i16, f64, f64)> = self
+        let voices: Vec<(PipeKey, i16, f64, f64, StopId, RankId)> = self
             .speaking
             .iter()
-            .map(|(&at, voice)| (at, voice.target, voice.ladder_key, voice.home, voice.model))
+            .map(|(&at, voice)| {
+                (at, voice.ladder_key, voice.home, voice.model, voice.stop, voice.rank)
+            })
             .collect();
         let mut updates = Vec::new();
-        for (at, target, ladder_key, home, model) in voices {
-            let tuning = self.effective_tuning(target);
+        for (at, ladder_key, home, model, stop, rank) in voices {
+            let (tuning, _) = self.voice_tuning(stop, rank);
             let Some(deviation) = tuning.deviation_cents(ladder_key.max(0) as u16) else {
                 continue;
             };
@@ -795,10 +1078,12 @@ impl Console {
         updates
     }
 
-    /// The tuning a division actually plays under: its own, else the
-    /// console's. Couplers make this physical — a coupled copy sounds
-    /// the destination's pipes, and pipes are tuned where they stand,
-    /// so the copy speaks in the destination's temperament.
+    /// The tuning a division plays under as a *keyboard*: its own,
+    /// else the console's — what the transposer reads, and the
+    /// division rung of `stop_tuning_resolved`. Couplers make tuning
+    /// physical — a coupled copy sounds the destination's pipes, and
+    /// pipes are tuned where they stand, so the copy speaks in the
+    /// destination's tuning, resolved stop by stop.
     fn effective_tuning(&self, manual_index: usize) -> &Tuning {
         self.manual_tuning
             .get(manual_index)
@@ -1160,15 +1445,6 @@ impl Console {
             // leaves unmapped sounds nothing here. Temperaments deviate
             // well under a semitone, so for them shift is always 0 and
             // this is exactly the old behaviour.
-            let tuning = self.effective_tuning(target);
-            let Some(deviation) = tuning.deviation_cents(midi_key.max(0) as u16) else {
-                continue;
-            };
-            // A target tuning bends each pipe from where it was
-            // measured to sound (or from the organ's model of it, when
-            // it keeps its drift), not from the nominal the ladder
-            // assumes. `Original` leaves every pipe as it is.
-            let corrects_pipes = tuning.corrects_pipes();
             // Negative below the set's own bottom key: the rank ladder
             // is extrapolated in both directions, so keep the sign.
             let key_index = midi_key - self.organ.manuals[target].first_midi_note as i16;
@@ -1187,13 +1463,6 @@ impl Console {
                 // from doubling the tape speed.
                 let adjust = self.stop_adjust.get(&stop.id).copied();
                 let adjust_cents = adjust.map_or(0.0, |(_, cents)| cents);
-                let priced = deviation + adjust_cents;
-                // As recorded, a key IS its pipe: pulling the organ's
-                // pitch bends that pipe however far, never a
-                // neighbour — only the stop's own footage re-anchors.
-                let anchored_on = if corrects_pipes { priced } else { adjust_cents };
-                let shift = (anchored_on / 100.0).round() as i16;
-                let key_bend_cents = priced - shift as f64 * 100.0;
                 for range in &stop.ranks {
                     // Coverage is judged at the played key — a divided
                     // register is a decision about the keyboard, not
@@ -1201,6 +1470,30 @@ impl Console {
                     if !self.range_covers(range, key_index, target, fill) {
                         continue;
                     }
+                    // The pitch this key wants under the tuning this
+                    // stop — this rank of it — resolves to, as a
+                    // deviation from the recorded 12-EDO ladder. A key
+                    // the tuning's keyboard mapping leaves unmapped
+                    // sounds nothing here.
+                    let (tuning, _) = self.voice_tuning(stop.id, range.rank);
+                    let Some(deviation) = tuning.deviation_cents(midi_key.max(0) as u16)
+                    else {
+                        continue;
+                    };
+                    // A target tuning bends each pipe from where it
+                    // was measured to sound (or from the organ's model
+                    // of it, when it keeps its drift), not from the
+                    // nominal the ladder assumes. `Original` leaves
+                    // every pipe as it is.
+                    let corrects_pipes = tuning.corrects_pipes();
+                    let priced = deviation + adjust_cents;
+                    // As recorded, a key IS its pipe: pulling the
+                    // organ's pitch bends that pipe however far, never
+                    // a neighbour — only the stop's own footage
+                    // re-anchors.
+                    let anchored_on = if corrects_pipes { priced } else { adjust_cents };
+                    let shift = (anchored_on / 100.0).round() as i16;
+                    let key_bend_cents = priced - shift as f64 * 100.0;
                     let Some((pipe, nominal, ratio)) =
                         self.pipe_for(range, key_index + shift, fill)
                     else {
@@ -1480,8 +1773,9 @@ impl Console {
                         bend: 0.0,
                         home: voice.home,
                         model: voice.model,
-                        target: voice.target,
                         ladder_key: voice.ladder_key,
+                        stop: voice.stop,
+                        rank: voice.rank,
                     },
                 );
                 if let Some(previous) = self.last_pipe_voice.insert(at, handle) {
@@ -3594,6 +3888,125 @@ mod tests {
         // Back on the shared tuning, the Great answers again.
         console.set_manual_tuning(0, None);
         assert_eq!(console.note_on_manual(0, 96, 127).0.len(), 1);
+    }
+
+    fn temperament_tuning(temperament: crate::tuning::Temperament) -> crate::tuning::Tuning {
+        crate::tuning::Tuning {
+            temperament,
+            ..crate::tuning::Tuning::default()
+        }
+    }
+
+    /// The rate the Great's stop speaks middle C at, then released.
+    fn great_c_rate(console: &mut Console) -> f32 {
+        let (starts, _) = console.note_on_manual(0, 60, 127);
+        assert_eq!(starts.len(), 1, "one voice");
+        let rate = starts[0].spec.rate;
+        console.note_off_manual(0, 60);
+        rate
+    }
+
+    /// A stop plays its own tuning; else what its pin names; else its
+    /// division's own, its set's own, the instrument's — in that order.
+    #[test]
+    fn a_stop_resolves_division_over_set_over_instrument() {
+        use crate::tuning::{Follow, Temperament, TuningScope};
+        let mut console = coupled_console();
+        console.set_stop_sources(HashMap::from([(StopId(1), "positif".to_string())]));
+        let meantone_c = (10.265f32 / 1200.0).exp2();
+        let pythagorean_c = (-5.865f32 / 1200.0).exp2();
+        let werckmeister_c = (11.730f32 / 1200.0).exp2();
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-4;
+
+        console.set_tuning(temperament_tuning(Temperament::Equal));
+        assert!(near(great_c_rate(&mut console), 1.0));
+        assert_eq!(console.stop_tuning_resolved(StopId(1)).1, TuningScope::Organ);
+
+        // The set tuned apart: its stop follows it…
+        console.set_source_tuning("positif", Some(temperament_tuning(Temperament::Meantone4)));
+        assert!(near(great_c_rate(&mut console), meantone_c), "follows the set");
+        assert_eq!(console.stop_tuning_resolved(StopId(1)).1, TuningScope::Source);
+        // …and a stop from another set does not.
+        assert_eq!(console.stop_tuning_resolved(StopId(2)).1, TuningScope::Organ);
+
+        // The division tuned apart wins over the set.
+        console.set_manual_tuning(0, Some(temperament_tuning(Temperament::Pythagorean)));
+        assert!(near(great_c_rate(&mut console), pythagorean_c), "the division wins");
+        assert_eq!(console.stop_tuning_resolved(StopId(1)).1, TuningScope::Division);
+
+        // Pinned, the stop skips whatever the pin doesn't name.
+        console.set_stop_follow(StopId(1), Follow::Source);
+        assert!(near(great_c_rate(&mut console), meantone_c), "pinned to the set");
+        console.set_stop_follow(StopId(1), Follow::Organ);
+        assert!(near(great_c_rate(&mut console), 1.0), "pinned to the instrument");
+        // A pin naming a scope with no tuning of its own falls through
+        // to the instrument, never to the other axis.
+        console.set_manual_tuning(0, None);
+        console.set_stop_follow(StopId(1), Follow::Division);
+        assert!(near(great_c_rate(&mut console), 1.0), "an untuned division is the instrument");
+        assert_eq!(console.stop_tuning_resolved(StopId(1)).1, TuningScope::Organ);
+
+        // A tuning of its own beats everything and drops the pin.
+        console.set_stop_tuning(StopId(1), Some(temperament_tuning(Temperament::Werckmeister3)));
+        assert!(near(great_c_rate(&mut console), werckmeister_c));
+        assert_eq!(console.stop_tuning_resolved(StopId(1)).1, TuningScope::Stop);
+        assert_eq!(console.stop_follow(StopId(1)), Follow::Auto);
+        assert_eq!(console.stop_tunings().len(), 1);
+        // Back to automatic: the set again.
+        console.set_stop_tuning(StopId(1), None);
+        assert!(near(great_c_rate(&mut console), meantone_c));
+        assert!(console.stop_tunings().is_empty());
+    }
+
+    /// A mixture: one stop sounding two ranks at once. Tuning one rank
+    /// apart moves that rank only, only when heard through that stop,
+    /// and live retuning follows the same seam.
+    #[test]
+    fn a_rank_tunes_apart_within_its_stop() {
+        use crate::tuning::Temperament;
+        let mut console = coupled_console();
+        // Turn stop 1 into a two-rank mixture on the Great: rank 1 and
+        // rank 2 under every key; stop 2 (the Swell's) keeps rank 2.
+        console.organ.stops[0].ranks.push(RankRange {
+            rank: RankId(2),
+            first_key: 0,
+            key_count: 61,
+            first_pipe: 0,
+        });
+        console.set_tuning(temperament_tuning(Temperament::Equal));
+        console.set_rank_tuning(StopId(1), RankId(2), Some(temperament_tuning(Temperament::Meantone4)));
+        let meantone_c = (10.265f32 / 1200.0).exp2();
+
+        let (starts, _) = console.note_on_manual(0, 60, 127);
+        assert_eq!(starts.len(), 2, "both ranks speak");
+        let rate_of = |sample: u32| {
+            starts
+                .iter()
+                .find(|s| s.spec.sample == sample)
+                .map(|s| s.spec.rate)
+                .expect("rank speaks")
+        };
+        assert!((rate_of(0) - 1.0).abs() < 1e-6, "rank 1 stays equal");
+        assert!((rate_of(1) - meantone_c).abs() < 1e-4, "rank 2 plays meantone");
+
+        // Held, retuning the rank moves exactly its voice.
+        console.set_rank_tuning(StopId(1), RankId(2), Some(temperament_tuning(Temperament::Pythagorean)));
+        let moved = console.retune_held();
+        assert_eq!(moved.len(), 1, "one voice drifts: {moved:?}");
+        let pythagorean_c = (-5.865f32 / 1200.0).exp2();
+        assert!((moved[0].1 - pythagorean_c).abs() < 1e-4, "to Pythagorean: {moved:?}");
+        console.note_off_manual(0, 60);
+
+        // Heard through the Swell's stop, rank 2 is untouched.
+        let (starts, _) = console.note_on_manual(1, 60, 127);
+        assert_eq!(starts.len(), 1);
+        assert!((starts[0].spec.rate - 1.0).abs() < 1e-6, "another stop's rank 2 is the instrument's");
+        console.note_off_manual(1, 60);
+
+        assert_eq!(console.stop_ranks(StopId(1)), vec![(RankId(1), "rank 1"), (RankId(2), "rank 2")]);
+        assert_eq!(console.rank_tunings().len(), 1);
+        console.set_rank_tuning(StopId(1), RankId(2), None);
+        assert!(console.rank_tunings().is_empty());
     }
 
     /// A Scala scale re-anchors keys to the nearest recorded pipe: a

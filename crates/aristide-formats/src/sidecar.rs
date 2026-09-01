@@ -667,6 +667,92 @@ pub struct TuningConfig {
     /// `exact` lands each pipe on the target from its measured pitch.
     #[serde(default = "default_pipes")]
     pub pipes: String,
+    /// Stops (and ranks within stops) tuned apart from what they would
+    /// otherwise follow — `[[tuning.stop]]` rows.
+    #[serde(default, rename = "stop", skip_serializing_if = "Vec::is_empty")]
+    pub stops: Vec<StopTuningDef>,
+}
+
+/// A tuning of one scope's own — a sample set's (`[sources.<alias>.tuning]`),
+/// a stop's or one rank of a stop's (`[[tuning.stop]]`) — as bare field
+/// overrides on top of whatever that scope would otherwise play: every
+/// `None` means "as resolved from above". No transpose: transposition
+/// is a keyboard's, not a set's or a stop's (a stop shifts pitch by its
+/// footage, see `[[voicing.adjust]]`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TuningOverride {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperament: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edo: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_key: Option<KeySpec>,
+    #[serde(default, alias = "a4_hz", skip_serializing_if = "Option::is_none")]
+    pub reference_hz: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keymap: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pipes: Option<String>,
+}
+
+impl TuningOverride {
+    pub fn is_empty(&self) -> bool {
+        *self == TuningOverride::default()
+    }
+}
+
+/// One `[[tuning.stop]]` row: a stop tuned apart from what it would
+/// follow, or one rank inside a stop (a mixture's tierce, say) tuned
+/// apart from the stop. `follow` names what a stop plays instead of
+/// resolving automatically — `division`, `source`, `organ` — and is
+/// exclusive with the tuning fields, which make the row a tuning of
+/// the stop's own; a rank row only ever carries its own tuning.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StopTuningDef {
+    /// The stop's console name, exactly (case-insensitive).
+    pub stop: String,
+    /// Its manual's console name — two divisions routinely both have
+    /// a "Bourdon 8", and a row must be able to mean exactly one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manual: Option<String>,
+    /// A rank within the stop, by the rank's name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rank: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperament: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edo: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_key: Option<KeySpec>,
+    #[serde(default, alias = "a4_hz", skip_serializing_if = "Option::is_none")]
+    pub reference_hz: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keymap: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pipes: Option<String>,
+}
+
+impl StopTuningDef {
+    /// The row's tuning fields, as the override they are.
+    pub fn tuning(&self) -> TuningOverride {
+        TuningOverride {
+            temperament: self.temperament.clone(),
+            edo: self.edo,
+            reference_key: self.reference_key.clone(),
+            reference_hz: self.reference_hz,
+            scale: self.scale.clone(),
+            keymap: self.keymap.clone(),
+            pipes: self.pipes.clone(),
+        }
+    }
 }
 
 fn default_pipes() -> String {
@@ -696,6 +782,7 @@ impl Default for TuningConfig {
             scale: None,
             keymap: None,
             pipes: default_pipes(),
+            stops: Vec::new(),
         }
     }
 }
