@@ -694,6 +694,10 @@ struct Assembly<'a> {
 /// after parsing and source loading; the server also calls it directly
 /// to make a multi-set launch an implicit composite (a [`Definition`]
 /// with sources and no pulls — everything, as the sources define it).
+/// Assemble a composite from already-loaded sources. `load` is this
+/// after parsing and source loading; the server also calls it directly
+/// to make a multi-set launch an implicit composite (a [`Definition`]
+/// with sources and no pulls — everything, as the sources define it).
 pub fn assemble(
     def: &Definition,
     sources: &[(String, Organ)],
@@ -720,6 +724,43 @@ pub fn assemble(
         tremulant_map: HashMap::new(),
         warnings,
     };
+    create_manuals(&mut assembly, def)?;
+    if !def.declares() {
+        pull_implicit_sources(&mut assembly, sources)?;
+    } else {
+        register_layout_sources(&mut assembly, def, sources);
+        pull_declared_divisions(&mut assembly, def, sources)?;
+        pull_declared_stops(&mut assembly, def, sources)?;
+    }
+    apply_moves(&mut assembly, def);
+
+    let manual_tuning = manual_tuning_defs(def);
+    let source_tuning = source_tuning_defs(def);
+    let (organ, rank_sources) = finish_assembly(&mut assembly, def);
+
+    Ok(Assembled {
+        organ,
+        sidecar: def.to_sidecar(),
+        midi: def.midi.clone(),
+        stop_map: assembly.stop_map,
+        division_pulls: assembly.division_pulls,
+        provenance: assembly.provenance,
+        pitch_labels: assembly.pitch_labels,
+        manual_tuning,
+        source_tuning,
+        rank_sources,
+        console_layout: def.console.layout.clone(),
+        console_order: def.console.order.clone(),
+        console_coupled_keys: def.console.coupled_keys,
+        console_coupler_keys: def.console.coupler_keys.clone(),
+        adopted: def.adopted,
+        warnings: assembly.warnings,
+    })
+}
+
+/// Every file-declared `[[manual]]`, created out of thin air before any
+/// pull touches them.
+fn create_manuals(assembly: &mut Assembly, def: &Definition) -> Result<(), InstrumentError> {
     for manual in &def.manuals {
         let compass = declared_compass(manual)?;
         let kind = match manual.kind.as_deref() {
@@ -735,188 +776,216 @@ pub fn assemble(
         };
         assembly.create_manual(manual.name.clone(), compass, kind, manual.hex.clone());
     }
-    if !def.declares() {
-        // Nothing declared: every source contributes everything —
-        // wrapping a set as an organ is just naming it as a source. Wind and
-        // boxes register up front in the source's own order, so a
-        // wrapped set keeps its numbering exactly (its sidecar's
-        // `[tremulant] chests` still mean the same chests); selective
-        // pulls instead carry only what their pipes touch.
-        for (source_idx, (_, organ)) in sources.iter().enumerate() {
-            for enclosure in 0..organ.enclosures.len() as u32 {
-                assembly.enclosure_index(source_idx, enclosure);
-            }
-            for tremulant in 0..organ.tremulants.len() as u32 {
-                assembly.tremulant_index(source_idx, tremulant);
-            }
-            let mut numbers: Vec<u32> = organ.windchests.iter().map(|c| c.number).collect();
-            numbers.sort_unstable();
-            for number in numbers {
-                assembly.chest_number(source_idx, number);
-            }
-            let none = DivisionOverrides {
-                rename: &BTreeMap::new(),
-                pitch_label: &BTreeMap::new(),
-                own_pipes: &BTreeMap::new(),
-            };
-            for manual_idx in 0..organ.manuals.len() {
-                assembly.pull_division(source_idx, manual_idx, None, &[], &none)?;
-            }
+    Ok(())
+}
+
+/// Nothing declared: every source contributes everything — wrapping a
+/// set as an organ is just naming it as a source. Wind and boxes
+/// register up front in the source's own order, so a wrapped set keeps
+/// its numbering exactly (its sidecar's `[tremulant] chests` still mean
+/// the same chests); selective pulls instead carry only what their
+/// pipes touch.
+fn pull_implicit_sources(
+    assembly: &mut Assembly,
+    sources: &[(String, Organ)],
+) -> Result<(), InstrumentError> {
+    for (source_idx, (_, organ)) in sources.iter().enumerate() {
+        for enclosure in 0..organ.enclosures.len() as u32 {
+            assembly.enclosure_index(source_idx, enclosure);
         }
-    } else {
-        // Layout sources first: their chests and boxes register whole,
-        // in the source's own order, before any pull touches them —
-        // the same up-front pass the implicit branch does, so numbering
-        // survives selective pulls.
-        for (alias, source) in &def.sources {
-            if !source.layout() {
-                continue;
-            }
-            let Ok(source_idx) = assembly.source(alias) else {
-                continue; // not loaded (unreadable earlier, already reported)
-            };
-            let organ = &sources[source_idx].1;
-            for enclosure in 0..organ.enclosures.len() as u32 {
-                assembly.enclosure_index(source_idx, enclosure);
-            }
-            for tremulant in 0..organ.tremulants.len() as u32 {
-                assembly.tremulant_index(source_idx, tremulant);
-            }
-            let mut numbers: Vec<u32> = organ.windchests.iter().map(|c| c.number).collect();
-            numbers.sort_unstable();
-            for number in numbers {
-                assembly.chest_number(source_idx, number);
-            }
+        for tremulant in 0..organ.tremulants.len() as u32 {
+            assembly.tremulant_index(source_idx, tremulant);
         }
-        for pull in &def.divisions {
-            let source_idx = assembly.source(&pull.from)?;
-            let organ = &sources[source_idx].1;
-            let names: Vec<&str> = organ.manuals.iter().map(|m| m.name.as_str()).collect();
-            let matches = sidecar::match_names(&names, &pull.manual);
-            if matches.is_empty() {
+        let mut numbers: Vec<u32> = organ.windchests.iter().map(|c| c.number).collect();
+        numbers.sort_unstable();
+        for number in numbers {
+            assembly.chest_number(source_idx, number);
+        }
+        let none = DivisionOverrides {
+            rename: &BTreeMap::new(),
+            pitch_label: &BTreeMap::new(),
+            own_pipes: &BTreeMap::new(),
+        };
+        for manual_idx in 0..organ.manuals.len() {
+            assembly.pull_division(source_idx, manual_idx, None, &[], &none)?;
+        }
+    }
+    Ok(())
+}
+
+/// Layout sources first: their chests and boxes register whole, in the
+/// source's own order, before any pull touches them — the same
+/// up-front pass the implicit branch does, so numbering survives
+/// selective pulls.
+fn register_layout_sources(assembly: &mut Assembly, def: &Definition, sources: &[(String, Organ)]) {
+    for (alias, source) in &def.sources {
+        if !source.layout() {
+            continue;
+        }
+        let Ok(source_idx) = assembly.source(alias) else {
+            continue; // not loaded (unreadable earlier, already reported)
+        };
+        let organ = &sources[source_idx].1;
+        for enclosure in 0..organ.enclosures.len() as u32 {
+            assembly.enclosure_index(source_idx, enclosure);
+        }
+        for tremulant in 0..organ.tremulants.len() as u32 {
+            assembly.tremulant_index(source_idx, tremulant);
+        }
+        let mut numbers: Vec<u32> = organ.windchests.iter().map(|c| c.number).collect();
+        numbers.sort_unstable();
+        for number in numbers {
+            assembly.chest_number(source_idx, number);
+        }
+    }
+}
+
+/// Every `[[division]]` pull, in file order.
+fn pull_declared_divisions(
+    assembly: &mut Assembly,
+    def: &Definition,
+    sources: &[(String, Organ)],
+) -> Result<(), InstrumentError> {
+    for pull in &def.divisions {
+        let source_idx = assembly.source(&pull.from)?;
+        let organ = &sources[source_idx].1;
+        let names: Vec<&str> = organ.manuals.iter().map(|m| m.name.as_str()).collect();
+        let matches = sidecar::match_names(&names, &pull.manual);
+        if matches.is_empty() {
+            assembly.warnings.push(format!(
+                "division {:?}: {:?} has no such manual — skipped",
+                pull.manual, pull.from
+            ));
+        }
+        for manual_idx in matches {
+            // Same healing as [[move]] and [[stop]] below: an `on`
+            // naming a manual this organ no longer declares (a
+            // console gesture that raced a rename's rebuild, a
+            // manual since removed) skips with a warning — it must
+            // never brick the organ file.
+            if let Err(err) = assembly.pull_division(
+                source_idx,
+                manual_idx,
+                pull.on.as_deref(),
+                &pull.except,
+                &DivisionOverrides {
+                    rename: &pull.rename,
+                    pitch_label: &pull.pitch_label,
+                    own_pipes: &pull.own_pipes,
+                },
+            ) {
                 assembly.warnings.push(format!(
-                    "division {:?}: {:?} has no such manual — skipped",
+                    "division {:?} from {:?}: {err} — skipped",
                     pull.manual, pull.from
                 ));
             }
-            for manual_idx in matches {
-                // Same healing as [[move]] and [[stop]] below: an `on`
-                // naming a manual this organ no longer declares (a
-                // console gesture that raced a rename's rebuild, a
-                // manual since removed) skips with a warning — it must
-                // never brick the organ file.
-                if let Err(err) = assembly.pull_division(
-                    source_idx,
-                    manual_idx,
-                    pull.on.as_deref(),
-                    &pull.except,
-                    &DivisionOverrides {
-                        rename: &pull.rename,
-                        pitch_label: &pull.pitch_label,
-                        own_pipes: &pull.own_pipes,
-                    },
-                ) {
-                    assembly.warnings.push(format!(
-                        "division {:?} from {:?}: {err} — skipped",
-                        pull.manual, pull.from
-                    ));
-                }
-            }
-        }
-        for pull in &def.stops {
-            let source_idx = assembly.source(&pull.from)?;
-            let organ = &sources[source_idx].1;
-            // A `manual` filter narrows the candidates to one source
-            // division's stops before the name pattern runs.
-            let candidates: Vec<usize> = match &pull.manual {
-                Some(pattern) => {
-                    let manual_names: Vec<&str> =
-                        organ.manuals.iter().map(|m| m.name.as_str()).collect();
-                    let manuals: HashSet<ManualId> =
-                        sidecar::match_names(&manual_names, pattern)
-                            .into_iter()
-                            .map(|index| organ.manuals[index].id)
-                            .collect();
-                    if manuals.is_empty() {
-                        assembly.warnings.push(format!(
-                            "stop {:?}: {:?} has no manual {pattern:?} — skipped",
-                            pull.stop, pull.from
-                        ));
-                        continue;
-                    }
-                    organ
-                        .stops
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, stop)| manuals.contains(&stop.manual))
-                        .map(|(index, _)| index)
-                        .collect()
-                }
-                None => (0..organ.stops.len()).collect(),
-            };
-            let names: Vec<&str> = candidates
-                .iter()
-                .map(|&index| organ.stops[index].name.as_str())
-                .collect();
-            let matches: Vec<usize> = sidecar::match_names(&names, &pull.stop)
-                .into_iter()
-                .map(|at| candidates[at])
-                .collect();
-            if matches.is_empty() {
-                assembly.warnings.push(format!(
-                    "stop {:?}: {:?} has no such stop — skipped",
-                    pull.stop, pull.from
-                ));
-                continue;
-            }
-            let rename = match (matches.len(), &pull.rename) {
-                (1, rename) => rename.clone(),
-                (_, Some(rename)) => {
-                    assembly.warnings.push(format!(
-                        "stop {:?} matched {} stops — rename {rename:?} not applied",
-                        pull.stop,
-                        matches.len()
-                    ));
-                    None
-                }
-                _ => None,
-            };
-            let pitch_label = match (matches.len(), &pull.pitch_label) {
-                (1, label) => label.clone(),
-                _ => None,
-            };
-            // An `on` naming a manual this organ no longer declares is
-            // dropped with a warning, not a load failure — the same
-            // healing [[move]] got when a raced rename bricked a file
-            // in the field (2026-08-21); a [[stop]] line proved able to
-            // do the very same thing.
-            let target = match assembly.find_manual(&pull.on) {
-                Ok(target) => target,
-                Err(err) => {
-                    assembly
-                        .warnings
-                        .push(format!("stop {:?}: {err} — skipped", pull.stop));
-                    continue;
-                }
-            };
-            for stop_idx in matches {
-                assembly.place_stop(
-                    source_idx,
-                    stop_idx,
-                    target,
-                    StopOverrides {
-                        rename: rename.clone(),
-                        pitch_label: pitch_label.clone(),
-                        own_pipes: pull.own_pipes,
-                    },
-                    false,
-                );
-            }
         }
     }
-    // Moves come last: whatever the pulls assembled, a [[move]] entry
-    // relocates by name — ranges stay pitch-anchored until `finish`,
-    // so re-anchoring onto the new manual is automatic.
+    Ok(())
+}
+
+/// Every `[[stop]]` pull, in file order.
+fn pull_declared_stops(
+    assembly: &mut Assembly,
+    def: &Definition,
+    sources: &[(String, Organ)],
+) -> Result<(), InstrumentError> {
+    for pull in &def.stops {
+        let source_idx = assembly.source(&pull.from)?;
+        let organ = &sources[source_idx].1;
+        // A `manual` filter narrows the candidates to one source
+        // division's stops before the name pattern runs.
+        let candidates: Vec<usize> = match &pull.manual {
+            Some(pattern) => {
+                let manual_names: Vec<&str> =
+                    organ.manuals.iter().map(|m| m.name.as_str()).collect();
+                let manuals: HashSet<ManualId> = sidecar::match_names(&manual_names, pattern)
+                    .into_iter()
+                    .map(|index| organ.manuals[index].id)
+                    .collect();
+                if manuals.is_empty() {
+                    assembly.warnings.push(format!(
+                        "stop {:?}: {:?} has no manual {pattern:?} — skipped",
+                        pull.stop, pull.from
+                    ));
+                    continue;
+                }
+                organ
+                    .stops
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, stop)| manuals.contains(&stop.manual))
+                    .map(|(index, _)| index)
+                    .collect()
+            }
+            None => (0..organ.stops.len()).collect(),
+        };
+        let names: Vec<&str> = candidates
+            .iter()
+            .map(|&index| organ.stops[index].name.as_str())
+            .collect();
+        let matches: Vec<usize> = sidecar::match_names(&names, &pull.stop)
+            .into_iter()
+            .map(|at| candidates[at])
+            .collect();
+        if matches.is_empty() {
+            assembly.warnings.push(format!(
+                "stop {:?}: {:?} has no such stop — skipped",
+                pull.stop, pull.from
+            ));
+            continue;
+        }
+        let rename = match (matches.len(), &pull.rename) {
+            (1, rename) => rename.clone(),
+            (_, Some(rename)) => {
+                assembly.warnings.push(format!(
+                    "stop {:?} matched {} stops — rename {rename:?} not applied",
+                    pull.stop,
+                    matches.len()
+                ));
+                None
+            }
+            _ => None,
+        };
+        let pitch_label = match (matches.len(), &pull.pitch_label) {
+            (1, label) => label.clone(),
+            _ => None,
+        };
+        // An `on` naming a manual this organ no longer declares is
+        // dropped with a warning, not a load failure — the same
+        // healing [[move]] got when a raced rename bricked a file
+        // in the field (2026-08-21); a [[stop]] line proved able to
+        // do the very same thing.
+        let target = match assembly.find_manual(&pull.on) {
+            Ok(target) => target,
+            Err(err) => {
+                assembly
+                    .warnings
+                    .push(format!("stop {:?}: {err} — skipped", pull.stop));
+                continue;
+            }
+        };
+        for stop_idx in matches {
+            assembly.place_stop(
+                source_idx,
+                stop_idx,
+                target,
+                StopOverrides {
+                    rename: rename.clone(),
+                    pitch_label: pitch_label.clone(),
+                    own_pipes: pull.own_pipes,
+                },
+                false,
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Moves come last: whatever the pulls assembled, a [[move]] entry
+/// relocates by name — ranges stay pitch-anchored until `finish`, so
+/// re-anchoring onto the new manual is automatic.
+fn apply_moves(assembly: &mut Assembly, def: &Definition) {
     for wanted in &def.moves {
         // A move that no longer resolves is dropped with a warning, not
         // a load failure — same treatment as its stop going missing
@@ -956,8 +1025,12 @@ pub fn assemble(
             assembly.placed[on_from[at]].manual = to;
         }
     }
-    let manual_tuning = def
-        .manuals
+}
+
+/// Declared manuals that carry a tuning of their own, in the format
+/// the server parses.
+fn manual_tuning_defs(def: &Definition) -> Vec<ManualTuningDef> {
+    def.manuals
         .iter()
         .enumerate()
         .filter(|(_, manual)| {
@@ -980,40 +1053,31 @@ pub fn assemble(
             keymap: manual.keymap.clone(),
             pipes: manual.pipes.clone(),
         })
-        .collect();
-    let source_tuning = def
-        .sources
+        .collect()
+}
+
+/// Sources that carry a tuning of their own, by alias.
+fn source_tuning_defs(def: &Definition) -> BTreeMap<String, sidecar::TuningOverride> {
+    def.sources
         .iter()
         .filter_map(|(alias, source)| Some((alias.clone(), source.tuning()?.clone())))
-        .collect();
+        .collect()
+}
+
+/// Settle the assembly into an [`Organ`] and work out which source
+/// alias each assembled rank came from.
+fn finish_assembly(assembly: &mut Assembly, def: &Definition) -> (Organ, Vec<String>) {
     let mut organ = assembly.finish(def.name.clone());
     apply_enclosure_defs(&mut organ, &def.enclosure_defs, &mut assembly.warnings);
     let mut rank_sources = vec![String::new(); organ.ranks.len()];
     for (&(source, _), &rank) in &assembly.rank_map {
         if let (Some(slot), Some((alias, _))) =
-            (rank_sources.get_mut(rank.0 as usize), sources.get(source))
+            (rank_sources.get_mut(rank.0 as usize), assembly.sources.get(source))
         {
             *slot = alias.clone();
         }
     }
-    Ok(Assembled {
-        organ,
-        sidecar: def.to_sidecar(),
-        midi: def.midi.clone(),
-        stop_map: assembly.stop_map,
-        division_pulls: assembly.division_pulls,
-        provenance: assembly.provenance,
-        pitch_labels: assembly.pitch_labels,
-        manual_tuning,
-        source_tuning,
-        rank_sources,
-        console_layout: def.console.layout.clone(),
-        console_order: def.console.order.clone(),
-        console_coupled_keys: def.console.coupled_keys,
-        console_coupler_keys: def.console.coupler_keys.clone(),
-        adopted: def.adopted,
-        warnings: assembly.warnings,
-    })
+    (organ, rank_sources)
 }
 
 /// How closed a defined box can get, as GO expresses it: a linear
