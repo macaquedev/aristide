@@ -19,7 +19,7 @@ export function applyHarnessHooks({ prefs, editor }) {
   // The organ-scoped settings popovers, opened as their menu items
   // would open them.
   if (params.has("organTuning")) {
-    setTimeout(() => editor.openTuningForm("organ", 120, 40), 400);
+    setTimeout(() => editor.openTuningForm({ kind: "organ" }, 120, 40), 400);
   }
   if (params.has("roomForm")) {
     setTimeout(() => editor.openRoomForm(120, 40), 400);
@@ -268,6 +268,49 @@ export function applyHarnessHooks({ prefs, editor }) {
           document.getElementById("editor-stop-src-change")?.click();
         }, 200);
       }
+    }, 400);
+  }
+
+  // A stop's own tuning popover, opened as its editor's "Tuning" row's
+  // Edit… button would open it — a stop id or name, the same lookup
+  // stopForm uses.
+  const stopTuningParam = params.get("stopTuning");
+  if (stopTuningParam != null) {
+    setTimeout(() => {
+      editor.unlock();
+      const knob = findStopKnob(stopTuningParam);
+      if (!knob) return;
+      const id = Number(knob.dataset.key.slice("stop-".length));
+      const rect = knob.getBoundingClientRect();
+      editor.openTuningForm({ kind: "stop", id }, rect.left, rect.bottom + 6);
+    }, 400);
+  }
+
+  // One rank of a stop's tuning popover — the first rank the stop
+  // actually carries, since a screenshot script only needs a real one
+  // to show the {kind:"rank"} scope, not a particular one.
+  const rankTuningParam = params.get("rankTuning");
+  if (rankTuningParam != null) {
+    setTimeout(() => {
+      editor.unlock();
+      const knob = findStopKnob(rankTuningParam);
+      if (!knob) return;
+      const id = Number(knob.dataset.key.slice("stop-".length));
+      const stop = editor.lastSnapshot?.stops.find((s) => s.id === id);
+      const rank = stop?.ranks?.[0];
+      if (!rank) return;
+      const rect = knob.getBoundingClientRect();
+      editor.openTuningForm({ kind: "rank", stop: id, rank: rank.id }, rect.left, rect.bottom + 6);
+    }, 400);
+  }
+
+  // A sample set's own tuning popover, by its offerings alias — the
+  // Library drawer chip's own target.
+  const sourceTuningParam = params.get("sourceTuning");
+  if (sourceTuningParam != null) {
+    setTimeout(() => {
+      editor.unlock();
+      editor.openTuningForm({ kind: "source", alias: sourceTuningParam }, 120, 40);
     }, 400);
   }
 

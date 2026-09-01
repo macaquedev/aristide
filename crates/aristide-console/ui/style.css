@@ -1028,6 +1028,22 @@ input[type="range"]:hover::-webkit-slider-thumb { filter: brightness(1.15); }
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* the set's own tuning, or "follows instrument" — a small mono chip
+   at the row's end, clicking through to the source's own tuning
+   popover (the stop/division chips' own idiom, .tuning-open-link) */
+.organ-offerings-tuning {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  padding: 1px 6px;
+  border: 1px solid #000000a0;
+  border-radius: 3px;
+  background: #ffffff08;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 9.5px;
+  cursor: pointer;
+}
+.organ-offerings-tuning:hover { color: var(--text); border-color: var(--accent); }
 
 .organ-offerings-body { padding: 0 12px 10px 22px; display: flex; flex-direction: column; gap: 10px; }
 .organ-offerings-error { margin: 0 12px 10px 22px; font-size: 11.5px; color: var(--danger); }
@@ -1124,8 +1140,10 @@ input[type="range"]:hover::-webkit-slider-thumb { filter: brightness(1.15); }
 .editor-add-form-actions { display: flex; justify-content: flex-end; gap: 8px; }
 
 /* wider than the other add-forms — a temperament label and its select
-   need more room than a bare name field does */
-#editor-tuning-form { width: 270px; }
+   need more room than a bare name field does; the stop scope's Follows
+   select carries the widest text of all (its Automatic option names
+   what auto currently resolves to) */
+#editor-tuning-form { width: 292px; }
 
 .editor-tuning-head {
   display: flex;
@@ -1152,7 +1170,7 @@ input[type="range"]:hover::-webkit-slider-thumb { filter: brightness(1.15); }
 /* the scale/keymap browser reuses the add-source browse chrome but at
    the tuning form's own width, so swapping it in doesn't resize the
    popover */
-#editor-tuning-browse { width: 270px; }
+#editor-tuning-browse { width: 292px; }
 
 /* a scale's name (or a keymap's), and the controls beside it, right-
    aligned against the row's label like the temperament/reference/
@@ -1197,6 +1215,56 @@ input[type="range"]:hover::-webkit-slider-thumb { filter: brightness(1.15); }
    picking one still works (and leaves the scale), so this only dims
    rather than disabling */
 .tuning-dimmed { opacity: 0.55; }
+
+/* a row showing someone else's tuning rather than its own — the value
+   reads (it's what's actually playing) but nothing here is live, so
+   the row neither invites nor responds to a click */
+.tuning-following { opacity: 0.45; pointer-events: none; }
+
+/* the "Plays X's tuning…" / "open →" line: styled into the dim prose
+   of .editor-tuning-home rather than as a button of its own */
+.tuning-open-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+}
+.tuning-open-link:hover { text-decoration: underline; }
+
+/* the stop editor's per-rank tuning rows — a mixture's ranks read as a
+   compact indented list under the stop's own Tuning row */
+.stop-ranks {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: -3px 0 0 10px;
+  padding-left: 8px;
+  border-left: 1px solid #ffffff14;
+}
+.stop-rank-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 10.5px;
+}
+.stop-rank-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-dim);
+}
+.stop-rank-status {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+  color: var(--text-dim);
+}
+.stop-rank-row .ghost { flex: 0 0 auto; padding: 2px 6px; font-size: 9px; }
 
 /* the stop-editor popover: wide enough for the pitch row's footage and
    cents fields side by side without wrapping */
@@ -2016,6 +2084,7 @@ body.editing .division-add { display: block; }
 
 /* a stop is a flat toggle tile */
 .knob {
+  position: relative; /* anchors .stop-tuning-dot */
   width: 88px;
   min-height: 52px;
   padding: 0;
@@ -2768,6 +2837,52 @@ body.editing .shoe-label:active {
   cursor: pointer;
 }
 .kb-silent:hover { color: var(--text); border-color: var(--accent); }
+
+/* The chip a keyboard wears when its division plays a tuning apart
+   from the instrument's — an organ fact, so (like .kb-silent) it
+   shows whether the console is locked or not. Locked, it sits where
+   the silent badge does, the top-right corner over the cheek; while
+   editing it moves up into the panel's title band, off the keys.
+   Clicking it opens the division's tuning popover. */
+.kb-tuning-chip {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  z-index: 3;
+  cursor: pointer;
+  max-width: 70%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 2px 7px;
+  border: 1px solid #000000a0;
+  border-radius: 3px;
+  background: #1f2022f2;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.02em;
+}
+.kb-tuning-chip:hover { color: var(--text); border-color: var(--accent); }
+body.editing .kb-tuning-chip { top: -17px; border-radius: 3px 3px 0 0; }
+/* A silent keyboard tuned apart wears both: the badge steps left. */
+.kb-tuning-chip ~ .kb-silent, .kb-silent ~ .kb-tuning-chip { right: 6px; }
+
+/* The dot a stop's drawknob wears when its tuning is pinned, its own,
+   or a rank of its own — never for a stop merely following the
+   instrument by default. */
+.stop-tuning-dot {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  z-index: 2;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: 1px solid #000000a0;
+  background: var(--accent);
+  pointer-events: none;
+}
 
 /* The user-only Preferences card: one small pane, so it fits its
    content — the fixed height existed for the old tabbed dialog. */

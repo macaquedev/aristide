@@ -726,10 +726,14 @@ export class Console {
     const tuning = snapshot.tuning;
     // What the readout leads with is whatever actually governs pitch:
     // an active scale, else a division count away from 12, else the
-    // temperament (absent edo on an old snapshot means 12).
+    // temperament (absent edo on an old snapshot means 12) — "original"
+    // reads as "as recorded" here, the LCD's own lowercase idiom for
+    // the tuning popover's "As recorded".
     const governs = tuning
       ? tuning.scale?.name ??
-        ((tuning.edo ?? 12) !== 12 ? `${tuning.edo}-EDO` : tuning.temperament)
+        ((tuning.edo ?? 12) !== 12
+          ? `${tuning.edo}-EDO`
+          : tuning.temperament === "original" ? "as recorded" : tuning.temperament)
       : "";
     // "C4 = 261.6" rather than "a′ NNN Hz": the anchor is a key/Hz pair
     // now, not a 12-EDO-only concept — up to one decimal, no trailing ".0".

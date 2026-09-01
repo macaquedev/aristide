@@ -458,6 +458,17 @@
           <button class="ghost" type="button" id="editor-stop-src-change">Change&hellip;</button>
         </span>
       </div>
+      <div class="settings-row">
+        <span class="rail-label">Tuning</span>
+        <span class="tuning-scale-value">
+          <span class="tuning-scale-name" id="editor-stop-tuning-summary"></span>
+          <button class="ghost" type="button" id="editor-stop-tuning-edit">Edit&hellip;</button>
+        </span>
+      </div>
+      <!-- One compact row per rank a mixture actually sounds, only
+           built when there's more than one (editor.js's syncStopForm)
+           — a single-rank stop's tuning is the row above, in full. -->
+      <div id="editor-stop-ranks" class="stop-ranks"></div>
       <div class="settings-row" id="editor-stop-piston-row">
         <span class="rail-label"
           title="A MIDI piston, pedal or computer key that draws this stop">Piston</span>
@@ -558,9 +569,22 @@
     <form class="editor-add-form" id="editor-tuning-form">
       <span class="editor-tuning-head">
         <span class="rail-label" id="editor-tuning-title">Tuning</span>
-        <button class="ghost hidden" type="button" id="editor-tuning-reset">Shared tuning</button>
       </span>
-      <div class="settings-row">
+      <!-- Hidden at instrument scope — the root has nothing to follow.
+           Options are rebuilt per scope kind in editor.js's
+           syncTuningForm (setFollowOptions), since what a division/
+           source/stop/rank can follow differs. -->
+      <label class="settings-row hidden" id="editor-tuning-follow-row">
+        <span class="rail-label">Follows</span>
+        <select id="editor-tuning-follow"></select>
+      </label>
+      <!-- What's actually playing, while following someone else's
+           tuning — the immediate governor on the first line, the rest
+           of the cascade (for a stop) dimmer still on the second. Both
+           hidden outright once the scope has its own tuning. -->
+      <p class="editor-tuning-home hidden" id="editor-tuning-resolved-primary"></p>
+      <p class="editor-tuning-home hidden" id="editor-tuning-resolved-chain"></p>
+      <div class="settings-row" id="editor-tuning-scale-row">
         <span class="rail-label">Scale</span>
         <span class="tuning-scale-value">
           <button class="ghost hidden" type="button" id="editor-tuning-scale-pick">Scala scale&hellip;</button>
@@ -587,7 +611,7 @@
       <label class="settings-row" id="editor-tuning-temperament-row">
         <span class="rail-label">Temperament</span>
         <select id="editor-tuning-temperament">
-          <option value="original">Original</option>
+          <option value="original">As recorded</option>
           <option value="equal">Equal</option>
           <option value="werckmeister3">Werckmeister III</option>
           <option value="kirnberger3">Kirnberger III</option>
@@ -608,7 +632,7 @@
       <label class="settings-row" id="editor-tuning-pipes-row">
         <span class="rail-label">Pipes</span>
         <select id="editor-tuning-pipes">
-          <option value="original">Original (keep drift)</option>
+          <option value="original">As recorded (keep drift)</option>
           <option value="exact">Exact</option>
         </select>
       </label>
@@ -616,7 +640,7 @@
            fixed "a′" concept, since that only names a key in 12-EDO.
            `pitch-names` is filled in by editor.js at startup, one
            option per MIDI note 0-127, rather than hand-written here. -->
-      <label class="settings-row">
+      <label class="settings-row" id="editor-tuning-ref-row">
         <span class="rail-label">Reference</span>
         <span class="stepper" id="editor-tuning-ref-stepper">
           <input id="editor-tuning-ref-key" type="text" list="pitch-names" autocomplete="off" spellcheck="false" />
@@ -626,7 +650,10 @@
         </span>
       </label>
       <datalist id="pitch-names"></datalist>
-      <label class="settings-row">
+      <!-- Transpose exists only at instrument and division scope — a
+           source, stop or rank never gets this row (locked, see
+           DESIGN.md). -->
+      <label class="settings-row" id="editor-tuning-transpose-row">
         <span class="rail-label">Transpose</span>
         <span class="stepper"><input id="editor-tuning-transpose" type="number" min="-12" max="12" step="1" /></span>
       </label>
