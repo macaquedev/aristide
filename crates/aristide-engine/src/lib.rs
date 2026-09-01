@@ -23,18 +23,22 @@ pub mod resample;
 pub mod reverb;
 pub mod routing;
 mod tone;
+mod voice;
 pub mod wind;
 
 use std::sync::Arc;
 
-use aristide_model::units::cents_to_ratio;
-use bank::{Sample, SampleBank};
+use bank::SampleBank;
 use command::COMMAND_QUEUE_CAPACITY;
 use enclosure::{Enclosure, ENCLOSURE_NONE, MAX_ENCLOSURES};
 use resample::SincTables;
 use routing::{Bus, MAX_BUSES, MAX_CHUNK_FRAMES};
 use rtrb::{Consumer, Producer, RingBuffer};
 use tone::{ToneStage, ToneVoice, TONE_ATTACK_SECONDS, TONE_GAIN, TONE_RELEASE_SECONDS};
+use voice::{
+    Brightness, EnclosureState, PlaybackCursor, ReleaseState, SamplePhase, SampledVoice,
+    Voice, WindState,
+};
 use wind::{WindGroup, MAX_WIND_GROUPS};
 
 pub use command::{Command, EngineHandle};
@@ -70,585 +74,6 @@ const TAIL_SHED_PER_BLOCK: usize = 8;
 const LIMITER_CEILING: f32 = 0.97;
 const LIMITER_RELEASE_SECONDS: f32 = 0.2;
 
-#[derive(Clone, Copy, PartialEq)]
-enum SamplePhase {
-    /// Attack and sustain loop, key held.
-    Held,
-    /// Ramping from the loop position onto the release tail.
-    Crossfade,
-    /// Playing the release tail out.
-    Tail,
-    /// Emergency amplitude ramp (no tail to go to / AllNotesOff).
-    FadeOut,
-}
-
-#[derive(Clone, Copy)]
-struct SampledVoice {
-    handle: u64,
-    sample: u32,
-    /// Fractional frame cursor into the sample.
-    position: f64,
-    /// Second cursor, into the release tail, during [`SamplePhase::Crossfade`].
-    release_position: f64,
-    /// Source frames advanced per output frame (before wind modulation).
-    rate: f64,
-    /// Where [`Command::SetVoiceRate`] is taking `rate`, and how many
-    /// output frames of geometric slew remain. `glide_frames == 0` ⇔
-    /// settled (`rate == rate_target`); the slew advances per block, so
-    /// within a block pitch is constant — at control rates that is the
-    /// same quantization every MIDI-driven sampler has.
-    rate_target: f64,
-    glide_frames: u32,
-    /// Sinc kernel bucket chosen once at [`Command::StartVoice`] from
-    /// `rate` ([`SincTables::select`]) and reused for the voice's whole
-    /// life: tremulant/release-bend wobble never swings `rate` far
-    /// enough to cross a quarter-octave bucket boundary, so re-picking
-    /// per block would only add cost, not quality.
-    kernel: usize,
-    gain: f32,
-    /// Crossfade progress 0→1.
-    fade: f32,
-    /// Release pitch drop: as the pallet closes, blowing pressure
-    /// collapses and a flue pipe's pitch sags before the sound dies —
-    /// small pipes noticeably so (Viscount US7442869 models this; Aeolus
-    /// has per-stop release detune). A constant-pitch high release reads
-    /// as a struck bell; bells don't bend. `bend` ramps 0 to 1; the
-    /// playback rate is scaled by (1 - depth * bend).
-    release_bend: f32,
-    release_bend_depth: f32,
-    release_bend_step: f32,
-    /// Staccato room-charge: the tail's LATE diffuse field never built
-    /// up for a short note, but its early reflections and speech-off
-    /// did. Output is scaled by (charge + deficit) where deficit decays
-    /// from (1 - charge) to 0 over ~150 ms: full level at the splice,
-    /// settling to the charge level for the developed-reverb portion.
-    tail_charge: f32,
-    tail_charge_deficit: f32,
-    tail_charge_step: f32,
-    /// Per-voice crossfade step, set at release() from the pipe's
-    /// fundamental: ~9 periods, clamped 6–184 ms (GO/HW practice: bass
-    /// splices need long fades, treble fades must be short or they smear
-    /// the speech-off transient into an "artificial" fade). 0 = use the
-    /// engine default.
-    fade_step: f32,
-    /// FadeOut amplitude 1→0.
-    amplitude: f32,
-    /// Fast envelope follower on the voice's own (pre-gain) output —
-    /// what "how loud am I right now" means at release time.
-    envelope: f32,
-    /// Level-matching scale applied to the release tail so it continues
-    /// at the voice's current loudness instead of the recording's.
-    tail_gain: f32,
-    /// Output bus the voice renders onto (pre-clamped to `MAX_BUSES`).
-    bus: u8,
-    /// Output frames still to wait before the pipe speaks (per-pipe
-    /// onset delay). While pending the voice renders nothing, draws no
-    /// wind, and does not age; released before speaking, it dies
-    /// silently — the pallet never opened.
-    onset: u32,
-    /// Wind group index (pre-clamped to `MAX_WIND_GROUPS`).
-    group: u8,
-    /// How much wind this voice draws while sounding.
-    wind_weight: f32,
-    /// Chest factors (pressure/tremulant/flow-noise pitch, gain,
-    /// brightness) cached per voice under the same rule as the box
-    /// factors below: a Held voice re-reads them each block; a
-    /// released voice keeps them FROZEN — the pallet is closed, the
-    /// tail is room decay, and it must not wobble (GO detaches
-    /// releases from the windchest likewise).
-    wind_rate: f32,
-    wind_gain: f32,
-    wind_treble: f32,
-    /// This pipe's own answer to the chest, fixed at voice start.
-    /// `wind_sens` spreads the modulation depth across the chorus (no
-    /// two pipes are voiced identically); the two rates are 1/τ for
-    /// the one-pole lags below — pitch follows pressure within a few
-    /// speaking periods, amplitude and timbre only over the pipe's
-    /// speech time (~tens of periods), so a 16' bass barely flutters
-    /// at tremulant rates while a 2' pipe follows the valve, and every
-    /// pipe sits at its own phase. Uniform, instant factors are the
-    /// single-LFO sound of an electronic vibrato.
-    wind_sens: f32,
-    wind_pitch_rate: f32,
-    wind_gain_rate: f32,
-    /// Output frames since the voice started — drives the wind model's
-    /// pallet-opening attack boost.
-    age_frames: u32,
-    /// Tilt-filter coefficient (0 = bypass) and per-channel lowpass
-    /// state: out = lp + treble·(x − lp) splits the signal at roughly
-    /// the pipe's 2nd harmonic so pressure can breathe the timbre.
-    brightness_a: f32,
-    lowpass: [f32; 2],
-    /// Swell box this voice sits inside ([`ENCLOSURE_NONE`] = none),
-    /// with the box factors cached per voice: a Held voice re-reads
-    /// them each block; a released voice keeps them FROZEN — the tail
-    /// is room decay that already left the box, so later shutter moves
-    /// must not touch it (HW's rule; GO bakes the gain in likewise).
-    enclosure: u8,
-    /// Broadband box gain, de-zippered per frame with a ~5 ms one-pole
-    /// toward `enc_gain_target` (block-stepped gain is audible zipper;
-    /// a one-pole never overshoots regardless of block size).
-    enc_gain: f32,
-    enc_gain_target: f32,
-    /// Shelf leg: high-frequency gain and one-pole corner coefficient,
-    /// same filter form as the brightness tilt but hinged at the box
-    /// corner instead of the pipe's 2nd harmonic.
-    enc_hi_gain: f32,
-    enc_coeff: f32,
-    enc_lowpass: [f32; 2],
-    /// Per-pipe wind-flow noise (slow, independent per voice).
-    wander: wind::Wander,
-    rng: u32,
-    /// Which of the sample's sustain loops the cursor is circling; a
-    /// new one is drawn at random on each pass.
-    loop_index: u8,
-    /// Separate release sample being crossfaded into, if any.
-    external_release: Option<u32>,
-    /// Per-frame gain decay during Crossfade/Tail (1.0 = none). GO's
-    /// staccato model: a short note hasn't formed the room's reverb
-    /// yet, so its recorded (fully-reverberant) release tail is decayed
-    /// over seconds to compensate.
-    tail_decay: f32,
-    /// FadeOut speed multiplier on the kill ramp: 1.0 = 15 ms (silent
-    /// noise voices, panic), 0.1 = ~150 ms (polyphony shedding, where
-    /// abruptness would be audible).
-    fade_scale: f32,
-    /// A scheduled key-release: (frames until the pallet closes, hold
-    /// age in ms captured at key-up). Real pallets never close in the
-    /// same millisecond across a chord, and spreading the release also
-    /// spreads the crossfade CPU spike that a mass release causes.
-    pending_release: Option<(u16, u32)>,
-    /// The chest's wave-tremulant state as this voice last saw it —
-    /// which recording variant its release should match. Follows the
-    /// live state while Held (GO selects by the state at key-off).
-    wave_trem: bool,
-    phase: SamplePhase,
-    /// The cursor has left the sustain loop for release material (set at
-    /// crossfade completion). Loop wrapping and seam-tap reads must never
-    /// apply again: a shed/killed tail whose phase is FadeOut is NOT in
-    /// the loop, and wrapping it teleports the cursor back into
-    /// full-level sustain — the click/ghost-note bug found 2026-08-11.
-    past_loop: bool,
-}
-
-/// Per-block invariants of a sampled voice's render loop, hoisted out
-/// of the per-frame path (`Sample::frames()` alone is a u64 division —
-/// two of those per frame per voice was a real cost at high polyphony).
-/// Must be recomputed when the voice changes sample or loop mid-block.
-#[derive(Clone, Copy)]
-struct VoiceBlockContext {
-    lite: bool,
-    rate: f64,
-    last: f64,
-    tail_last: f64,
-    current_loop: Option<(u64, u64)>,
-    looping: bool,
-    /// Engine output sample rate; releases need it to convert dB/s
-    /// decay compensation into a per-frame factor.
-    output_sr: f32,
-}
-
-impl SampledVoice {
-    #[inline]
-    fn block_context(
-        &self,
-        sample: &Sample,
-        external: Option<&Sample>,
-        rate_scale: f64,
-    ) -> VoiceBlockContext {
-        let current_loop = sample.loop_at(self.loop_index as usize);
-        VoiceBlockContext {
-            lite: false,
-            rate: self.rate * rate_scale,
-            last: (sample.frames() - 1) as f64,
-            tail_last: (external.unwrap_or(sample).frames() - 1) as f64,
-            current_loop,
-            looping: current_loop.is_some(),
-            output_sr: 44_100.0, // overridden by the block loop
-        }
-    }
-
-    /// Render one frame and advance. Returns `None` when the voice ends.
-    /// End-of-data checks happen on entry so every read frame is emitted.
-    #[inline]
-    fn tick(
-        &mut self,
-        sample: &Sample,
-        external: Option<&Sample>,
-        tables: &SincTables,
-        ctx: &VoiceBlockContext,
-        crossfade_step: f32,
-        kill_step: f32,
-    ) -> Option<(f32, f32)> {
-        let mut rate = ctx.rate;
-        if self.release_bend_depth > 0.0
-            && matches!(self.phase, SamplePhase::Crossfade | SamplePhase::Tail)
-        {
-            self.release_bend += (1.0 - self.release_bend) * self.release_bend_step;
-            rate *= 1.0 - (self.release_bend_depth * self.release_bend) as f64;
-        }
-        let last = ctx.last;
-        let current_loop = ctx.current_loop;
-        let looping = ctx.looping;
-        // A scheduled release fires when its pallet-delay runs out.
-        if self.phase == SamplePhase::Held {
-            if let Some((delay, age_ms)) = self.pending_release {
-                if delay == 0 {
-                    self.pending_release = None;
-                    self.release(sample, age_ms, ctx.output_sr);
-                } else {
-                    self.pending_release = Some((delay - 1, age_ms));
-                }
-            }
-        }
-        // During a crossfade into a separate release sample, the tail
-        // cursor lives in that sample's coordinates.
-        let tail_sample = external.unwrap_or(sample);
-        let tail_last = ctx.tail_last;
-        let ended = match self.phase {
-            SamplePhase::Held => !looping && self.position >= last,
-            SamplePhase::Crossfade => self.release_position >= tail_last,
-            SamplePhase::Tail => self.position >= last,
-            SamplePhase::FadeOut => {
-                self.amplitude <= 0.0 || ((!looping || self.past_loop) && self.position >= last)
-            }
-        };
-        if ended {
-            return None;
-        }
-
-        // Cursors still circling the sustain loop wrap their kernel taps
-        // across the seam; tail reads clamp at the sample edges.
-        let seam = if self.phase == SamplePhase::Tail || self.past_loop {
-            None
-        } else {
-            current_loop
-        };
-        // During a crossfade the OUTGOING leg fades to zero — linear
-        // interpolation there is inaudible and halves the double-read
-        // cost that made mass releases blow the block budget. The
-        // persistent (incoming) leg keeps full sinc quality.
-        // The outgoing crossfade leg once dropped to linear interpolation
-        // to halve the double-read cost, but the sinc→linear switch at
-        // release() put a ~-46 dB kink at the START of every splice — an
-        // audible tick on exposed releases. Keep full quality; the pallet
-        // stagger already spreads the crossfade CPU spike.
-        let (mut left, mut right) = if ctx.lite {
-            sample.read(self.position)
-        } else {
-            tables.read(self.kernel, sample, self.position, seam)
-        };
-        let mut advance_position = true;
-        // This frame's output gain, captured BEFORE the match arms mutate
-        // self.gain. The crossfade-completion frame folds tail_gain into
-        // the voice gain for FUTURE frames, but its own blend already
-        // applied tail_gain — returning with the mutated gain applied it
-        // twice, dipping exactly one frame by up to 5x (tail_gain floor
-        // 0.2): an audible tick on every splice handover.
-        let frame_gain = self.gain;
-        match self.phase {
-            SamplePhase::Held | SamplePhase::Tail => {}
-            SamplePhase::Crossfade => {
-                let (tail_l, tail_r) = if ctx.lite {
-                    tail_sample.read(self.release_position)
-                } else {
-                    tables.read(self.kernel, tail_sample, self.release_position, None)
-                };
-                // Raised-cosine-shaped blend (smoothstep ≈ it, no trig):
-                // linear fades dip audibly on the uncorrelated noise
-                // floor (Appleton 2019).
-                let weight = self.fade * self.fade * (3.0 - 2.0 * self.fade);
-                left += (tail_l * self.tail_gain - left) * weight;
-                right += (tail_r * self.tail_gain - right) * weight;
-                self.fade += if self.fade_step > 0.0 {
-                    self.fade_step
-                } else {
-                    crossfade_step
-                };
-                self.release_position += rate;
-                if self.fade >= 1.0 {
-                    // Hand the (already advanced) tail cursor over and
-                    // fold the level match into the voice gain. If the
-                    // tail is a separate sample, the voice moves there.
-                    self.position = self.release_position;
-                    self.gain *= self.tail_gain;
-                    self.tail_gain = 1.0;
-                    if let Some(external_id) = self.external_release.take() {
-                        self.sample = external_id;
-                        self.loop_index = 0;
-                    }
-                    self.phase = SamplePhase::Tail;
-                    self.past_loop = true;
-                    advance_position = false;
-                }
-            }
-            SamplePhase::FadeOut => {
-                left *= self.amplitude;
-                right *= self.amplitude;
-                self.amplitude -= kill_step * self.fade_scale;
-            }
-        }
-
-        if self.tail_charge_deficit > 0.0
-            && !matches!(self.phase, SamplePhase::Held)
-        {
-            let factor = self.tail_charge + self.tail_charge_deficit;
-            left *= factor;
-            right *= factor;
-            self.tail_charge_deficit *= self.tail_charge_step;
-            if self.tail_charge_deficit < 1e-4 {
-                // Settled: fold the charge into the gain and stop paying
-                // the per-frame cost.
-                self.gain *= self.tail_charge;
-                self.tail_charge = 1.0;
-                self.tail_charge_deficit = 0.0;
-            }
-        } else if self.tail_charge != 1.0 && !matches!(self.phase, SamplePhase::Held) {
-            left *= self.tail_charge;
-            right *= self.tail_charge;
-        }
-        // EOF guard: a tail must reach the end of its material silent.
-        // Decay compensation can leave boosted level near EOF (and some
-        // sets simply end hot); fade the final ~46 ms instead of cutting.
-        if self.past_loop {
-            const GUARD_FRAMES: f64 = 2048.0;
-            let remaining = last - self.position;
-            if remaining < GUARD_FRAMES {
-                let scale = (remaining / GUARD_FRAMES).max(0.0) as f32;
-                left *= scale;
-                right *= scale;
-            }
-        }
-        if matches!(self.phase, SamplePhase::Crossfade | SamplePhase::Tail)
-            && self.tail_decay != 1.0
-        {
-            self.gain *= self.tail_decay;
-        }
-        if advance_position {
-            self.position += rate;
-            // Only cursors still circling the sustain loop wrap; a Tail
-            // cursor has left it for the release material. On each pass
-            // a fresh loop is drawn at random (multi-loop sets), which
-            // decorrelates repetition.
-            if self.phase != SamplePhase::Tail && !self.past_loop {
-                if let Some((start, end)) = current_loop {
-                    if self.position >= end as f64 {
-                        // Wrap to THIS loop's own start — the only splice
-                        // the set's author guaranteed seamless. Loop
-                        // variety comes from choosing which loop's end we
-                        // run toward next (all loops live in one
-                        // continuous recording, so playing from here to
-                        // any later end is seamless too). Jumping into a
-                        // different loop's start pops audibly.
-                        let overshoot = self.position - end as f64;
-                        self.position = (start as f64 + overshoot).min(end as f64 - 1.0);
-                        let count = sample.loop_count();
-                        if count > 1 {
-                            let candidate = (wind::xorshift_unit(&mut self.rng) * count as f32)
-                                as u8
-                                % count as u8;
-                            if let Some((_, candidate_end)) =
-                                sample.loop_at(candidate as usize)
-                            {
-                                if (candidate_end as f64) > self.position {
-                                    self.loop_index = candidate;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        Some((left * frame_gain, right * frame_gain))
-    }
-
-    /// Key released: splice to a separate release (selected by hold
-    /// duration) or the embedded tail, whichever the sample offers.
-    fn release(&mut self, sample: &Sample, age_ms: u32, output_rate: f32) {
-        fn pitch_scaled_fade_step(
-            sample: &Sample,
-            rate: f64,
-            output_rate: f32,
-            age_ms: u32,
-        ) -> f32 {
-            let Some(period) = sample.measured_period() else {
-                return 0.0; // engine default
-            };
-            let output_period = period / rate.max(1e-6);
-            // ~9 fundamental periods (GO: 184 ms bass → 6 ms treble),
-            // but never longer than the note has lived: a mid-attack
-            // release must not keep swelling through a long fade — the
-            // drive collapses when the pallet closes.
-            let age_frames = age_ms as f64 * 0.001 * output_rate as f64;
-            let frames = (9.0 * output_period)
-                .min(age_frames.max(0.006 * output_rate as f64))
-                .clamp(0.006 * output_rate as f64, 0.184 * output_rate as f64);
-            (1.0 / frames) as f32
-        }
-        // A producer-tuned crossfade (ODF ReleaseCrossfadeLength)
-        // overrides the pitch-scaled default; the note-age cap stays —
-        // a mid-attack release must still collapse, not swell.
-        fn odf_fade_step(ms: u16, output_rate: f32, age_ms: u32) -> f32 {
-            let age_frames = age_ms as f64 * 0.001 * output_rate as f64;
-            let frames = (f64::from(ms) * 0.001 * output_rate as f64)
-                .min(age_frames.max(0.006 * output_rate as f64))
-                .max(1.0);
-            (1.0 / frames) as f32
-        }
-        match self.phase {
-            SamplePhase::Held | SamplePhase::Crossfade => {}
-            _ => return,
-        }
-        if self.phase == SamplePhase::Held && sample.sustain_loop().is_some() {
-            // Options are sorted (bounded holds ascending, unbounded
-            // last): the first whose bound covers the hold wins.
-            let chosen = sample
-                .release_options()
-                .iter()
-                .filter(|option| {
-                    option
-                        .wave_trem
-                        .is_none_or(|wants| wants == self.wave_trem)
-                })
-                .find(|option| option.max_hold_ms.is_none_or(|max| age_ms <= max));
-            if let Some(option) = chosen {
-                self.external_release = Some(option.sample);
-                self.release_position = match (option.alignment(), sample.sustain_loop()) {
-                    (Some(alignment), Some((loop_start, _))) => {
-                        alignment.target(self.position, loop_start) as f64
-                    }
-                    _ => 0.0,
-                };
-                self.tail_gain = if option.level > 1e-5 {
-                    (self.envelope / option.level).clamp(0.05, 1.1)
-                } else {
-                    1.0
-                };
-                self.fade_step = if option.crossfade_ms > 0 {
-                    odf_fade_step(option.crossfade_ms, output_rate, age_ms)
-                } else {
-                    pitch_scaled_fade_step(sample, self.rate, output_rate, age_ms)
-                };
-                self.fade = 0.0;
-                self.phase = SamplePhase::Crossfade;
-                return;
-            }
-        }
-        match sample.release_start() {
-            Some(tail) if self.phase == SamplePhase::Held => {
-                self.release_position = match (sample.release_alignment(), sample.sustain_loop()) {
-                    (Some(alignment), Some((loop_start, _))) => {
-                        alignment.target(self.position, loop_start) as f64
-                    }
-                    _ => tail as f64,
-                };
-                // Level match: scale the tail to continue at the voice's
-                // current loudness (early releases are quieter than the
-                // recorded sustain — unscaled tails strike like a bell).
-                // Floor at 0.2 like GO: a fully-silent-entry release
-                // sounds MORE artificial than a slightly loud one.
-                // Exception: a near-silent loop (control-noise samples:
-                // thump → silent loop → thump tail) means the tail is
-                // MEANT to be louder — play it as recorded.
-                let reference = sample.tail_reference_level();
-                self.tail_gain = if reference > 1e-5 && self.envelope > 0.02 * reference {
-                    (self.envelope / reference).clamp(0.2, 1.1)
-                } else {
-                    1.0
-                };
-                // Staccato: a room's decay RATE is fixed by the room —
-                // a short note leaves a QUIETER tail, never a faster-
-                // decaying one (GO decays the rate instead, which turns
-                // fast passages into plucks). Model the room charge as a
-                // first-order build-up toward steady state.
-                let tail_seconds =
-                    (sample.frames().saturating_sub(tail)) as f32 / sample.sample_rate_hz();
-                let full_reverb_ms = (60.0 * tail_seconds + 40.0).clamp(100.0, 350.0);
-                let mut staccato_extra_db_per_s = 0.0f32;
-                if (age_ms as f32) < full_reverb_ms {
-                    let charge =
-                        (1.0 - (-(age_ms as f32) / (0.5 * full_reverb_ms)).exp()).max(0.1);
-                    self.tail_charge = charge;
-                    self.tail_charge_deficit = 1.0 - charge;
-                    self.tail_charge_step = (-1.0 / (0.15 * output_rate)).exp();
-                    // Level scaling alone leaves a conspicuous shimmer
-                    // after high staccato (the diffuse field wasn't just
-                    // quieter, it never fully formed): also shorten the
-                    // late tail in proportion to how undeveloped it was.
-                    staccato_extra_db_per_s = (1.0 - charge) * 25.0;
-                }
-                // Repitching by R also plays the recorded room decay R×
-                // too fast (or slow) — ring time must not depend on the
-                // key, so compensate the measured tail decay rate with a
-                // per-frame gain factor. Down-repitched pipes were the
-                // "bell": their tails rang up to 40% too long.
-                self.fade_step = if sample.release_crossfade_ms() > 0 {
-                    odf_fade_step(sample.release_crossfade_ms(), output_rate, age_ms)
-                } else {
-                    pitch_scaled_fade_step(sample, self.rate, output_rate, age_ms)
-                };
-                if let Some(period) = sample.measured_period() {
-                    let f0 = sample.sample_rate_hz() as f64 / period;
-                    // Depth grows with pipe pitch: ~35 cents at 1 kHz+,
-                    // ~15 at 250 Hz, negligible for big pipes.
-                    let cents = (4.0 * (f0 / 100.0).sqrt()).clamp(1.0, 12.0);
-                    self.release_bend_depth = 1.0 - cents_to_ratio(-cents) as f32;
-                    // Pressure collapse: ~12 periods, 15-80 ms.
-                    let tau_s = (12.0 * period / sample.sample_rate_hz() as f64)
-                        .clamp(0.015, 0.080);
-                    self.release_bend_step =
-                        1.0 - (-1.0 / (tau_s as f32 * output_rate)).exp();
-                    self.release_bend = 0.0;
-                }
-                let lambda = sample.tail_decay_db_per_s();
-                let repitch =
-                    (self.rate as f32) * output_rate / sample.sample_rate_hz();
-                let comp_db_per_s = if lambda > 0.0 && (repitch - 1.0).abs() > 0.01 {
-                    (lambda * (repitch - 1.0)).clamp(-25.0, 25.0)
-                } else {
-                    0.0
-                };
-                // A tail still audible when its recording runs out ends
-                // in a hard cut — the demo set's mixture has a rank 50 dB
-                // hot at EOF that rings bell-like and then vanishes. Add
-                // whatever decay settles the tail to ≈ -60 dB by EOF,
-                // counting the level the decay compensation adds back.
-                let out_tail_seconds = tail_seconds / repitch.max(0.01);
-                let settle_db_per_s = if out_tail_seconds > 0.3 {
-                    let eof_db =
-                        sample.tail_eof_level_db() + comp_db_per_s * out_tail_seconds;
-                    ((eof_db + 60.0) / out_tail_seconds).clamp(0.0, 60.0)
-                } else {
-                    0.0
-                };
-                let db_per_s = comp_db_per_s - staccato_extra_db_per_s - settle_db_per_s;
-                self.tail_decay = if db_per_s.abs() > 0.01 {
-                    10.0f32.powf(db_per_s / (20.0 * output_rate))
-                } else {
-                    1.0
-                };
-self.fade = 0.0;
-                self.phase = SamplePhase::Crossfade;
-            }
-            Some(_) => {} // already crossfading
-            None => {
-                if sample.sustain_loop().is_some() {
-                    self.amplitude = 1.0;
-                    self.phase = SamplePhase::FadeOut;
-                }
-                // Loop-less (percussive) samples play to the end.
-            }
-        }
-    }
-}
-
-#[derive(Clone, Copy, Default)]
-enum Voice {
-    #[default]
-    Idle,
-    Tone(ToneVoice),
-    Sampled(SampledVoice),
-}
 
 /// RT side. Owned by the audio callback; every method here upholds the
 /// no-alloc/no-lock/no-I/O invariants.
@@ -766,15 +191,15 @@ impl Engine {
                             // the pallet never opened, so nothing ever
                             // sounded and nothing should.
                             sampled.phase = SamplePhase::FadeOut;
-                            sampled.amplitude = 0.0;
+                            sampled.release.amplitude = 0.0;
                         } else if sampled.phase == SamplePhase::Held
-                            && sampled.pending_release.is_none()
+                            && sampled.release.pending.is_none()
                         {
                             let delay = (wind::xorshift_unit(&mut sampled.rng)
                                 * max_stagger) as u16;
-                            sampled.pending_release = Some((delay, age_ms));
-                        } else if let Some(sample) = self.bank.get(sampled.sample) {
-                            sampled.release(sample, age_ms, self.sample_rate);
+                            sampled.release.pending = Some((delay, age_ms));
+                        } else if let Some(sample) = self.bank.get(sampled.cursor.sample) {
+                            sampled.begin_release(sample, age_ms, self.sample_rate);
                         }
                     }
                 }
@@ -839,10 +264,10 @@ impl Engine {
                 }
                 let Some((index, _)) = quietest else { break };
                 if let Voice::Sampled(sampled) = &mut self.voices[index] {
-                    sampled.amplitude = 1.0;
+                    sampled.release.amplitude = 1.0;
                     // Gentle ~150 ms fade: under 128 masking tails this
                     // is inaudible; the 15 ms kill ramp is not.
-                    sampled.fade_scale = 0.1;
+                    sampled.release.fade_scale = 0.1;
                     sampled.phase = SamplePhase::FadeOut;
                 }
             }
@@ -865,14 +290,14 @@ impl Engine {
                     // pressure recovers while tails ring out.
                     continue;
                 }
-                let params = self.wind[sampled.group as usize].params();
+                let params = self.wind[sampled.wind.group as usize].params();
                 let attack_frames = params.attack_ms * 0.001 * self.sample_rate;
                 let boost = if (sampled.age_frames as f32) < attack_frames {
                     params.attack_boost * (1.0 - sampled.age_frames as f32 / attack_frames)
                 } else {
                     0.0
                 };
-                demand[sampled.group as usize] += sampled.wind_weight * (1.0 + boost);
+                demand[sampled.wind.group as usize] += sampled.wind.weight * (1.0 + boost);
             }
         }
         let dt = frames as f32 / self.sample_rate;
@@ -946,14 +371,11 @@ impl Engine {
                     } else {
                         0
                     };
-                    let Some(sample) = bank.get(sampled.sample) else {
+                    let Some(sample) = bank.get(sampled.cursor.sample) else {
                         *voice = Voice::Idle;
                         free_slots.push(index as u16);
                         continue;
                     };
-                    let chest = &wind[sampled.group as usize];
-                    let params = chest.params();
-
                     // Wind factors follow the swell-box rule below: a
                     // Held voice re-reads its chest each block; a
                     // released voice keeps the factors frozen from its
@@ -961,63 +383,21 @@ impl Engine {
                     // is room decay, and trem/pressure must not wobble
                     // it.
                     if !lite && sampled.phase == SamplePhase::Held {
-                        // Per-voice flow noise, linearized around the
-                        // chest factors (a powf per voice per block
-                        // would also be fine, but ±2 % deviations are
-                        // firmly linear).
-                        let mut deviation = 0.0;
-                        if params.flow_noise > 0.0 && sampled.wind_weight > 0.0 {
-                            sampled
-                                .wander
-                                .step(dt, params.flow_noise, &mut sampled.rng);
-                            deviation = sampled.wander.deviation();
-                        }
-                        // The chest says where pressure is; the PIPE
-                        // decides how it answers: its own sensitivity
-                        // spreads the depth across the chorus, and the
-                        // one-pole lags below give each pipe its speech
-                        // dynamics — pitch follows fast, amplitude and
-                        // timbre over ~tens of periods, so basses
-                        // barely flutter at tremulant rates and every
-                        // pipe sits at its own phase. All identity when
-                        // the chest is quiet (factors 1, no noise).
-                        let sens = sampled.wind_sens;
-                        let target_rate = 1.0
-                            + (chest.rate_factor() - 1.0) * sens
-                            + params.pitch_exponent * deviation;
-                        let target_gain = 1.0
-                            + (chest.gain_factor() - 1.0) * sens
-                            + params.gain_exponent * deviation;
-                        // The brightness exponent is calibrated on the
-                        // regulator's few-percent sags; at tremulant
-                        // pressure swings a pipe's spectrum saturates
-                        // long before P^3 says ±6 dB, so the swing is
-                        // capped at ≈ ±2.5 dB.
-                        let target_treble = (1.0
-                            + (chest.brightness_factor() - 1.0) * sens
-                            + params.brightness_exponent * deviation)
-                            .clamp(0.75, 1.33);
-                        let pitch_alpha = (dt * sampled.wind_pitch_rate).min(1.0);
-                        let slow_alpha = (dt * sampled.wind_gain_rate).min(1.0);
-                        sampled.wind_rate += (target_rate - sampled.wind_rate) * pitch_alpha;
-                        sampled.wind_gain += (target_gain - sampled.wind_gain) * slow_alpha;
-                        sampled.wind_treble +=
-                            (target_treble - sampled.wind_treble) * slow_alpha;
-                    }
-                    let (rate_scale, gain, treble) = if lite {
+                        let chest = &wind[sampled.wind.group as usize];
+                        sampled.wind.follow_chest(chest, dt, &mut sampled.rng);
+                    }                    let (rate_scale, gain, treble) = if lite {
                         (1.0f64, master, 1.0f32)
                     } else {
                         (
-                            sampled.wind_rate as f64,
-                            master * sampled.wind_gain,
-                            sampled.wind_treble,
+                            sampled.wind.rate as f64,
+                            master * sampled.wind.gain,
+                            sampled.wind.treble,
                         )
                     };
 
-                    let tilt_a = sampled.brightness_a;
-                    // Bypass the filter while it would do nothing: keeps
-                    // untouched-pressure rendering bit-identical.
-                    let tilting = tilt_a > 0.0 && (treble - 1.0).abs() > 1e-4;
+                    // Bypass the tilt filter while it would do nothing:
+                    // keeps untouched-pressure rendering bit-identical.
+                    let tilting = sampled.brightness.a > 0.0 && (treble - 1.0).abs() > 1e-4;
 
                     // Swell box: a Held voice tracks its box each block
                     // (gain ramped per frame — pedal sweeps would zipper
@@ -1025,37 +405,13 @@ impl Engine {
                     // factors frozen from its last Held block. Lite mode
                     // keeps the broadband gain (the pedal must still do
                     // something) and only skips the shutter filter.
-                    let enclosed = sampled.enclosure != ENCLOSURE_NONE;
+                    let enclosed = sampled.enclosure.index != ENCLOSURE_NONE;
                     if enclosed && sampled.phase == SamplePhase::Held {
-                        let box_state = &enclosures[sampled.enclosure as usize];
-                        sampled.enc_gain_target = box_state.gain();
-                        sampled.enc_hi_gain = box_state.hi_gain();
-                        sampled.enc_coeff = box_state.coeff();
+                        let box_state = &enclosures[sampled.enclosure.index as usize];
+                        sampled.enclosure.follow_box(box_state);
                     }
-                    // A pending rate glide takes one geometric step per
-                    // block (the powf is paid only while gliding). A
-                    // bend can cross a quarter-octave sinc bucket, so
-                    // the kernel is re-picked while in motion — the
-                    // one case the pick-once rule at StartVoice excludes.
-                    if sampled.glide_frames > 0 {
-                        if sampled.phase == SamplePhase::Held {
-                            if sampled.glide_frames as usize <= frames {
-                                sampled.rate = sampled.rate_target;
-                                sampled.glide_frames = 0;
-                            } else {
-                                let fraction = frames as f64 / sampled.glide_frames as f64;
-                                sampled.rate *=
-                                    (sampled.rate_target / sampled.rate).powf(fraction);
-                                sampled.glide_frames -= frames as u32;
-                            }
-                            sampled.kernel = sinc.select(sampled.rate);
-                        } else {
-                            // Released mid-glide: the tail keeps the
-                            // pitch it reached, as it keeps its box.
-                            sampled.glide_frames = 0;
-                            sampled.rate_target = sampled.rate;
-                        }
-                    }
+                    let held = sampled.phase == SamplePhase::Held;
+                    sampled.cursor.step_glide(frames, held, sinc);
                     sampled.age_frames = sampled
                         .age_frames
                         .saturating_add((frames - start_frame) as u32);
@@ -1063,23 +419,23 @@ impl Engine {
                     // sample or switch loops mid-block; track the refs
                     // and per-block invariants it reads from.
                     let mut current = sample;
-                    let mut current_id = sampled.sample;
-                    let mut current_loop_index = sampled.loop_index;
-                    let mut current_external_id = sampled.external_release;
+                    let mut current_id = sampled.cursor.sample;
+                    let mut current_loop_index = sampled.cursor.loop_index;
+                    let mut current_external_id = sampled.cursor.external_release;
                     let mut external = current_external_id.and_then(|id| bank.get(id));
                     let mut ctx = sampled.block_context(current, external, rate_scale);
                     ctx.lite = lite;
                     ctx.output_sr = output_sr;
                     let scratch = buses[sampled.bus as usize].mix_target(frames);
                     for frame in start_frame..frames {
-                        if sampled.sample != current_id {
-                            match bank.get(sampled.sample) {
+                        if sampled.cursor.sample != current_id {
+                            match bank.get(sampled.cursor.sample) {
                                 Some(switched) => {
                                     current = switched;
-                                    current_id = sampled.sample;
+                                    current_id = sampled.cursor.sample;
                                     external = None;
                                     current_external_id = None;
-                                    current_loop_index = sampled.loop_index;
+                                    current_loop_index = sampled.cursor.loop_index;
                                     ctx = sampled.block_context(current, external, rate_scale);
                                     ctx.lite = lite;
                     ctx.output_sr = output_sr;
@@ -1090,11 +446,11 @@ impl Engine {
                                     break;
                                 }
                             }
-                        } else if sampled.loop_index != current_loop_index
-                            || sampled.external_release != current_external_id
+                        } else if sampled.cursor.loop_index != current_loop_index
+                            || sampled.cursor.external_release != current_external_id
                         {
-                            current_loop_index = sampled.loop_index;
-                            current_external_id = sampled.external_release;
+                            current_loop_index = sampled.cursor.loop_index;
+                            current_external_id = sampled.cursor.external_release;
                             external = current_external_id.and_then(|id| bank.get(id));
                             ctx = sampled.block_context(current, external, rate_scale);
                             ctx.lite = lite;
@@ -1109,29 +465,14 @@ impl Engine {
                             *kill_step,
                         ) {
                             Some((mut left, mut right)) => {
-                                // Track the voice's own loudness (pre-
-                                // gain) for release level matching.
-                                sampled.envelope += *envelope_step
-                                    * ((left.abs() + right.abs()) * 0.5 - sampled.envelope);
+                                sampled.follow_envelope(left, right, *envelope_step);
                                 if tilting {
-                                    let lp = &mut sampled.lowpass;
-                                    lp[0] += tilt_a * (left - lp[0]);
-                                    lp[1] += tilt_a * (right - lp[1]);
-                                    left = lp[0] + treble * (left - lp[0]);
-                                    right = lp[1] + treble * (right - lp[1]);
+                                    sampled.brightness.apply(&mut left, &mut right, treble);
                                 }
                                 if enclosed {
-                                    if !lite {
-                                        let lp = &mut sampled.enc_lowpass;
-                                        lp[0] += sampled.enc_coeff * (left - lp[0]);
-                                        lp[1] += sampled.enc_coeff * (right - lp[1]);
-                                        left = lp[0] + sampled.enc_hi_gain * (left - lp[0]);
-                                        right = lp[1] + sampled.enc_hi_gain * (right - lp[1]);
-                                    }
-                                    sampled.enc_gain += *enc_ramp
-                                        * (sampled.enc_gain_target - sampled.enc_gain);
-                                    left *= sampled.enc_gain;
-                                    right *= sampled.enc_gain;
+                                    sampled
+                                        .enclosure
+                                        .apply(&mut left, &mut right, lite, *enc_ramp);
                                 }
                                 scratch[frame * 2] += left * gain;
                                 scratch[frame * 2 + 1] += right * gain;
@@ -1243,56 +584,66 @@ impl Engine {
                 if let Some(slot) = self.allocate_slot() {
                     self.voices[slot] = Voice::Sampled(SampledVoice {
                         handle,
-                        sample,
-                        position: start_position,
-                        release_position: 0.0,
-                        rate: rate as f64,
-                        rate_target: rate as f64,
-                        glide_frames: 0,
-                        kernel: self.sinc.select(rate as f64),
                         gain,
-                        fade: 0.0,
-                        fade_step: 0.0,
-                        tail_charge: 1.0,
-                        tail_charge_deficit: 0.0,
-                        tail_charge_step: 1.0,
-                        release_bend: 0.0,
-                        release_bend_depth: 0.0,
-                        release_bend_step: 0.0,
-                        amplitude: 1.0,
                         envelope: 0.0,
-                        tail_gain: 1.0,
                         bus: bus.min(MAX_BUSES as u8 - 1),
                         // Onset delays are bounded only against nonsense
                         // (30 s covers any musical canon trick).
                         onset: delay_frames.min((30.0 * self.sample_rate) as u32),
-                        group,
-                        wind_weight: wind_weight.max(0.0),
-                        wind_rate,
-                        wind_gain,
-                        wind_treble,
-                        wind_sens,
-                        wind_pitch_rate,
-                        wind_gain_rate,
                         age_frames: 0,
-                        tail_decay: 1.0,
-                        fade_scale: 1.0,
-                        pending_release: None,
-                        wave_trem: self.wave_trems & (1u32 << u32::from(group).min(31)) != 0,
-                        brightness_a: brightness.clamp(0.0, 1.0),
-                        lowpass: [0.0; 2],
-                        enclosure,
-                        enc_gain: box_state.gain(),
-                        enc_gain_target: box_state.gain(),
-                        enc_hi_gain: box_state.hi_gain(),
-                        enc_coeff: box_state.coeff(),
-                        enc_lowpass: [0.0; 2],
-                        wander: wind::Wander::default(),
                         rng: (handle as u32).wrapping_mul(0x9E37_79B9) | 1,
-                        loop_index: 0,
-                        external_release: None,
                         phase: SamplePhase::Held,
-                        past_loop: false,
+                        cursor: PlaybackCursor {
+                            sample,
+                            position: start_position,
+                            release_position: 0.0,
+                            rate: rate as f64,
+                            rate_target: rate as f64,
+                            glide_frames: 0,
+                            kernel: self.sinc.select(rate as f64),
+                            loop_index: 0,
+                            external_release: None,
+                            past_loop: false,
+                        },
+                        wind: WindState {
+                            group,
+                            weight: wind_weight.max(0.0),
+                            rate: wind_rate,
+                            gain: wind_gain,
+                            treble: wind_treble,
+                            sens: wind_sens,
+                            pitch_rate: wind_pitch_rate,
+                            gain_rate: wind_gain_rate,
+                            wander: wind::Wander::default(),
+                        },
+                        brightness: Brightness {
+                            a: brightness.clamp(0.0, 1.0),
+                            lowpass: [0.0; 2],
+                        },
+                        enclosure: EnclosureState {
+                            index: enclosure,
+                            gain: box_state.gain(),
+                            gain_target: box_state.gain(),
+                            hi_gain: box_state.hi_gain(),
+                            coeff: box_state.coeff(),
+                            lowpass: [0.0; 2],
+                        },
+                        release: ReleaseState {
+                            fade: 0.0,
+                            fade_step: 0.0,
+                            fade_scale: 1.0,
+                            amplitude: 1.0,
+                            tail_gain: 1.0,
+                            tail_decay: 1.0,
+                            charge: 1.0,
+                            charge_deficit: 0.0,
+                            charge_step: 1.0,
+                            bend: 0.0,
+                            bend_depth: 0.0,
+                            bend_step: 0.0,
+                            pending: None,
+                            wave_trem: self.wave_trems & (1u32 << u32::from(group).min(31)) != 0,
+                        },
                     });
                 }
             }
@@ -1338,8 +689,8 @@ impl Engine {
                 // state they released under.
                 for voice in self.voices.iter_mut() {
                     if let Voice::Sampled(sampled) = voice {
-                        if sampled.group == group && sampled.phase == SamplePhase::Held {
-                            sampled.wave_trem = engaged;
+                        if sampled.wind.group == group && sampled.phase == SamplePhase::Held {
+                            sampled.release.wave_trem = engaged;
                         }
                     }
                 }
@@ -1369,11 +720,11 @@ impl Engine {
                 for voice in self.voices.iter_mut() {
                     if let Voice::Sampled(sampled) = voice {
                         if sampled.handle == handle {
-                            sampled.rate_target = rate as f64;
-                            sampled.glide_frames = glide_frames;
+                            sampled.cursor.rate_target = rate as f64;
+                            sampled.cursor.glide_frames = glide_frames;
                             if glide_frames == 0 {
-                                sampled.rate = rate as f64;
-                                sampled.kernel = self.sinc.select(sampled.rate);
+                                sampled.cursor.rate = rate as f64;
+                                sampled.cursor.kernel = self.sinc.select(sampled.cursor.rate);
                             }
                         }
                     }
@@ -1390,8 +741,8 @@ impl Engine {
                 for voice in self.voices.iter_mut() {
                     if let Voice::Sampled(sampled) = voice {
                         if sampled.handle == handle && sampled.phase != SamplePhase::FadeOut {
-                            sampled.amplitude = 1.0;
-                            sampled.fade_scale = 1.0;
+                            sampled.release.amplitude = 1.0;
+                            sampled.release.fade_scale = 1.0;
                             sampled.phase = SamplePhase::FadeOut;
                         }
                     }
@@ -1430,8 +781,8 @@ impl Engine {
                         }
                         Voice::Sampled(sampled) => {
                             if sampled.phase != SamplePhase::FadeOut {
-                                sampled.amplitude = 1.0;
-                                sampled.fade_scale = 1.0;
+                                sampled.release.amplitude = 1.0;
+                                sampled.release.fade_scale = 1.0;
                                 sampled.phase = SamplePhase::FadeOut;
                             }
                         }

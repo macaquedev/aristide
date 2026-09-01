@@ -3,6 +3,7 @@
 //! `use super::*`.
 
 use super::*;
+use crate::bank::Sample;
 
 mod allocation;
 mod tone_voice;
