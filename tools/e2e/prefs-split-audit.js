@@ -113,7 +113,7 @@ try {
   const sizes = await drive.eval(`[...document.querySelectorAll("#scale-segment button")]
     .map((b) => b.textContent + (b.classList.contains("on") ? "*" : ""))`);
   check(
-    sizes.join(" ") === "80% 90% 100%* 110% 125% 150%",
+    sizes.join(" ") === "50% 60% 70% 80% 90% 100%* 110% 125% 150% 175% 200%",
     `the size row offers the zoom steps with 100% lit (${sizes.join(" ")})`
   );
   check(
@@ -122,7 +122,7 @@ try {
   );
   await drive.eval(`document.querySelectorAll("#accent-swatches .swatch")[2]?.click();
     document.querySelectorAll("#density-segment button")[0]?.click();
-    document.querySelectorAll("#scale-segment button")[5]?.click(); true`);
+    document.querySelectorAll("#scale-segment button")[10]?.click(); true`);
   await sleep(200);
   const posts = await drive.eval(`window.__apiPosts`);
   check(posts === 0, `appearance edits sent ${posts} API commands (want 0)`);

@@ -1,6 +1,6 @@
 # 2026-09-01 — console size in Preferences
 
-Preferences gains a **Size** row: 80 / 90 / 100 / 110 / 125 / 150 %,
+Preferences gains a **Size** row: 50–200 % in eleven steps,
 with Ctrl + / Ctrl − / Ctrl 0 stepping the same choices. A user
 preference like accent and density — localStorage, no organ command,
 never in an organ file.

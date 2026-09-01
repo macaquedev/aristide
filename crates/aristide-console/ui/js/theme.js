@@ -30,7 +30,7 @@ const DENSITIES = ["compact", "regular", "spacious"];
 // measures in. In a plain browser the browser's own zoom (Ctrl +/−)
 // already does exactly this and remembers it per site, so the row
 // only points there.
-const SCALES = [0.8, 0.9, 1, 1.1, 1.25, 1.5];
+const SCALES = [0.5, 0.6, 0.7, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2];
 const NATIVE_SCALE = 1;
 
 const store = {

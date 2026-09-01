@@ -1668,6 +1668,8 @@ input[type="range"]:hover::-webkit-slider-thumb { filter: brightness(1.15); }
    pane's closing note; a row the host can't act on stays visible but
    dimmed, so the option is seen to exist */
 .settings-hint { margin-top: -8px; font-size: 10.5px; }
+/* eleven zoom steps in one run: tighter chips so the row stays a row */
+#scale-segment button { padding: 5px 7px; }
 .segment[aria-disabled="true"] { opacity: 0.45; pointer-events: none; }
 
 .pane select,
@@ -2906,7 +2908,7 @@ body.editing .kb-tuning-chip { top: -17px; border-radius: 3px 3px 0 0; }
 
 /* The user-only Preferences card: one small pane, so it fits its
    content — the fixed height existed for the old tabbed dialog. */
-.prefs-card { width: min(520px, 100%); height: auto; }
+.prefs-card { width: min(580px, 100%); height: auto; }
 
 /* The bindings popover's trigger cell must never squeeze to nothing
    between the two selects — it's the half the player just played. */
