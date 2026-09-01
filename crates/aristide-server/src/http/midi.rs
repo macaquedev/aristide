@@ -43,9 +43,9 @@ pub(super) fn bind(state: &Mutex<State>, query: &str) -> Reply {
 /// API documents them, so a request naming two bad values is refused
 /// for the first.
 ///
-/// This is `config::Input`'s constructor in all but name, and would
-/// sit better beside the type in `config`; it stays here until that
-/// module can be touched.
+/// It lives here rather than beside `config::Input` because both of
+/// its inputs are this layer's: the query string and the live slot
+/// the request is patching.
 fn input_from_query(
     state: &State,
     manual: usize,
