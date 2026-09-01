@@ -9,7 +9,9 @@
 // Needs: a built server (default target/release, falls back to debug),
 // chromium on PATH, the gitignored demo set at testsets/grandorgue-demo,
 // and no listener on the ports below. Runs against a throwaway
-// XDG_CONFIG_HOME, so the real library and wiring are never touched.
+// XDG_CONFIG_HOME, so the real library and wiring are never touched;
+// the demo is saved under a name of its own first, since a set's own
+// organ refuses every edit (409 → the console's save-as card).
 //
 // What it proves:
 //   1. OFFER — revoicing a footage-named stop shows the inline offer,
@@ -115,8 +117,16 @@ try {
   }
   await post(`/api/organ/load?path=${encodeURIComponent(demo)}`);
   let snap = await settled();
+  check(snap.setup?.adopted === true, `the demo loads as the set's own organ (${snap.setup?.file})`);
+
+  // A sample set's own organ refuses every edit (409 → the save-as
+  // card), so the audit works on a copy with a name of its own — the
+  // rename must land in *that* file.
+  const saved = await post(`/api/organ/save_as?name=${encodeURIComponent("Stop label audit")}`);
+  check(saved.ok, `the demo saved as an organ of its own (${saved.body.slice(0, 80)})`);
+  snap = await settled();
   const organFile = snap.setup?.file;
-  check(!!organFile, `the adopted demo lives in a file (${organFile})`);
+  check(!!organFile && snap.setup?.adopted === false, `the copy lives in a file that takes edits (${organFile})`);
   const fileText = () => readFileSync(organFile, "utf8");
 
   // Two audit subjects: single-footage stops whose names carry a tail.
@@ -190,7 +200,8 @@ try {
 
   // Give the stop a custom engraving first: accepting must return it
   // to auto, so the knob face follows the pitch from now on.
-  await post(`/api/organ/stop/label?stop=${renameStop.id}&label=${encodeURIComponent("olde text")}`);
+  const labelled = await post(`/api/organ/stop/label?stop=${renameStop.id}&label=${encodeURIComponent("olde text")}`);
+  check(labelled.ok, `${renameStop.name} takes a custom engraving to start from`);
   const target = footageTail(renameStop.name);
   const goal = target.feet === 8 ? "16" : "8";
   check(await openEditor(renameStop.id), `the editor opens on ${renameStop.name}`);
