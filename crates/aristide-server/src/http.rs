@@ -241,11 +241,25 @@ fn respond(
                 if state.loading.is_some() || state.pending_load.is_some() {
                     return bad_request("an organ is already loading");
                 }
-                // With `manual`, the update tunes that one division
-                // apart from the instrument (starting from what it
-                // effectively plays now); `reset=1` returns it to the
-                // shared tuning. Without, it tunes the instrument.
+                // The scope: `stop` (+ `rank` for one rank within it),
+                // `source` (a set, by alias), `manual` (a division), or
+                // none for the instrument. A scope other than the
+                // instrument starts from what it effectively plays now
+                // and takes a tuning of its own; `follow=` instead
+                // names what a stop follows (auto | division | source |
+                // organ), `follow=own` its own tuning, and `reset=1`
+                // (or `follow=organ` for a set, `follow=stop` for a
+                // rank) returns a scope to what it would follow.
                 let manual = param(query, "manual").and_then(|v| v.parse::<usize>().ok());
+                let source = param(query, "source").map(unescape);
+                let stop = param(query, "stop")
+                    .and_then(|v| v.parse::<u32>().ok())
+                    .map(aristide_model::StopId);
+                let rank = param(query, "rank")
+                    .and_then(|v| v.parse::<u32>().ok())
+                    .map(aristide_model::RankId);
+                let follow = param(query, "follow").map(unescape);
+                let reset = param(query, "reset") == Some("1");
                 // Scale files load now, against the organ's own
                 // directory, so a bad path answers this request instead
                 // of warning into the void.
@@ -342,9 +356,65 @@ fn respond(
                     tuning.refresh_scale_reference();
                     Ok(tuning)
                 };
-                match manual {
-                    Some(manual) => {
-                        let reset = param(query, "reset") == Some("1");
+                match (stop, source, manual) {
+                    (Some(stop), _, _) => {
+                        let Control::Organ(console) = &state.control else {
+                            return bad_request("no organ is loaded");
+                        };
+                        if let Some(rank) = rank {
+                            let back = reset || follow.as_deref() == Some("stop");
+                            let current = console
+                                .rank_tuning(stop, rank)
+                                .unwrap_or_else(|| console.stop_tuning_resolved(stop).0.clone());
+                            let tuning = match (!back).then(|| patched(current)).transpose() {
+                                Ok(tuning) => tuning,
+                                Err(err) => return bad_request(&err),
+                            };
+                            if let Err(err) = state.tune_rank(stop, rank, tuning) {
+                                return bad_request(&err);
+                            }
+                        } else {
+                            let change = match follow.as_deref() {
+                                Some("own") | None if !reset => {
+                                    let current = console
+                                        .stop_own_tuning(stop)
+                                        .unwrap_or_else(|| console.stop_tuning_resolved(stop).0.clone());
+                                    match patched(current) {
+                                        Ok(tuning) => Err(tuning),
+                                        Err(err) => return bad_request(&err),
+                                    }
+                                }
+                                None => Ok(crate::tuning::Follow::Auto),
+                                Some(name) => match crate::tuning::Follow::parse(name) {
+                                    Some(follow) => Ok(follow),
+                                    None => {
+                                        return bad_request(
+                                            "follow must be auto, division, source, organ or own",
+                                        )
+                                    }
+                                },
+                            };
+                            if let Err(err) = state.tune_stop(stop, change) {
+                                return bad_request(&err);
+                            }
+                        }
+                    }
+                    (None, Some(alias), _) => {
+                        let Control::Organ(console) = &state.control else {
+                            return bad_request("no organ is loaded");
+                        };
+                        let back = reset || follow.as_deref() == Some("organ");
+                        let current = console.source_tuning(&alias).unwrap_or(console.tuning());
+                        let tuning = match (!back).then(|| patched(current)).transpose() {
+                            Ok(tuning) => tuning,
+                            Err(err) => return bad_request(&err),
+                        };
+                        if let Err(err) = state.tune_source(&alias, tuning) {
+                            return bad_request(&err);
+                        }
+                    }
+                    (None, None, Some(manual)) => {
+                        let reset = reset || follow.as_deref() == Some("organ");
                         let current = match &state.control {
                             Control::Organ(console) => Some(
                                 console.manual_tuning(manual).unwrap_or(console.tuning()),
@@ -359,7 +429,7 @@ fn respond(
                             state.tune_manual(manual, tuning);
                         }
                     }
-                    None => {
+                    (None, None, None) => {
                         if let Control::Organ(console) = &mut state.control {
                             match patched(console.tuning()) {
                                 Ok(tuning) => console.set_tuning(tuning),
@@ -1891,8 +1961,34 @@ fn state_json_locked(state: &State) -> String {
             } else {
                 ""
             };
+            // What the stop's tuning resolves to (`scope`: organ |
+            // source | division | stop), what it follows, and the
+            // distinct ranks it sounds — with which are tuned apart.
+            let (_, scope) = console.stop_tuning_resolved(id);
+            let tuning = format!(
+                ",\"tuning\":{{\"scope\":{},\"follow\":{}}}",
+                json_string(scope.name()),
+                json_string(if console.stop_own_tuning(id).is_some() {
+                    "own"
+                } else {
+                    console.stop_follow(id).name()
+                })
+            );
+            let ranks: Vec<String> = console
+                .stop_ranks(id)
+                .iter()
+                .map(|(rank, name)| {
+                    format!(
+                        "{{\"id\":{},\"name\":{},\"own\":{}}}",
+                        rank.0,
+                        json_string(name),
+                        console.rank_tuning(id, *rank).is_some()
+                    )
+                })
+                .collect();
+            let ranks = format!(",\"ranks\":[{}]", ranks.join(","));
             out.push_str(&format!(
-                "{{\"id\":{},\"name\":{},\"manual\":{},\"midx\":{},\"enc\":[{}],\"on\":{}{src}{pitch}{label}{own_pipes}}}",
+                "{{\"id\":{},\"name\":{},\"manual\":{},\"midx\":{},\"enc\":[{}],\"on\":{}{src}{pitch}{label}{own_pipes}{tuning}{ranks}}}",
                 id.0,
                 json_string(name),
                 json_string(manual),
@@ -2193,6 +2289,62 @@ fn state_json_locked(state: &State) -> String {
             .collect();
         if !own.is_empty() {
             out.push_str(&format!(",\"manual_tuning\":[{}]", own.join(",")));
+        }
+        // Sets tuned apart, by alias; stops pinned or tuned apart (a
+        // pinned stop carries `follow` only, a tuned one its tuning
+        // and `follow: "own"`); ranks tuned apart within their stops.
+        let sources: Vec<String> = console
+            .source_tunings()
+            .iter()
+            .map(|(alias, tuning)| {
+                format!("{{\"source\":{},{}}}", json_string(alias), tuning_json(tuning))
+            })
+            .collect();
+        if !sources.is_empty() {
+            out.push_str(&format!(",\"source_tuning\":[{}]", sources.join(",")));
+        }
+        let stops: Vec<String> = console
+            .stop_tunings()
+            .iter()
+            .map(|(stop, follow, own)| match own {
+                Some(tuning) => format!(
+                    "{{\"stop\":{},\"follow\":\"own\",{}}}",
+                    stop.0,
+                    tuning_json(tuning)
+                ),
+                None => format!("{{\"stop\":{},\"follow\":{}}}", stop.0, json_string(follow.name())),
+            })
+            .collect();
+        if !stops.is_empty() {
+            out.push_str(&format!(",\"stop_tuning\":[{}]", stops.join(",")));
+        }
+        let ranks: Vec<String> = console
+            .rank_tunings()
+            .iter()
+            .map(|(stop, rank, tuning)| {
+                format!("{{\"stop\":{},\"rank\":{},{}}}", stop.0, rank.0, tuning_json(tuning))
+            })
+            .collect();
+        if !ranks.is_empty() {
+            out.push_str(&format!(",\"rank_tuning\":[{}]", ranks.join(",")));
+        }
+        // Each set's own recorded pitch, where the instrument holds
+        // more than one: what "as recorded" means at set scope.
+        let homes: Vec<String> = state
+            .setup
+            .sources
+            .iter()
+            .filter_map(|(alias, _)| {
+                let home = console.source_home_of(alias)?;
+                Some(format!(
+                    "{{\"source\":{},\"a4_hz\":{:.2}}}",
+                    json_string(alias),
+                    home.a4_hz
+                ))
+            })
+            .collect();
+        if homes.len() > 1 {
+            out.push_str(&format!(",\"source_home\":[{}]", homes.join(",")));
         }
     }
     if let Some(wet) = state.reverb_wet {
@@ -2800,6 +2952,12 @@ mod tests {
         let mut console =
             crate::console::Console::new(organ, loaded.specs, Vec::new(), 48000.0);
         console.set_home(loaded.home.map(std::sync::Arc::new));
+        console.set_stop_sources(
+            provenance
+                .iter()
+                .map(|(id, prov)| (*id, prov.source.clone()))
+                .collect(),
+        );
         if let Some(home) = console.home() {
             let mut tuning = console.tuning();
             tuning.reference = home.reference(69);
@@ -3038,6 +3196,135 @@ mod tests {
             moved.manual, saved.organ.manuals[target].id,
             "the move replays from the file"
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Every tuning scope over one endpoint: a set by alias, a stop by
+    /// pin or own tuning, a rank within a stop — each live in the
+    /// snapshot (the stop reporting what it resolves to) and in the
+    /// file, and each undone the same way.
+    #[test]
+    fn sets_stops_and_ranks_tune_apart_over_the_api() {
+        let Some(state) = demo_state() else { return };
+        let demo = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testsets/grandorgue-demo/demo.organ");
+        let (stop, rank, other) = {
+            let mut state = state.lock().expect("state poisoned");
+            let names: Vec<String> = state.manual_names();
+            state.setup.sources = vec![("Demo".into(), demo.clone())];
+            state.setup.pulls = names
+                .iter()
+                .enumerate()
+                .map(|(index, name)| (0, name.clone(), index))
+                .collect();
+            state.setup.implicit = true;
+            let Control::Organ(console) = &state.control else { unreachable!() };
+            let states = console.stop_states();
+            let (id, ..) = states[0];
+            let (other, ..) = states[1];
+            (id, console.stop_ranks(id)[0].0, other)
+        };
+        let path = std::env::temp_dir().join("aristide-scoped-tuning-api-test.toml");
+        let _ = std::fs::remove_file(&path);
+        respond(
+            &state,
+            &Method::Post,
+            &format!("/api/organ/save?path={}", path.display().to_string().replace('/', "%2F")),
+        );
+        let stop_entry = |body: &str, id: aristide_model::StopId| -> String {
+            let at = body.find(&format!("{{\"id\":{},\"name\":", id.0)).expect("stop listed");
+            let end = body[at..].find("\"ranks\":[").expect("ranks follow") + at;
+            body[at..end].to_string()
+        };
+
+        // The set: every stop from it follows it.
+        let ok = respond(&state, &Method::Post, "/api/tuning?source=s1&temperament=meantone");
+        assert_eq!(ok.status_code().0, 200);
+        let body = state_json(&state);
+        assert!(
+            body.contains("\"source_tuning\":[{\"source\":\"s1\",\"temperament\":\"meantone4\""),
+            "set tuning shows: {body}"
+        );
+        assert!(
+            stop_entry(&body, stop).contains("\"tuning\":{\"scope\":\"source\",\"follow\":\"auto\"}"),
+            "a stop resolves to its set: {body}"
+        );
+        let bad = respond(&state, &Method::Post, "/api/tuning?source=nowhere&temperament=equal");
+        assert_eq!(bad.status_code().0, 400);
+
+        // A pin past the set, an own tuning, a rank of its own.
+        respond(&state, &Method::Post, &format!("/api/tuning?stop={}&follow=organ", stop.0));
+        let body = state_json(&state);
+        assert!(
+            stop_entry(&body, stop).contains("\"scope\":\"organ\",\"follow\":\"organ\""),
+            "pinned: {body}"
+        );
+        assert!(
+            body.contains(&format!("\"stop_tuning\":[{{\"stop\":{},\"follow\":\"organ\"}}]", stop.0)),
+            "the pin is listed: {body}"
+        );
+        respond(
+            &state,
+            &Method::Post,
+            &format!("/api/tuning?stop={}&follow=own&temperament=pythagorean", stop.0),
+        );
+        let body = state_json(&state);
+        assert!(stop_entry(&body, stop).contains("\"scope\":\"stop\",\"follow\":\"own\""), "{body}");
+        assert!(
+            body.contains(&format!(
+                "\"stop_tuning\":[{{\"stop\":{},\"follow\":\"own\",\"temperament\":\"pythagorean\"",
+                stop.0
+            )),
+            "own tuning listed: {body}"
+        );
+        assert!(
+            stop_entry(&body, other).contains("\"scope\":\"source\""),
+            "the other stop still follows the set: {body}"
+        );
+        respond(
+            &state,
+            &Method::Post,
+            &format!("/api/tuning?stop={}&rank={}&temperament=werckmeister", other.0, {
+                let state = state.lock().expect("state poisoned");
+                let Control::Organ(console) = &state.control else { unreachable!() };
+                console.stop_ranks(other)[0].0.0
+            }),
+        );
+        let body = state_json(&state);
+        assert!(
+            body.contains(&format!("\"rank_tuning\":[{{\"stop\":{},\"rank\":", other.0)),
+            "rank tuning listed: {body}"
+        );
+        assert!(body.contains("\"own\":true}"), "the rank is marked: {body}");
+        let bad = respond(&state, &Method::Post, &format!("/api/tuning?stop={}&follow=sideways", stop.0));
+        assert_eq!(bad.status_code().0, 400);
+
+        // All of it in the file.
+        let saved = aristide_formats::instrument::load(&path).expect("reloads");
+        assert_eq!(
+            saved.source_tuning.get("s1").and_then(|t| t.temperament.as_deref()),
+            Some("meantone4")
+        );
+        assert_eq!(saved.sidecar.tuning.stops.len(), 2, "{:?}", saved.sidecar.tuning.stops);
+        assert!(saved.sidecar.tuning.stops.iter().any(|row| row.rank.is_some()));
+        let reloaded = crate::load::prepare(&[path.clone()], &[], 48_000.0, &|_| {})
+            .expect("the scoped file loads");
+        assert!(reloaded.console.source_tuning("s1").is_some());
+        assert_eq!(reloaded.console.stop_tunings().len(), 1);
+        assert_eq!(reloaded.console.rank_tunings().len(), 1);
+
+        // And undone: follow=auto, reset=1 on the rank, follow=organ on
+        // the set.
+        respond(&state, &Method::Post, &format!("/api/tuning?stop={}&follow=auto", stop.0));
+        respond(&state, &Method::Post, &format!("/api/tuning?stop={}&rank={}&reset=1", other.0, rank.0));
+        let _ = rank;
+        respond(&state, &Method::Post, "/api/tuning?source=s1&follow=organ");
+        let body = state_json(&state);
+        assert!(!body.contains("\"source_tuning\""), "{body}");
+        assert!(!body.contains("\"stop_tuning\""), "{body}");
+        assert!(stop_entry(&body, stop).contains("\"scope\":\"organ\",\"follow\":\"auto\""));
+        let saved = aristide_formats::instrument::load(&path).expect("reloads");
+        assert!(saved.source_tuning.is_empty());
         let _ = std::fs::remove_file(&path);
     }
 

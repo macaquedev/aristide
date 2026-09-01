@@ -273,7 +273,6 @@ struct KeyVoice {
     deviation: f64,
     home: f64,
     model: f64,
-    target: usize,
     ladder_key: i16,
     spec: VoiceSpec,
 }
@@ -1543,7 +1542,6 @@ impl Console {
                         deviation: deviation - home,
                         home: spec.home_cents as f64,
                         model: spec.model_cents as f64,
-                        target,
                         ladder_key: midi_key,
                         spec: self.voiced(spec, ratio * bend_ratio),
                     });

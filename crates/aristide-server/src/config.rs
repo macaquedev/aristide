@@ -896,7 +896,7 @@ pub fn save_composite(
         table["low"] = toml_edit::value(manual.low as i64);
         table["high"] = toml_edit::value(manual.high as i64);
         if let Some(tuning) = &manual.tuning {
-            write_manual_tuning_fields(&mut table, tuning);
+            write_tuning_fields(&mut table, tuning, true);
         }
         manual_tables.push(table);
     }
@@ -972,7 +972,7 @@ pub fn write_composite_manual_tuning(
 ) -> Result<bool, String> {
     edit_composite_manual(path, manual, |table| match &tuning {
         Some(fields) => {
-            write_manual_tuning_fields(table, fields);
+            write_tuning_fields(table, fields, true);
         }
         None => {
             for field in [
@@ -995,7 +995,7 @@ pub fn write_composite_manual_tuning(
 /// The tuning lines of one `[[manual]]` table. A scale replaces the
 /// temperament line (a Scala scale IS the temperament); absent fields
 /// are removed so the file never says two things at once.
-fn write_manual_tuning_fields(table: &mut toml_edit::Table, fields: &ManualTuningFields) {
+fn write_tuning_fields(table: &mut toml_edit::Table, fields: &ManualTuningFields, transpose: bool) {
     // A scale supersedes both the temperament and the division count;
     // and at 12 divisions — the file's default — the edo line goes,
     // while the temperament line goes at any other count (twelve-class
@@ -1017,7 +1017,13 @@ fn write_manual_tuning_fields(table: &mut toml_edit::Table, fields: &ManualTunin
         toml_edit::value(aristide_formats::sidecar::note_name(fields.reference.key));
     table["reference_hz"] = toml_edit::value(fields.reference.hz);
     table.remove("a4_hz");
-    table["transpose"] = toml_edit::value(fields.transpose as i64);
+    // Transposition is a keyboard's: a set's or a stop's tuning never
+    // carries the line.
+    if transpose {
+        table["transpose"] = toml_edit::value(fields.transpose as i64);
+    } else {
+        table.remove("transpose");
+    }
     for (key, value) in [("scale", &fields.scale), ("keymap", &fields.keymap)] {
         match value {
             Some(value) => table[key] = toml_edit::value(value.as_str()),
@@ -1099,7 +1105,181 @@ pub fn write_composite_tuning(path: &Path, fields: &ManualTuningFields) -> Resul
     let Some(table) = table.as_table_mut() else {
         return Err("[tuning] is not a table".into());
     };
-    write_manual_tuning_fields(table, fields);
+    write_tuning_fields(table, fields, true);
+    write_atomically(path, doc.to_string())
+}
+
+/// The tuning lines every scope's own tuning is written with — no
+/// transpose — minus nothing: the same fields, so a scope's table
+/// reads like `[tuning]` itself.
+const TUNING_FIELD_KEYS: [&str; 9] = [
+    "temperament",
+    "edo",
+    "reference_key",
+    "reference_hz",
+    "a4_hz",
+    "transpose",
+    "scale",
+    "keymap",
+    "pipes",
+];
+
+/// Update (or with `None` remove) one source set's own tuning — its
+/// `[sources.<alias>.tuning]` table. A source spelled as a bare path
+/// becomes a table with the same `path` so the tuning has somewhere
+/// to live. `Ok(false)` when the file has no such source.
+pub fn write_composite_source_tuning(
+    path: &Path,
+    alias: &str,
+    tuning: Option<&ManualTuningFields>,
+) -> Result<bool, String> {
+    let mut doc = composite_doc(path)?;
+    let Some(sources) = doc.get_mut("sources").and_then(|s| s.as_table_mut()) else {
+        return Ok(false);
+    };
+    let Some(set_path) = sources.get(alias) else {
+        return Ok(false);
+    };
+    // A bare path becomes a table of its own — a fresh entry, so the
+    // path line's decor (a trailing label comment) doesn't cling to
+    // the table header.
+    if let Some(set_path) = set_path.as_str().map(str::to_string) {
+        sources.remove(alias);
+        let mut table = toml_edit::Table::new();
+        table["path"] = toml_edit::value(set_path);
+        sources.insert(alias, toml_edit::Item::Table(table));
+    }
+    let Some(source) = sources.get_mut(alias).and_then(|item| item.as_table_like_mut()) else {
+        return Err(format!("[sources.{alias}] is neither a path nor a table"));
+    };
+    match tuning {
+        Some(fields) => {
+            let entry = source
+                .entry("tuning")
+                .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+            let Some(table) = entry.as_table_like_mut() else {
+                return Err(format!("[sources.{alias}.tuning] is not a table"));
+            };
+            let mut scratch = toml_edit::Table::new();
+            for (key, value) in table.iter() {
+                scratch.insert(key, value.clone());
+            }
+            write_tuning_fields(&mut scratch, fields, false);
+            for key in TUNING_FIELD_KEYS {
+                match scratch.get(key) {
+                    Some(value) => {
+                        table.insert(key, value.clone());
+                    }
+                    None => {
+                        table.remove(key);
+                    }
+                }
+            }
+        }
+        None => {
+            source.remove("tuning");
+        }
+    }
+    write_atomically(path, doc.to_string())?;
+    Ok(true)
+}
+
+/// What a `[[tuning.stop]]` row says about its stop.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StopTuningEntry {
+    /// `follow = "<scope>"` — a pin.
+    Follow(String),
+    /// A tuning of the stop's (or the rank's) own.
+    Own(ManualTuningFields),
+}
+
+/// Write (or with `None` remove) the `[[tuning.stop]]` row for one
+/// stop — or for one rank within it, with `rank` — matched by console
+/// stop name, manual name and rank name (all case-insensitive; a row
+/// naming no manual matches any). One row per coordinate: writing
+/// replaces what was there. The rows live under `[tuning]`, which is
+/// left implicit when the file had none, so a file gains
+/// `[[tuning.stop]]` and nothing else.
+pub fn write_composite_stop_tuning(
+    path: &Path,
+    stop_name: &str,
+    manual_name: &str,
+    rank: Option<&str>,
+    entry: Option<StopTuningEntry>,
+) -> Result<(), String> {
+    let mut doc = composite_doc(path)?;
+    let is_row = |table: &toml_edit::Table| {
+        let field = |key: &str| table.get(key).and_then(|v| v.as_str());
+        field("stop").is_some_and(|name| name.eq_ignore_ascii_case(stop_name))
+            && field("manual").is_none_or(|m| m.eq_ignore_ascii_case(manual_name))
+            && match (field("rank"), rank) {
+                (None, None) => true,
+                (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+                _ => false,
+            }
+    };
+    fn rows_of(doc: &mut toml_edit::DocumentMut) -> Option<&mut toml_edit::ArrayOfTables> {
+        doc.get_mut("tuning")?
+            .as_table_mut()?
+            .get_mut("stop")?
+            .as_array_of_tables_mut()
+    }
+    let Some(entry) = entry else {
+        if let Some(rows) = rows_of(&mut doc) {
+            rows.retain(|row| !is_row(row));
+            if rows.is_empty()
+                && let Some(tuning) = doc.get_mut("tuning").and_then(|t| t.as_table_mut())
+            {
+                tuning.remove("stop");
+                if tuning.is_empty() {
+                    doc.remove("tuning");
+                }
+            }
+        }
+        return write_atomically(path, doc.to_string());
+    };
+    let tuning = doc
+        .entry("tuning")
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+    let Some(tuning) = tuning.as_table_mut() else {
+        return Err("[tuning] is not a table".into());
+    };
+    if tuning.iter().all(|(key, _)| key == "stop") {
+        tuning.set_implicit(true);
+    }
+    let rows = tuning
+        .entry("stop")
+        .or_insert(toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new()));
+    let Some(rows) = rows.as_array_of_tables_mut() else {
+        return Err("[[tuning.stop]] is not an array of tables".into());
+    };
+    let index = (0..rows.len()).find(|&i| rows.get(i).is_some_and(&is_row));
+    let table = match index {
+        Some(index) => rows.get_mut(index).expect("row just found"),
+        None => {
+            let mut table = toml_edit::Table::new();
+            table["stop"] = toml_edit::value(stop_name);
+            table["manual"] = toml_edit::value(manual_name);
+            if let Some(rank) = rank {
+                table["rank"] = toml_edit::value(rank);
+            }
+            rows.push(table);
+            let last = rows.len() - 1;
+            rows.get_mut(last).expect("row just pushed")
+        }
+    };
+    match entry {
+        StopTuningEntry::Follow(scope) => {
+            for key in TUNING_FIELD_KEYS {
+                table.remove(key);
+            }
+            table["follow"] = toml_edit::value(scope);
+        }
+        StopTuningEntry::Own(fields) => {
+            table.remove("follow");
+            write_tuning_fields(table, &fields, false);
+        }
+    }
     write_atomically(path, doc.to_string())
 }
 
@@ -4234,6 +4414,99 @@ device = "Keys"
     /// same absence rules a manual's own tuning does — a scale
     /// supersedes the temperament and the division count, and 12 EDO
     /// (the file's default) is never written.
+    /// A set's own tuning lands under its `[sources]` entry (a bare
+    /// path becoming a table with the same path); a stop's pin or own
+    /// tuning, and a rank's own, are `[[tuning.stop]]` rows keyed by
+    /// stop, manual and rank — one row per coordinate, the `[tuning]`
+    /// header implicit unless it has fields of its own.
+    #[test]
+    fn write_source_and_stop_tuning_round_trip() {
+        let dir = std::env::temp_dir().join("aristide-scope-tuning-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("scoped.toml");
+        std::fs::write(
+            &path,
+            "name = \"Scoped\"\n\n[sources]\npositif = \"/sets/positif\"\n\n\
+             [sources.great]\npath = \"/sets/great\"\nlayout = true\n\n\
+             [[manual]]\nname = \"Récit\"\n",
+        )
+        .expect("writes");
+        let def = |path: &Path| -> aristide_formats::instrument::Definition {
+            toml::from_str(&std::fs::read_to_string(path).expect("reads")).expect("parses")
+        };
+        let fields = |temperament: &str| ManualTuningFields {
+            temperament: temperament.into(),
+            edo: 12,
+            reference: crate::tuning::PitchReference { key: 69, hz: 415.0 },
+            transpose: -2,
+            scale: None,
+            keymap: None,
+            pipes: crate::tuning::PipeRetune::Original,
+        };
+
+        assert!(write_composite_source_tuning(&path, "positif", Some(&fields("meantone4"))).expect("set"));
+        assert!(write_composite_source_tuning(&path, "great", Some(&fields("equal"))).expect("set"));
+        assert!(!write_composite_source_tuning(&path, "ghost", Some(&fields("equal"))).expect("ghost"));
+        let parsed = def(&path);
+        let positif = &parsed.sources["positif"];
+        assert_eq!(positif.path(), Path::new("/sets/positif"), "the path survives the table");
+        assert_eq!(positif.tuning().and_then(|t| t.temperament.as_deref()), Some("meantone4"));
+        assert_eq!(positif.tuning().and_then(|t| t.reference_hz), Some(415.0));
+        let great = &parsed.sources["great"];
+        assert!(great.layout(), "other source options survive");
+        assert_eq!(great.tuning().and_then(|t| t.temperament.as_deref()), Some("equal"));
+        let text = std::fs::read_to_string(&path).expect("reads");
+        assert!(!text.contains("transpose"), "a set never transposes: {text}");
+        assert!(write_composite_source_tuning(&path, "positif", None).expect("unset"));
+        let parsed = def(&path);
+        assert!(parsed.sources["positif"].tuning().is_none());
+        assert_eq!(parsed.sources["positif"].path(), Path::new("/sets/positif"));
+
+        // A pin, replaced by an own tuning at the same coordinate; a
+        // rank row beside it; removal down to no [tuning] at all.
+        let pin = Some(StopTuningEntry::Follow("source".into()));
+        write_composite_stop_tuning(&path, "Bourdon 8", "Récit", None, pin).expect("pin");
+        let parsed = def(&path);
+        assert_eq!(parsed.tuning.stops.len(), 1);
+        assert_eq!(parsed.tuning.stops[0].follow.as_deref(), Some("source"));
+        assert_eq!(parsed.tuning.stops[0].manual.as_deref(), Some("Récit"));
+        let text = std::fs::read_to_string(&path).expect("reads");
+        assert!(text.contains("[[tuning.stop]]"), "{text}");
+        assert!(!text.contains("[tuning]\n"), "the header stays implicit: {text}");
+
+        let own = Some(StopTuningEntry::Own(fields("pythagorean")));
+        write_composite_stop_tuning(&path, "bourdon 8", "récit", None, own.clone()).expect("own");
+        let parsed = def(&path);
+        assert_eq!(parsed.tuning.stops.len(), 1, "one row per coordinate");
+        assert_eq!(parsed.tuning.stops[0].follow, None, "own tuning drops the pin");
+        assert_eq!(parsed.tuning.stops[0].temperament.as_deref(), Some("pythagorean"));
+        assert_eq!(parsed.tuning.stops[0].stop, "Bourdon 8", "the first spelling stands");
+
+        write_composite_stop_tuning(&path, "Fourniture IV", "Récit", Some("Tierce"), own).expect("rank");
+        let parsed = def(&path);
+        assert_eq!(parsed.tuning.stops.len(), 2);
+        assert_eq!(parsed.tuning.stops[1].rank.as_deref(), Some("Tierce"));
+
+        write_composite_stop_tuning(&path, "Bourdon 8", "Récit", None, None).expect("unpin");
+        assert_eq!(def(&path).tuning.stops.len(), 1, "the rank row stays");
+        write_composite_stop_tuning(&path, "Fourniture IV", "Récit", Some("Tierce"), None).expect("rank off");
+        assert!(def(&path).tuning.stops.is_empty());
+        let text = std::fs::read_to_string(&path).expect("reads");
+        assert!(!text.contains("[tuning") && !text.contains("follow"), "nothing left behind: {text}");
+
+        // Under a [tuning] with fields of its own, rows append and the
+        // fields survive.
+        write_composite_tuning(&path, &fields("equal")).expect("instrument tuning");
+        let pin = Some(StopTuningEntry::Follow("division".into()));
+        write_composite_stop_tuning(&path, "Bourdon 8", "Récit", None, pin).expect("pin");
+        let parsed = def(&path);
+        assert_eq!(parsed.tuning.temperament, "equal");
+        assert_eq!(parsed.tuning.transpose, -2);
+        assert_eq!(parsed.tuning.stops.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn write_composite_tuning_reverb_and_noises_round_trip() {
         let dir = std::env::temp_dir().join("aristide-instrument-settings-test");

@@ -254,6 +254,12 @@ pub fn prepare(
     let mut stop_labels: std::collections::HashMap<StopId, String> =
         std::collections::HashMap::new();
     let mut manual_tuning_defs: Vec<instrument::ManualTuningDef> = Vec::new();
+    let mut source_tuning_defs: std::collections::BTreeMap<
+        String,
+        aristide_formats::sidecar::TuningOverride,
+    > = std::collections::BTreeMap::new();
+    // Per assembled rank: the alias of the set it came from.
+    let mut rank_sources: Vec<String> = Vec::new();
     let mut console_order: std::collections::BTreeMap<String, Vec<String>> =
         std::collections::BTreeMap::new();
     let mut console_layout: std::collections::BTreeMap<String, instrument::PanelPos> =
@@ -309,6 +315,8 @@ pub fn prepare(
                     .filter_map(|(index, label)| Some((StopId(index as u32), label?)))
                     .collect();
                 manual_tuning_defs = assembled.manual_tuning;
+                source_tuning_defs = assembled.source_tuning;
+                rank_sources = assembled.rank_sources;
                 console_layout = assembled.console_layout;
                 console_order = assembled.console_order;
                 console_coupled_keys = assembled.console_coupled_keys.unwrap_or(true);
@@ -414,6 +422,9 @@ pub fn prepare(
         // A composite already reported where each stop came from; a
         // bare set standing as itself is its own provenance — each
         // stop from its own manual, as a division pull would record it.
+        if rank_sources.is_empty() {
+            rank_sources = vec![label.clone(); organ.ranks.len()];
+        }
         if single_provenance.is_empty() {
             single_provenance = organ
                 .stops
@@ -487,6 +498,7 @@ pub fn prepare(
         }
         setup.pulls = assembled.division_pulls.clone();
         setup.implicit = true;
+        rank_sources = assembled.rank_sources.clone();
         single_provenance = assembled
             .provenance
             .iter()
@@ -740,6 +752,36 @@ pub fn prepare(
         None => tracing::info!("recorded tuning: no pipe measured; assuming a′ = 440 equal"),
     }
     console.set_home(home.clone());
+    // Each set's own recorded pitch: the instrument's class table at
+    // the median anchor of the set's ranks — so "as recorded" at set
+    // scope names the 415 the Positif was sampled at, not the
+    // instrument's blend of 415 and 440. One set is the instrument.
+    let source_homes: std::collections::HashMap<String, Arc<tuning::HomeTuning>> = match &home {
+        Some(home) if setup.sources.len() > 1 || source_tuning_defs.len() > 1 => {
+            let mut per_source: std::collections::HashMap<String, Vec<f64>> =
+                std::collections::HashMap::new();
+            for (rank, anchor) in &loaded.rank_anchors {
+                if let Some(alias) = rank_sources.get(rank.0 as usize) {
+                    per_source.entry(alias.clone()).or_default().push(*anchor);
+                }
+            }
+            per_source
+                .into_iter()
+                .filter_map(|(alias, mut anchors)| {
+                    tuning::median(&mut anchors)
+                        .map(|anchor| (alias, Arc::new(home.at_anchor(anchor))))
+                })
+                .collect()
+        }
+        _ => Default::default(),
+    };
+    console.set_scope_homes(source_homes, loaded.rank_anchors.clone());
+    console.set_stop_sources(
+        single_provenance
+            .iter()
+            .map(|(id, prov)| (*id, prov.source.clone()))
+            .collect(),
+    );
     let temperament = tuning::Temperament::parse(&sidecar.tuning.temperament)
         .unwrap_or_else(|| {
             tracing::warn!(
@@ -801,63 +843,182 @@ pub fn prepare(
         );
     }
     console.set_tuning(live_tuning.clone());
-    // Divisions the definition tunes apart from the rest: missing
-    // fields follow the instrument-wide tuning.
-    for def in &manual_tuning_defs {
+    // A scope's own tuning from its file fields: every missing field
+    // is the tuning it would otherwise play (`base`), so a row saying
+    // only `temperament = "meantone4"` keeps the pitch it had. An
+    // as-recorded override at a scope with a home of its own (a set, a
+    // rank) and no reference of its own sits at *that* home's pitch —
+    // a 415 set marked `original` inside a 440 instrument plays at 415.
+    let override_tuning = |base: &tuning::Tuning,
+                           def: &aristide_formats::sidecar::TuningOverride,
+                           scope_home: Option<Arc<tuning::HomeTuning>>,
+                           what: &str| {
         let temperament = def
             .temperament
             .as_deref()
             .map(|name| {
                 tuning::Temperament::parse(name).unwrap_or_else(|| {
-                    tracing::warn!(
-                        "manual tuning: unknown temperament {name:?}, using the \
-                         instrument's"
-                    );
-                    live_tuning.temperament
+                    tracing::warn!("{what}: unknown temperament {name:?}, keeping the tuning above");
+                    base.temperament
                 })
             })
-            .unwrap_or(live_tuning.temperament);
+            .unwrap_or(base.temperament);
+        let edo = def
+            .edo
+            .unwrap_or(base.edo)
+            .clamp(*tuning::EDO_RANGE.start(), *tuning::EDO_RANGE.end());
+        let scale_named = def.scale.is_some() || (def.temperament.is_none() && def.edo.is_none() && base.scale.is_some());
+        let as_recorded = temperament == tuning::Temperament::Original && edo == 12 && !scale_named;
+        let key = def
+            .reference_key
+            .as_ref()
+            .map_or(base.reference.key, |key| reference_key(key, Some(base.reference.key)));
+        let hz = def.reference_hz.unwrap_or_else(|| match (&scope_home, as_recorded) {
+            (Some(home), true) => home.reference(key).hz,
+            _ => base.reference.hz,
+        });
         let mut own = tuning::Tuning {
             temperament,
-            edo: def
-                .edo
-                .unwrap_or(live_tuning.edo)
-                .clamp(*tuning::EDO_RANGE.start(), *tuning::EDO_RANGE.end()),
+            edo,
             scale: None,
-            reference: tuning::PitchReference {
-                key: def
-                    .reference_key
-                    .as_ref()
-                    .map_or(live_tuning.reference.key, |key| {
-                        reference_key(key, Some(live_tuning.reference.key))
-                    }),
-                hz: def.reference_hz.unwrap_or(live_tuning.reference.hz),
-            }
-            .clamped(),
-            transpose: def.transpose.unwrap_or(live_tuning.transpose).clamp(-12, 12),
-            pipes: def
-                .pipes
-                .as_deref()
-                .and_then(parse_pipes)
-                .unwrap_or(live_tuning.pipes),
-            home: home.clone(),
+            reference: tuning::PitchReference { key, hz }.clamped(),
+            transpose: base.transpose,
+            pipes: def.pipes.as_deref().and_then(parse_pipes).unwrap_or(base.pipes),
+            home: scope_home.or_else(|| home.clone()),
         };
-        if let Some(scl) = &def.scale {
-            own.scale = load_scale(scl, def.keymap.as_deref(), own.reference);
+        match &def.scale {
+            Some(scl) => own.scale = load_scale(scl, def.keymap.as_deref(), own.reference),
+            // Naming a temperament or a count leaves the scale above.
+            None if def.temperament.is_none() && def.edo.is_none() => {
+                own.scale = base.scale.clone();
+            }
+            None => {}
         }
-        tracing::info!(
-            "tuning: manual {} plays {} @ {}={} Hz, transpose {:+}",
-            def.manual,
-            match &own.scale {
+        own
+    };
+    let describe = |tuning: &tuning::Tuning| {
+        format!(
+            "{} @ {}={} Hz",
+            match &tuning.scale {
                 Some(scale) => scale.name().to_string(),
-                None if own.edo != 12 => format!("{}-EDO", own.edo),
-                None => own.temperament.name().to_string(),
+                None if tuning.edo != 12 => format!("{}-EDO", tuning.edo),
+                None => tuning.temperament.name().to_string(),
             },
-            aristide_formats::sidecar::note_name(own.reference.key),
-            own.reference.hz,
+            aristide_formats::sidecar::note_name(tuning.reference.key),
+            tuning.reference.hz
+        )
+    };
+    // Divisions the definition tunes apart from the rest: missing
+    // fields follow the instrument-wide tuning.
+    for def in &manual_tuning_defs {
+        let fields = aristide_formats::sidecar::TuningOverride {
+            temperament: def.temperament.clone(),
+            edo: def.edo,
+            reference_key: def.reference_key.clone(),
+            reference_hz: def.reference_hz,
+            scale: def.scale.clone(),
+            keymap: def.keymap.clone(),
+            pipes: def.pipes.clone(),
+        };
+        let mut own = override_tuning(&live_tuning, &fields, None, "manual tuning");
+        own.transpose = def.transpose.unwrap_or(live_tuning.transpose).clamp(-12, 12);
+        tracing::info!(
+            "tuning: manual {} plays {}, transpose {:+}",
+            def.manual,
+            describe(&own),
             own.transpose
         );
         console.set_manual_tuning(def.manual, Some(own));
+    }
+    // Sets tuned apart ([sources.<alias>.tuning]): what their stops
+    // play unless a division of their own or a pin says otherwise.
+    for (alias, def) in &source_tuning_defs {
+        let own = override_tuning(
+            &live_tuning,
+            def,
+            console.source_home_of(alias),
+            &format!("source {alias:?} tuning"),
+        );
+        tracing::info!("tuning: set {alias:?} plays {}", describe(&own));
+        console.set_source_tuning(alias, Some(own));
+    }
+    // Stops pinned or tuned apart, and ranks tuned apart within them
+    // ([[tuning.stop]]): rows name console stops (and manuals) as the
+    // console spells them; a row naming nothing warns and does nothing.
+    let stop_rows: Vec<(StopId, String, String)> = console
+        .stop_states()
+        .iter()
+        .map(|(id, name, manual, ..)| (*id, name.to_string(), manual.to_string()))
+        .collect();
+    for row in &sidecar.tuning.stops {
+        let matches: Vec<StopId> = stop_rows
+            .iter()
+            .filter(|(_, name, manual)| {
+                name.eq_ignore_ascii_case(&row.stop)
+                    && row.manual.as_deref().is_none_or(|m| m.eq_ignore_ascii_case(manual))
+            })
+            .map(|(id, ..)| *id)
+            .collect();
+        if matches.is_empty() {
+            let note = format!(
+                "tuning.stop: {:?}{} names no stop",
+                row.stop,
+                row.manual.as_deref().map(|m| format!(" on {m:?}")).unwrap_or_default()
+            );
+            tracing::warn!("{note}");
+            load_warnings.push(note);
+            continue;
+        }
+        for stop in matches {
+            let fields = row.tuning();
+            if let Some(rank_name) = &row.rank {
+                let Some((rank, _)) = console
+                    .stop_ranks(stop)
+                    .into_iter()
+                    .find(|(_, name)| name.eq_ignore_ascii_case(rank_name))
+                else {
+                    let note = format!("tuning.stop: {:?} has no rank {rank_name:?}", row.stop);
+                    tracing::warn!("{note}");
+                    load_warnings.push(note);
+                    continue;
+                };
+                let base = console.stop_tuning_resolved(stop).0.clone();
+                let own = override_tuning(
+                    &base,
+                    &fields,
+                    console.rank_home_of(rank),
+                    &format!("rank {rank_name:?} of {:?}", row.stop),
+                );
+                tracing::info!("tuning: {:?} rank {rank_name:?} plays {}", row.stop, describe(&own));
+                console.set_rank_tuning(stop, rank, Some(own));
+                continue;
+            }
+            match row.follow.as_deref() {
+                Some(name) => match tuning::Follow::parse(name) {
+                    Some(follow) => console.set_stop_follow(stop, follow),
+                    None => {
+                        let note = format!(
+                            "tuning.stop: {:?} follow = {name:?} is none of auto, division, \
+                             source, organ",
+                            row.stop
+                        );
+                        tracing::warn!("{note}");
+                        load_warnings.push(note);
+                    }
+                },
+                None => {
+                    let base = console.stop_tuning_resolved(stop).0.clone();
+                    let own = override_tuning(
+                        &base,
+                        &fields,
+                        console.source_home_of(console.stop_source(stop).unwrap_or_default()),
+                        &format!("stop {:?} tuning", row.stop),
+                    );
+                    tracing::info!("tuning: stop {:?} plays {}", row.stop, describe(&own));
+                    console.set_stop_tuning(stop, Some(own));
+                }
+            }
+        }
     }
     console.set_coupler_repitch(sidecar.couplers.repitch);
     // Console names for carried couplers ([couplers.rename]): applied
@@ -1291,6 +1452,104 @@ mod tests {
         let prepared = prepare(&[dir.join("demo.organ")], &[], 48_000.0, &|_| {})
             .expect("renamed set prepares");
         assert_eq!(prepared.console.organ_name(), "Église Fictive");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A set tuned apart in its `[sources]` entry, a stop pinned past
+    /// it, a stop with a tuning of its own, and a rank tuned apart
+    /// within a stop all install from the file.
+    #[test]
+    fn sets_stops_and_ranks_tune_apart_from_the_file() {
+        let demo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testsets/grandorgue-demo/demo.organ");
+        if !demo.is_file() {
+            eprintln!("skipping: demo set not present");
+            return;
+        }
+        let direct =
+            prepare(std::slice::from_ref(&demo), &[], 48_000.0, &|_| {}).expect("direct load");
+        let stops: Vec<(String, String, Vec<String>)> = direct
+            .console
+            .stop_states()
+            .iter()
+            .map(|(id, name, manual, ..)| {
+                let ranks = direct
+                    .console
+                    .stop_ranks(*id)
+                    .iter()
+                    .map(|(_, name)| name.to_string())
+                    .collect();
+                (name.to_string(), manual.to_string(), ranks)
+            })
+            .collect();
+        let manual = stops[0].1.clone();
+        let on_manual: Vec<&(String, String, Vec<String>)> =
+            stops.iter().filter(|(_, m, _)| *m == manual).collect();
+        assert!(on_manual.len() >= 2, "the demo's first division has stops");
+        let (pinned, _, _) = on_manual[0];
+        let (own, _, _) = on_manual[1];
+        let mixture = stops.iter().find(|(_, _, ranks)| ranks.len() > 1);
+
+        let dir = std::env::temp_dir().join("aristide-scoped-tuning-load-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("scoped.toml");
+        let mut text = format!(
+            "name = \"Scoped demo\"\n\n[sources.demo]\npath = {:?}\nlayout = true\n\n\
+             [sources.demo.tuning]\ntemperament = \"meantone4\"\n\n\
+             [[division]]\nfrom = \"demo\"\nmanual = \"*\"\n\n\
+             [[tuning.stop]]\nstop = {pinned:?}\nmanual = {manual:?}\nfollow = \"organ\"\n\n\
+             [[tuning.stop]]\nstop = {own:?}\nmanual = {manual:?}\ntemperament = \"pythagorean\"\n\n",
+            demo.canonicalize().expect("demo").display().to_string()
+        );
+        if let Some((name, manual, ranks)) = mixture {
+            text.push_str(&format!(
+                "[[tuning.stop]]\nstop = {name:?}\nmanual = {manual:?}\nrank = {:?}\n\
+                 temperament = \"werckmeister3\"\n",
+                ranks[1]
+            ));
+        }
+        std::fs::write(&path, text).expect("writes");
+        let prepared = prepare(&[path], &[], 48_000.0, &|_| {}).expect("scoped load");
+        let console = &prepared.console;
+        assert_eq!(
+            console.source_tuning("demo").map(|t| t.temperament),
+            Some(tuning::Temperament::Meantone4)
+        );
+        let id_of = |name: &str| {
+            console
+                .stop_states()
+                .iter()
+                .find(|(_, n, ..)| *n == name)
+                .map(|(id, ..)| *id)
+                .expect("stop reloads")
+        };
+        let third = on_manual
+            .iter()
+            .map(|(name, ..)| name.as_str())
+            .find(|name| *name != pinned && *name != own)
+            .map(id_of);
+        if let Some(third) = third {
+            assert_eq!(
+                console.stop_tuning_resolved(third).1,
+                tuning::TuningScope::Source,
+                "an unpinned stop follows its set"
+            );
+        }
+        assert_eq!(console.stop_tuning_resolved(id_of(pinned)).1, tuning::TuningScope::Organ);
+        assert_eq!(console.stop_follow(id_of(pinned)), tuning::Follow::Organ);
+        let (own_tuning, scope) = console.stop_tuning_resolved(id_of(own));
+        assert_eq!(scope, tuning::TuningScope::Stop);
+        assert_eq!(own_tuning.temperament, tuning::Temperament::Pythagorean);
+        if let Some((name, _, _)) = mixture {
+            let id = id_of(name);
+            let ranks = console.stop_ranks(id);
+            assert_eq!(
+                console.rank_tuning(id, ranks[1].0).map(|t| t.temperament),
+                Some(tuning::Temperament::Werckmeister3)
+            );
+            assert!(console.rank_tuning(id, ranks[0].0).is_none(), "only the named rank");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

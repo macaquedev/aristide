@@ -368,6 +368,42 @@ path survives only as the fallback for pipes that cannot be measured
 means "the organ's own" under `original` and 440-ladder under a target; the
 console writes whatever is live.
 
+**Tuning is a cascade of scopes (locked 2026-09-01):** the whole
+instrument's `[tuning]` is the root — the organ's global preference, `original`
+(*as recorded*) by default — and everything that joins the organ later, a set,
+a stop, a rank, plays it until told otherwise, by absence: nothing is written
+for a scope that merely follows. Four scopes hang off it. A *division* and a
+*sample set* (`[sources.<alias>.tuning]`) each either follow the instrument or
+carry a whole tuning of their own. A *stop* plays its own tuning if it has one;
+else what its pin names (`[[tuning.stop]] follow = "division" | "source" |
+"organ"`); else — automatically, the default — its division's own, its set's
+own, the instrument's, in that order. Division and set are two axes that only
+meet at the stop, so the order is a decision: a division's tuning is a
+*performance* fact ("the Terpstra keyboard plays 31-EDO") and a keyboard
+silently playing the wrong scale on some of its stops is the worse failure; a
+set's tuning is a *material* fact, and the set that must not be retuned
+whatever keyboard it lands on is what the stop's `source` pin is for. A *rank
+within a stop* (a mixture's tierce, `rank = "…"` on the row) tunes apart from
+the stop, within that stop only — the drawknob is the unit the player sees, so
+a rank's tuning is keyed by the stop it is heard through. Inheritance is
+all-or-nothing per scope, never per field: switching a scope to its own tuning
+seeds it with what it resolved to, so the switch itself changes nothing
+audible and the file never needs "inherit the temperament but override the
+reference". Transposition is a keyboard's — instrument and division only.
+Each set has a home of its own (the instrument's class table at the median
+anchor of the set's ranks; a rank likewise at its own anchor), so *as
+recorded* at set scope means the 415 the Positif was sampled at inside a 440
+instrument, and a set-scoped reference pull moves that set as one. On the
+console one popover serves every scope: its first row says what the scope
+follows, the spec below it is live under *Own tuning* and shown dimmed and
+disabled — the resolved values, with an "open →" to the governing scope —
+while following. Disabled, not edit-to-detach: the common mistake is
+right-clicking the nearest keyboard meaning to retune the organ, and a live
+field would silently fork the division. A stop's row lives on its editor
+(with one row per rank on a mixture), a set's on its Library row; keyboards
+and drawknobs tuned apart wear a chip or a dot, and nothing shows for a scope
+that just follows.
+
 **Two scopes, two surfaces (locked 2026-08-28):** user preferences and organ
 settings never share a surface. The Preferences dialog (Aristide menu, Ctrl+,)
 is the *player's* — appearance today, per-machine audio settings tomorrow —
@@ -416,7 +452,9 @@ main thread; a failed load reports and leaves the running organ untouched.
   N-channel output. See docs/progress/2026-08-24-m6-contemporary-layer.md. Named
   deferrals: MIDI 2.0 UMP parsing (device layer — the cents seam is ready), the full
   effect-node graph and per-single-pipe addressing (overlap M4), multi-device output
-  and a full routing matrix, console editors for routing.
+  and a full routing matrix, console editors for routing. 2026-09-01: tuning
+  scopes — sets, stops, ranks within stops — see
+  docs/progress/2026-09-01-tuning-scopes.md.
 - **M7 — HW-unencrypted loader, CLAP wrapper, Windows/macOS CI.**
 
 ## Test rig

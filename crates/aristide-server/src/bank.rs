@@ -93,6 +93,11 @@ pub struct LoadedBank {
     /// The tuning the samples were recorded in, fitted from every
     /// pipe that measured; `None` when none did.
     pub home: Option<crate::tuning::HomeTuning>,
+    /// Each rank's measured pitch anchor — the median of its pipes'
+    /// deviation from the 440 ladder, cents — for ranks that measured.
+    /// A rank comes from one set, so a set's own pitch is the median
+    /// of these over its ranks.
+    pub rank_anchors: HashMap<RankId, f64>,
 }
 
 /// `sample_bits`: resident audio resolution — 16 (default, half the
@@ -773,6 +778,7 @@ pub fn build(
         attack_options,
         skipped,
         home,
+        rank_anchors: rank_anchor,
     })
 }
 

@@ -2009,6 +2009,95 @@ impl State {
         true
     }
 
+    /// Tune one sample set apart from the instrument (or with `None`
+    /// return it), live and in the file. `alias` is a `[sources]`
+    /// alias — the one the set's stops report as their source.
+    pub fn tune_source(&mut self, alias: &str, tuning: Option<tuning::Tuning>) -> Result<(), String> {
+        if !self.provenance.values().any(|prov| prov.source == alias) {
+            return Err(format!("{alias:?} is not a source of this organ"));
+        }
+        let Control::Organ(console) = &mut self.control else {
+            return Err("no organ is loaded".into());
+        };
+        let fields = tuning.as_ref().map(Self::tuning_fields_of);
+        console.set_source_tuning(alias, tuning);
+        if let Some(path) = self.composite_path.clone() {
+            match config::write_composite_source_tuning(&path, alias, fields.as_ref()) {
+                Ok(true) => {}
+                Ok(false) => tracing::warn!(
+                    "set tuning not saved: {} has no [sources] entry {alias:?}",
+                    path.display()
+                ),
+                Err(err) => tracing::warn!("set tuning not saved: {err}"),
+            }
+        } else {
+            tracing::warn!("tuning for set {alias:?} not saved: this organ has no file yet");
+        }
+        Ok(())
+    }
+
+    /// Pin what a stop follows, or give it a tuning of its own — live
+    /// and in the file. `Follow::Auto` with no tuning is the default
+    /// and removes the stop's row.
+    pub fn tune_stop(
+        &mut self,
+        stop: StopId,
+        change: Result<tuning::Follow, tuning::Tuning>,
+    ) -> Result<(), String> {
+        let (name, manual, _) = self.stop_coordinates(stop)?;
+        let Control::Organ(console) = &mut self.control else {
+            return Err("no organ is loaded".into());
+        };
+        let entry = match change {
+            Ok(follow) => {
+                console.set_stop_follow(stop, follow);
+                (follow != tuning::Follow::Auto)
+                    .then(|| config::StopTuningEntry::Follow(follow.name().to_string()))
+            }
+            Err(tuning) => {
+                let fields = Self::tuning_fields_of(&tuning);
+                console.set_stop_tuning(stop, Some(tuning));
+                Some(config::StopTuningEntry::Own(fields))
+            }
+        };
+        if let Some(path) = self.composite_path.clone() {
+            config::write_composite_stop_tuning(&path, &name, &manual, None, entry)?;
+        } else {
+            tracing::warn!("tuning for {name:?} not saved: this organ has no file yet");
+        }
+        Ok(())
+    }
+
+    /// Tune one rank apart within a stop (or with `None` return it to
+    /// the stop's tuning), live and in the file.
+    pub fn tune_rank(
+        &mut self,
+        stop: StopId,
+        rank: aristide_model::RankId,
+        tuning: Option<tuning::Tuning>,
+    ) -> Result<(), String> {
+        let (name, manual, _) = self.stop_coordinates(stop)?;
+        let Control::Organ(console) = &mut self.control else {
+            return Err("no organ is loaded".into());
+        };
+        let Some(rank_name) = console
+            .stop_ranks(stop)
+            .into_iter()
+            .find(|(id, _)| *id == rank)
+            .map(|(_, name)| name.to_string())
+        else {
+            return Err(format!("{name:?} sounds no rank {}", rank.0));
+        };
+        let entry = tuning.as_ref().map(|tuning| config::StopTuningEntry::Own(Self::tuning_fields_of(tuning)));
+        console.set_rank_tuning(stop, rank, tuning);
+        if let Some(path) = self.composite_path.clone() {
+            config::write_composite_stop_tuning(&path, &name, &manual, Some(&rank_name), entry)?;
+        } else {
+            tracing::warn!("tuning for {name:?} / {rank_name:?} not saved: this organ has no file yet");
+        }
+        Ok(())
+    }
+
     /// Write this instrument — sources, manuals with their effective
     /// compasses, division pulls, and the current MIDI wiring — as a
     /// composite organ file, which from now on is where it lives.
