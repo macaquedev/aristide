@@ -81,7 +81,14 @@ import {
   closeSaveAsForm,
   syncSaveAsForm,
 } from "./editor/settings-popovers.js";
-import { keyName, parseKeyName } from "./pitch.js";
+import { wireHexForm, openHexForm, closeHexForm, syncHexForm } from "./editor/hex-popover.js";
+import {
+  wireTremKnob,
+  wireTremForm,
+  openTremForm,
+  closeTremForm,
+  syncTremForm,
+} from "./editor/trem-popover.js";
 import { PITCH_ACTIONS, emptyNote } from "./wiring.js";
 
 /// The keyboard context menu's "Change type" radio group, in the order
@@ -1544,101 +1551,26 @@ export class Editor {
   }
 
   // ---- the tremulant-shape popover: right-click the Tremblant knob --------
-  //
-  // A tremulant is a valve venting the wind, so its shape is spoken in
-  // wind terms: rate, pitch depth in cents (gain and timbre follow
-  // pressure physically), spin-up, unevenness. Every field posts on
-  // change — live on the engine, written to the organ file's
-  // [tremulant] section — and the next poll echoes what the server
-  // settled, the tuning popover's contract.
+  // See editor/trem-popover.js.
 
-  /// The Tremblant knob doubles as the tremulant's editor: right-click
-  /// while unlocked (or ctrl through the lock) opens the shape popover.
-  /// Wave tremulants offer no shape, so the gesture stays silent then.
   wireTremKnob() {
-    const knob = this.root.querySelector('[data-key="trem"]');
-    if (!knob) return;
-    knob.addEventListener("contextmenu", (event) => {
-      if (!(this.unlocked || event.ctrlKey)) return;
-      if (!this.shapeableTrem()) return;
-      event.preventDefault();
-      event.stopPropagation();
-      this.openTremForm(event.clientX, event.clientY);
-    });
+    wireTremKnob(this);
   }
 
   wireTremForm() {
-    this.el.tremClose.addEventListener("click", () => this.closeTremForm());
-    for (const [field, input] of [
-      ["rate", this.el.tremRate],
-      ["depth", this.el.tremDepth],
-      ["ramp", this.el.tremRamp],
-      ["wobble", this.el.tremWobble],
-    ]) {
-      input.addEventListener("change", () => {
-        if (this.tremOpen == null) return;
-        const value = Number(input.value);
-        if (!Number.isFinite(value)) return;
-        this.tremCommand({ idx: this.tremOpen, [field]: value });
-      });
-    }
-  }
-
-  /// The first shapeable tremulant — wave trems are recorded in their
-  /// samples and offer nothing to edit.
-  shapeableTrem() {
-    return (this.lastSnapshot?.trems ?? []).find((t) => !t.wave) ?? null;
+    wireTremForm(this);
   }
 
   openTremForm(x, y) {
-    const trem = this.shapeableTrem();
-    if (!trem) return;
-    this.openingPopover("trem");
-    this.tremOpen = trem.idx;
-    this.hideTremError();
-    this.syncTremForm();
-    this.el.trem.classList.remove("hidden");
-    this.positionPopover(this.el.trem, x, y);
+    openTremForm(this, x, y);
   }
 
   closeTremForm() {
-    this.tremOpen = null;
-    this.el.trem.classList.add("hidden");
-    this.hideTremError();
+    closeTremForm(this);
   }
 
   syncTremForm() {
-    const trem = (this.lastSnapshot?.trems ?? []).find((t) => t.idx === this.tremOpen);
-    if (!trem || trem.wave) {
-      this.closeTremForm();
-      return;
-    }
-    setText(this.el.tremTitle, trem.name);
-    for (const [input, value] of [
-      [this.el.tremRate, trem.rate],
-      [this.el.tremDepth, trem.depth],
-      [this.el.tremRamp, trem.ramp],
-      [this.el.tremWobble, trem.wobble],
-    ]) {
-      if (this.root.activeElement !== input) input.value = value;
-    }
-  }
-
-  async tremCommand(fields) {
-    this.hideTremError();
-    const { ok, error } = await this.organCommandResult(commands.tremParams(fields));
-    if (error != null) this.showTremError(error);
-    return ok;
-  }
-
-  showTremError(text) {
-    this.el.tremError.textContent = text;
-    this.el.tremError.classList.remove("hidden");
-  }
-
-  hideTremError() {
-    this.el.tremError.classList.add("hidden");
-    this.el.tremError.textContent = "";
+    syncTremForm(this);
   }
 
   // ---- the stop-editor popover: right-click any drawknob ------------------
@@ -1688,106 +1620,22 @@ export class Editor {
   }
 
   // ---- the hex-layout popover: a microtonal manual's isomorphic grid ------
-  //
-  // Two step-vectors (right, up-right, in key-number steps), the grid
-  // size, and the bottom-left key. Every field posts on change —
-  // structural, so the keyboard redraws and the next snapshot echoes
-  // back what the server settled on (a preset refits the width, wild
-  // values clamp), keeping the form honest the same way the tuning
-  // popover is.
+  // See editor/hex-popover.js.
 
   wireHexForm() {
-    this.el.hexClose.addEventListener("click", () => this.closeHexForm());
-    this.el.hexReset.addEventListener("click", () => this.hexCommand({ reset: 1 }));
-    for (const button of this.el.hex.querySelectorAll("[data-preset]")) {
-      button.addEventListener("click", () => this.hexCommand({ preset: button.dataset.preset }));
-    }
-    for (const [field, input] of [
-      ["right", this.el.hexRight],
-      ["upright", this.el.hexUpright],
-      ["rows", this.el.hexRows],
-      ["cols", this.el.hexCols],
-    ]) {
-      input.addEventListener("change", () => {
-        if (this.hexManual == null) return;
-        const value = Number(input.value);
-        if (Number.isInteger(value)) this.hexCommand({ [field]: value });
-      });
-    }
-    this.el.hexAnchor.addEventListener("change", () => {
-      if (this.hexManual == null) return;
-      // A note name ("C2") or a raw key number — numbers past MIDI's
-      // 127 are legal on a widened manual, so they pass through.
-      const text = this.el.hexAnchor.value.trim();
-      const key = parseKeyName(text) ?? (/^\d+$/.test(text) ? Number(text) : null);
-      if (key == null || key > 65535) {
-        this.showHexError(`${text || "(empty)"} does not name a key`);
-        return;
-      }
-      this.hexCommand({ anchor: key });
-    });
+    wireHexForm(this);
   }
 
   openHexForm(idx, x, y) {
-    this.openingPopover("hex");
-    this.hexManual = idx;
-    this.hideHexError();
-    this.syncHexForm();
-    this.el.hex.classList.remove("hidden");
-    this.positionPopover(this.el.hex, x, y);
+    openHexForm(this, idx, x, y);
   }
 
   closeHexForm() {
-    this.hexManual = null;
-    this.el.hex.classList.add("hidden");
-    this.hideHexError();
+    closeHexForm(this);
   }
 
-  /// Refills the form from the snapshot's effective layout — on open
-  /// and on every poll, so the server's settling (clamps, refits,
-  /// another session's edit) lands in the fields. A manual that
-  /// stopped being microtonal takes its popover with it.
   syncHexForm() {
-    const idx = this.hexManual;
-    const manual = this.lastSnapshot?.manuals.find((m) => m.idx === idx);
-    if (!manual?.hex) {
-      this.closeHexForm();
-      return;
-    }
-    setText(this.el.hexTitle, `${manual.name} · hex layout`);
-    const fields = [
-      [this.el.hexRight, manual.hex.right],
-      [this.el.hexUpright, manual.hex.upright],
-      [this.el.hexRows, manual.hex.rows],
-      [this.el.hexCols, manual.hex.cols],
-      [
-        this.el.hexAnchor,
-        manual.hex.anchor <= 127 ? keyName(manual.hex.anchor) : String(manual.hex.anchor),
-      ],
-    ];
-    for (const [input, value] of fields) {
-      if (this.root.activeElement !== input) input.value = value;
-    }
-  }
-
-  async hexCommand(fields) {
-    if (this.hexManual == null) return false;
-    this.hideHexError();
-    const { ok, error } = await this.organCommandResult(
-      commands.organManualHex(this.hexManual, fields)
-    );
-    if (error != null) this.showHexError(error);
-    return ok;
-  }
-
-  showHexError(text) {
-    this.el.hexError.textContent = text;
-    this.el.hexError.classList.remove("hidden");
-  }
-
-  hideHexError() {
-    this.el.hexError.classList.add("hidden");
-    this.el.hexError.textContent = "";
+    syncHexForm(this);
   }
 
   // ---- drag controller: plain when unlocked, ctrl-drag always -------------
