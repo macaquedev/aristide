@@ -443,42 +443,23 @@ fn handle_midi(message: &[u8], port: usize, state: &Mutex<State>) {
     // at Preferences, not at the music desk, and a division blurting out
     // mid-assignment reads as a fault.
     if status & 0xF0 == 0x90 && data2 > 0 && state.learning().is_some() {
-        let Some(device) = state.midi_ports.get(port).map(|p| p.name.clone()) else {
-            return;
-        };
-        state.learn_key(&device, channel, data1);
+        handle_learn_key_mode(&mut state, port, channel, data1);
         return;
     }
 
     // Teaching a binding: the first message that could be a control
     // becomes one, and does nothing else on its way past.
     if state.control_learning().is_some() {
-        let trigger = match (status & 0xF0, data2) {
-            (0x90, velocity) if velocity > 0 => Some(control::Trigger::Note(data1)),
-            (0xB0, value) if value >= control::SWITCH_ON => Some(control::Trigger::Control(data1)),
-            (0xC0, _) => Some(control::Trigger::Program(data1)),
-            _ => None,
-        };
-        if let Some(trigger) = trigger
-            && let Some(device) = state.midi_ports.get(port).map(|p| p.name.clone())
-        {
-            state.learn_control(&device, Some(channel + 1), trigger);
-        }
+        handle_learn_control_mode(&mut state, port, channel, status, data1, data2);
         return;
     }
 
     // A bound message is a control, not a note: a piston that also
     // sounded the key it sits under would be unusable. Note-offs of a
     // bound note are swallowed with it.
-    let Some(source) = state.midi_ports.get(port) else {
-        return;
-    };
-    let device = source.name.clone();
-    if let Some(fired) = matching_bindings(&source.bindings, status, channel, data1) {
-        for binding in fired {
-            state.run(&binding, &device, data2);
-        }
-        return;
+    match dispatch_binding(&mut state, port, status, channel, data1, data2) {
+        Dispatch::NoSuchPort | Dispatch::Bound => return,
+        Dispatch::Fallthrough => {}
     }
 
     // A manual with no input assigned is deaf to everything, including
@@ -501,19 +482,6 @@ fn handle_midi(message: &[u8], port: usize, state: &Mutex<State>) {
     if matches!(state.control, Control::Organ(_)) && lands.is_empty() && targets.is_empty() {
         return;
     }
-    let State {
-        engine,
-        control,
-        live_notes,
-        channel_bend,
-        ..
-    } = &mut *state;
-
-    let mut send = |command: Command| {
-        if !engine.send(command) {
-            tracing::warn!("command queue full, dropped {command:?}");
-        }
-    };
 
     // Note-ons are the one message class that makes sound out of nowhere,
     // so each gets a timestamped log line — that's what lets a user tell
@@ -522,108 +490,283 @@ fn handle_midi(message: &[u8], port: usize, state: &Mutex<State>) {
         tracing::info!("midi: note-on ch={channel} key={data1} vel={data2}");
     }
     match (status & 0xF0, key, data2) {
-        (0x90, key, velocity) if velocity > 0 => match control {
-            Control::Tone => send(Command::NoteOn {
-                key,
-                freq_hz: midi_note_to_hz(key),
-            }),
-            Control::Organ(console) => {
-                for &(manual, key) in &lands {
-                    let (starts, retriggered) = console.note_on_manual(manual, key, velocity);
-                    for handle in retriggered {
-                        send(Command::StopVoice { handle });
-                    }
-                    for start in starts {
-                        send(start.command());
-                    }
-                }
-                if bend_range.is_some() {
-                    // A note on an already-bent MPE channel starts at
-                    // the bend, not at centre — the retune snaps (the
-                    // voice is a frame old, nothing to glide from).
-                    let cents = channel_bend
-                        .get(&(port, channel))
-                        .copied()
-                        .unwrap_or(0.0);
-                    if cents != 0.0 {
-                        for &(manual, key) in &lands {
-                            for (handle, rate) in console.bend_key(manual, key, cents) {
-                                send(Command::SetVoiceRate {
-                                    handle,
-                                    rate,
-                                    glide_ms: 0.0,
-                                });
-                            }
-                        }
-                    }
-                    live_notes.insert((port, channel, data1), lands);
-                }
-            }
-        },
-        (0x80, key, _) | (0x90, key, 0) => match control {
-            Control::Tone => send(Command::NoteOff { key }),
-            Control::Organ(console) => {
-                live_notes.remove(&(port, channel, data1));
-                for (manual, key) in lands {
-                    let (stopped, starts) = console.note_off_manual(manual, key);
-                    for handle in stopped {
-                        send(Command::StopVoice { handle });
-                    }
-                    // A Bass/Melody coupler retargeting onto another
-                    // held key.
-                    for start in starts {
-                        send(start.command());
-                    }
-                }
-            }
-        },
+        (0x90, _, velocity) if velocity > 0 => {
+            handle_note_on(&mut state, port, channel, key, velocity, lands, bend_range);
+        }
+        (0x80, _, _) | (0x90, _, 0) => {
+            handle_note_off(&mut state, port, channel, key, lands);
+        }
         // Per-channel pitch bend: MPE's per-note pitch, since a member
         // channel holds one note. 14-bit centre 8192; the input's bend
         // range says what full deflection means. Inputs with no range
         // configured ignore bends entirely, as organ consoles do.
         (0xE0, lsb, msb) => {
-            if let (Control::Organ(console), Some(range)) = (control, bend_range) {
-                let value = (lsb as i32) | ((msb as i32) << 7);
-                let cents = (value - 8192) as f64 / 8192.0 * range as f64 * 100.0;
-                channel_bend.insert((port, channel), cents);
-                for (_, landings) in live_notes
-                    .iter()
-                    .filter(|((p, c, _), _)| *p == port && *c == channel)
-                {
-                    for &(manual, key) in landings {
-                        for (handle, rate) in console.bend_key(manual, key, cents) {
-                            send(Command::SetVoiceRate {
-                                handle,
-                                rate,
-                                glide_ms: BEND_GLIDE_MS,
-                            });
-                        }
-                    }
-                }
-            }
+            handle_pitch_bend(&mut state, port, channel, lsb, msb, bend_range);
         }
         (0xB0, 120..=123, _) => {
-            if let Control::Organ(console) = control {
-                console.all_off();
-            }
-            live_notes.clear();
-            send(Command::AllNotesOff);
+            handle_all_notes_off(&mut state);
         }
         // Expression pedal: drive the swell boxes of whatever manuals
         // this input plays.
         (0xB0, cc, value) if cc == expression_cc => {
-            if let Control::Organ(console) = control {
-                for manual in targets {
-                    for (enclosure, position) in console.expression_manual(manual, value) {
-                        send(Command::SetEnclosurePosition {
-                            enclosure,
-                            position,
-                        });
+            handle_expression(&mut state, targets, value);
+        }
+        _ => {}
+    }
+}
+
+/// The first press of a learn gesture names the keyboard (its port and
+/// channel) and the bottom of its compass; the second fixes the top
+/// and commits the assignment. A port that has vanished mid-gesture
+/// (unplugged between the two presses) simply leaves the dialog
+/// waiting rather than crashing on it.
+fn handle_learn_key_mode(state: &mut State, port: usize, channel: u8, data1: u8) {
+    let Some(device) = state.midi_ports.get(port).map(|p| p.name.clone()) else {
+        return;
+    };
+    state.learn_key(&device, channel, data1);
+}
+
+/// The first message that could plausibly be a control (a note, a
+/// switch-like CC, a program change) while a binding row is listening
+/// becomes that binding; anything else passes through unclaimed.
+fn handle_learn_control_mode(
+    state: &mut State,
+    port: usize,
+    channel: u8,
+    status: u8,
+    data1: u8,
+    data2: u8,
+) {
+    let trigger = match (status & 0xF0, data2) {
+        (0x90, velocity) if velocity > 0 => Some(control::Trigger::Note(data1)),
+        (0xB0, value) if value >= control::SWITCH_ON => Some(control::Trigger::Control(data1)),
+        (0xC0, _) => Some(control::Trigger::Program(data1)),
+        _ => None,
+    };
+    if let Some(trigger) = trigger
+        && let Some(device) = state.midi_ports.get(port).map(|p| p.name.clone())
+    {
+        state.learn_control(&device, Some(channel + 1), trigger);
+    }
+}
+
+/// What became of a message once bindings had first refusal on it.
+enum Dispatch {
+    /// `port` names no connected input; the message has nowhere to land.
+    NoSuchPort,
+    /// A binding fired and ran; the message is spent.
+    Bound,
+    /// Nothing on this device names it — free to reach a manual instead.
+    Fallthrough,
+}
+
+/// Bindings get first refusal on every message: a piston that also
+/// sounded the key it sits under would be unusable, and a note-off of
+/// a bound note is swallowed the same way so nothing hangs.
+fn dispatch_binding(
+    state: &mut State,
+    port: usize,
+    status: u8,
+    channel: u8,
+    data1: u8,
+    data2: u8,
+) -> Dispatch {
+    let Some(source) = state.midi_ports.get(port) else {
+        return Dispatch::NoSuchPort;
+    };
+    let device = source.name.clone();
+    let Some(fired) = matching_bindings(&source.bindings, status, channel, data1) else {
+        return Dispatch::Fallthrough;
+    };
+    for binding in fired {
+        state.run(&binding, &device, data2);
+    }
+    Dispatch::Bound
+}
+
+/// A key struck: a tone in Tone mode, or every landing this port's
+/// routes give it on the loaded organ, each already shifted to its
+/// route's manual. A note on an already-bent MPE channel starts at
+/// the bend, not at centre — the retune snaps, since the voice is a
+/// frame old and there is nothing to glide from.
+fn handle_note_on(
+    state: &mut State,
+    port: usize,
+    channel: u8,
+    raw_key: u8,
+    velocity: u8,
+    lands: Vec<(usize, u16)>,
+    bend_range: Option<f32>,
+) {
+    let State {
+        engine,
+        control,
+        live_notes,
+        channel_bend,
+        ..
+    } = state;
+    let mut send = |command: Command| {
+        if !engine.send(command) {
+            tracing::warn!("command queue full, dropped {command:?}");
+        }
+    };
+    match control {
+        Control::Tone => send(Command::NoteOn {
+            key: raw_key,
+            freq_hz: midi_note_to_hz(raw_key),
+        }),
+        Control::Organ(console) => {
+            for &(manual, key) in &lands {
+                let (starts, retriggered) = console.note_on_manual(manual, key, velocity);
+                for handle in retriggered {
+                    send(Command::StopVoice { handle });
+                }
+                for start in starts {
+                    send(start.command());
+                }
+            }
+            if bend_range.is_some() {
+                let cents = channel_bend.get(&(port, channel)).copied().unwrap_or(0.0);
+                if cents != 0.0 {
+                    for &(manual, key) in &lands {
+                        for (handle, rate) in console.bend_key(manual, key, cents) {
+                            send(Command::SetVoiceRate {
+                                handle,
+                                rate,
+                                glide_ms: 0.0,
+                            });
+                        }
                     }
+                }
+                live_notes.insert((port, channel, raw_key), lands);
+            }
+        }
+    }
+}
+
+/// A key released — or, in the Tone-mode case, just released. Landings
+/// stopped on the organ may hand back `starts` of their own: a
+/// Bass/Melody coupler retargeting the release onto another held key.
+fn handle_note_off(
+    state: &mut State,
+    port: usize,
+    channel: u8,
+    raw_key: u8,
+    lands: Vec<(usize, u16)>,
+) {
+    let State {
+        engine,
+        control,
+        live_notes,
+        ..
+    } = state;
+    let mut send = |command: Command| {
+        if !engine.send(command) {
+            tracing::warn!("command queue full, dropped {command:?}");
+        }
+    };
+    match control {
+        Control::Tone => send(Command::NoteOff { key: raw_key }),
+        Control::Organ(console) => {
+            live_notes.remove(&(port, channel, raw_key));
+            for (manual, key) in lands {
+                let (stopped, starts) = console.note_off_manual(manual, key);
+                for handle in stopped {
+                    send(Command::StopVoice { handle });
+                }
+                for start in starts {
+                    send(start.command());
                 }
             }
         }
-        _ => {}
+    }
+}
+
+/// MPE per-note pitch bend: a member channel holds one note, so the
+/// bend applies to every landing currently live on this port's
+/// channel. 14-bit centre 8192; the input's own bend range says what
+/// full deflection means.
+fn handle_pitch_bend(
+    state: &mut State,
+    port: usize,
+    channel: u8,
+    lsb: u8,
+    msb: u8,
+    bend_range: Option<f32>,
+) {
+    let State {
+        engine,
+        control,
+        live_notes,
+        channel_bend,
+        ..
+    } = state;
+    let mut send = |command: Command| {
+        if !engine.send(command) {
+            tracing::warn!("command queue full, dropped {command:?}");
+        }
+    };
+    if let (Control::Organ(console), Some(range)) = (control, bend_range) {
+        let value = (lsb as i32) | ((msb as i32) << 7);
+        let cents = (value - 8192) as f64 / 8192.0 * range as f64 * 100.0;
+        channel_bend.insert((port, channel), cents);
+        for (_, landings) in live_notes
+            .iter()
+            .filter(|((p, c, _), _)| *p == port && *c == channel)
+        {
+            for &(manual, key) in landings {
+                for (handle, rate) in console.bend_key(manual, key, cents) {
+                    send(Command::SetVoiceRate {
+                        handle,
+                        rate,
+                        glide_ms: BEND_GLIDE_MS,
+                    });
+                }
+            }
+        }
+    }
+}
+
+/// The all-notes-off / all-sound-off CC range (120-123): silence the
+/// organ (or the tone) outright and forget every live note.
+fn handle_all_notes_off(state: &mut State) {
+    let State {
+        engine,
+        control,
+        live_notes,
+        ..
+    } = state;
+    let mut send = |command: Command| {
+        if !engine.send(command) {
+            tracing::warn!("command queue full, dropped {command:?}");
+        }
+    };
+    if let Control::Organ(console) = control {
+        console.all_off();
+    }
+    live_notes.clear();
+    send(Command::AllNotesOff);
+}
+
+/// The expression pedal's CC: drive the swell boxes of whatever
+/// manuals this input plays.
+fn handle_expression(state: &mut State, targets: Vec<usize>, value: u8) {
+    let State { engine, control, .. } = state;
+    let mut send = |command: Command| {
+        if !engine.send(command) {
+            tracing::warn!("command queue full, dropped {command:?}");
+        }
+    };
+    if let Control::Organ(console) = control {
+        for manual in targets {
+            for (enclosure, position) in console.expression_manual(manual, value) {
+                send(Command::SetEnclosurePosition {
+                    enclosure,
+                    position,
+                });
+            }
+        }
     }
 }
 
