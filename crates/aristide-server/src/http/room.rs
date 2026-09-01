@@ -6,7 +6,8 @@ use std::sync::Mutex;
 use aristide_engine::Command;
 use aristide_model::units::cents_to_ratio;
 
-use super::{bad_request, json, param, state_json, state_json_locked, Reply};
+use super::{bad_request, json, param, Reply};
+use super::snapshot::{state_json, state_json_locked};
 use crate::State;
 
 pub(super) fn noises(state: &Mutex<State>, query: &str) -> Reply {

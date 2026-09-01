@@ -5,7 +5,8 @@ use std::sync::Mutex;
 
 use aristide_engine::Command;
 
-use super::{apply_note, bad_request, json, param, state_json, state_json_locked, Reply};
+use super::{apply_note, bad_request, json, param, Reply};
+use super::snapshot::{state_json, state_json_locked};
 use crate::State;
 
 pub(super) fn cancel(state: &Mutex<State>, _query: &str) -> Reply {

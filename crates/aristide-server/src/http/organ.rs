@@ -3,7 +3,8 @@
 
 use std::sync::Mutex;
 
-use super::{bad_request, json, json_string, param, params, state_json_locked, unescape, Reply};
+use super::{bad_request, json, json_string, param, params, unescape, Reply};
+use super::snapshot::state_json_locked;
 use crate::State;
 
 // Declare a manual's compass (both low and high, MIDI notes),

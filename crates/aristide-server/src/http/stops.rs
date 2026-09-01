@@ -3,7 +3,8 @@
 
 use std::sync::Mutex;
 
-use super::{apply_stop, bad_request, json, param, state_json, state_json_locked, unescape, Reply};
+use super::{apply_stop, bad_request, json, param, unescape, Reply};
+use super::snapshot::{state_json, state_json_locked};
 use crate::State;
 
 pub(super) fn draw(state: &Mutex<State>, query: &str) -> Reply {

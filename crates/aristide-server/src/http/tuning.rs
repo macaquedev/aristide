@@ -5,7 +5,8 @@ use std::sync::Mutex;
 
 use aristide_engine::Command;
 
-use super::{bad_request, json, param, state_json, unescape, Reply};
+use super::{bad_request, json, param, unescape, Reply};
+use super::snapshot::state_json;
 use crate::console::Console;
 use crate::State;
 

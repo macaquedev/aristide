@@ -4,7 +4,8 @@
 
 use std::sync::Mutex;
 
-use super::{bad_request, json, param, state_json, state_json_locked, unescape, Reply};
+use super::{bad_request, json, param, unescape, Reply};
+use super::snapshot::{state_json, state_json_locked};
 use crate::State;
 
 // Input routing, addressed the way the player thinks about it:
