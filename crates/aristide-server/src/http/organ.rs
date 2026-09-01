@@ -494,7 +494,8 @@ pub(super) fn save(state: &Mutex<State>, query: &str) -> Reply {
 }
 
 // Copy the loaded organ's file under a new name and switch to
-// the copy — the way past an adopted organ's refusal to change.
+// the copy — the way past an adopted organ's refusal to change the
+// instrument itself.
 pub(super) fn save_as(state: &Mutex<State>, query: &str) -> Reply {
     match param(query, "name").map(unescape) {
         Some(name) => {

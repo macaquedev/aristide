@@ -281,9 +281,11 @@ pub struct Setup {
     /// and offer to save it.
     pub implicit: bool,
     /// The sample set's own organ (its file carries `adopted = true`):
-    /// kept exactly as the set defines it, so every edit is refused
-    /// until the organ is saved under a different name — the copy is
-    /// the player's and takes edits.
+    /// kept as the set defines it. The player's settings — wiring,
+    /// room, whole-instrument pitch, layout — land in its file; any
+    /// change to the instrument itself is refused until the organ is
+    /// saved under a different name — the copy is the player's and
+    /// takes every edit.
     pub adopted: bool,
 }
 
@@ -607,7 +609,8 @@ impl State {
     /// copy, and the console carries on playing the very same
     /// instrument — nothing needs rebuilding, only the name and the
     /// file behind it change. The original file is left untouched.
-    /// This is the way past an adopted organ's refusal to be edited.
+    /// This is the way past an adopted organ's refusal to change the
+    /// instrument itself.
     pub fn save_organ_as(&mut self, name: &str) -> Result<(), String> {
         let name = name.trim();
         if name.is_empty() {

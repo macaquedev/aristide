@@ -11,7 +11,7 @@
 // and no listener on the ports below. Runs against a throwaway
 // XDG_CONFIG_HOME, so the real library and wiring are never touched;
 // the demo is saved under a name of its own first, since a set's own
-// organ refuses every edit (409 → the console's save-as card).
+// organ refuses edits to its instrument (409 → the console's save-as card).
 //
 // What it proves:
 //   1. OFFER — revoicing a footage-named stop shows the inline offer,
@@ -49,7 +49,7 @@ try {
   let snap = await settled();
   check(snap.setup?.adopted === true, `the demo loads as the set's own organ (${snap.setup?.file})`);
 
-  // A sample set's own organ refuses every edit (409 → the save-as
+  // A sample set's own organ refuses instrument edits (409 → the save-as
   // card), so the audit works on a copy with a name of its own — the
   // rename must land in *that* file.
   const saved = await post(`/api/organ/save_as?name=${encodeURIComponent("Stop label audit")}`);

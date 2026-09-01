@@ -449,9 +449,11 @@ function hideSaveError(editor) {
 
 // ---- the save-as dialog: a set's own organ becomes the player's -----------
 //
-// A sample set's own organ (its file marked `adopted`) is kept exactly
-// as the set defines it: the server answers every change with 409,
-// and main.js routes that here with the refused command in hand.
+// A sample set's own organ (its file marked `adopted`) keeps the
+// instrument the set defines: the player's wiring, room, pitch and
+// layout land in its file, but the server answers any change to the
+// instrument itself with 409, and main.js routes that here with the
+// refused command in hand.
 // Saving copies the file under the new name, the server switches to
 // the copy, and the refused command is sent again — so the player's
 // gesture lands after all, on an organ that is theirs. The same
@@ -490,8 +492,9 @@ export function openSaveAsForm(editor, pending = null) {
     ...(adopted
       ? [
           strong(organ),
-          " is the sample set's own organ, and Aristide keeps it exactly as the set " +
-            "defines it. Save it under a different name and the copy is yours to change" +
+          " is the sample set's own organ: your wiring, room and pitch are saved on it, " +
+            "but the instrument itself stays as the set defines it. Save it under a " +
+            "different name and the copy is yours to change" +
             (pending && !rename ? " — this change and every one after it." : ".") +
             " The set's own organ stays as it was.",
         ]

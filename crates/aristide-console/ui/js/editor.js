@@ -1729,7 +1729,8 @@ export class Editor {
     return ok;
   }
 
-  /// A 409 is the sample set's own organ refusing to change: not an
+  /// A 409 is the sample set's own organ refusing to change its
+  /// instrument: not an
   /// error to show, but the save-as dialog to open with the refused
   /// command in hand (see openSaveAsForm). True when handled that way.
   deferToSaveAs(status, query) {

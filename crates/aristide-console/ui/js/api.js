@@ -96,7 +96,8 @@ export const commands = {
   organSave: (path) => `/api/organ/save?path=${encodeURIComponent(path)}`,
   // Copies the loaded organ's file under `name`, beside the original,
   // and switches to the copy — the way past a sample set's own organ
-  // refusing to change (a 409 on any edit). 400s with a reason when
+  // refusing to change its instrument (a 409 on such an edit; wiring,
+  // room, pitch and layout it takes as its own). 400s with a reason when
   // the organ has no file yet or the name is the organ's own.
   organSaveAs: (name) => `/api/organ/save_as?name=${encodeURIComponent(name)}`,
   // Reassigns a stop to a different manual's division.
@@ -284,7 +285,8 @@ export async function localFetch(base, path, opts = {}) {
 /// `onError(message)` when the server is unreachable, and
 /// `onRefused(reason, status, query)` when it answered but said no (a
 /// 4xx with its plain-text reason, the status, and the query that was
-/// refused — a 409 is a sample set's own organ refusing to change, and
+/// refused — a 409 is a sample set's own organ refusing to change its
+/// instrument, and
 /// the query is what to send again once it has a name of its own) — a
 /// refusal is the organ talking, not a dead connection, and must never
 /// dress up as one. Returns `send(query)`,

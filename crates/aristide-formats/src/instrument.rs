@@ -94,10 +94,11 @@ fn invalid(message: impl Into<String>) -> InstrumentError {
 pub struct Definition {
     pub name: String,
     /// Written by adoption: this file is a sample set's own organ,
-    /// the inventory of what the set defines, kept exactly as the set
-    /// defines it. An adopted organ refuses edits — changing anything
-    /// means saving it under a different name first, and the copy
-    /// drops the flag.
+    /// the inventory of what the set defines, kept as the set defines
+    /// it. An adopted organ takes the player's own settings (wiring,
+    /// room, whole-instrument pitch, console layout) but refuses
+    /// changes to the instrument itself — those mean saving it under
+    /// a different name first, and the copy drops the flag.
     #[serde(default)]
     pub adopted: bool,
     /// Alias → source set, relative to this file.

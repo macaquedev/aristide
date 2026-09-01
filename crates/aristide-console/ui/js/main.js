@@ -214,7 +214,8 @@ send = connect(
   // A refused command (a 4xx and its reason) lands in the editor's
   // status strip — the same place rebuild errors show — instead of
   // masquerading as a lost connection. Except a 409: that is the sample
-  // set's own organ refusing to change, answered with the save-as
+  // set's own organ refusing to change its instrument (the player's
+  // wiring, room, pitch and layout it takes), answered with the save-as
   // dialog, which holds the command and sends it again once the organ
   // has a name of its own.
   (reason, status, query) => {
