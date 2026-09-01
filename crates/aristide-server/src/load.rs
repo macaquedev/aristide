@@ -899,91 +899,173 @@ fn install_home_tuning(
     home
 }
 
-/// Assemble `paths` (sample sets and composite definitions; several are
-/// combined into one implicit composite), decode the samples, and build
-/// the console. `stops` are CLI registration patterns; empty means each
-/// source's sidecar default. `progress` is told what is happening, for
-/// a UI that is watching the load.
-pub fn prepare(
-    paths: &[PathBuf],
-    stops: &[String],
-    sample_rate: f32,
-    progress: &dyn Fn(String),
-) -> Result<PreparedInstrument> {
-    anyhow::ensure!(!paths.is_empty(), "no sample set given");
-    let first_path = &paths[0];
-    let mut setup = Setup::default();
-    let mut load_warnings: Vec<String> = Vec::new();
+/// A resolved scope tuning from a base tuning plus a file's
+/// `TuningOverride` fields, given the scope's own recorded home (if
+/// any). Shared by every scope that tunes apart from what it follows:
+/// manuals, sets, stops, and ranks.
+type OverrideTuning<'a> = &'a dyn Fn(
+    &tuning::Tuning,
+    &aristide_formats::sidecar::TuningOverride,
+    Option<Arc<tuning::HomeTuning>>,
+    &str,
+) -> tuning::Tuning;
 
-    // Every path is a source: a sample set with its sidecar, or a
-    // composite definition (`.toml`), which assembles first and then
-    // acts like any other source. Per-set decisions — sidecar couplers,
-    // the default registration, channel suggestions — resolve against
-    // each source's own names here, then ride the id maps across.
-    let Sources {
-        sources: source_list,
-        sidecars,
-        composite_midi,
-        mut single_provenance,
-        mut stop_labels,
-        manual_tuning_defs,
-        source_tuning_defs,
-        mut rank_sources,
-        console_order,
-        console_layout,
-        console_coupled_keys,
-        coupler_key_modes,
-    } = load_sources(paths, progress, &mut setup, &mut load_warnings)?;
+/// A one-line human description of a tuning, for log lines.
+type DescribeTuning<'a> = &'a dyn Fn(&tuning::Tuning) -> String;
 
-    let (per_source_drawn, per_source_suggested) =
-        register_and_suggest(&source_list, &sidecars, stops);
-    let suggested: Vec<Option<u8>> = per_source_suggested.concat();
-    // Engine-wide settings (wind, tremulant, reverb, tuning…) come from
-    // the first source.
-    let sidecar = sidecars[0].clone();
+/// Divisions the definition tunes apart from the rest ([[manual]]
+/// tuning in a composite file): missing fields follow the
+/// instrument-wide tuning.
+fn apply_manual_tuning(
+    console: &mut Console,
+    defs: &[instrument::ManualTuningDef],
+    live_tuning: &tuning::Tuning,
+    override_tuning: OverrideTuning,
+    describe: DescribeTuning,
+) {
+    for def in defs {
+        let fields = aristide_formats::sidecar::TuningOverride {
+            temperament: def.temperament.clone(),
+            edo: def.edo,
+            reference_key: def.reference_key.clone(),
+            reference_hz: def.reference_hz,
+            scale: def.scale.clone(),
+            keymap: def.keymap.clone(),
+            pipes: def.pipes.clone(),
+        };
+        let mut own = override_tuning(live_tuning, &fields, None, "manual tuning");
+        own.transpose = def.transpose.unwrap_or(live_tuning.transpose).clamp(-12, 12);
+        tracing::info!(
+            "tuning: manual {} plays {}, transpose {:+}",
+            def.manual,
+            describe(&own),
+            own.transpose
+        );
+        console.set_manual_tuning(def.manual, Some(own));
+    }
+}
 
-    let (organ, drawn) = assemble_organ(
-        source_list,
-        per_source_drawn,
-        stops,
-        &mut setup,
-        &mut SourceExtras {
-            rank_sources: &mut rank_sources,
-            single_provenance: &mut single_provenance,
-            stop_labels: &mut stop_labels,
-        },
-        &mut load_warnings,
-    )?;
+/// Sets tuned apart ([sources.<alias>.tuning]): what their stops play
+/// unless a division of their own or a pin says otherwise.
+fn apply_source_tuning(
+    console: &mut Console,
+    defs: &std::collections::BTreeMap<String, aristide_formats::sidecar::TuningOverride>,
+    live_tuning: &tuning::Tuning,
+    override_tuning: OverrideTuning,
+    describe: DescribeTuning,
+) {
+    for (alias, def) in defs {
+        let own = override_tuning(
+            live_tuning,
+            def,
+            console.source_home_of(alias),
+            &format!("source {alias:?} tuning"),
+        );
+        tracing::info!("tuning: set {alias:?} plays {}", describe(&own));
+        console.set_source_tuning(alias, Some(own));
+    }
+}
 
-    let loaded = decode_samples(&organ, &sidecar, paths, sample_rate, progress)?;
-    let bank::LoadedBank {
-        bank,
-        specs,
-        attack_options,
-        home,
-        rank_anchors,
-        ..
-    } = loaded;
+/// Stops pinned or tuned apart, and ranks tuned apart within them
+/// ([[tuning.stop]]): rows name console stops (and manuals) as the
+/// console spells them; a row naming nothing warns and does nothing.
+fn apply_stop_tuning(
+    console: &mut Console,
+    rows: &[aristide_formats::sidecar::StopTuningDef],
+    override_tuning: OverrideTuning,
+    describe: DescribeTuning,
+    load_warnings: &mut Vec<String>,
+) {
+    let stop_rows: Vec<(StopId, String, String)> = console
+        .stop_states()
+        .iter()
+        .map(|(id, name, manual, ..)| (*id, name.to_string(), manual.to_string()))
+        .collect();
+    for row in rows {
+        let matches: Vec<StopId> = stop_rows
+            .iter()
+            .filter(|(_, name, manual)| {
+                name.eq_ignore_ascii_case(&row.stop)
+                    && row.manual.as_deref().is_none_or(|m| m.eq_ignore_ascii_case(manual))
+            })
+            .map(|(id, ..)| *id)
+            .collect();
+        if matches.is_empty() {
+            let note = format!(
+                "tuning.stop: {:?}{} names no stop",
+                row.stop,
+                row.manual.as_deref().map(|m| format!(" on {m:?}")).unwrap_or_default()
+            );
+            tracing::warn!("{note}");
+            load_warnings.push(note);
+            continue;
+        }
+        for stop in matches {
+            let fields = row.tuning();
+            if let Some(rank_name) = &row.rank {
+                let Some((rank, _)) = console
+                    .stop_ranks(stop)
+                    .into_iter()
+                    .find(|(_, name)| name.eq_ignore_ascii_case(rank_name))
+                else {
+                    let note = format!("tuning.stop: {:?} has no rank {rank_name:?}", row.stop);
+                    tracing::warn!("{note}");
+                    load_warnings.push(note);
+                    continue;
+                };
+                let base = console.stop_tuning_resolved(stop).0.clone();
+                let own = override_tuning(
+                    &base,
+                    &fields,
+                    console.rank_home_of(rank),
+                    &format!("rank {rank_name:?} of {:?}", row.stop),
+                );
+                tracing::info!("tuning: {:?} rank {rank_name:?} plays {}", row.stop, describe(&own));
+                console.set_rank_tuning(stop, rank, Some(own));
+                continue;
+            }
+            match row.follow.as_deref() {
+                Some(name) => match tuning::Follow::parse(name) {
+                    Some(follow) => console.set_stop_follow(stop, follow),
+                    None => {
+                        let note = format!(
+                            "tuning.stop: {:?} follow = {name:?} is none of auto, division, \
+                             source, organ",
+                            row.stop
+                        );
+                        tracing::warn!("{note}");
+                        load_warnings.push(note);
+                    }
+                },
+                None => {
+                    let base = console.stop_tuning_resolved(stop).0.clone();
+                    let own = override_tuning(
+                        &base,
+                        &fields,
+                        console.source_home_of(console.stop_source(stop).unwrap_or_default()),
+                        &format!("stop {:?} tuning", row.stop),
+                    );
+                    tracing::info!("tuning: stop {:?} plays {}", row.stop, describe(&own));
+                    console.set_stop_tuning(stop, Some(own));
+                }
+            }
+        }
+    }
+}
 
-    let wind = configure_wind(&sidecar);
-    let tremulants = configure_tremulants(&sidecar, &organ);
-    let (enclosures, expression_cc) = configure_enclosures(&sidecar, &organ);
-    let reverb = configure_reverb(&sidecar, first_path, sample_rate);
-
-    let mut console = Console::new(organ, specs, drawn, sample_rate);
-    console.set_attack_options(attack_options);
-    let home = home.map(Arc::new);
-    let sources_len = setup.sources.len();
-    let source_tuning_defs_len = source_tuning_defs.len();
-    let home = install_home_tuning(
-        &mut console,
-        home,
-        &rank_anchors,
-        &rank_sources,
-        &single_provenance,
-        sources_len,
-        source_tuning_defs_len,
-    );
+/// The instrument's tuning, resolved from the sidecar's `[tuning]`
+/// table against the home tuning, then applied to every scope that
+/// tunes apart from it: manuals, sets, and individual stops/ranks.
+/// Returns the instrument-wide tuning the console now plays.
+fn configure_tuning(
+    console: &mut Console,
+    sidecar: &aristide_formats::sidecar::Sidecar,
+    home: Option<Arc<tuning::HomeTuning>>,
+    first_path: &Path,
+    manual_tuning_defs: &[instrument::ManualTuningDef],
+    source_tuning_defs: &std::collections::BTreeMap<String, aristide_formats::sidecar::TuningOverride>,
+    load_warnings: &mut Vec<String>,
+) -> tuning::Tuning {
     let temperament = tuning::Temperament::parse(&sidecar.tuning.temperament)
         .unwrap_or_else(|| {
             tracing::warn!(
@@ -1110,118 +1192,106 @@ pub fn prepare(
             tuning.reference.hz
         )
     };
-    // Divisions the definition tunes apart from the rest: missing
-    // fields follow the instrument-wide tuning.
-    for def in &manual_tuning_defs {
-        let fields = aristide_formats::sidecar::TuningOverride {
-            temperament: def.temperament.clone(),
-            edo: def.edo,
-            reference_key: def.reference_key.clone(),
-            reference_hz: def.reference_hz,
-            scale: def.scale.clone(),
-            keymap: def.keymap.clone(),
-            pipes: def.pipes.clone(),
-        };
-        let mut own = override_tuning(&live_tuning, &fields, None, "manual tuning");
-        own.transpose = def.transpose.unwrap_or(live_tuning.transpose).clamp(-12, 12);
-        tracing::info!(
-            "tuning: manual {} plays {}, transpose {:+}",
-            def.manual,
-            describe(&own),
-            own.transpose
-        );
-        console.set_manual_tuning(def.manual, Some(own));
-    }
-    // Sets tuned apart ([sources.<alias>.tuning]): what their stops
-    // play unless a division of their own or a pin says otherwise.
-    for (alias, def) in &source_tuning_defs {
-        let own = override_tuning(
-            &live_tuning,
-            def,
-            console.source_home_of(alias),
-            &format!("source {alias:?} tuning"),
-        );
-        tracing::info!("tuning: set {alias:?} plays {}", describe(&own));
-        console.set_source_tuning(alias, Some(own));
-    }
-    // Stops pinned or tuned apart, and ranks tuned apart within them
-    // ([[tuning.stop]]): rows name console stops (and manuals) as the
-    // console spells them; a row naming nothing warns and does nothing.
-    let stop_rows: Vec<(StopId, String, String)> = console
-        .stop_states()
-        .iter()
-        .map(|(id, name, manual, ..)| (*id, name.to_string(), manual.to_string()))
-        .collect();
-    for row in &sidecar.tuning.stops {
-        let matches: Vec<StopId> = stop_rows
-            .iter()
-            .filter(|(_, name, manual)| {
-                name.eq_ignore_ascii_case(&row.stop)
-                    && row.manual.as_deref().is_none_or(|m| m.eq_ignore_ascii_case(manual))
-            })
-            .map(|(id, ..)| *id)
-            .collect();
-        if matches.is_empty() {
-            let note = format!(
-                "tuning.stop: {:?}{} names no stop",
-                row.stop,
-                row.manual.as_deref().map(|m| format!(" on {m:?}")).unwrap_or_default()
-            );
-            tracing::warn!("{note}");
-            load_warnings.push(note);
-            continue;
-        }
-        for stop in matches {
-            let fields = row.tuning();
-            if let Some(rank_name) = &row.rank {
-                let Some((rank, _)) = console
-                    .stop_ranks(stop)
-                    .into_iter()
-                    .find(|(_, name)| name.eq_ignore_ascii_case(rank_name))
-                else {
-                    let note = format!("tuning.stop: {:?} has no rank {rank_name:?}", row.stop);
-                    tracing::warn!("{note}");
-                    load_warnings.push(note);
-                    continue;
-                };
-                let base = console.stop_tuning_resolved(stop).0.clone();
-                let own = override_tuning(
-                    &base,
-                    &fields,
-                    console.rank_home_of(rank),
-                    &format!("rank {rank_name:?} of {:?}", row.stop),
-                );
-                tracing::info!("tuning: {:?} rank {rank_name:?} plays {}", row.stop, describe(&own));
-                console.set_rank_tuning(stop, rank, Some(own));
-                continue;
-            }
-            match row.follow.as_deref() {
-                Some(name) => match tuning::Follow::parse(name) {
-                    Some(follow) => console.set_stop_follow(stop, follow),
-                    None => {
-                        let note = format!(
-                            "tuning.stop: {:?} follow = {name:?} is none of auto, division, \
-                             source, organ",
-                            row.stop
-                        );
-                        tracing::warn!("{note}");
-                        load_warnings.push(note);
-                    }
-                },
-                None => {
-                    let base = console.stop_tuning_resolved(stop).0.clone();
-                    let own = override_tuning(
-                        &base,
-                        &fields,
-                        console.source_home_of(console.stop_source(stop).unwrap_or_default()),
-                        &format!("stop {:?} tuning", row.stop),
-                    );
-                    tracing::info!("tuning: stop {:?} plays {}", row.stop, describe(&own));
-                    console.set_stop_tuning(stop, Some(own));
-                }
-            }
-        }
-    }
+    apply_manual_tuning(console, manual_tuning_defs, &live_tuning, &override_tuning, &describe);
+    apply_source_tuning(console, source_tuning_defs, &live_tuning, &override_tuning, &describe);
+    apply_stop_tuning(console, &sidecar.tuning.stops, &override_tuning, &describe, load_warnings);
+    live_tuning
+}
+
+/// Assemble `paths` (sample sets and composite definitions; several are
+/// combined into one implicit composite), decode the samples, and build
+/// the console. `stops` are CLI registration patterns; empty means each
+/// source's sidecar default. `progress` is told what is happening, for
+/// a UI that is watching the load.
+pub fn prepare(
+    paths: &[PathBuf],
+    stops: &[String],
+    sample_rate: f32,
+    progress: &dyn Fn(String),
+) -> Result<PreparedInstrument> {
+    anyhow::ensure!(!paths.is_empty(), "no sample set given");
+    let first_path = &paths[0];
+    let mut setup = Setup::default();
+    let mut load_warnings: Vec<String> = Vec::new();
+
+    // Every path is a source: a sample set with its sidecar, or a
+    // composite definition (`.toml`), which assembles first and then
+    // acts like any other source. Per-set decisions — sidecar couplers,
+    // the default registration, channel suggestions — resolve against
+    // each source's own names here, then ride the id maps across.
+    let Sources {
+        sources: source_list,
+        sidecars,
+        composite_midi,
+        mut single_provenance,
+        mut stop_labels,
+        manual_tuning_defs,
+        source_tuning_defs,
+        mut rank_sources,
+        console_order,
+        console_layout,
+        console_coupled_keys,
+        coupler_key_modes,
+    } = load_sources(paths, progress, &mut setup, &mut load_warnings)?;
+
+    let (per_source_drawn, per_source_suggested) =
+        register_and_suggest(&source_list, &sidecars, stops);
+    let suggested: Vec<Option<u8>> = per_source_suggested.concat();
+    // Engine-wide settings (wind, tremulant, reverb, tuning…) come from
+    // the first source.
+    let sidecar = sidecars[0].clone();
+
+    let (organ, drawn) = assemble_organ(
+        source_list,
+        per_source_drawn,
+        stops,
+        &mut setup,
+        &mut SourceExtras {
+            rank_sources: &mut rank_sources,
+            single_provenance: &mut single_provenance,
+            stop_labels: &mut stop_labels,
+        },
+        &mut load_warnings,
+    )?;
+
+    let loaded = decode_samples(&organ, &sidecar, paths, sample_rate, progress)?;
+    let bank::LoadedBank {
+        bank,
+        specs,
+        attack_options,
+        home,
+        rank_anchors,
+        ..
+    } = loaded;
+
+    let wind = configure_wind(&sidecar);
+    let tremulants = configure_tremulants(&sidecar, &organ);
+    let (enclosures, expression_cc) = configure_enclosures(&sidecar, &organ);
+    let reverb = configure_reverb(&sidecar, first_path, sample_rate);
+
+    let mut console = Console::new(organ, specs, drawn, sample_rate);
+    console.set_attack_options(attack_options);
+    let home = home.map(Arc::new);
+    let sources_len = setup.sources.len();
+    let source_tuning_defs_len = source_tuning_defs.len();
+    let home = install_home_tuning(
+        &mut console,
+        home,
+        &rank_anchors,
+        &rank_sources,
+        &single_provenance,
+        sources_len,
+        source_tuning_defs_len,
+    );
+    let live_tuning = configure_tuning(
+        &mut console,
+        &sidecar,
+        home,
+        first_path,
+        &manual_tuning_defs,
+        &source_tuning_defs,
+        &mut load_warnings,
+    );
     console.set_coupler_repitch(sidecar.couplers.repitch);
     // Console names for carried couplers ([couplers.rename]): applied
     // before the drop pass, so drop entries written by the console
