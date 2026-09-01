@@ -21,85 +21,138 @@ pub(super) fn bind(state: &Mutex<State>, query: &str) -> Reply {
     match (manual, slot, device) {
         (Some(manual), Some(slot), Some(device)) if !device.is_empty() => {
             let mut state = state.lock().expect("state poisoned");
-            // No channel given means "whatever the set suggests
-            // for this manual, else every channel" — the sidecar
-            // knows how the real console was wired.
-            let channel = match param(query, "ch") {
-                Some("any") => None,
-                Some(value) => value.parse::<u8>().ok().filter(|c| (1..=16).contains(c)),
-                None => state.suggested_channels.get(manual).copied().flatten(),
-            };
-            // The keyboard's own compass. "set" means the sample
-            // set's, i.e. forget what was learned.
-            let key = |name| match param(query, name) {
-                Some("set") => None,
-                Some(value) => value.parse::<u8>().ok().filter(|k| *k < 128),
-                None => state
-                    .manual_inputs(manual)
-                    .get(slot)
-                    .and_then(|input| if name == "low" { input.low } else { input.high }),
-            };
-            let (low, high) = (key("low"), key("high"));
-            // The keyboard's shift in semitones: a controller
-            // whose keys should sound below (or above) what
-            // they send. Same ±36 bound as the octave actions;
-            // absent, rebinding keeps whatever the octave
-            // buttons have done to it.
-            let transpose = match param(query, "transpose") {
-                Some(value) => match value.parse::<i8>() {
-                    Ok(semitones) => semitones.clamp(-36, 36),
-                    Err(_) => return bad_request("transpose must be semitones"),
-                },
-                None => state
-                    .manual_inputs(manual)
-                    .get(slot)
-                    .map_or(0, |input| input.transpose),
-            };
-            // Pitch-bend range in semitones; "off" (or 0)
-            // disables. Absent, rebinding keeps what the slot
-            // already had — like transpose.
-            let bend = match param(query, "bend") {
-                Some("off") => None,
-                Some(value) => match value.parse::<f32>() {
-                    Ok(semitones) if (0.0..=96.0).contains(&semitones) => {
-                        (semitones > 0.0).then_some(semitones)
-                    }
-                    _ => return bad_request("bend must be 0-96 semitones"),
-                },
-                None => state
-                    .manual_inputs(manual)
-                    .get(slot)
-                    .and_then(|input| input.bend),
-            };
-            // A Lumatone .ltn key map, resolved at route time;
-            // "off" clears it. Absent, rebinding keeps it.
-            let map = match param(query, "map").map(unescape) {
-                Some(path) if path.is_empty() || path == "off" => None,
-                Some(path) => Some(path),
-                None => state
-                    .manual_inputs(manual)
-                    .get(slot)
-                    .and_then(|input| input.map.clone()),
+            let input = match input_from_query(&state, manual, slot, device, query) {
+                Ok(input) => input,
+                Err(err) => return bad_request(err),
             };
             state.learn = None;
-            if !state.propose_input(
-                manual,
-                slot,
-                crate::config::Input {
-                    device,
-                    channel,
-                    low,
-                    high,
-                    transpose,
-                    bend,
-                    map,
-                },
-            ) {
+            if !state.propose_input(manual, slot, input) {
                 return bad_request("no such manual");
             }
             json(state_json_locked(&state))
         }
         _ => bad_request("missing manual/slot/device"),
+    }
+}
+
+/// One input slot as a bind request describes it: every field the
+/// query names is parsed and clamped here, and every field it leaves
+/// out falls back to what the slot already had (or, for the channel,
+/// to what the sample set suggests). Fields are read in the order the
+/// API documents them, so a request naming two bad values is refused
+/// for the first.
+///
+/// This is `config::Input`'s constructor in all but name, and would
+/// sit better beside the type in `config`; it stays here until that
+/// module can be touched.
+fn input_from_query(
+    state: &State,
+    manual: usize,
+    slot: usize,
+    device: String,
+    query: &str,
+) -> Result<crate::config::Input, &'static str> {
+    let channel = bound_channel(state, manual, query);
+    let (low, high) = bound_compass(state, manual, slot, query);
+    let transpose = bound_transpose(state, manual, slot, query)?;
+    let bend = bound_bend(state, manual, slot, query)?;
+    let map = bound_map(state, manual, slot, query);
+    Ok(crate::config::Input {
+        device,
+        channel,
+        low,
+        high,
+        transpose,
+        bend,
+        map,
+    })
+}
+
+/// The channel the slot answers on. No channel given means "whatever
+/// the set suggests for this manual, else every channel" — the
+/// sidecar knows how the real console was wired.
+fn bound_channel(state: &State, manual: usize, query: &str) -> Option<u8> {
+    match param(query, "ch") {
+        Some("any") => None,
+        Some(value) => value.parse::<u8>().ok().filter(|c| (1..=16).contains(c)),
+        None => state.suggested_channels.get(manual).copied().flatten(),
+    }
+}
+
+/// The keyboard's own compass. "set" means the sample set's, i.e.
+/// forget what was learned.
+fn bound_compass(
+    state: &State,
+    manual: usize,
+    slot: usize,
+    query: &str,
+) -> (Option<u8>, Option<u8>) {
+    let key = |name| match param(query, name) {
+        Some("set") => None,
+        Some(value) => value.parse::<u8>().ok().filter(|k| *k < 128),
+        None => state
+            .manual_inputs(manual)
+            .get(slot)
+            .and_then(|input| if name == "low" { input.low } else { input.high }),
+    };
+    (key("low"), key("high"))
+}
+
+/// The keyboard's shift in semitones: a controller whose keys should
+/// sound below (or above) what they send. Same ±36 bound as the
+/// octave actions; absent, rebinding keeps whatever the octave
+/// buttons have done to it.
+fn bound_transpose(
+    state: &State,
+    manual: usize,
+    slot: usize,
+    query: &str,
+) -> Result<i8, &'static str> {
+    Ok(match param(query, "transpose") {
+        Some(value) => match value.parse::<i8>() {
+            Ok(semitones) => semitones.clamp(-36, 36),
+            Err(_) => return Err("transpose must be semitones"),
+        },
+        None => state
+            .manual_inputs(manual)
+            .get(slot)
+            .map_or(0, |input| input.transpose),
+    })
+}
+
+/// Pitch-bend range in semitones; "off" (or 0) disables. Absent,
+/// rebinding keeps what the slot already had — like transpose.
+fn bound_bend(
+    state: &State,
+    manual: usize,
+    slot: usize,
+    query: &str,
+) -> Result<Option<f32>, &'static str> {
+    Ok(match param(query, "bend") {
+        Some("off") => None,
+        Some(value) => match value.parse::<f32>() {
+            Ok(semitones) if (0.0..=96.0).contains(&semitones) => {
+                (semitones > 0.0).then_some(semitones)
+            }
+            _ => return Err("bend must be 0-96 semitones"),
+        },
+        None => state
+            .manual_inputs(manual)
+            .get(slot)
+            .and_then(|input| input.bend),
+    })
+}
+
+/// A Lumatone .ltn key map, resolved at route time; "off" clears it.
+/// Absent, rebinding keeps it.
+fn bound_map(state: &State, manual: usize, slot: usize, query: &str) -> Option<String> {
+    match param(query, "map").map(unescape) {
+        Some(path) if path.is_empty() || path == "off" => None,
+        Some(path) => Some(path),
+        None => state
+            .manual_inputs(manual)
+            .get(slot)
+            .and_then(|input| input.map.clone()),
     }
 }
 
