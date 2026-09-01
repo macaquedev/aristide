@@ -1208,7 +1208,7 @@ fn resolve_borrow(organ: &Organ, pipe: &Pipe) -> Option<PipeRef> {
 /// hinge (HW had to disable bass brightness modulation for distortion;
 /// a 150 Hz floor sidesteps that). Percussive noises skip the filter.
 pub(crate) fn brightness_coefficient(frequency_hz: f64, device_rate: f32, percussive: bool) -> f32 {
-    if percussive || frequency_hz <= 0.0 {
+    if percussive || frequency_hz.is_nan() || frequency_hz <= 0.0 {
         return 0.0;
     }
     let hinge_hz = (2.0 * frequency_hz).clamp(150.0, 8000.0);
@@ -1220,7 +1220,7 @@ pub(crate) fn brightness_coefficient(frequency_hz: f64, device_rate: f32, percus
 /// 8'/4'/2' as 1.0/0.5/0.25), i.e. weight ∝ 1/f, normalized to 1.0 at
 /// ~150 Hz. Percussive one-shots (action noises) draw nothing.
 pub(crate) fn wind_weight(frequency_hz: f64, percussive: bool) -> f32 {
-    if percussive || frequency_hz <= 0.0 {
+    if percussive || frequency_hz.is_nan() || frequency_hz <= 0.0 {
         return 0.0;
     }
     ((150.0 / frequency_hz) as f32).clamp(0.1, 4.0)

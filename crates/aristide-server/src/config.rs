@@ -459,7 +459,7 @@ pub fn create_blank_organ(dir: &Path, name: &str) -> Result<PathBuf, String> {
          # or divisions onto manuals — this file is the whole instrument.\n\
          {doc}"
     );
-    std::fs::write(&path, body).map_err(|err| format!("{}: {err}", path.display()))?;
+    write_atomically(&path, body)?;
     Ok(path)
 }
 
@@ -732,7 +732,7 @@ fn write_wrapper_organ(
          # and samples. Edit freely: the console writes back here too.\n\
          {doc}"
     );
-    std::fs::write(path, body).map_err(|err| format!("{}: {err}", path.display()))?;
+    write_atomically(path, body)?;
     if wiring.is_some_and(|organ| organ != &OrganConfig::default()) {
         write_composite_midi(path, wiring)?;
     }
