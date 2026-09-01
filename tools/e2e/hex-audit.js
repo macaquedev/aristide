@@ -20,63 +20,22 @@
 //   3. COLOURS — a bound Lumatone .ltn's key colours reach the hexes
 //      (skipped, with a note, when the machine has no real MIDI port).
 
-import { connect } from "./cdp.js";
-import { spawn } from "node:child_process";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
-import { tmpdir, homedir } from "node:os";
+import { connect, launchHarness } from "./cdp.js";
+import { writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { existsSync } from "node:fs";
 
-const REPO = new URL("../..", import.meta.url).pathname;
 const SERVER_PORT = 9876;
 const UI_PORT = 9877;
 const CDP_PORT = 9223;
-const S = `http://127.0.0.1:${SERVER_PORT}`;
-
-let failures = 0;
-const check = (ok, what) => {
-  console.log(`${ok ? "PASS" : "FAIL"}  ${what}`);
-  if (!ok) failures++;
-};
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const post = async (path) => {
-  const res = await fetch(S + path, { method: "POST" });
-  return { ok: res.ok, body: await res.text() };
-};
-const state = async () => (await fetch(S + "/api/state")).json();
-
-// ---- processes -------------------------------------------------------
-
-const serverBin = process.argv[2] ??
-  [join(REPO, "target/release/aristide-server"), join(REPO, "target/debug/aristide-server")]
-    .find(existsSync);
-if (!serverBin) {
-  console.error("no server binary — cargo build -p aristide-server first");
-  process.exit(2);
-}
-const scratch = mkdtempSync(join(tmpdir(), "aristide-hex-audit-"));
-const server = spawn(serverBin, ["--http-port", String(SERVER_PORT)], {
-  stdio: ["ignore", "ignore", "pipe"],
+// Unlike the other audits, this one means to touch the player's real
+// library (it creates a throwaway organ there and removes it again),
+// needs no demo set, and checks no pixel geometry against a fixed
+// window size.
+const h = launchHarness({
+  name: "hex-audit", serverPort: SERVER_PORT, uiPort: UI_PORT, cdpPort: CDP_PORT,
+  needsDemo: false, isolateConfig: false, windowSize: false,
 });
-let serverLog = "";
-server.stderr.on("data", (d) => (serverLog += d));
-
-// The console UI is plain static files; serve them ourselves so the
-// audit needs no extra tooling. `?server=` points the client at the
-// real organ server, exactly how the screenshot stub works.
-const ui = Bun.serve({
-  port: UI_PORT,
-  fetch(req) {
-    const path = new URL(req.url).pathname;
-    const file = Bun.file(join(REPO, "crates/aristide-console/ui", path === "/" ? "index.html" : path));
-    return file.exists().then((ok) => (ok ? new Response(file) : new Response("nope", { status: 404 })));
-  },
-});
-
-const chrome = spawn("chromium", [
-  "--headless", "--disable-gpu", `--remote-debugging-port=${CDP_PORT}`,
-  `--user-data-dir=${join(scratch, "chrome")}`, "about:blank",
-], { stdio: "ignore" });
+const { S, scratch, check, sleep, state, post, waitForServer } = h;
 
 const cleanup = async () => {
   try {
@@ -87,17 +46,12 @@ const cleanup = async () => {
       rmSync(mine.path, { force: true });
     }
   } catch {}
-  server.kill();
-  chrome.kill();
-  ui.stop();
-  rmSync(scratch, { recursive: true, force: true });
+  await h.cleanup();
 };
 
 try {
   // ---- a throwaway microtonal organ ---------------------------------
-  for (let i = 0; i < 50; i++) {
-    try { await state(); break; } catch { await sleep(200); }
-  }
+  await waitForServer(50);
   await post("/api/organ/new?name=HexAudit");
   await sleep(1500);
   await post("/api/organ/manual/add?name=Hex&kind=microtonal&low=36&high=96");
@@ -237,5 +191,5 @@ try {
 } finally {
   await cleanup();
 }
-console.log(failures ? `\n${failures} FAILURE(S)` : "\nall green");
-process.exit(failures ? 1 : 0);
+console.log(h.failures ? `\n${h.failures} FAILURE(S)` : "\nall green");
+process.exit(h.failures ? 1 : 0);

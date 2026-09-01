@@ -22,84 +22,16 @@
 //   4. AFTERWARDS — the very next plain click on that knob toggles it:
 //      a finished drag leaves no click-swallowing listener behind.
 
-import { connect } from "./cdp.js";
-import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync, existsSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { connect, launchHarness } from "./cdp.js";
 
-const REPO = new URL("../..", import.meta.url).pathname;
 const SERVER_PORT = 9898;
 const UI_PORT = 9899;
 const CDP_PORT = 9236;
-const S = `http://127.0.0.1:${SERVER_PORT}`;
-
-let failures = 0;
-const check = (ok, what) => {
-  console.log(`${ok ? "PASS" : "FAIL"}  ${what}`);
-  if (!ok) failures++;
-};
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const state = async () => (await fetch(S + "/api/state")).json();
-const settled = async () => {
-  for (let i = 0; i < 100; i++) {
-    const s = await state();
-    if (s.organ && !s.loading) return s;
-    await sleep(300);
-  }
-  throw new Error("organ never settled");
-};
-
-// ---- processes -------------------------------------------------------
-
-const serverBin = process.argv[2] ??
-  [join(REPO, "target/release/aristide-server"), join(REPO, "target/debug/aristide-server")]
-    .find(existsSync);
-if (!serverBin) {
-  console.error("no server binary — cargo build -p aristide-server first");
-  process.exit(2);
-}
-const demo = join(REPO, "testsets/grandorgue-demo/demo.organ");
-if (!existsSync(demo)) {
-  console.error("no demo set — see CLAUDE.md's testsets note");
-  process.exit(2);
-}
-
-const scratch = mkdtempSync(join(tmpdir(), "aristide-click-vs-drag-"));
-const server = spawn(serverBin, ["--http-port", String(SERVER_PORT)], {
-  stdio: ["ignore", "ignore", "pipe"],
-  env: { ...process.env, XDG_CONFIG_HOME: join(scratch, "config") },
-});
-let serverLog = "";
-server.stderr.on("data", (d) => (serverLog += d));
-
-const ui = Bun.serve({
-  port: UI_PORT,
-  fetch(req) {
-    const path = new URL(req.url).pathname;
-    const file = Bun.file(join(REPO, "crates/aristide-console/ui", path === "/" ? "index.html" : path));
-    return file.exists().then((ok) => (ok ? new Response(file) : new Response("nope", { status: 404 })));
-  },
-});
-
-const chrome = spawn("chromium", [
-  "--headless", "--disable-gpu", `--remote-debugging-port=${CDP_PORT}`,
-  `--window-size=1500,950`,
-  `--user-data-dir=${join(scratch, "chrome")}`, "about:blank",
-], { stdio: "ignore" });
-
-const done = async (code) => {
-  try { chrome.kill(); } catch {}
-  try { server.kill(); } catch {}
-  try { ui.stop(true); } catch {}
-  try { rmSync(scratch, { recursive: true, force: true }); } catch {}
-  process.exit(code);
-};
+const h = launchHarness({ name: "click-vs-drag", serverPort: SERVER_PORT, uiPort: UI_PORT, cdpPort: CDP_PORT });
+const { S, demo, check, sleep, state, settled, waitForServer, done } = h;
 
 try {
-  for (let i = 0; i < 100; i++) {
-    try { await state(); break; } catch { await sleep(200); }
-  }
+  await waitForServer();
   await fetch(S + `/api/organ/load?path=${encodeURIComponent(demo)}`, { method: "POST" });
   await settled();
 
@@ -197,11 +129,11 @@ try {
       `unlocked: the first plain click after a drag toggles the knob`);
   }
 
-  console.log(failures ? `\n${failures} check(s) failed` : "\nall checks passed");
-  if (failures && serverLog) console.log("--- server log ---\n" + serverLog.split("\n").filter((l) => l.includes("http ")).slice(-30).join("\n"));
-  await done(failures ? 1 : 0);
+  console.log(h.failures ? `\n${h.failures} check(s) failed` : "\nall checks passed");
+  if (h.failures && h.serverLog) console.log("--- server log ---\n" + h.serverLog.split("\n").filter((l) => l.includes("http ")).slice(-30).join("\n"));
+  await done(h.failures ? 1 : 0);
 } catch (err) {
   console.error("audit crashed:", err);
-  console.log("--- server log ---\n" + serverLog.slice(-2000));
+  console.log("--- server log ---\n" + h.serverLog.slice(-2000));
   await done(2);
 }

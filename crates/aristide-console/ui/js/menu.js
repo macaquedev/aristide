@@ -7,6 +7,40 @@
 // `radio` are booleans describing the item's current state; "-" is a
 // separator and a plain string is a section heading.
 
+/// One `.menu-item` button — the building block both the pull-down
+/// menu bar and the editor's ad hoc context menus (division, keyboard,
+/// stop-source) share. `checked` shows the checkmark; `checkable`
+/// reserves its gutter even unchecked (a menu mixing checked and plain
+/// items keeps them aligned); `radio` marks it part of a radio group.
+/// `onClick`, if given, always sees its propagation already stopped —
+/// every call site needs that, so a popover the item opens doesn't
+/// see the same click hit the window's close-all listener.
+export function menuItem(label, { onClick, accel, checked, checkable, radio, disabled } = {}) {
+  const button = document.createElement("button");
+  button.className = "menu-item";
+  button.setAttribute("role", "menuitem");
+  button.disabled = Boolean(disabled);
+  button.classList.toggle("checked", Boolean(checked));
+  if (radio) button.classList.add("radio");
+  if (checkable) button.classList.add("checkable");
+
+  const text = document.createElement("span");
+  text.textContent = label;
+  button.append(text);
+  if (accel) {
+    const kbd = document.createElement("kbd");
+    kbd.textContent = accel;
+    button.append(kbd);
+  }
+  if (onClick) {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      onClick(event);
+    });
+  }
+  return button;
+}
+
 export class MenuBar {
   /// `menus` = [{title, items: () => [...]}, ...]. A menu may instead
   /// bring its own `{button, list}` elements from the page — how the
@@ -80,33 +114,21 @@ export class MenuBar {
       heading.textContent = item;
       return heading;
     }
-    const button = document.createElement("button");
-    button.className = "menu-item";
-    button.setAttribute("role", "menuitem");
-    button.disabled = Boolean(item.disabled);
-    button.classList.toggle("checked", Boolean(item.check || item.radio));
-    if (item.radio !== undefined) button.classList.add("radio");
-    if (item.check !== undefined) button.classList.add("checkable");
-
-    const label = document.createElement("span");
-    label.textContent = item.label;
-    button.append(label);
-    if (item.accel) {
-      const accel = document.createElement("kbd");
-      accel.textContent = item.accel;
-      button.append(accel);
-    }
-    button.addEventListener("click", (event) => {
-      // The click must not travel on to the window's own close-all
-      // listener: an item that opens a popover (Tuning…, Bindings…)
-      // would see it shut by the very click that opened it. The
-      // anchor rides along so such a popover can open under the item.
-      event.stopPropagation();
-      const rect = button.getBoundingClientRect();
-      this.close();
-      item.run?.({ x: rect.left, y: rect.top });
+    // The anchor rides along so a popover an item opens (Tuning…,
+    // Bindings…) can open under the item, not wherever the pointer
+    // now sits — see menuItem for why the click stops there too.
+    return menuItem(item.label, {
+      accel: item.accel,
+      checked: item.check || item.radio,
+      checkable: item.check !== undefined,
+      radio: item.radio !== undefined,
+      disabled: item.disabled,
+      onClick: (event) => {
+        const rect = event.currentTarget.getBoundingClientRect();
+        this.close();
+        item.run?.({ x: rect.left, y: rect.top });
+      },
     });
-    return button;
   }
 
   hide(entry) {
