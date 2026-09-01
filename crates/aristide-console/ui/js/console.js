@@ -90,7 +90,22 @@ export class Console {
     };
     this.wireRail();
     window.addEventListener("resize", () => {
-      if (this.snapshot) this.layoutPanels(this.snapshot);
+      if (!this.snapshot) return;
+      this.layoutPanels(this.snapshot);
+      // A zoom leaves every box the same size in CSS pixels but not
+      // the type rendered into it, so the field observer below stays
+      // quiet and the cheeks are refitted from here.
+      this.fitCheeks();
+    });
+    // Each keyboard's key field is watched for size changes — density,
+    // a resize drag, a stored width landing — and its cheek refitted
+    // to the new room. The field rather than the cheek: a fit changes
+    // the cheek's own width, and an observer there would chase itself.
+    this.fields = new ResizeObserver((entries) => {
+      for (const { target } of entries) {
+        const cheek = target.parentElement?.querySelector(".cheek");
+        if (cheek) this.fitCheek(cheek);
+      }
     });
   }
 
@@ -131,6 +146,7 @@ export class Console {
     const empty = !!snapshot.organ && !snapshot.stops.length && !snapshot.manuals.length;
     this.el.emptyCard.classList.toggle("hidden", !empty);
     this.layoutSig = null; // panels are new; place them on next refresh
+    this.fields.disconnect(); // the old fields go with the old panels
     if (empty) {
       this.panels.clear();
       this.el.canvas.replaceChildren();
@@ -140,7 +156,6 @@ export class Console {
     }
     this.buildPanels(snapshot);
     this.fitLabels();
-    this.fitCheeks();
     this.decorate?.(snapshot);
   }
 
@@ -178,28 +193,29 @@ export class Console {
     }
   }
 
-  /// A cheek's lettering never runs past its key field: the run is
-  /// measured against the room as actually rendered — after every
-  /// build, and again from layoutPanels whenever the room or the
-  /// rendering may have changed (a resized keyboard, a zoom, a density)
-  /// — and shrunk until it fits. Rendered, not predicted: hinted glyphs
-  /// at small device sizes come out longer than any em count says, so
-  /// one measurement at build time was not a promise the desktop kept.
-  /// The cheek's box is the key field's height regardless (style.css),
-  /// so even mid-fit nothing stretches the panel or hangs off its ends.
-  fitCheeks() {
-    for (const cheek of this.root.querySelectorAll(".cheek")) {
-      cheek.style.removeProperty("--cheek-fit");
-      const room = cheek.clientHeight;
-      if (!room) continue;
-      let fit = 1;
-      // one step straight from the overrun, then nudges — shrinking is
-      // not quite linear at the sizes where hinting bites
-      for (let i = 0; i < 8 && cheek.scrollHeight > room; i++) {
-        fit *= i === 0 ? room / cheek.scrollHeight : 0.97;
-        cheek.style.setProperty("--cheek-fit", fit.toFixed(3));
-      }
+  /// A cheek's lettering never runs past its key field: the rendered
+  /// run is measured against the room and the type shrunk until it
+  /// fits. Rendered, not predicted — hinted glyphs at small device
+  /// sizes come out longer than any em count says, so the fit is
+  /// redone whenever the room changes (the field observer) or the
+  /// rendering may have (a zoom; the resize listener). The box is the
+  /// field's height regardless (style.css), so nothing stretches the
+  /// panel or hangs off its ends even before a refit lands.
+  fitCheek(cheek) {
+    cheek.style.removeProperty("--cheek-fit");
+    const room = cheek.clientHeight;
+    if (!room) return;
+    let fit = 1;
+    // one step straight from the overrun, then nudges — shrinking is
+    // not quite linear at the sizes where hinting bites
+    for (let i = 0; i < 8 && cheek.scrollHeight > room; i++) {
+      fit *= i === 0 ? room / cheek.scrollHeight : 0.97;
+      cheek.style.setProperty("--cheek-fit", fit.toFixed(3));
     }
+  }
+
+  fitCheeks() {
+    for (const cheek of this.root.querySelectorAll(".cheek")) this.fitCheek(cheek);
   }
 
   // ---- panels -------------------------------------------------------
@@ -441,6 +457,7 @@ export class Console {
       }
     }
     board.append(keys);
+    this.fields.observe(keys); // fires once the field is laid out: the first fit
     return board;
   }
 
@@ -601,7 +618,6 @@ export class Console {
       el.classList.toggle("sized", sized);
       el.style.width = sized ? `${Math.round(placed[id].w * W)}px` : "";
     }
-    this.fitCheeks();
     const defaults = this.defaultLayout(snapshot, W, H);
     for (const [id, el] of this.panels) {
       if (el.dataset.dragging) continue;

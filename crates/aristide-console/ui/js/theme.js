@@ -156,9 +156,6 @@ export function wireTheme(root) {
   segmented(densities, DENSITIES, density, (name) => name.toUpperCase(), (name) => {
     store.set("density", name);
     applyDensity(name);
-    // Every panel just changed size: the console re-seats and refits
-    // on resize, and a density is a resize of everything at once.
-    window.dispatchEvent(new Event("resize"));
   });
 
   scale = readScale();
