@@ -74,7 +74,6 @@ const TAIL_SHED_PER_BLOCK: usize = 8;
 const LIMITER_CEILING: f32 = 0.97;
 const LIMITER_RELEASE_SECONDS: f32 = 0.2;
 
-
 /// [`Command::StartVoice`] unpacked: a pipe's identity plus
 /// everything the RT side needs to seed a voice from it.
 #[derive(Clone, Copy)]
@@ -357,7 +356,8 @@ impl Engine {
         let master = self.master_gain;
         let lite = self.lite;
         let output_sr = self.sample_rate;
-        // Split borrows: voices mutably, bank/read-only params shared.
+        // Split borrows: voices and buses mutably, everything a voice
+        // only reads shared through [`BlockRefs`].
         let Engine {
             voices,
             buses,
@@ -374,6 +374,21 @@ impl Engine {
             enc_ramp,
             ..
         } = self;
+        let refs = BlockRefs {
+            bank,
+            sinc: &*sinc,
+            wind: &*wind,
+            enclosures: &*enclosures,
+            frames,
+            dt,
+            master,
+            lite,
+            output_sr,
+            crossfade_step: *crossfade_step,
+            kill_step: *kill_step,
+            envelope_step: *envelope_step,
+            enc_ramp: *enc_ramp,
+        };
 
         for bus in buses.iter_mut() {
             bus.begin_chunk(frames);
@@ -381,145 +396,27 @@ impl Engine {
 
         for index in 0..voices.len() {
             let voice = &mut voices[index];
-            match voice {
-                Voice::Idle => {}
+            let alive = match voice {
+                Voice::Idle => true,
                 Voice::Tone(tone) => {
                     let scratch = buses[0].mix_target(frames);
+                    let mut alive = true;
                     for frame in 0..frames {
                         let value = tone.tick(*tone_attack_step, *tone_release_step);
                         if tone.stage == ToneStage::Idle {
-                            *voice = Voice::Idle;
-                            free_slots.push(index as u16);
+                            alive = false;
                             break;
                         }
                         scratch[frame * 2] += value * TONE_GAIN * master;
                         scratch[frame * 2 + 1] += value * TONE_GAIN * master;
                     }
+                    alive
                 }
-                Voice::Sampled(sampled) => {
-                    let start_frame = match sampled.take_onset(frames) {
-                        Onset::Speaks(frame) => frame,
-                        Onset::Waiting => continue,
-                        Onset::NeverSpoke => {
-                            *voice = Voice::Idle;
-                            free_slots.push(index as u16);
-                            continue;
-                        }
-                    };
-                    let Some(sample) = bank.get(sampled.cursor.sample) else {
-                        *voice = Voice::Idle;
-                        free_slots.push(index as u16);
-                        continue;
-                    };
-                    // Wind factors follow the swell-box rule below: a
-                    // Held voice re-reads its chest each block; a
-                    // released voice keeps the factors frozen from its
-                    // last Held block — the pallet is closed, the tail
-                    // is room decay, and trem/pressure must not wobble
-                    // it.
-                    if !lite && sampled.phase == SamplePhase::Held {
-                        let chest = &wind[sampled.wind.group as usize];
-                        sampled.wind.follow_chest(chest, dt, &mut sampled.rng);
-                    }
-                    let (rate_scale, gain, treble) = if lite {
-                        (1.0f64, master, 1.0f32)
-                    } else {
-                        (
-                            sampled.wind.rate as f64,
-                            master * sampled.wind.gain,
-                            sampled.wind.treble,
-                        )
-                    };
-                    // Bypass the tilt filter while it would do nothing:
-                    // keeps untouched-pressure rendering bit-identical.
-                    let tilting = sampled.brightness.a > 0.0 && (treble - 1.0).abs() > 1e-4;
-
-                    // Swell box: a Held voice tracks its box each block
-                    // (gain ramped per frame — pedal sweeps would zipper
-                    // otherwise); any released/fading voice keeps the
-                    // factors frozen from its last Held block. Lite mode
-                    // keeps the broadband gain (the pedal must still do
-                    // something) and only skips the shutter filter.
-                    let enclosed = sampled.enclosure.index != ENCLOSURE_NONE;
-                    if enclosed && sampled.phase == SamplePhase::Held {
-                        let box_state = &enclosures[sampled.enclosure.index as usize];
-                        sampled.enclosure.follow_box(box_state);
-                    }
-                    let held = sampled.phase == SamplePhase::Held;
-                    sampled.cursor.step_glide(frames, held, sinc);
-                    sampled.age_frames = sampled
-                        .age_frames
-                        .saturating_add((frames - start_frame) as u32);
-
-                    // The voice can hand over to a separate release
-                    // sample or switch loops mid-block; track the refs
-                    // and per-block invariants it reads from.
-                    let mut current = sample;
-                    let mut current_id = sampled.cursor.sample;
-                    let mut current_loop_index = sampled.cursor.loop_index;
-                    let mut current_external_id = sampled.cursor.external_release;
-                    let mut external = current_external_id.and_then(|id| bank.get(id));
-                    let mut ctx =
-                        sampled.block_context(current, external, rate_scale, lite, output_sr);
-                    let scratch = buses[sampled.bus as usize].mix_target(frames);
-                    for frame in start_frame..frames {
-                        if sampled.cursor.sample != current_id {
-                            match bank.get(sampled.cursor.sample) {
-                                Some(switched) => {
-                                    current = switched;
-                                    current_id = sampled.cursor.sample;
-                                    external = None;
-                                    current_external_id = None;
-                                    current_loop_index = sampled.cursor.loop_index;
-                                    ctx = sampled.block_context(
-                                        current, external, rate_scale, lite, output_sr,
-                                    );
-                                }
-                                None => {
-                                    *voice = Voice::Idle;
-                                    free_slots.push(index as u16);
-                                    break;
-                                }
-                            }
-                        } else if sampled.cursor.loop_index != current_loop_index
-                            || sampled.cursor.external_release != current_external_id
-                        {
-                            current_loop_index = sampled.cursor.loop_index;
-                            current_external_id = sampled.cursor.external_release;
-                            external = current_external_id.and_then(|id| bank.get(id));
-                            ctx = sampled.block_context(
-                                current, external, rate_scale, lite, output_sr,
-                            );
-                        }
-                        match sampled.tick(
-                            current,
-                            external,
-                            sinc,
-                            &ctx,
-                            *crossfade_step,
-                            *kill_step,
-                        ) {
-                            Some((mut left, mut right)) => {
-                                sampled.follow_envelope(left, right, *envelope_step);
-                                if tilting {
-                                    sampled.brightness.apply(&mut left, &mut right, treble);
-                                }
-                                if enclosed {
-                                    sampled
-                                        .enclosure
-                                        .apply(&mut left, &mut right, lite, *enc_ramp);
-                                }
-                                scratch[frame * 2] += left * gain;
-                                scratch[frame * 2 + 1] += right * gain;
-                            }
-                            None => {
-                                *voice = Voice::Idle;
-                                free_slots.push(index as u16);
-                                break;
-                            }
-                        }
-                    }
-                }
+                Voice::Sampled(sampled) => render_sampled_voice(sampled, buses, &refs),
+            };
+            if !alive {
+                *voice = Voice::Idle;
+                free_slots.push(index as u16);
             }
         }
     }
@@ -965,6 +862,148 @@ impl Engine {
             )
         })
     }
+}
+
+/// The read-only environment one block of rendering happens against:
+/// the bank and tables a voice reads from, the chests and boxes it
+/// answers to, and the engine's per-block coefficients.
+#[derive(Clone, Copy)]
+struct BlockRefs<'a> {
+    bank: &'a SampleBank,
+    sinc: &'a SincTables,
+    wind: &'a [WindGroup; MAX_WIND_GROUPS],
+    enclosures: &'a [Enclosure; MAX_ENCLOSURES],
+    /// Frames in this chunk, and the seconds they span.
+    frames: usize,
+    dt: f32,
+    master: f32,
+    lite: bool,
+    output_sr: f32,
+    crossfade_step: f32,
+    kill_step: f32,
+    envelope_step: f32,
+    enc_ramp: f32,
+}
+
+/// One sampled voice, one block, onto its bus's scratch. Returns false
+/// when the voice ended and its slot should go back on the free list.
+fn render_sampled_voice(
+    sampled: &mut SampledVoice,
+    buses: &mut [Bus],
+    refs: &BlockRefs<'_>,
+) -> bool {
+    let BlockRefs {
+        bank,
+        sinc,
+        wind,
+        enclosures,
+        frames,
+        dt,
+        master,
+        lite,
+        output_sr,
+        ..
+    } = *refs;
+    let start_frame = match sampled.take_onset(frames) {
+        Onset::Speaks(frame) => frame,
+        Onset::Waiting => return true,
+        Onset::NeverSpoke => return false,
+    };
+    let Some(sample) = bank.get(sampled.cursor.sample) else {
+        return false;
+    };
+    // Wind factors follow the swell-box rule below: a Held voice
+    // re-reads its chest each block; a released voice keeps the factors
+    // frozen from its last Held block — the pallet is closed, the tail
+    // is room decay, and trem/pressure must not wobble it.
+    if !lite && sampled.phase == SamplePhase::Held {
+        let chest = &wind[sampled.wind.group as usize];
+        sampled.wind.follow_chest(chest, dt, &mut sampled.rng);
+    }
+    let (rate_scale, gain, treble) = if lite {
+        (1.0f64, master, 1.0f32)
+    } else {
+        (
+            sampled.wind.rate as f64,
+            master * sampled.wind.gain,
+            sampled.wind.treble,
+        )
+    };
+    // Bypass the tilt filter while it would do nothing: keeps
+    // untouched-pressure rendering bit-identical.
+    let tilting = sampled.brightness.a > 0.0 && (treble - 1.0).abs() > 1e-4;
+
+    // Swell box: a Held voice tracks its box each block (gain ramped per
+    // frame — pedal sweeps would zipper otherwise); any released/fading
+    // voice keeps the factors frozen from its last Held block. Lite mode
+    // keeps the broadband gain (the pedal must still do something) and
+    // only skips the shutter filter.
+    let enclosed = sampled.enclosure.index != ENCLOSURE_NONE;
+    if enclosed && sampled.phase == SamplePhase::Held {
+        let box_state = &enclosures[sampled.enclosure.index as usize];
+        sampled.enclosure.follow_box(box_state);
+    }
+    let held = sampled.phase == SamplePhase::Held;
+    sampled.cursor.step_glide(frames, held, sinc);
+    sampled.age_frames = sampled
+        .age_frames
+        .saturating_add((frames - start_frame) as u32);
+
+    // The voice can hand over to a separate release sample or switch
+    // loops mid-block; track the refs and per-block invariants it reads
+    // from.
+    let mut current = sample;
+    let mut current_id = sampled.cursor.sample;
+    let mut current_loop_index = sampled.cursor.loop_index;
+    let mut current_external_id = sampled.cursor.external_release;
+    let mut external = current_external_id.and_then(|id| bank.get(id));
+    let mut ctx = sampled.block_context(current, external, rate_scale, lite, output_sr);
+    let scratch = buses[sampled.bus as usize].mix_target(frames);
+    for frame in start_frame..frames {
+        if sampled.cursor.sample != current_id {
+            match bank.get(sampled.cursor.sample) {
+                Some(switched) => {
+                    current = switched;
+                    current_id = sampled.cursor.sample;
+                    external = None;
+                    current_external_id = None;
+                    current_loop_index = sampled.cursor.loop_index;
+                    ctx = sampled
+                        .block_context(current, external, rate_scale, lite, output_sr);
+                }
+                None => return false,
+            }
+        } else if sampled.cursor.loop_index != current_loop_index
+            || sampled.cursor.external_release != current_external_id
+        {
+            current_loop_index = sampled.cursor.loop_index;
+            current_external_id = sampled.cursor.external_release;
+            external = current_external_id.and_then(|id| bank.get(id));
+            ctx = sampled.block_context(current, external, rate_scale, lite, output_sr);
+        }
+        let Some((mut left, mut right)) = sampled.tick(
+            current,
+            external,
+            sinc,
+            &ctx,
+            refs.crossfade_step,
+            refs.kill_step,
+        ) else {
+            return false;
+        };
+        sampled.follow_envelope(left, right, refs.envelope_step);
+        if tilting {
+            sampled.brightness.apply(&mut left, &mut right, treble);
+        }
+        if enclosed {
+            sampled
+                .enclosure
+                .apply(&mut left, &mut right, lite, refs.enc_ramp);
+        }
+        scratch[frame * 2] += left * gain;
+        scratch[frame * 2 + 1] += right * gain;
+    }
+    true
 }
 
 #[cfg(test)]
