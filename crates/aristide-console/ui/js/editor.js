@@ -47,12 +47,38 @@ const KEYBOARD_KINDS = [
   ["microtonal", "Microtonal keyboard"],
 ];
 
-/// Swallows the click a suppressed drag would otherwise leave behind —
-/// a drag that crossed the threshold must not also toggle the drawknob
-/// (or fire whatever else the element's own click listener does).
-function suppressClick(event) {
-  event.preventDefault();
-  event.stopImmediatePropagation();
+/// How far the pointer travels before a press on a drag source becomes
+/// a drag rather than a click — GTK's threshold. A mouse button's own
+/// travel wobbles the pointer a few pixels (more on a high-DPI mouse),
+/// and below this nothing is dragged, so a wobbly click stays a click.
+const DRAG_THRESHOLD_PX = 8;
+
+/// Swallows the click a real drag leaves behind if it lands on the
+/// dragged control — which it does only when the browser dispatches the
+/// click to the pressed element rather than to the nearest common
+/// ancestor of press and release, where it may bubble on as any click
+/// elsewhere would. Either way the listener stands down at the next
+/// press, so it can never eat a later, honest click on the control.
+function suppressNextClick(source) {
+  const swallow = (event) => {
+    if (source.contains(event.target)) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }
+    disarm();
+  };
+  const disarm = () => {
+    window.removeEventListener("click", swallow, true);
+    window.removeEventListener("pointerdown", disarm, true);
+  };
+  window.addEventListener("click", swallow, true);
+  window.addEventListener("pointerdown", disarm, true);
+}
+
+function withinRect(rect, { clientX, clientY }) {
+  return (
+    clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom
+  );
 }
 
 /// Anything with behavior of its own — a panel drag must never start on
@@ -3711,6 +3737,8 @@ export class Editor {
   /// `getInfo()` returns `{kind, payload, label}` for the drag about to
   /// start, or null to refuse it. Called only once the pointer has
   /// actually moved past the threshold, so it can read live state.
+  /// Whether the drag then also swallows the control's click is
+  /// endDrag's call: a release still over the source was a click.
   wireDragSource(el, getInfo) {
     el.addEventListener("pointerdown", (event) => {
       if (event.button !== 0) return;
@@ -3721,13 +3749,12 @@ export class Editor {
       let moved = false;
       const onMove = (e) => {
         if (moved) return;
-        if (Math.hypot(e.clientX - startX, e.clientY - startY) < 4) return;
+        if (Math.hypot(e.clientX - startX, e.clientY - startY) < DRAG_THRESHOLD_PX) return;
         moved = true;
         window.removeEventListener("pointermove", onMove);
         const info = getInfo();
         if (!info) return;
-        el.addEventListener("click", suppressClick, { capture: true, once: true });
-        this.startDrag(e, info.kind, info.payload, info.label);
+        this.startDrag(e, info.kind, info.payload, info.label, el);
       };
       const onUp = () => window.removeEventListener("pointermove", onMove);
       window.addEventListener("pointermove", onMove);
@@ -3735,13 +3762,22 @@ export class Editor {
     });
   }
 
-  startDrag(event, kind, payload, label) {
+  startDrag(event, kind, payload, label, source) {
     event.preventDefault();
     const ghost = document.createElement("div");
     ghost.className = "organ-drag-ghost";
     ghost.textContent = label;
     document.body.append(ghost);
-    this.drag = { kind, payload, ghost, label, targetType: null, targetIdx: null, insert: null };
+    this.drag = {
+      kind,
+      payload,
+      ghost,
+      label,
+      source,
+      targetType: null,
+      targetIdx: null,
+      insert: null,
+    };
     this.positionGhost(event.clientX, event.clientY);
     if (this.binAllowed(kind)) this.el.bin.classList.add("visible");
     this._dragMove = (e) => this.dragMove(e);
@@ -3929,6 +3965,16 @@ export class Editor {
       ".insert-before, .insert-after, .insert-left, .insert-right"
     )) {
       el.classList.remove("insert-before", "insert-after", "insert-left", "insert-right");
+    }
+
+    // Let go where it was picked up: the pointer never left the
+    // control, so nobody meant to drop it anywhere — that was a click
+    // with a wobble, and the control's own click goes through.
+    // Otherwise the click the browser fires after this release belongs
+    // to the drag and must not also toggle or open anything.
+    if (drag.source) {
+      if (withinRect(drag.source.getBoundingClientRect(), event)) return;
+      suppressNextClick(drag.source);
     }
 
     const { targetType, targetIdx } = drag;
