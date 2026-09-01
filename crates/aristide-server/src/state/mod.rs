@@ -292,8 +292,8 @@ pub struct Setup {
 /// sidecar or the organ's own file can carry. `perform_load` builds
 /// one of these once `load::prepare` and the engine swap have both
 /// succeeded, and [`State::install`] is the one place they land —
-/// symmetric with the constructor that sets their blank defaults at
-/// startup, so a future field can't be added to one path and
+/// symmetric with [`State::new`], the one place their blank defaults
+/// land at startup, so a future field can't be added to one path and
 /// forgotten in the other.
 pub struct Installed {
     pub engine: EngineHandle,
@@ -318,6 +318,56 @@ pub struct Installed {
 }
 
 impl State {
+    /// A freshly started server: the tone engine and the on-disk MIDI
+    /// config, with no organ loaded yet (or one already queued, for a
+    /// set named on the command line). Every organ-derived field
+    /// starts at its blank default here — [`State::install`] is the
+    /// only other place they're set, once a load actually completes.
+    pub fn new(
+        engine: EngineHandle,
+        config_path: Option<PathBuf>,
+        midi_config: config::MidiConfig,
+        master_gain: f32,
+        pending_load: Option<LoadRequest>,
+    ) -> State {
+        State {
+            engine,
+            control: Control::Tone,
+            midi_ports: Vec::new(),
+            midi_config,
+            config_path,
+            organ_key: String::new(),
+            suggested_channels: Vec::new(),
+            learn: None,
+            control_learn: None,
+            pending: None,
+            key_bindings: Vec::new(),
+            keyboard: Vec::new(),
+            live_notes: HashMap::new(),
+            channel_bend: HashMap::new(),
+            ltn_cache: HashMap::new(),
+            trems: Vec::new(),
+            setter_armed: false,
+            master_gain,
+            reverb_wet: None,
+            expression_cc: 11,
+            composite_path: None,
+            setup: Setup::default(),
+            provenance: Default::default(),
+            stop_voicing: Default::default(),
+            stop_labels: Default::default(),
+            stop_order: Default::default(),
+            compass_overrides: Vec::new(),
+            loading: pending_load.as_ref().map(|_| "loading…".to_string()),
+            pending_load,
+            load_error: None,
+            load_warnings: Vec::new(),
+            layout: Default::default(),
+            coupled_keys: true,
+            coupler_key_modes: Default::default(),
+        }
+    }
+
     /// Swap a freshly loaded instrument in: the engine, the console,
     /// and every organ-derived field, in the one place `perform_load`
     /// touches `State` directly instead of going through an edit

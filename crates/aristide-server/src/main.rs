@@ -19,7 +19,6 @@ pub use state::{
     TremControl,
 };
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -116,41 +115,32 @@ fn parse_args() -> Result<Args> {
     Ok(args)
 }
 
-fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
-    tracing::info!(
-        "aristide-server {} (commit {})",
-        env!("CARGO_PKG_VERSION"),
-        option_env!("ARISTIDE_COMMIT").unwrap_or("unknown")
-    );
-    if cfg!(debug_assertions) {
-        tracing::warn!(
-            "DEBUG BUILD — 10-20x slower than release; audio WILL crackle. \
-             Run: cargo run --release -p aristide-server"
-        );
-    }
-    let args = parse_args()?;
-
-    if args.list_stops {
-        anyhow::ensure!(!args.sets.is_empty(), "--list-stops needs a set path");
-        for path in &args.sets {
-            let organ = if instrument::is_definition(path) {
-                instrument::load(path)
-                    .with_context(|| format!("loading {}", path.display()))?
-                    .organ
-            } else {
-                load::load_organ(path)?
-            };
-            for manual in &organ.manuals {
-                println!("{}:", manual.name);
-                for stop in organ.stops.iter().filter(|s| s.manual == manual.id) {
-                    println!("  {}", stop.name);
-                }
+/// `--list-stops`: print every manual's registered stop names for each
+/// named set or organ file, without opening any audio device.
+fn list_stops(paths: &[PathBuf]) -> Result<()> {
+    anyhow::ensure!(!paths.is_empty(), "--list-stops needs a set path");
+    for path in paths {
+        let organ = if instrument::is_definition(path) {
+            instrument::load(path)
+                .with_context(|| format!("loading {}", path.display()))?
+                .organ
+        } else {
+            load::load_organ(path)?
+        };
+        for manual in &organ.manuals {
+            println!("{}:", manual.name);
+            for stop in organ.stops.iter().filter(|s| s.manual == manual.id) {
+                println!("  {}", stop.name);
             }
         }
-        return Ok(());
     }
+    Ok(())
+}
 
+/// The default output device and the best f32 format it offers,
+/// logging the diagnostic line every audio bug report should open
+/// with.
+fn select_audio_config(args: &Args) -> Result<(cpal::Device, cpal::StreamConfig, f32, usize)> {
     let host = cpal::default_host();
     let device = host
         .default_output_device()
@@ -171,6 +161,29 @@ fn main() -> Result<()> {
         args.buffer_frames,
         args.buffer_frames as f32 * 1000.0 / sample_rate
     );
+    Ok((device, config, sample_rate, channels))
+}
+
+fn main() -> Result<()> {
+    tracing_subscriber::fmt::init();
+    tracing::info!(
+        "aristide-server {} (commit {})",
+        env!("CARGO_PKG_VERSION"),
+        option_env!("ARISTIDE_COMMIT").unwrap_or("unknown")
+    );
+    if cfg!(debug_assertions) {
+        tracing::warn!(
+            "DEBUG BUILD — 10-20x slower than release; audio WILL crackle. \
+             Run: cargo run --release -p aristide-server"
+        );
+    }
+    let args = parse_args()?;
+
+    if args.list_stops {
+        return list_stops(&args.sets);
+    }
+
+    let (device, config, sample_rate, channels) = select_audio_config(&args)?;
 
     if args.safe {
         tracing::warn!(
@@ -234,42 +247,13 @@ fn main() -> Result<()> {
     if pending_load.is_none() {
         tracing::info!("no organ loaded — pick one in the console");
     }
-    let state = Arc::new(Mutex::new(State {
-        engine: handle,
-        control: Control::Tone,
-        midi_ports: Vec::new(),
-        midi_config,
+    let state = Arc::new(Mutex::new(State::new(
+        handle,
         config_path,
-        organ_key: String::new(),
-        suggested_channels: Vec::new(),
-        learn: None,
-        control_learn: None,
-        pending: None,
-        key_bindings: Vec::new(),
-        keyboard: Vec::new(),
-        live_notes: HashMap::new(),
-        channel_bend: HashMap::new(),
-        ltn_cache: HashMap::new(),
-        trems: Vec::new(),
-        setter_armed: false,
-        master_gain: args.master_gain.unwrap_or(0.178),
-        reverb_wet: None,
-        expression_cc: 11,
-        composite_path: None,
-        setup: Setup::default(),
-        provenance: Default::default(),
-        stop_voicing: Default::default(),
-        stop_labels: Default::default(),
-        stop_order: Default::default(),
-        compass_overrides: Vec::new(),
-        loading: pending_load.as_ref().map(|_| "loading…".to_string()),
+        midi_config,
+        args.master_gain.unwrap_or(0.178),
         pending_load,
-        load_error: None,
-        load_warnings: Vec::new(),
-        layout: Default::default(),
-        coupled_keys: true,
-        coupler_key_modes: Default::default(),
-    }));
+    )));
     // Assignments exist before any hardware does: the computer
     // keyboard and every binding are live from the first note.
     state.lock().expect("state poisoned").resolve_routes();
