@@ -1198,6 +1198,269 @@ fn configure_tuning(
     live_tuning
 }
 
+/// Coupler repitch/rename/drop/link settings from the sidecar's
+/// `[couplers]` table, plus ambient noise playback — all resolved by
+/// console name, all reported (never fatal) when a name doesn't match.
+fn configure_couplers_and_noises(
+    console: &mut Console,
+    sidecar: &aristide_formats::sidecar::Sidecar,
+    load_warnings: &mut Vec<String>,
+) {
+    console.set_coupler_repitch(sidecar.couplers.repitch);
+    // Console names for carried couplers ([couplers.rename]): applied
+    // before the drop pass, so drop entries written by the console
+    // (which speak current names) mean what they say at load too.
+    for (original, name) in &sidecar.couplers.rename {
+        let index = console
+            .coupler_states()
+            .iter()
+            .position(|(_, existing, _, _)| existing.eq_ignore_ascii_case(original));
+        match index {
+            Some(index) => {
+                console.rename_coupler(index, name);
+            }
+            None => load_warnings.push(format!(
+                "couplers.rename: no coupler named {original:?}"
+            )),
+        }
+    }
+    // Couplers this instrument takes off its console — they stay
+    // restorable from the Organ preferences.
+    {
+        let names: Vec<String> = console
+            .coupler_states()
+            .iter()
+            .map(|(_, name, _, _)| name.to_string())
+            .collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        for pattern in &sidecar.couplers.drop {
+            let matches = aristide_formats::sidecar::match_names(&names, pattern);
+            if matches.is_empty() {
+                tracing::warn!("couplers.drop: {pattern:?} matches nothing");
+            }
+            for index in matches {
+                tracing::info!("coupler off the console: {}", names[index]);
+                console.set_coupler_available(index, false);
+            }
+        }
+    }
+    // Linked couplers ([couplers] link): engaging one engages the rest.
+    // Names that don't resolve are reported and skipped — a group left
+    // with one member links nothing.
+    {
+        let names: Vec<String> = console
+            .coupler_states()
+            .iter()
+            .map(|(_, name, _, _)| name.to_string())
+            .collect();
+        let mut groups: Vec<Vec<usize>> = Vec::new();
+        for group in &sidecar.couplers.link {
+            let mut indices: Vec<usize> = Vec::new();
+            for name in group {
+                match names.iter().position(|n| n.eq_ignore_ascii_case(name)) {
+                    Some(index) => indices.push(index),
+                    None => {
+                        load_warnings
+                            .push(format!("couplers.link: no coupler named {name:?}"));
+                    }
+                }
+            }
+            indices.sort_unstable();
+            indices.dedup();
+            if indices.len() > 1 {
+                groups.push(indices);
+            }
+        }
+        console.set_coupler_links(groups);
+    }
+    console.set_noises(
+        sidecar.noises.enabled,
+        sidecar.noises.volume.clamp(0.0, 2.0) as f32,
+    );
+}
+
+/// Audio routing: stops onto buses, and their onset delays — resolved
+/// by the same name-pattern rules couplers use. A pattern that matches
+/// nothing warns to the console; it never fails the load.
+fn configure_buses(
+    console: &mut Console,
+    sidecar: &aristide_formats::sidecar::Sidecar,
+    sample_rate: f32,
+    load_warnings: &mut Vec<String>,
+) -> Vec<BusSetup> {
+    let stop_ids: Vec<(aristide_model::StopId, String, usize)> = console
+        .stop_states()
+        .iter()
+        .map(|(id, name, _, manual, _)| (*id, name.to_string(), *manual))
+        .collect();
+    let stop_names: Vec<&str> = stop_ids.iter().map(|(_, name, _)| name.as_str()).collect();
+    let manual_names: Vec<String> = console
+        .manual_states()
+        .iter()
+        .map(|(_, name, _, _, _)| name.to_string())
+        .collect();
+    let manual_names: Vec<&str> = manual_names.iter().map(String::as_str).collect();
+    let mut plan: std::collections::HashMap<aristide_model::StopId, (u8, u32)> =
+        std::collections::HashMap::new();
+    let mut buses = Vec::new();
+    for (index, def) in sidecar.routing.buses.iter().enumerate() {
+        if index + 1 >= aristide_engine::routing::MAX_BUSES {
+            load_warnings.push(format!(
+                "routing: at most {} buses; {:?} and beyond ignored",
+                aristide_engine::routing::MAX_BUSES - 1,
+                def.name
+            ));
+            break;
+        }
+        let bus = (index + 1) as u8;
+        let mut members: Vec<aristide_model::StopId> = Vec::new();
+        for pattern in &def.stops {
+            let matched = aristide_formats::sidecar::match_names(&stop_names, pattern);
+            if matched.is_empty() {
+                load_warnings.push(format!("routing: stop {pattern:?} matches nothing"));
+            }
+            members.extend(matched.iter().map(|&at| stop_ids[at].0));
+        }
+        for pattern in &def.manuals {
+            let matched = aristide_formats::sidecar::match_names(&manual_names, pattern);
+            if matched.is_empty() {
+                load_warnings.push(format!("routing: manual {pattern:?} matches nothing"));
+            }
+            members.extend(
+                stop_ids
+                    .iter()
+                    .filter(|(_, _, manual)| matched.contains(manual))
+                    .map(|(id, _, _)| *id),
+            );
+        }
+        for id in members {
+            let entry = plan.entry(id).or_insert((bus, 0));
+            if entry.0 != bus && entry.0 != 0 {
+                load_warnings
+                    .push("routing: a stop matched two buses; keeping the first".to_string());
+            } else {
+                entry.0 = bus;
+            }
+        }
+        buses.push(BusSetup {
+            bus,
+            output: def
+                .output
+                .map(|[left, right]| (left.saturating_sub(1), right.saturating_sub(1))),
+            gain: 10f32.powf((def.gain_db.clamp(-60.0, 20.0) as f32) / 20.0),
+            delay: def.delay.as_ref().map(|delay| {
+                aristide_engine::routing::DelayParams {
+                    seconds: (delay.ms.clamp(0.0, 60_000.0) / 1000.0) as f32,
+                    feedback: delay.feedback as f32,
+                    mix: delay.mix as f32,
+                    dry: delay.dry as f32,
+                }
+            }),
+        });
+    }
+    for rule in &sidecar.voicing.delays {
+        let frames = (rule.ms.clamp(0.0, 30_000.0) / 1000.0 * sample_rate as f64) as u32;
+        for pattern in &rule.stops {
+            let matched = aristide_formats::sidecar::match_names(&stop_names, pattern);
+            if matched.is_empty() {
+                load_warnings.push(format!("voicing.delay: {pattern:?} matches nothing"));
+            }
+            for at in matched {
+                plan.entry(stop_ids[at].0).or_insert((0, 0)).1 = frames;
+            }
+        }
+    }
+    if !plan.is_empty() {
+        console.set_stop_routing(plan);
+    }
+    buses
+}
+
+/// Voicing trims from `[[voicing.adjust]]`: level, cents, and footage
+/// per stop pattern. A `pitch` footage becomes a cents shift against
+/// the stop's own recorded footage, then rides the same fold as
+/// `cents`. A rule naming exactly one stop, exactly, becomes that
+/// stop's own editable rule (the console editor's mirror); the sound
+/// still gets every rule regardless.
+fn configure_voicing_adjust(
+    console: &mut Console,
+    sidecar: &aristide_formats::sidecar::Sidecar,
+    load_warnings: &mut Vec<String>,
+) -> std::collections::HashMap<StopId, StopVoicing> {
+    let stop_ids: Vec<(aristide_model::StopId, String, usize)> = console
+        .stop_states()
+        .iter()
+        .map(|(id, name, _, manual, _)| (*id, name.to_string(), *manual))
+        .collect();
+    let stop_names: Vec<&str> = stop_ids.iter().map(|(_, name, _)| name.as_str()).collect();
+    let mut stop_voicing: std::collections::HashMap<StopId, StopVoicing> =
+        std::collections::HashMap::new();
+    let mut adjust: std::collections::HashMap<aristide_model::StopId, (f32, f64)> =
+        std::collections::HashMap::new();
+    for rule in &sidecar.voicing.adjusts {
+        let gain = 10f32.powf((rule.gain_db.clamp(-40.0, 20.0) as f32) / 20.0);
+        let cents = rule.cents.clamp(-2400.0, 2400.0);
+        let feet = match &rule.pitch {
+            None => None,
+            Some(spec) => match spec.feet() {
+                Some(feet) => Some(feet),
+                None => {
+                    load_warnings
+                        .push(format!("voicing.adjust: {spec:?} names no footage"));
+                    None
+                }
+            },
+        };
+        for pattern in &rule.stops {
+            let matched = aristide_formats::sidecar::match_names(&stop_names, pattern);
+            if matched.is_empty() {
+                load_warnings.push(format!("voicing.adjust: {pattern:?} matches nothing"));
+            }
+            for at in matched {
+                let footage_cents = match feet {
+                    None => 0.0,
+                    Some(feet) => match console.stop_native_footage(stop_ids[at].0) {
+                        Some(native) => cents_between(feet, native),
+                        None => {
+                            load_warnings.push(format!(
+                                "voicing.adjust: {:?} speaks no single footage — \
+                                 pitch {feet} not applied",
+                                stop_names[at]
+                            ));
+                            0.0
+                        }
+                    },
+                };
+                let entry = adjust.entry(stop_ids[at].0).or_insert((1.0, 0.0));
+                entry.0 *= gain;
+                entry.1 += cents + footage_cents;
+            }
+        }
+        // A rule naming exactly one stop, exactly, is that stop's own
+        // — the one the console editor shows and edits. The last such
+        // rule wins the mirror (the sound still gets every rule).
+        if let [pattern] = rule.stops.as_slice()
+            && let [at] = aristide_formats::sidecar::match_names(&stop_names, pattern)
+                .as_slice()
+            && stop_names[*at].eq_ignore_ascii_case(pattern)
+        {
+            stop_voicing.insert(
+                stop_ids[*at].0,
+                StopVoicing {
+                    feet,
+                    cents: rule.cents,
+                    gain_db: rule.gain_db,
+                },
+            );
+        }
+    }
+    if !adjust.is_empty() {
+        tracing::info!("voicing: {} stop(s) trimmed", adjust.len());
+        console.set_stop_adjust(adjust);
+    }
+    stop_voicing
+}
+
 /// Assemble `paths` (sample sets and composite definitions; several are
 /// combined into one implicit composite), decode the samples, and build
 /// the console. `stops` are CLI registration patterns; empty means each
@@ -1292,236 +1555,9 @@ pub fn prepare(
         &source_tuning_defs,
         &mut load_warnings,
     );
-    console.set_coupler_repitch(sidecar.couplers.repitch);
-    // Console names for carried couplers ([couplers.rename]): applied
-    // before the drop pass, so drop entries written by the console
-    // (which speak current names) mean what they say at load too.
-    for (original, name) in &sidecar.couplers.rename {
-        let index = console
-            .coupler_states()
-            .iter()
-            .position(|(_, existing, _, _)| existing.eq_ignore_ascii_case(original));
-        match index {
-            Some(index) => {
-                console.rename_coupler(index, name);
-            }
-            None => load_warnings.push(format!(
-                "couplers.rename: no coupler named {original:?}"
-            )),
-        }
-    }
-    // Couplers this instrument takes off its console — they stay
-    // restorable from the Organ preferences.
-    {
-        let names: Vec<String> = console
-            .coupler_states()
-            .iter()
-            .map(|(_, name, _, _)| name.to_string())
-            .collect();
-        let names: Vec<&str> = names.iter().map(String::as_str).collect();
-        for pattern in &sidecar.couplers.drop {
-            let matches = aristide_formats::sidecar::match_names(&names, pattern);
-            if matches.is_empty() {
-                tracing::warn!("couplers.drop: {pattern:?} matches nothing");
-            }
-            for index in matches {
-                tracing::info!("coupler off the console: {}", names[index]);
-                console.set_coupler_available(index, false);
-            }
-        }
-    }
-    // Linked couplers ([couplers] link): engaging one engages the rest.
-    // Names that don't resolve are reported and skipped — a group left
-    // with one member links nothing.
-    {
-        let names: Vec<String> = console
-            .coupler_states()
-            .iter()
-            .map(|(_, name, _, _)| name.to_string())
-            .collect();
-        let mut groups: Vec<Vec<usize>> = Vec::new();
-        for group in &sidecar.couplers.link {
-            let mut indices: Vec<usize> = Vec::new();
-            for name in group {
-                match names.iter().position(|n| n.eq_ignore_ascii_case(name)) {
-                    Some(index) => indices.push(index),
-                    None => {
-                        load_warnings
-                            .push(format!("couplers.link: no coupler named {name:?}"));
-                    }
-                }
-            }
-            indices.sort_unstable();
-            indices.dedup();
-            if indices.len() > 1 {
-                groups.push(indices);
-            }
-        }
-        console.set_coupler_links(groups);
-    }
-    console.set_noises(
-        sidecar.noises.enabled,
-        sidecar.noises.volume.clamp(0.0, 2.0) as f32,
-    );
-    // Audio routing: stops onto buses, speaking delays — resolved by
-    // the same name-pattern rules couplers use. A pattern that matches
-    // nothing warns to the console; it never fails the load.
-    let mut buses = Vec::new();
-    let mut stop_voicing: std::collections::HashMap<StopId, StopVoicing> =
-        std::collections::HashMap::new();
-    {
-        let stop_ids: Vec<(aristide_model::StopId, String, usize)> = console
-            .stop_states()
-            .iter()
-            .map(|(id, name, _, manual, _)| (*id, name.to_string(), *manual))
-            .collect();
-        let stop_names: Vec<&str> = stop_ids.iter().map(|(_, name, _)| name.as_str()).collect();
-        let manual_names: Vec<String> = console
-            .manual_states()
-            .iter()
-            .map(|(_, name, _, _, _)| name.to_string())
-            .collect();
-        let manual_names: Vec<&str> = manual_names.iter().map(String::as_str).collect();
-        let mut plan: std::collections::HashMap<aristide_model::StopId, (u8, u32)> =
-            std::collections::HashMap::new();
-        for (index, def) in sidecar.routing.buses.iter().enumerate() {
-            if index + 1 >= aristide_engine::routing::MAX_BUSES {
-                load_warnings.push(format!(
-                    "routing: at most {} buses; {:?} and beyond ignored",
-                    aristide_engine::routing::MAX_BUSES - 1,
-                    def.name
-                ));
-                break;
-            }
-            let bus = (index + 1) as u8;
-            let mut members: Vec<aristide_model::StopId> = Vec::new();
-            for pattern in &def.stops {
-                let matched = aristide_formats::sidecar::match_names(&stop_names, pattern);
-                if matched.is_empty() {
-                    load_warnings.push(format!("routing: stop {pattern:?} matches nothing"));
-                }
-                members.extend(matched.iter().map(|&at| stop_ids[at].0));
-            }
-            for pattern in &def.manuals {
-                let matched = aristide_formats::sidecar::match_names(&manual_names, pattern);
-                if matched.is_empty() {
-                    load_warnings.push(format!("routing: manual {pattern:?} matches nothing"));
-                }
-                members.extend(
-                    stop_ids
-                        .iter()
-                        .filter(|(_, _, manual)| matched.contains(manual))
-                        .map(|(id, _, _)| *id),
-                );
-            }
-            for id in members {
-                let entry = plan.entry(id).or_insert((bus, 0));
-                if entry.0 != bus && entry.0 != 0 {
-                    load_warnings
-                        .push("routing: a stop matched two buses; keeping the first".to_string());
-                } else {
-                    entry.0 = bus;
-                }
-            }
-            buses.push(BusSetup {
-                bus,
-                output: def
-                    .output
-                    .map(|[left, right]| (left.saturating_sub(1), right.saturating_sub(1))),
-                gain: 10f32.powf((def.gain_db.clamp(-60.0, 20.0) as f32) / 20.0),
-                delay: def.delay.as_ref().map(|delay| {
-                    aristide_engine::routing::DelayParams {
-                        seconds: (delay.ms.clamp(0.0, 60_000.0) / 1000.0) as f32,
-                        feedback: delay.feedback as f32,
-                        mix: delay.mix as f32,
-                        dry: delay.dry as f32,
-                    }
-                }),
-            });
-        }
-        for rule in &sidecar.voicing.delays {
-            let frames = (rule.ms.clamp(0.0, 30_000.0) / 1000.0 * sample_rate as f64) as u32;
-            for pattern in &rule.stops {
-                let matched = aristide_formats::sidecar::match_names(&stop_names, pattern);
-                if matched.is_empty() {
-                    load_warnings.push(format!("voicing.delay: {pattern:?} matches nothing"));
-                }
-                for at in matched {
-                    plan.entry(stop_ids[at].0).or_insert((0, 0)).1 = frames;
-                }
-            }
-        }
-        if !plan.is_empty() {
-            console.set_stop_routing(plan);
-        }
-        // Voicing trims: level, cents, and footage per stop pattern.
-        // A `pitch` footage becomes a cents shift against the stop's
-        // own recorded footage, then rides the same fold as `cents`.
-        let mut adjust: std::collections::HashMap<aristide_model::StopId, (f32, f64)> =
-            std::collections::HashMap::new();
-        for rule in &sidecar.voicing.adjusts {
-            let gain = 10f32.powf((rule.gain_db.clamp(-40.0, 20.0) as f32) / 20.0);
-            let cents = rule.cents.clamp(-2400.0, 2400.0);
-            let feet = match &rule.pitch {
-                None => None,
-                Some(spec) => match spec.feet() {
-                    Some(feet) => Some(feet),
-                    None => {
-                        load_warnings
-                            .push(format!("voicing.adjust: {spec:?} names no footage"));
-                        None
-                    }
-                },
-            };
-            for pattern in &rule.stops {
-                let matched = aristide_formats::sidecar::match_names(&stop_names, pattern);
-                if matched.is_empty() {
-                    load_warnings.push(format!("voicing.adjust: {pattern:?} matches nothing"));
-                }
-                for at in matched {
-                    let footage_cents = match feet {
-                        None => 0.0,
-                        Some(feet) => match console.stop_native_footage(stop_ids[at].0) {
-                            Some(native) => cents_between(feet, native),
-                            None => {
-                                load_warnings.push(format!(
-                                    "voicing.adjust: {:?} speaks no single footage — \
-                                     pitch {feet} not applied",
-                                    stop_names[at]
-                                ));
-                                0.0
-                            }
-                        },
-                    };
-                    let entry = adjust.entry(stop_ids[at].0).or_insert((1.0, 0.0));
-                    entry.0 *= gain;
-                    entry.1 += cents + footage_cents;
-                }
-            }
-            // A rule naming exactly one stop, exactly, is that stop's
-            // own — the one the console editor shows and edits. The
-            // last such rule wins the mirror (the sound still gets
-            // every rule).
-            if let [pattern] = rule.stops.as_slice()
-                && let [at] = aristide_formats::sidecar::match_names(&stop_names, pattern)
-                    .as_slice()
-                && stop_names[*at].eq_ignore_ascii_case(pattern)
-            {
-                stop_voicing.insert(
-                    stop_ids[*at].0,
-                    StopVoicing {
-                        feet,
-                        cents: rule.cents,
-                        gain_db: rule.gain_db,
-                    },
-                );
-            }
-        }
-        if !adjust.is_empty() {
-            tracing::info!("voicing: {} stop(s) trimmed", adjust.len());
-            console.set_stop_adjust(adjust);
-        }
-    }
+    configure_couplers_and_noises(&mut console, &sidecar, &mut load_warnings);
+    let buses = configure_buses(&mut console, &sidecar, sample_rate, &mut load_warnings);
+    let stop_voicing = configure_voicing_adjust(&mut console, &sidecar, &mut load_warnings);
     tracing::info!(
         "tuning: {} @ {}={} Hz, transpose {:+}",
         live_tuning.temperament.name(),
