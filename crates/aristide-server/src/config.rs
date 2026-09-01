@@ -522,14 +522,35 @@ pub fn create_wrapper_organ(
     sources.insert("s1", toml_edit::value(source));
     doc["sources"] = toml_edit::Item::Table(sources);
 
-    let manual_name = |id: aristide_model::ManualId| {
-        organ
-            .manuals
-            .iter()
-            .find(|manual| manual.id == id)
-            .map(|manual| manual.name.as_str())
-    };
+    let manuals = build_manual_table(organ);
+    if !manuals.is_empty() {
+        doc["manual"] = toml_edit::Item::ArrayOfTables(manuals);
+    }
 
+    let stops = build_stop_pulls(organ);
+    if !stops.is_empty() {
+        doc["stop"] = toml_edit::Item::ArrayOfTables(stops);
+    }
+
+    carry_over_sidecar(&mut doc, set);
+    build_coupler_defines(&mut doc, organ)?;
+
+    write_wrapper_organ(&path, doc, wiring)?;
+    Ok(path)
+}
+
+/// The assembled organ's manual, by id — every extraction below that
+/// writes a manual name into the file looks it up the same way.
+fn manual_name(organ: &aristide_model::Organ, id: aristide_model::ManualId) -> Option<&str> {
+    organ
+        .manuals
+        .iter()
+        .find(|manual| manual.id == id)
+        .map(|manual| manual.name.as_str())
+}
+
+/// One `[[manual]]` table per manual, in the set's own order.
+fn build_manual_table(organ: &aristide_model::Organ) -> toml_edit::ArrayOfTables {
     let mut manuals = toml_edit::ArrayOfTables::new();
     for manual in &organ.manuals {
         let mut table = toml_edit::Table::new();
@@ -543,17 +564,17 @@ pub fn create_wrapper_organ(
         );
         manuals.push(table);
     }
-    if !manuals.is_empty() {
-        doc["manual"] = toml_edit::Item::ArrayOfTables(manuals);
-    }
+    manuals
+}
 
-    // One pull per stop, in the set's own order. Exact names match
-    // exactly (and all together): two same-named stops on one manual
-    // are one line pulling both, so the line is written once.
+/// One pull per stop, in the set's own order. Exact names match
+/// exactly (and all together): two same-named stops on one manual
+/// are one line pulling both, so the line is written once.
+fn build_stop_pulls(organ: &aristide_model::Organ) -> toml_edit::ArrayOfTables {
     let mut stops = toml_edit::ArrayOfTables::new();
     let mut written: std::collections::HashSet<(String, String)> = Default::default();
     for stop in &organ.stops {
-        let Some(manual) = manual_name(stop.manual) else {
+        let Some(manual) = manual_name(organ, stop.manual) else {
             tracing::warn!(
                 "adoption: stop {:?} sits on a manual the set hasn't got — not inventoried",
                 stop.name
@@ -570,10 +591,14 @@ pub fn create_wrapper_organ(
         table["on"] = toml_edit::value(manual);
         stops.push(table);
     }
-    if !stops.is_empty() {
-        doc["stop"] = toml_edit::Item::ArrayOfTables(stops);
-    }
+    stops
+}
 
+/// Carry the set's sidecar into the new file verbatim, minus the
+/// structural keys this file owns itself — a sidecar has no business
+/// declaring them anyway — and resolve the one value that's relative
+/// to the set rather than to this file.
+fn carry_over_sidecar(doc: &mut toml_edit::DocumentMut, set: &Path) {
     let sidecar_path = aristide_formats::sidecar::path_for(set);
     match std::fs::read_to_string(&sidecar_path) {
         Ok(text) => match text.parse::<toml_edit::DocumentMut>() {
@@ -619,23 +644,28 @@ pub fn create_wrapper_organ(
             );
         }
     }
+}
 
-    // The set's couplers, snapshotted as route definitions — ahead of
-    // any the sidecar defines, matching the order a direct load gives
-    // them (the set's own first, the player's custom ones after).
+/// The set's couplers, snapshotted as route definitions — ahead of any
+/// the sidecar defines, matching the order a direct load gives them
+/// (the set's own first, the player's custom ones after).
+fn build_coupler_defines(
+    doc: &mut toml_edit::DocumentMut,
+    organ: &aristide_model::Organ,
+) -> Result<(), String> {
     let mut defines = toml_edit::ArrayOfTables::new();
     for coupler in &organ.couplers {
         let mut routes = toml_edit::ArrayOfTables::new();
         let mut sound = true;
         for route in &coupler.routes {
             let mut table = toml_edit::Table::new();
-            let Some(from) = manual_name(route.from_manual) else {
+            let Some(from) = manual_name(organ, route.from_manual) else {
                 sound = false;
                 break;
             };
             table["from"] = toml_edit::value(from);
             if let Some(target) = &route.target {
-                let Some(to) = manual_name(target.manual) else {
+                let Some(to) = manual_name(organ, target.manual) else {
                     sound = false;
                     break;
                 };
@@ -685,7 +715,16 @@ pub fn create_wrapper_organ(
         }
         couplers["define"] = toml_edit::Item::ArrayOfTables(defines);
     }
+    Ok(())
+}
 
+/// Render the finished document with its header comment and write it,
+/// then lay down its MIDI wiring when it declares any.
+fn write_wrapper_organ(
+    path: &Path,
+    doc: toml_edit::DocumentMut,
+    wiring: Option<&OrganConfig>,
+) -> Result<(), String> {
     let body = format!(
         "# An Aristide organ, born from the sample set under [sources].\n\
          # This file is the whole instrument — manuals, stops, couplers,\n\
@@ -693,11 +732,11 @@ pub fn create_wrapper_organ(
          # and samples. Edit freely: the console writes back here too.\n\
          {doc}"
     );
-    std::fs::write(&path, body).map_err(|err| format!("{}: {err}", path.display()))?;
+    std::fs::write(path, body).map_err(|err| format!("{}: {err}", path.display()))?;
     if wiring.is_some_and(|organ| organ != &OrganConfig::default()) {
-        write_composite_midi(&path, wiring)?;
+        write_composite_midi(path, wiring)?;
     }
-    Ok(path)
+    Ok(())
 }
 
 /// A missing file is not an error: it is the state before the player
