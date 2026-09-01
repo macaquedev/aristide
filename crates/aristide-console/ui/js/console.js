@@ -15,7 +15,7 @@
 // is the editor's job (editor.js); this file only draws and places.
 
 import { commands } from "./api.js";
-import { setText } from "./dom.js";
+import { renderIfChanged, setText } from "./dom.js";
 import { formatFootage, keyName } from "./pitch.js";
 
 const SHARPS = new Set([1, 3, 6, 8, 10]);
@@ -74,7 +74,6 @@ export class Console {
     this.openTuning = openTuning;
     this.enterEditMode = enterEditMode;
     this.decorate = null;
-    this.signature = null;
     this.snapshot = null;
     this.layoutSig = null; // JSON of the last snapshot.layout applied
     this.panels = new Map(); // panel id -> its element on the canvas
@@ -117,10 +116,7 @@ export class Console {
       (snapshot.enclosures ?? []).filter((e) => e.displayed).map((e) => e.name),
       snapshot.reverb != null,
     ]);
-    if (signature !== this.signature) {
-      this.signature = signature;
-      this.build(snapshot);
-    }
+    renderIfChanged(this.el.canvas, signature, () => this.build(snapshot));
     this.refresh(snapshot);
   }
 

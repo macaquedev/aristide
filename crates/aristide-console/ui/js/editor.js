@@ -13,7 +13,7 @@
 // is called on every poll, the same as the other panels.
 
 import { commands } from "./api.js";
-import { renderIfChanged, setText } from "./dom.js";
+import { renderIfChanged, resetRender, setText } from "./dom.js";
 import {
   formatFootage,
   keyName,
@@ -164,13 +164,10 @@ export class Editor {
     this.addBrowseError = null;
     this._lockNoteTimer = null;
     this.midiManual = null; // manual idx the MIDI-input popover is open for, or null
-    this.midiSignature = null; // rebuild the popover's rows only when these change
     this.compassManual = null; // manual idx the compass popover is open for, or null
-    this.compassSignature = null;
     this.roomOpen = false; // the Room & noises popover
     this.roomDragging = new Set(); // slider keys mid-drag: the snapshot keeps its hands off
     this.bindingsOpen = false; // the flat Bindings popover
-    this.bindingsSignature = null;
     this.saveOpen = false; // the save-as popover
     this.saveAsOpen = false; // the save-as dialog (a copy under a new name)
     this.saveAsFor = null; // the organ it was opened for
@@ -1993,7 +1990,7 @@ export class Editor {
     this.closeCouplerForm();
     this.closeSettingsPopovers();
     this.midiManual = idx;
-    this.midiSignature = null;
+    resetRender(this.el.midi);
     this.syncMidiForm();
     this.el.midi.classList.remove("hidden");
     this.positionPopover(this.el.midi, x, y);
@@ -2005,7 +2002,7 @@ export class Editor {
     // player touches should sound, not be swallowed as an assignment.
     if (this.lastSnapshot?.midi?.learning) this.send(commands.midiLearn(null));
     this.midiManual = null;
-    this.midiSignature = null;
+    resetRender(this.el.midi);
     this.el.midi.classList.add("hidden");
   }
 
@@ -2029,65 +2026,64 @@ export class Editor {
     const signature = JSON.stringify([
       midi.ports, entry, midi.learning ?? null, keyboardSpan, pitchBindings, this.quickBind,
     ]);
-    if (signature === this.midiSignature) return;
-    this.midiSignature = signature;
-
-    this.el.midiTitle.textContent = `${entry.name} · MIDI input`;
-    this.el.midiInputs.replaceChildren();
-    buildManualInputs(this.el.midiInputs, {
-      midi,
-      manualEntry: entry,
-      keyboardSpan,
-      send: this.send,
-    });
-
-    // The pitch actions that shift *this* keyboard, as quick piston
-    // rows. Bindings that shift "the same keyboard" (no manual of
-    // their own) live in the Bindings popover, where the whole list is.
-    this.el.midiPistons.replaceChildren();
-    const heading = document.createElement("span");
-    heading.className = "menu-heading";
-    heading.textContent = "Pistons";
-    this.el.midiPistons.append(heading);
-    for (const [action, label] of [
-      ["octave-up", "Octave up"],
-      ["octave-down", "Octave down"],
-      ["transpose-up", "Transpose up"],
-      ["transpose-down", "Transpose down"],
-    ]) {
-      const ctx = {
-        snapshot: this.lastSnapshot,
+    renderIfChanged(this.el.midi, signature, () => {
+      this.el.midiTitle.textContent = `${entry.name} · MIDI input`;
+      this.el.midiInputs.replaceChildren();
+      buildManualInputs(this.el.midiInputs, {
+        midi,
+        manualEntry: entry,
+        keyboardSpan,
         send: this.send,
-        manual: entry.name,
-        listening: this.quickBind?.action === action && this.quickBind?.manual === entry.name,
-      };
-      const row = document.createElement("div");
-      row.className = "settings-row";
-      const name = document.createElement("span");
-      name.className = "rail-label";
-      name.textContent = label;
-      row.append(
-        name,
-        pistonRow(ctx, action, (act, cancelling) =>
-          this.quickBindListen(act, entry.name, cancelling)
-        )
-      );
-      this.el.midiPistons.append(row);
-    }
+      });
 
-    this.el.midiPorts.replaceChildren();
-    if (!midi.ports.length) {
-      this.el.midiPorts.append(
-        this.emptyNote("No MIDI inputs. Plug the console in — the list finds it by itself.")
-      );
-    }
-    for (const port of midi.ports) {
-      const row = document.createElement("div");
-      row.className = "midi-port";
-      row.textContent = port.name;
-      row.title = port.name;
-      this.el.midiPorts.append(row);
-    }
+      // The pitch actions that shift *this* keyboard, as quick piston
+      // rows. Bindings that shift "the same keyboard" (no manual of
+      // their own) live in the Bindings popover, where the whole list is.
+      this.el.midiPistons.replaceChildren();
+      const heading = document.createElement("span");
+      heading.className = "menu-heading";
+      heading.textContent = "Pistons";
+      this.el.midiPistons.append(heading);
+      for (const [action, label] of [
+        ["octave-up", "Octave up"],
+        ["octave-down", "Octave down"],
+        ["transpose-up", "Transpose up"],
+        ["transpose-down", "Transpose down"],
+      ]) {
+        const ctx = {
+          snapshot: this.lastSnapshot,
+          send: this.send,
+          manual: entry.name,
+          listening: this.quickBind?.action === action && this.quickBind?.manual === entry.name,
+        };
+        const row = document.createElement("div");
+        row.className = "settings-row";
+        const name = document.createElement("span");
+        name.className = "rail-label";
+        name.textContent = label;
+        row.append(
+          name,
+          pistonRow(ctx, action, (act, cancelling) =>
+            this.quickBindListen(act, entry.name, cancelling)
+          )
+        );
+        this.el.midiPistons.append(row);
+      }
+
+      this.el.midiPorts.replaceChildren();
+      if (!midi.ports.length) {
+        this.el.midiPorts.append(
+          this.emptyNote("No MIDI inputs. Plug the console in — the list finds it by itself.")
+        );
+      }
+      for (const port of midi.ports) {
+        const row = document.createElement("div");
+        row.className = "midi-port";
+        row.textContent = port.name;
+        row.title = port.name;
+        this.el.midiPorts.append(row);
+      }
+    });
   }
 
   // ---- the compass popover: how far this manual reaches -------------------
@@ -2105,7 +2101,7 @@ export class Editor {
     this.closeCouplerForm();
     this.closeSettingsPopovers();
     this.compassManual = idx;
-    this.compassSignature = null;
+    resetRender(this.el.compass);
     this.hideCompassError();
     this.syncCompassForm();
     this.el.compass.classList.remove("hidden");
@@ -2114,7 +2110,7 @@ export class Editor {
 
   closeCompassForm() {
     this.compassManual = null;
-    this.compassSignature = null;
+    resetRender(this.el.compass);
     this.el.compass.classList.add("hidden");
     this.hideCompassError();
   }
@@ -2128,10 +2124,10 @@ export class Editor {
       return;
     }
     const signature = JSON.stringify([manual.name, compass]);
-    if (signature === this.compassSignature) return;
-    this.compassSignature = signature;
-    this.el.compassTitle.textContent = `${manual.name} · compass`;
-    this.el.compassRow.replaceChildren(this.compassRow(manual, compass));
+    renderIfChanged(this.el.compass, signature, () => {
+      this.el.compassTitle.textContent = `${manual.name} · compass`;
+      this.el.compassRow.replaceChildren(this.compassRow(manual, compass));
+    });
   }
 
   /// One manual's compass: two editable bounds and the two ways to
@@ -2319,7 +2315,7 @@ export class Editor {
     this.closeCouplerForm();
     this.closeSettingsPopovers();
     this.bindingsOpen = true;
-    this.bindingsSignature = null;
+    resetRender(this.el.bindings);
     this.syncBindingsForm();
     this.el.bindings.classList.remove("hidden");
     this.positionPopover(this.el.bindings, x, y);
@@ -2332,7 +2328,7 @@ export class Editor {
       this.send(commands.controlLearn(null));
     }
     this.bindingsOpen = false;
-    this.bindingsSignature = null;
+    resetRender(this.el.bindings);
     this.el.bindings.classList.add("hidden");
   }
 
@@ -2350,11 +2346,11 @@ export class Editor {
       (snapshot.manuals ?? []).map((m) => m.name),
       snapshot.keyboard ?? null,
     ]);
-    if (signature === this.bindingsSignature) return;
-    this.bindingsSignature = signature;
-    this.el.bindingsList.replaceChildren();
-    buildControlsList(this.el.bindingsList, { snapshot, learning, send: this.send });
-    this.el.bindingsKeyboard.textContent = keyboardNote(snapshot);
+    renderIfChanged(this.el.bindings, signature, () => {
+      this.el.bindingsList.replaceChildren();
+      buildControlsList(this.el.bindingsList, { snapshot, learning, send: this.send });
+      this.el.bindingsKeyboard.textContent = keyboardNote(snapshot);
+    });
   }
 
   // ---- the save-as popover: an ad-hoc combination becomes a file ----------
@@ -2811,7 +2807,7 @@ export class Editor {
     this.closeCouplerForm();
     this.closeSettingsPopovers();
     this.stopOpen = id;
-    this.stopPistonsSignature = null;
+    resetRender(this.el.stopPistons);
     this.hideStopError();
     this.hideStopLabelSync();
     this.closeStopSrcView();
@@ -2914,25 +2910,25 @@ export class Editor {
       }
     });
 
-    this.syncPistonRow(this.el.stopPistons, `stop:${stop.name}`, "stopPistonsSignature");
+    this.syncPistonRow(this.el.stopPistons, `stop:${stop.name}`);
   }
 
   /// One popover's quick piston row, rebuilt only when the bindings it
   /// shows (or the quick-bind in flight) change — a poll must never
   /// recreate the Listen button under the pointer.
-  syncPistonRow(container, action, signatureKey) {
+  syncPistonRow(container, action) {
     const listening = this.quickBind?.action === action && this.quickBind?.manual == null;
     const bound = (this.lastSnapshot?.controls ?? []).filter((c) => c.action === action);
     const signature = JSON.stringify([action, bound, listening]);
-    if (signature === this[signatureKey]) return;
-    this[signatureKey] = signature;
-    container.replaceChildren(
-      pistonRow(
-        { snapshot: this.lastSnapshot, send: this.send, listening },
-        action,
-        (act, cancelling) => this.quickBindListen(act, null, cancelling)
-      )
-    );
+    renderIfChanged(container, signature, () => {
+      container.replaceChildren(
+        pistonRow(
+          { snapshot: this.lastSnapshot, send: this.send, listening },
+          action,
+          (act, cancelling) => this.quickBindListen(act, null, cancelling)
+        )
+      );
+    });
   }
 
   /// Sends a stop field update directly (not through the app-wide
@@ -3172,7 +3168,7 @@ export class Editor {
     this.closeStopForm();
     this.closeSettingsPopovers();
     this.couplerOpen = idx;
-    this.couplerPistonsSignature = null;
+    resetRender(this.el.couplerPistons);
     this.hideCouplerError();
     this.couplerRoutes = structuredClone(coupler.routes ?? []);
     this.renderCouplerRoutes();
@@ -3256,7 +3252,7 @@ export class Editor {
     if (this.root.activeElement !== this.el.couplerKeys) {
       this.el.couplerKeys.value = coupler.keys ?? "auto";
     }
-    this.syncPistonRow(this.el.couplerPistons, `coupler:${coupler.name}`, "couplerPistonsSignature");
+    this.syncPistonRow(this.el.couplerPistons, `coupler:${coupler.name}`);
     this.renderCouplerLinks(coupler);
     if (
       this.couplerResync &&

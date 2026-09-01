@@ -23,3 +23,11 @@ export function renderIfChanged(el, signature, render) {
   el.dataset.renderedFor = signature;
   render();
 }
+
+/// Forgets `el`'s last-rendered signature, so the next `renderIfChanged`
+/// on it rebuilds unconditionally — for popovers that force a fresh
+/// paint on open even when the state underneath happens not to have
+/// moved since they last closed.
+export function resetRender(el) {
+  delete el.dataset.renderedFor;
+}
