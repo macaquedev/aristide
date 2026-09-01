@@ -624,8 +624,15 @@ export class Console {
       const pos = placed[id]
         ? { x: placed[id].x * W, y: placed[id].y * H }
         : (defaults.get(id) ?? { x: 24, y: 24 });
-      el.style.left = `${Math.round(pos.x)}px`;
-      el.style.top = `${Math.round(pos.y)}px`;
+      // Kept on the canvas: a placement recorded on a wider window (or
+      // at a smaller zoom) would otherwise seat the panel past the
+      // edge, where the canvas clips it — the same clamp the editor's
+      // drag applies, so the panel sits where the drag would have
+      // left it.
+      const x = Math.max(0, Math.min(pos.x, W - el.offsetWidth));
+      const y = Math.max(0, Math.min(pos.y, H - el.offsetHeight));
+      el.style.left = `${Math.round(x)}px`;
+      el.style.top = `${Math.round(y)}px`;
     }
   }
 

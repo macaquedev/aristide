@@ -1929,6 +1929,11 @@ input[type="range"]:hover::-webkit-slider-thumb { filter: brightness(1.15); }
   position: absolute;
   left: 24px;
   top: 24px;
+  /* hugs its content wherever it sits: an absolute box near the
+     canvas's right edge would otherwise shrink to the room left of
+     it and squeeze, wrap or clip what it holds (a player-sized jamb
+     sets its own width inline, which wins) */
+  width: max-content;
 }
 
 .panel-chrome {
