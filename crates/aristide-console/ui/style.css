@@ -1664,6 +1664,12 @@ input[type="range"]:hover::-webkit-slider-thumb { filter: brightness(1.15); }
   gap: 16px;
 }
 
+/* a row's one-line footnote hugs its row instead of reading as the
+   pane's closing note; a row the host can't act on stays visible but
+   dimmed, so the option is seen to exist */
+.settings-hint { margin-top: -8px; font-size: 10.5px; }
+.segment[aria-disabled="true"] { opacity: 0.45; pointer-events: none; }
+
 .pane select,
 .keys-legend select,
 .editor-add-form select,

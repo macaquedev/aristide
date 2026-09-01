@@ -40,6 +40,18 @@ fn server_url(backend: tauri::State<Backend>) -> String {
     backend.url.clone()
 }
 
+/// Zoom the whole page, as a browser's Ctrl+plus would: `1.0` is the
+/// console's native size. The frontend asks for this from Preferences
+/// (theme.js) — a webview zoom rather than a CSS one so that pointer
+/// coordinates, panel layout and every popover's geometry stay in the
+/// same CSS pixels the code was written in. The choice itself is the
+/// player's and lives in the page's localStorage; the page re-applies
+/// it at every start.
+#[tauri::command]
+fn set_zoom(webview: tauri::Webview, scale: f64) -> Result<(), String> {
+    webview.set_zoom(scale).map_err(|err| err.to_string())
+}
+
 /// The port the spawned server will serve on: whatever `--http-port`
 /// says, read the same way the server reads it, so the window and the
 /// child cannot disagree about where to meet.
@@ -97,7 +109,7 @@ fn main() {
         // load — the one thing the web console can't do by itself.
         .plugin(tauri_plugin_dialog::init())
         .manage(backend)
-        .invoke_handler(tauri::generate_handler![server_url])
+        .invoke_handler(tauri::generate_handler![server_url, set_zoom])
         .build(tauri::generate_context!())
         .expect("build tauri application")
         .run(|app, event| {

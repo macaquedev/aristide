@@ -7,7 +7,7 @@ import { PianoKeys } from "./keys.js";
 import { MenuBar } from "./menu.js";
 import { Picker } from "./picker.js";
 import { Preferences } from "./prefs.js";
-import { wireTheme } from "./theme.js";
+import { stepScale, wireTheme } from "./theme.js";
 
 wireTheme(document);
 
@@ -185,10 +185,18 @@ new MenuBar(document, document.getElementById("menus"), [
   },
 ]);
 
+// Ctrl+plus / minus / 0 size the console as they would a browser page.
+// In a browser they still do — stepScale declines and the keystroke
+// falls through to the browser's own zoom.
+const ZOOM_KEYS = { "=": 1, "+": 1, "-": -1, "0": 0 };
+
 window.addEventListener("keydown", (event) => {
-  if (event.key === "," && (event.ctrlKey || event.metaKey)) {
+  if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
+  if (event.key === ",") {
     event.preventDefault();
     prefs.isOpen ? prefs.close() : prefs.open();
+  } else if (event.key in ZOOM_KEYS && stepScale(ZOOM_KEYS[event.key])) {
+    event.preventDefault();
   }
 });
 

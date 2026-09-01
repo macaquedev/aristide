@@ -108,8 +108,21 @@ try {
   const foreign = await drive.eval(`[...document.querySelectorAll("#prefs select, #prefs input")].length`);
   check(foreign === 0, "the dialog holds no selects or inputs — appearance buttons only");
   await drive.shot(join(OUT, "prefs-user-only.png"));
+  // The size row: six zoom steps with the native one lit. In a browser
+  // the host zooms for itself, so the row is shown but not live.
+  const sizes = await drive.eval(`[...document.querySelectorAll("#scale-segment button")]
+    .map((b) => b.textContent + (b.classList.contains("on") ? "*" : ""))`);
+  check(
+    sizes.join(" ") === "80% 90% 100%* 110% 125% 150%",
+    `the size row offers the zoom steps with 100% lit (${sizes.join(" ")})`
+  );
+  check(
+    await drive.eval(`document.getElementById("scale-segment").getAttribute("aria-disabled") === "true"`),
+    "in a browser the size row defers to the browser's own zoom"
+  );
   await drive.eval(`document.querySelectorAll("#accent-swatches .swatch")[2]?.click();
-    document.querySelectorAll("#density-segment button")[0]?.click(); true`);
+    document.querySelectorAll("#density-segment button")[0]?.click();
+    document.querySelectorAll("#scale-segment button")[5]?.click(); true`);
   await sleep(200);
   const posts = await drive.eval(`window.__apiPosts`);
   check(posts === 0, `appearance edits sent ${posts} API commands (want 0)`);
