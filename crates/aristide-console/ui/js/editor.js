@@ -41,14 +41,21 @@ import {
   syncCouplerForm,
 } from "./editor/coupler-routes.js";
 import {
-  formatFootage,
-  keyName,
-  keySpellings,
-  parseFootage,
-  parseKeyName,
-  splitFootageName,
-  tidyKeyName,
-} from "./pitch.js";
+  wireTuningForm,
+  openTuningForm,
+  closeTuningForm,
+  tuningLabel,
+  tuningSummary,
+  stopTuningLine,
+  syncTuningForm,
+  currentScalePath,
+  tuningFields,
+  tuningCommand,
+  openTuningBrowse,
+  closeTuningBrowse,
+  tuningBrowse,
+} from "./editor/tuning-popover.js";
+import { keyName, parseKeyName } from "./pitch.js";
 import {
   buildManualInputs,
   buildControlsList,
@@ -56,7 +63,6 @@ import {
   keyboardNote,
   PITCH_ACTIONS,
   emptyNote,
-  option,
 } from "./wiring.js";
 
 /// The keyboard context menu's "Change type" radio group, in the order
@@ -71,30 +77,6 @@ const KEYBOARD_KINDS = [
 /// Anything with behavior of its own — a panel drag must never start on
 /// these, or a drawknob could not be clicked and a key could not play.
 const INTERACTIVE = ".knob, .key, .cheek, .rocker, .shoe, button, input, select, textarea";
-
-/// What the tuning popover's "Recorded: …" line calls each of the
-/// temperaments `snapshot.home` can *identify* by name — `null` there
-/// means an unequal temperament that doesn't match any of these
-/// tables, not an absence of measurement (that's `home` itself null).
-const HOME_TEMPERAMENT_NAMES = {
-  equal: "equal",
-  werckmeister3: "Werckmeister III",
-  kirnberger3: "Kirnberger III",
-  meantone4: "¼-comma meantone",
-  pythagorean: "Pythagorean",
-};
-
-/// The pitch a sample set was actually recorded at for MIDI key `key`,
-/// per the snapshot's `home` block: `home.a4_hz` is the measured A4,
-/// `home.offsets_cents` the other eleven pitch classes' deviation from
-/// equal temperament under that A4 (C = index 0). Used only to decide
-/// whether the "as recorded" reference button has anything to do —
-/// the popover otherwise just echoes `home.a4_hz` verbatim.
-function homeHz(home, key) {
-  const equalCents = 1200 * Math.log2(home.a4_hz / 440);
-  const classCents = home.offsets_cents[key % 12];
-  return 440 * 2 ** ((key - 69) / 12 + (equalCents + classCents) / 1200);
-}
 
 export class Editor {
   constructor(root, base, send) {
@@ -1358,573 +1340,59 @@ export class Editor {
   }
 
   // ---- the tuning popover: this manual's own pitch, apart from the --------
-  // instrument's, applied live field by field — never a rebuild. A
-  // Scala scale (and its optional keymap) is just another field on the
-  // same /api/tuning contract; picking one supersedes the temperament.
-  //
-  // Every field goes through `tuningCommand` rather than the plain
-  // `send()` the rest of the console uses: a scale path can 400 (a bad
-  // file, an unparseable one), and that reason needs to land in this
-  // popover, not the app-wide status strip — see `showTuningError`.
+  // See editor/tuning-popover.js (also home of its own file browser,
+  // formerly its own section here — the popover and browse together).
 
   wireTuningForm() {
-    // Every MIDI note for the reference-key field's autocomplete —
-    // built here rather than hand-written into index.html, in the
-    // ASCII spellings a player can type, black keys under both names.
-    for (let key = 0; key <= 127; key++) {
-      for (const spelling of keySpellings(key)) {
-        // A bare value, no label: the datalist offers it as typed text,
-        // not the value/label pair wiring.js's option() builds.
-        const entry = document.createElement("option");
-        entry.value = spelling;
-        this.el.pitchNames.append(entry);
-      }
-    }
-
-    this.el.tuningClose.addEventListener("click", () => this.closeTuningForm());
-
-    // The Follows select: what a division/source/rank falls back to is
-    // binary (the parent, or its own), a stop's is the five-way
-    // auto/division/source/organ/own vocabulary the server's `follow`
-    // param speaks directly — so every kind maps straight onto one
-    // /api/tuning call, never a client-side branch on what "own" means.
-    this.el.tuningFollow.addEventListener("change", () => {
-      const scope = this.tuningScope;
-      if (!scope) return;
-      const value = this.el.tuningFollow.value;
-      if (scope.kind === "stop") {
-        this.tuningCommand(this.tuningFields({ follow: value }));
-      } else if (value === "own") {
-        this.tuningCommand(this.tuningFields({ follow: "own" }));
-      } else {
-        this.tuningCommand(this.tuningFields({ reset: 1 }));
-      }
-      this.el.tuningFollow.blur();
-    });
-
-    this.el.tuningTemperament.addEventListener("change", () => {
-      if (!this.tuningScope) return;
-      // Naming a temperament here is allowed even with a scale active —
-      // the server reads it as leaving the scale (http.rs's /api/tuning
-      // arm clears `tuning.scale` whenever `temperament` is given).
-      this.tuningCommand(this.tuningFields({ temperament: this.el.tuningTemperament.value }));
-      this.el.tuningTemperament.blur();
-    });
-
-    this.el.tuningPipes.addEventListener("change", () => {
-      if (!this.tuningScope) return;
-      this.tuningCommand(this.tuningFields({ pipes: this.el.tuningPipes.value }));
-      this.el.tuningPipes.blur();
-    });
-
-    this.el.tuningEdo.addEventListener("change", () => {
-      if (!this.tuningScope) return;
-      const edo = Math.min(311, Math.max(1, Math.round(Number(this.el.tuningEdo.value) || 12)));
-      this.el.tuningEdo.value = edo;
-      // Like naming a temperament, choosing a division count leaves
-      // any active scale (the server clears it on this field).
-      this.tuningCommand(this.tuningFields({ edo }));
-    });
-
-    // The pitch anchor is a key/Hz *pair* — "a′" only names a key in
-    // 12-EDO — so either field changing re-sends both: the server keeps
-    // whichever one didn't move.
-    this.el.tuningRefKey.addEventListener("change", () => {
-      if (!this.tuningScope) return;
-      const key = parseKeyName(this.el.tuningRefKey.value);
-      if (key == null) {
-        this.showTuningError(`"${this.el.tuningRefKey.value}" doesn't name a key`);
-        this.el.tuningRefKey.blur();
-        this.syncTuningForm(); // restores the last known-good spelling
-        return;
-      }
-      // The player's own spelling stays on screen: D#4 typed is D#4
-      // shown, not the E♭4 the canonical printer would pick. The
-      // server only ever sees the key number's canonical name.
-      this.tuningRefKeySpelling = { key, text: tidyKeyName(this.el.tuningRefKey.value) };
-      this.el.tuningRefKey.value = this.tuningRefKeySpelling.text;
-      const hz = Number(this.el.tuningRefHz.value);
-      this.tuningCommand(this.tuningFields({ reference_key: keyName(key), reference_hz: hz }));
-      this.el.tuningRefKey.blur();
-    });
-
-    this.el.tuningRefHz.addEventListener("change", () => {
-      if (!this.tuningScope) return;
-      const hz = Number(this.el.tuningRefHz.value);
-      // No hard range here — the server clamps so the implied shift
-      // stays within a′ 300–500 Hz equivalents and the next snapshot
-      // reflects the clamped value; a bad number just reverts.
-      if (!Number.isFinite(hz) || hz <= 0) {
-        this.el.tuningRefHz.blur();
-        this.syncTuningForm();
-        return;
-      }
-      const key = parseKeyName(this.el.tuningRefKey.value);
-      this.tuningCommand(this.tuningFields({
-        reference_key: key != null ? keyName(key) : this.el.tuningRefKey.value,
-        reference_hz: hz,
-      }));
-      this.el.tuningRefHz.blur();
-    });
-
-    // "As recorded": put the reference back on whatever the sample set
-    // itself sounds on the current reference key — the server reads
-    // `reference_hz=home` as that instruction rather than a literal Hz
-    // number (see /api/tuning). Only shown when it would move anything;
-    // see the visibility check in syncTuningForm.
-    this.el.tuningRefHome.addEventListener("click", () => {
-      if (!this.tuningScope) return;
-      this.tuningCommand(this.tuningFields({ reference_hz: "home" }));
-    });
-
-    this.el.tuningTranspose.addEventListener("change", () => {
-      if (!this.tuningScope) return;
-      const transpose = Math.min(12, Math.max(-12, Math.round(Number(this.el.tuningTranspose.value) || 0)));
-      this.el.tuningTranspose.value = transpose;
-      this.tuningCommand(this.tuningFields({ transpose }));
-      this.el.tuningTranspose.blur();
-    });
-
-    this.el.tuningScalePick.addEventListener("click", () => this.openTuningBrowse("scale"));
-    this.el.tuningScaleClear.addEventListener("click", () => {
-      if (!this.tuningScope) return;
-      this.tuningCommand(this.tuningFields({ scale: "off" }));
-    });
-
-    this.el.tuningKeymapPick.addEventListener("click", () => this.openTuningBrowse("keymap"));
-    this.el.tuningKeymapClear.addEventListener("click", () => {
-      if (!this.tuningScope) return;
-      const scl = this.currentScalePath();
-      if (!scl) return;
-      // An empty `keymap` param is indistinguishable, server-side, from
-      // an omitted one (http.rs filters both to "no keymap") — sending
-      // it explicitly just documents the intent here.
-      this.tuningCommand(this.tuningFields({ scale: scl, keymap: "" }));
-    });
-
-    this.el.tuningBrowseUp.addEventListener("click", () => {
-      if (this.tuningBrowseParent) this.tuningBrowse(this.tuningBrowseParent);
-    });
-    this.el.tuningBrowseCancel.addEventListener("click", () => this.closeTuningBrowse());
+    wireTuningForm(this);
   }
 
-  /// `scope` is one of {kind:"organ"} | {kind:"division", idx} |
-  /// {kind:"source", alias} | {kind:"stop", id} | {kind:"rank", stop, rank}
-  /// — see the class-level comment by `this.tuningScope`. The bare
-  /// string "organ" (main.js's own two call sites, predating the
-  /// scope object) is still accepted as shorthand for {kind:"organ"}.
   openTuningForm(scope, x, y) {
-    if (scope === "organ") scope = { kind: "organ" };
-    this.openingPopover("tuning");
-    this.tuningScope = scope;
-    this.hideTuningError();
-    this.closeTuningBrowse();
-    this.syncTuningForm();
-    // A bad scope (a stop/division/rank the snapshot doesn't have)
-    // closes right back — sync's own job, since a later poll can find
-    // the same thing gone. Nothing left to show.
-    if (this.tuningScope == null) return;
-    // A source or stop's popover names the governing sample set by its
-    // offerings entry (display name, not just the bare alias) — fetch
-    // once, quietly, if the drawer never has been opened this session.
-    if ((scope.kind === "source" || scope.kind === "stop") && this.offerings == null) {
-      this.fetchOfferings(false).then(() => this.syncTuningForm());
-    }
-    this.el.tuning.classList.remove("hidden");
-    this.positionPopover(this.el.tuning, x, y);
+    openTuningForm(this, scope, x, y);
   }
 
   closeTuningForm() {
-    this.tuningScope = null;
-    this.tuningResolved = null;
-    this.el.tuning.classList.add("hidden");
-    this.hideTuningError();
-    this.closeTuningBrowse();
+    closeTuningForm(this);
   }
 
-  /// Replaces the Follows select's own options — each scope kind offers
-  /// a different vocabulary (division/source: instrument or own; stop:
-  /// the full auto/division/source/organ/own cascade; rank: the stop or
-  /// own). `pairs` is `[value, label]`.
-  setFollowOptions(pairs) {
-    renderIfChanged(this.el.tuningFollow, JSON.stringify(pairs), () => {
-      this.el.tuningFollow.replaceChildren(...pairs.map(([value, label]) => option(value, label)));
-    });
-  }
-
-  /// The short label a tuning reads by — a scale's name, an EDO count,
-  /// or the temperament select's own friendly text for the value (so
-  /// renaming an option, like "original" → "As recorded", only has to
-  /// happen in index.html).
   tuningLabel(tuning) {
-    if (!tuning) return "";
-    if (tuning.scale) return `${tuning.scale.name} (${tuning.scale.notes} notes)`;
-    const edo = tuning.edo ?? 12;
-    if (edo !== 12) return `${edo}-EDO`;
-    const option = this.el.tuningTemperament.querySelector(`option[value="${tuning.temperament}"]`);
-    return option ? option.textContent : tuning.temperament;
+    return tuningLabel(this, tuning);
   }
 
-  /// The resolved line's "…: <summary>" half — the label above plus
-  /// where it's anchored, e.g. "¼-comma meantone · A4 = 415.3 Hz".
   tuningSummary(tuning) {
-    if (!tuning?.reference) return "";
-    const hz = tuning.reference.hz.toFixed(1).replace(/\.0$/, "");
-    return `${this.tuningLabel(tuning)} · ${keyName(tuning.reference.key)} = ${hz} Hz`;
+    return tuningSummary(this, tuning);
   }
 
-  /// A source's display name from the cached offerings list, falling
-  /// back to its bare alias when the offerings haven't loaded yet.
-  sourceDisplayName(alias) {
-    return this.offerings?.find((s) => s.alias === alias)?.name ?? alias ?? "?";
-  }
-
-  /// What a stop is actually playing right now, cutting straight to the
-  /// concrete tuning object regardless of how it got there — used both
-  /// to populate its own popover and (via a rank's "follows the stop")
-  /// to resolve a rank that doesn't have one of its own.
-  stopEffectiveTuning(stop) {
-    const snap = this.lastSnapshot;
-    const info = stop?.tuning ?? { scope: "organ" };
-    if (info.scope === "stop") {
-      return (snap.stop_tuning ?? []).find((t) => t.stop === stop.id) ?? snap.tuning;
-    }
-    if (info.scope === "division") {
-      return (snap.manual_tuning ?? []).find((t) => t.idx === stop.midx) ?? snap.tuning;
-    }
-    if (info.scope === "source") {
-      return (snap.source_tuning ?? []).find((t) => t.source === stop.src?.from) ?? snap.tuning;
-    }
-    return snap.tuning;
-  }
-
-  /// The stop editor's compact "Tuning" line — also the accent dot's
-  /// title attribute on the console (refreshTuningChips): "Automatic →
-  /// Récit · 19-EDO", "Pinned · sample set", "Own · Pythagorean".
   stopTuningLine(stop) {
-    const snap = this.lastSnapshot;
-    const info = stop.tuning ?? { scope: "organ", follow: "auto" };
-    const manual = snap.manuals.find((m) => m.idx === stop.midx);
-    if (info.follow === "own") {
-      const own = (snap.stop_tuning ?? []).find((t) => t.stop === stop.id);
-      return `Own · ${this.tuningLabel(own)}`;
-    }
-    if (info.follow && info.follow !== "auto") {
-      const target = { division: manual?.name ?? "division", source: "sample set", organ: "instrument" }[info.follow];
-      return `Pinned · ${target}`;
-    }
-    const target =
-      info.scope === "division" ? manual?.name ?? "division" : info.scope === "source" ? "sample set" : "instrument";
-    return `Automatic → ${target} · ${this.tuningLabel(this.stopEffectiveTuning(stop))}`;
+    return stopTuningLine(this, stop);
   }
 
-  /// Fills `#editor-tuning-resolved-primary`/`-chain` with "Plays X's
-  /// tuning: <summary> — open →" and dims the fields below to match —
-  /// the common tail every following (non-own) scope shares. `link`
-  /// jumps this same popover to the scope that actually governs.
-  setResolvedLines(primaryLabel, link, tuning, chainText) {
-    const primary = this.el.tuningResolvedPrimary;
-    const lead = `Plays ${primaryLabel}'s tuning: ${this.tuningSummary(tuning)} — `;
-    renderIfChanged(primary, JSON.stringify([lead, link]), () => {
-      primary.replaceChildren(lead);
-      const open = document.createElement("button");
-      open.type = "button";
-      open.className = "tuning-open-link";
-      open.textContent = "open →";
-      open.addEventListener("click", () => {
-        const rect = this.el.tuning.getBoundingClientRect();
-        this.openTuningForm(link, rect.left, rect.top);
-      });
-      primary.append(open);
-    });
-    primary.classList.remove("hidden");
-    setText(this.el.tuningResolvedChain, chainText ?? "");
-    this.el.tuningResolvedChain.classList.toggle("hidden", !chainText);
-  }
-
-  /// Dims (and disables) the spec fields while a scope is following
-  /// someone else's tuning — item 3 of the tuning-cascade UI: the
-  /// values still read as what's actually playing, but nothing here is
-  /// live until "Own tuning" seeds a copy to edit.
-  setTuningFollowing(following) {
-    for (const row of [
-      this.el.tuningScaleRow, this.el.tuningKeymapRow, this.el.tuningEdoRow,
-      this.el.tuningTemperamentRow, this.el.tuningPipesRow, this.el.tuningRefRow,
-      this.el.tuningTransposeRow,
-    ]) {
-      row.classList.toggle("tuning-following", following);
-    }
-    for (const field of [
-      this.el.tuningScalePick, this.el.tuningScaleClear, this.el.tuningKeymapPick, this.el.tuningKeymapClear,
-      this.el.tuningEdo, this.el.tuningTemperament, this.el.tuningPipes,
-      this.el.tuningRefKey, this.el.tuningRefHz, this.el.tuningRefHome, this.el.tuningTranspose,
-    ]) {
-      field.disabled = following;
-    }
-  }
-
-  /// Every scope kind's tuning popover: what governs it right now (its
-  /// own tuning, or someone else's — organ/division/source/stop cascade
-  /// down to instrument), reflected into the Follows select, the
-  /// resolved-line prose, and the spec fields below (which show the
-  /// governing values, live and editable only when it's this scope's
-  /// own). Called on open and on every later poll, so a shared value
-  /// another panel (or session) changes keeps the popover honest. Never
-  /// touches the file-browser sub-view (see `openTuningBrowse`/
-  /// `closeTuningBrowse`) — a poll landing mid-navigation must not yank
-  /// it shut.
   syncTuningForm() {
-    const scope = this.tuningScope;
-    const snap = this.lastSnapshot;
-    if (!scope || !snap) return;
-
-    let tuning; // populates the fields below
-    let following = false; // fields read someone else's tuning, disabled
-    this.el.tuningFollowRow.classList.toggle("hidden", scope.kind === "organ");
-    this.el.tuningTransposeRow.classList.toggle("hidden", scope.kind === "source" || scope.kind === "stop" || scope.kind === "rank");
-
-    if (scope.kind === "organ") {
-      setText(this.el.tuningTitle, "Whole instrument");
-      tuning = snap.tuning;
-    } else if (scope.kind === "division") {
-      const manual = snap.manuals.find((m) => m.idx === scope.idx);
-      if (!manual) return this.closeTuningForm();
-      setText(this.el.tuningTitle, manual.name);
-      const own = (snap.manual_tuning ?? []).find((t) => t.idx === scope.idx);
-      this.setFollowOptions([["organ", "Whole instrument"], ["own", "Own tuning"]]);
-      if (this.root.activeElement !== this.el.tuningFollow) this.el.tuningFollow.value = own ? "own" : "organ";
-      if (own) {
-        tuning = own;
-      } else {
-        tuning = snap.tuning;
-        following = true;
-        this.setResolvedLines("the instrument", { kind: "organ" }, tuning);
-      }
-    } else if (scope.kind === "source") {
-      // No existence check against the offerings list: it may not have
-      // loaded yet (openTuningForm kicks that fetch off but doesn't wait
-      // on it), and the alias is otherwise all this scope needs — the
-      // display name just falls back to the bare alias until it lands.
-      const name = this.sourceDisplayName(scope.alias);
-      setText(this.el.tuningTitle, `${name} · sample set`);
-      const own = (snap.source_tuning ?? []).find((t) => t.source === scope.alias);
-      this.setFollowOptions([["organ", "Whole instrument"], ["own", "Own tuning"]]);
-      if (this.root.activeElement !== this.el.tuningFollow) this.el.tuningFollow.value = own ? "own" : "organ";
-      if (own) {
-        tuning = own;
-      } else {
-        tuning = snap.tuning;
-        following = true;
-        this.setResolvedLines("the instrument", { kind: "organ" }, tuning);
-      }
-    } else if (scope.kind === "stop") {
-      const stop = snap.stops.find((s) => s.id === scope.id);
-      if (!stop) return this.closeTuningForm();
-      const manual = snap.manuals.find((m) => m.idx === stop.midx);
-      setText(this.el.tuningTitle, `${stop.name} · ${manual?.name ?? ""}`);
-      const info = stop.tuning ?? { scope: "organ", follow: "auto" };
-      const divOwn = (snap.manual_tuning ?? []).find((t) => t.idx === stop.midx);
-      const srcAlias = stop.src?.from;
-      const srcOwn = srcAlias ? (snap.source_tuning ?? []).find((t) => t.source === srcAlias) : null;
-      const autoLabel = divOwn ? "division" : srcOwn ? "sample set" : "instrument";
-      this.setFollowOptions([
-        ["auto", `Automatic (→ ${autoLabel})`],
-        ["division", `Division · ${manual?.name ?? "?"}`],
-        ["source", `Sample set · ${srcAlias ? this.sourceDisplayName(srcAlias) : "?"}`],
-        ["organ", "Whole instrument"],
-        ["own", "Own tuning"],
-      ]);
-      if (this.root.activeElement !== this.el.tuningFollow) this.el.tuningFollow.value = info.follow ?? "auto";
-
-      if (info.scope === "stop") {
-        tuning = (snap.stop_tuning ?? []).find((t) => t.stop === stop.id) ?? snap.tuning;
-      } else {
-        following = true;
-        if (info.scope === "division") {
-          tuning = divOwn ?? snap.tuning;
-          const sourceStatus = srcAlias ? (srcOwn ? "own tuning" : "follows instrument") : "no sample set";
-          this.setResolvedLines(
-            manual?.name ?? "this division", { kind: "division", idx: stop.midx }, tuning,
-            `Sample set: ${sourceStatus} · Instrument: ${this.tuningSummary(snap.tuning)}`
-          );
-        } else if (info.scope === "source") {
-          tuning = srcOwn ?? snap.tuning;
-          this.setResolvedLines(
-            this.sourceDisplayName(srcAlias), { kind: "source", alias: srcAlias }, tuning,
-            `Instrument: ${this.tuningSummary(snap.tuning)}`
-          );
-        } else {
-          tuning = snap.tuning;
-          this.setResolvedLines("the instrument", { kind: "organ" }, tuning);
-        }
-      }
-    } else if (scope.kind === "rank") {
-      const stop = snap.stops.find((s) => s.id === scope.stop);
-      const rankInfo = stop?.ranks?.find((r) => r.id === scope.rank);
-      if (!stop || !rankInfo) return this.closeTuningForm();
-      setText(this.el.tuningTitle, `${rankInfo.name} · ${stop.name}`);
-      this.setFollowOptions([["stop", "This stop"], ["own", "Own tuning"]]);
-      if (this.root.activeElement !== this.el.tuningFollow) this.el.tuningFollow.value = rankInfo.own ? "own" : "stop";
-      if (rankInfo.own) {
-        tuning = (snap.rank_tuning ?? []).find((t) => t.stop === scope.stop && t.rank === scope.rank);
-      } else {
-        following = true;
-        tuning = this.stopEffectiveTuning(stop);
-        this.setResolvedLines("this stop", { kind: "stop", id: scope.stop }, tuning);
-      }
-    }
-
-    if (!tuning) return;
-    this.tuningResolved = tuning;
-    this.el.tuningResolvedPrimary.classList.toggle("hidden", !following);
-    if (!following) this.el.tuningResolvedChain.classList.add("hidden");
-    this.setTuningFollowing(following);
-
-    // Temperaments are twelve-class vocabulary: the row shows only
-    // while the division count is 12 (absent on an old snapshot = 12).
-    const edo = tuning.edo ?? 12;
-    this.el.tuningTemperamentRow.classList.toggle("hidden", edo !== 12);
-    if (this.root.activeElement !== this.el.tuningTemperament) {
-      this.el.tuningTemperament.value = tuning.temperament;
-    }
-    if (this.root.activeElement !== this.el.tuningEdo) this.el.tuningEdo.value = edo;
-    if (this.root.activeElement !== this.el.tuningRefKey) {
-      const spelling = this.tuningRefKeySpelling;
-      this.el.tuningRefKey.value =
-        spelling?.key === tuning.reference.key ? spelling.text : keyName(tuning.reference.key);
-    }
-    if (this.root.activeElement !== this.el.tuningRefHz) this.el.tuningRefHz.value = tuning.reference.hz;
-    if (this.root.activeElement !== this.el.tuningTranspose) this.el.tuningTranspose.value = tuning.transpose ?? 0;
-
-    // "Recorded: …" — what the sample set itself sounds, measured at
-    // load time. Lives on the snapshot's top level (`home`) for the
-    // instrument as a whole; at set scope, `source_home` swaps in that
-    // set's own recorded A4 alongside the instrument-wide temperament
-    // and spread (every division of one set was recorded together).
-    let home = this.lastSnapshot?.home ?? null;
-    if (home && scope.kind === "source") {
-      const setHome = (snap.source_home ?? []).find((h) => h.source === scope.alias);
-      if (setHome) home = { ...home, a4_hz: setHome.a4_hz };
-    }
-    if (!home) {
-      setText(this.el.tuningHome, "Recorded: not measured (assuming A4 = 440 equal)");
-    } else {
-      const name = HOME_TEMPERAMENT_NAMES[home.temperament] ?? "unequal (unnamed)";
-      const mixed = home.spread_cents > 8 ? " · mixed pitch standards?" : "";
-      setText(
-        this.el.tuningHome,
-        `Recorded: A4 = ${home.a4_hz.toFixed(1).replace(/\.0$/, "")} Hz · ${name} · ` +
-          `±${home.spread_cents.toFixed(1).replace(/\.0$/, "")} ¢ · ${home.measured} of ${home.pipes} pipes${mixed}`
-      );
-    }
-    // The ↺ button next to Reference: only worth showing when it would
-    // actually move something — when the reference isn't already
-    // sitting on what the recording itself sounds on that key. A
-    // button that silently does nothing on click is worse than none.
-    // `.wrap` rides along on the same condition: the row has no spare
-    // width for a fourth thing, so the button (and "Hz" alongside it)
-    // only wrap to their own line while there's a button to make room
-    // for — the row's ordinary layout is untouched the rest of the time.
-    const showRefHome =
-      !following && home != null && Math.abs(tuning.reference.hz - homeHz(home, tuning.reference.key)) > 0.05;
-    this.el.tuningRefHome.classList.toggle("hidden", !showRefHome);
-    this.el.tuningRefStepper.classList.toggle("wrap", showRefHome);
-
-    const scale = tuning.scale ?? null;
-    this.el.tuningScalePick.classList.toggle("hidden", !!scale);
-    this.el.tuningScaleActive.classList.toggle("hidden", !scale);
-    if (scale) {
-      setText(this.el.tuningScaleName, `${scale.name} · ${scale.notes} notes`);
-      this.el.tuningScaleName.title = scale.scl;
-    }
-
-    this.el.tuningKeymapRow.classList.toggle("hidden", !scale);
-    if (scale) {
-      if (scale.kbm) {
-        this.el.tuningKeymapName.textContent = scale.kbm.split("/").pop();
-        this.el.tuningKeymapName.title = scale.kbm;
-        this.el.tuningKeymapClear.classList.remove("hidden");
-      } else {
-        this.el.tuningKeymapName.textContent = "linear";
-        this.el.tuningKeymapName.title = "";
-        this.el.tuningKeymapClear.classList.add("hidden");
-      }
-    }
-
-    // The scale IS the tuning while one is active — the temperament
-    // select and the division count stay live (setting either is a
-    // valid way back out) but read as superseded rather than in
-    // effect.
-    this.el.tuningTemperamentRow.classList.toggle("tuning-dimmed", !!scale);
-    this.el.tuningEdoRow.classList.toggle("tuning-dimmed", !!scale);
-    this.el.tuningTemperament.title = scale
-      ? "A scale is active — picking a temperament here leaves it"
-      : "";
-    this.el.tuningEdo.title = scale
-      ? "A scale is active — setting a division count here leaves it"
-      : "";
-
-    // Pipes only mean something under a target: as recorded, every
-    // pipe is exactly where it is, so the row stays visible (the
-    // choice persists into the next target) but reads dimmed.
-    if (this.root.activeElement !== this.el.tuningPipes) {
-      this.el.tuningPipes.value = tuning.pipes ?? "original";
-    }
-    const asRecorded = tuning.temperament === "original" && edo === 12 && !scale;
-    this.el.tuningPipesRow.classList.toggle("tuning-dimmed", asRecorded);
-    this.el.tuningPipes.title = asRecorded
-      ? "As recorded, pipes are exactly where they are — this applies under a target tuning"
-      : "";
+    syncTuningForm(this);
   }
 
-  /// The scope's effective scale path right now, or null with none —
-  /// what a keymap pick or clear re-sends alongside, since /api/tuning
-  /// takes the scale and its keymap together (see http.rs). Reads the
-  /// same resolved tuning the fields above are already showing, so it
-  /// agrees with them even while following (fields are disabled then,
-  /// but the browse-cancel/clear paths still call in).
   currentScalePath() {
-    return this.tuningResolved?.scale?.scl ?? null;
+    return currentScalePath(this);
   }
 
-  /// The tuning popover's target as /api/tuning fields — the scope
-  /// selector each kind speaks (see the endpoint contract): none for
-  /// the instrument, `manual=` for a division, `source=` for a set,
-  /// `stop=` for a stop, `stop=`+`rank=` for one of its ranks.
   tuningFields(extra) {
-    const scope = this.tuningScope;
-    if (!scope || scope.kind === "organ") return extra;
-    if (scope.kind === "division") return { manual: scope.idx, ...extra };
-    if (scope.kind === "source") return { source: scope.alias, ...extra };
-    if (scope.kind === "stop") return { stop: scope.id, ...extra };
-    if (scope.kind === "rank") return { stop: scope.stop, rank: scope.rank, ...extra };
-    return extra;
+    return tuningFields(this, extra);
   }
 
-  /// Sends a tuning field update directly (not through the app-wide
-  /// `send()`), so a 400's reason can land in this popover instead of
-  /// the global status strip — the same local-fetch idiom
-  /// `organCommandResult` uses for structural edits.
   async tuningCommand(fields) {
-    this.hideTuningError();
-    const query = commands.tuning(fields);
-    const { ok, status, error } = await localFetch(this.base, query, { method: "POST" });
-    if (!ok) {
-      if (this.deferToSaveAs(status, query)) return false;
-      this.showTuningError(error);
-      return false;
-    }
-    return true;
+    return tuningCommand(this, fields);
   }
 
-  showTuningError(text) {
-    this.el.tuningError.textContent = text;
-    this.el.tuningError.classList.remove("hidden");
+  openTuningBrowse(kind) {
+    openTuningBrowse(this, kind);
   }
 
-  hideTuningError() {
-    this.el.tuningError.classList.add("hidden");
-    this.el.tuningError.textContent = "";
+  closeTuningBrowse() {
+    closeTuningBrowse(this);
+  }
+
+  async tuningBrowse(dir) {
+    await tuningBrowse(this, dir);
   }
 
   // ---- the MIDI-input popover: what plays this manual ---------------------
@@ -2759,86 +2227,6 @@ export class Editor {
   hideHexError() {
     this.el.hexError.classList.add("hidden");
     this.el.hexError.textContent = "";
-  }
-
-  // ---- the tuning popover's own file browser: picks a .scl or .kbm --------
-  // path, the same /api/browse idiom as the add-source browse, filtered
-  // client-side to the relevant extension (directories stay navigable).
-
-  openTuningBrowse(kind) {
-    this.tuningBrowseKind = kind;
-    this.tuningBrowseDir = null;
-    this.tuningBrowseParent = null;
-    this.tuningBrowseEntries = null;
-    this.tuningBrowseError = null;
-    this.el.tuningBrowseTitle.textContent = kind === "keymap" ? "Choose a keymap" : "Choose a scale";
-    this.el.tuningForm.classList.add("hidden");
-    this.el.tuningBrowse.classList.remove("hidden");
-    this.tuningBrowse();
-  }
-
-  closeTuningBrowse() {
-    this.tuningBrowseKind = null;
-    this.el.tuningBrowse.classList.add("hidden");
-    this.el.tuningForm.classList.remove("hidden");
-  }
-
-  async tuningBrowse(dir) {
-    const query = dir ? `/api/browse?dir=${encodeURIComponent(dir)}` : "/api/browse";
-    const { ok, data, error } = await localFetch(this.base, query, { json: true });
-    if (!ok) {
-      this.tuningBrowseError = error;
-    } else {
-      this.tuningBrowseDir = data.dir;
-      this.tuningBrowseParent = data.parent;
-      this.tuningBrowseEntries = data.entries;
-      this.tuningBrowseError = null;
-    }
-    this.renderTuningBrowse();
-  }
-
-  renderTuningBrowse() {
-    this.el.tuningBrowseDir.textContent = this.tuningBrowseDir ?? "";
-    this.el.tuningBrowseDir.title = this.tuningBrowseDir ?? "";
-    this.el.tuningBrowseUp.disabled = !this.tuningBrowseParent;
-    this.el.tuningBrowseError.classList.toggle("hidden", !this.tuningBrowseError);
-    this.el.tuningBrowseError.textContent = this.tuningBrowseError ?? "";
-    this.el.tuningBrowseList.replaceChildren();
-    if (this.tuningBrowseError) return;
-    const ext = this.tuningBrowseKind === "keymap" ? ".kbm" : ".scl";
-    const entries = (this.tuningBrowseEntries ?? []).filter(
-      (entry) => entry.dir || entry.name.toLowerCase().endsWith(ext)
-    );
-    if (!entries.length) {
-      this.el.tuningBrowseList.append(emptyNote("Nothing here."));
-      return;
-    }
-    for (const entry of entries) {
-      const row = document.createElement("button");
-      row.type = "button";
-      row.className = entry.dir ? "picker-row picker-browse-dir" : "picker-row";
-      row.title = entry.path;
-      row.addEventListener("click", () => {
-        if (entry.dir) this.tuningBrowse(entry.path);
-        else this.pickTuningFile(entry.path);
-      });
-      const name = document.createElement("span");
-      name.className = "picker-row-name";
-      name.textContent = entry.name;
-      row.append(name);
-      this.el.tuningBrowseList.append(row);
-    }
-  }
-
-  async pickTuningFile(path) {
-    if (!this.tuningScope) return;
-    const fields =
-      this.tuningBrowseKind === "keymap"
-        ? this.tuningFields({ scale: this.currentScalePath(), keymap: path })
-        : this.tuningFields({ scale: path });
-    if (fields.scale == null) return;
-    const ok = await this.tuningCommand(fields);
-    if (ok) this.closeTuningBrowse();
   }
 
   // ---- drag controller: plain when unlocked, ctrl-drag always -------------
