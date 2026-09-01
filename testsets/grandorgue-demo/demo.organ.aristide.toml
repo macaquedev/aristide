@@ -19,10 +19,13 @@ bounce_hz = 3.5
 damping = 0.5
 
 [tuning]
-# equal | werckmeister3 | kirnberger3 | meantone4 | pythagorean
-temperament = "equal"
+# original | equal | werckmeister3 | kirnberger3 | meantone4 | pythagorean
+# "original" plays the organ as recorded, at its own pitch; the rest are
+# targets each pipe is retuned to from its measured pitch. Leave
+# reference_hz unsaid to keep the recording's own pitch on the key.
+temperament = "original"
 reference_key = "A4"
-reference_hz = 440.0
+# reference_hz = 440.0
 transpose = 0
 
 # Convolution reverb (this set is recorded wet, so off by default):
