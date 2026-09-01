@@ -17,28 +17,30 @@
 //! mapping, registration, and couplers out of the RT core entirely.
 
 pub mod bank;
+mod command;
 pub mod enclosure;
 pub mod resample;
 pub mod reverb;
 pub mod routing;
+mod tone;
 pub mod wind;
 
 use std::sync::Arc;
 
 use aristide_model::units::cents_to_ratio;
 use bank::{Sample, SampleBank};
-use enclosure::{Enclosure, EnclosureParams, ENCLOSURE_NONE, MAX_ENCLOSURES};
+use command::COMMAND_QUEUE_CAPACITY;
+use enclosure::{Enclosure, ENCLOSURE_NONE, MAX_ENCLOSURES};
 use resample::SincTables;
 use routing::{Bus, MAX_BUSES, MAX_CHUNK_FRAMES};
 use rtrb::{Consumer, Producer, RingBuffer};
-use wind::{WindGroup, WindParams, MAX_WIND_GROUPS};
+use tone::{ToneStage, ToneVoice, TONE_ATTACK_SECONDS, TONE_GAIN, TONE_RELEASE_SECONDS};
+use wind::{WindGroup, MAX_WIND_GROUPS};
+
+pub use command::{Command, EngineHandle};
 
 pub const MAX_VOICES: usize = 2048;
-const COMMAND_QUEUE_CAPACITY: usize = 8192;
 
-const TONE_ATTACK_SECONDS: f32 = 0.006;
-const TONE_RELEASE_SECONDS: f32 = 0.09;
-const TONE_GAIN: f32 = 0.08;
 /// Loop-position → release-tail splice length. Phase-aligned release
 /// selection (M4) will replace this fixed equal-power-ish ramp.
 const RELEASE_CROSSFADE_SECONDS: f32 = 0.03;
@@ -67,174 +69,6 @@ const TAIL_SHED_PER_BLOCK: usize = 8;
 /// turn-down rather than crunching.
 const LIMITER_CEILING: f32 = 0.97;
 const LIMITER_RELEASE_SECONDS: f32 = 0.2;
-
-/// Principal-chorus-flavoured partials: 8', 4', 2 2/3', 2', 1 1/3'.
-const HARMONICS: [(f32, f32); 5] = [
-    (1.0, 0.50),
-    (2.0, 0.24),
-    (3.0, 0.09),
-    (4.0, 0.12),
-    (6.0, 0.04),
-];
-
-#[derive(Debug, Clone, Copy)]
-pub enum Command {
-    /// Start a sampled voice. `rate` is source frames per output frame
-    /// (sample-rate ratio × pitch adjustments), `gain` is linear.
-    /// `group` is the wind group the voice draws from and `wind_weight`
-    /// how much it draws (0 = draws nothing, e.g. action noises).
-    /// `brightness` is the voice's tilt-filter one-pole coefficient
-    /// (control-side from the pipe's pitch; 0 bypasses the filter).
-    /// `enclosure` is the swell box the voice sits inside
-    /// ([`ENCLOSURE_NONE`] for unenclosed divisions).
-    /// `bus` is the output bus the voice renders onto (0 = the main
-    /// pair) and `delay_frames` an onset delay: the voice waits that
-    /// many output frames before speaking — per-pipe tracker/speaking
-    /// delay, the Orgelpark trick at its smallest. A voice released
-    /// before it ever spoke dies silently.
-    StartVoice {
-        handle: u64,
-        sample: u32,
-        rate: f32,
-        gain: f32,
-        group: u8,
-        wind_weight: f32,
-        brightness: f32,
-        enclosure: u8,
-        bus: u8,
-        delay_frames: u32,
-        /// The pipe's sounding frequency in Hz — how big a pipe this
-        /// is, which is what decides how fast its amplitude can answer
-        /// the chest (speech time ~ tens of periods). 0 = unpitched
-        /// (noises): chest factors apply unlagged.
-        nominal_hz: f32,
-    },
-    /// Reconfigure one wind group's supply model.
-    SetWind { group: u8, params: WindParams },
-    /// Configure one wind group's tremulant.
-    SetTremulantParams {
-        group: u8,
-        params: wind::TremulantParams,
-    },
-    /// Engage/disengage one wind group's tremulant (ramped).
-    SetTremulant { group: u8, engaged: bool },
-    /// Flag one wind group's *wave* tremulant: no synthesized
-    /// modulation, only which recording variants pipes on the chest
-    /// prefer — held voices will pick releases matching this state.
-    SetWaveTremulant { group: u8, engaged: bool },
-    /// Reconfigure one enclosure's box model.
-    SetEnclosure {
-        enclosure: u8,
-        params: EnclosureParams,
-    },
-    /// Move one enclosure's pedal (0 = closed, 1 = open); the shutter
-    /// inertia model slews toward it.
-    SetEnclosurePosition { enclosure: u8, position: f32 },
-    /// Glide a sounding voice's playback rate to a new target over
-    /// `glide_ms` (0 = snap at the next block). The slew is geometric —
-    /// constant cents per frame — so a glide reads as linear pitch
-    /// motion. Only Held voices move: a release tail is room decay that
-    /// already left the pipe, the same reason shutter moves never touch
-    /// it. This is the seam MPE/MIDI 2.0 per-note pitch and live tuning
-    /// drift ride on.
-    SetVoiceRate {
-        handle: u64,
-        rate: f32,
-        glide_ms: f32,
-    },
-    /// Release the voice started with `handle`. Loop-less (percussive)
-    /// voices ignore this and play to their end.
-    StopVoice { handle: u64 },
-    /// Silence a voice quickly WITHOUT its release tail (a short fade) —
-    /// for retiring control-noise voices silently.
-    KillVoice { handle: u64 },
-    /// Configure one output bus's delay node (the first public effects
-    /// node; `mix: 0` bypasses it).
-    SetBusDelay {
-        bus: u8,
-        params: routing::DelayParams,
-    },
-    /// Route one bus onto an output channel pair at a level. Channels
-    /// the device hasn't got fall back to the main pair at render time.
-    SetBusOutput {
-        bus: u8,
-        left: u8,
-        right: u8,
-        gain: f32,
-    },
-    /// Start/stop the built-in additive test tone (no-set mode).
-    NoteOn { key: u8, freq_hz: f32 },
-    NoteOff { key: u8 },
-    /// Fade out every sounding voice.
-    AllNotesOff,
-    SetMasterGain { linear: f32 },
-    /// Convolution reverb wet level (0 bypasses entirely).
-    SetReverbWet { wet: f32 },
-}
-
-/// Control-plane side of the engine. Not RT-constrained.
-pub struct EngineHandle {
-    commands: Producer<Command>,
-}
-
-impl EngineHandle {
-    /// Returns `false` if the queue was full and the command dropped.
-    pub fn send(&mut self, command: Command) -> bool {
-        self.commands.push(command).is_ok()
-    }
-}
-
-#[derive(Clone, Copy, Default, PartialEq)]
-enum ToneStage {
-    #[default]
-    Idle,
-    Attack,
-    Sustain,
-    Release,
-}
-
-#[derive(Clone, Copy, Default)]
-struct ToneVoice {
-    key: u8,
-    phase: f32,
-    phase_increment: f32,
-    envelope: f32,
-    stage: ToneStage,
-}
-
-impl ToneVoice {
-    #[inline]
-    fn tick(&mut self, attack_step: f32, release_step: f32) -> f32 {
-        match self.stage {
-            ToneStage::Idle => return 0.0,
-            ToneStage::Attack => {
-                self.envelope += attack_step;
-                if self.envelope >= 1.0 {
-                    self.envelope = 1.0;
-                    self.stage = ToneStage::Sustain;
-                }
-            }
-            ToneStage::Sustain => {}
-            ToneStage::Release => {
-                self.envelope -= release_step;
-                if self.envelope <= 0.0 {
-                    self.envelope = 0.0;
-                    self.stage = ToneStage::Idle;
-                    return 0.0;
-                }
-            }
-        }
-        let mut sample = 0.0;
-        for (multiple, amplitude) in HARMONICS {
-            sample += amplitude * (core::f32::consts::TAU * self.phase * multiple).sin();
-        }
-        self.phase += self.phase_increment;
-        if self.phase >= 1.0 {
-            self.phase -= 1.0;
-        }
-        sample * self.envelope
-    }
-}
 
 #[derive(Clone, Copy, PartialEq)]
 enum SamplePhase {
