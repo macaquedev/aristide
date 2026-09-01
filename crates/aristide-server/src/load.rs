@@ -52,6 +52,16 @@ impl StopVoicing {
     }
 }
 
+/// One configured output bus, engine-ready.
+pub struct BusSetup {
+    /// Engine bus index (1-based; 0 is the untouched main bus).
+    pub bus: u8,
+    /// 0-based interface channel pair; `None` keeps the main pair.
+    pub output: Option<(u8, u8)>,
+    pub gain: f32,
+    pub delay: Option<aristide_engine::routing::DelayParams>,
+}
+
 pub struct PreparedInstrument {
     pub console: Console,
     pub bank: SampleBank,
@@ -226,29 +236,68 @@ fn load_impulse_response(
     .map_err(|e| anyhow::anyhow!(e))
 }
 
-/// Assemble `paths` (sample sets and composite definitions; several are
-/// combined into one implicit composite), decode the samples, and build
-/// the console. `stops` are CLI registration patterns; empty means each
-/// source's sidecar default. `progress` is told what is happening, for
-/// a UI that is watching the load.
-/// One configured output bus, engine-ready.
-pub struct BusSetup {
-    /// Engine bus index (1-based; 0 is the untouched main bus).
-    pub bus: u8,
-    /// 0-based interface channel pair; `None` keeps the main pair.
-    pub output: Option<(u8, u8)>,
-    pub gain: f32,
-    pub delay: Option<aristide_engine::routing::DelayParams>,
+/// Every source path's contribution before assembly: the organs and
+/// sidecars themselves, plus whatever a lone composite definition
+/// contributed (MIDI wiring, provenance, tuning, layout) — populated
+/// only when it was the sole path.
+struct Sources {
+    sources: Vec<(String, Organ)>,
+    sidecars: Vec<aristide_formats::sidecar::Sidecar>,
+    composite_midi: Option<(PathBuf, instrument::MidiDef)>,
+    single_provenance: std::collections::HashMap<StopId, instrument::StopProvenance>,
+    stop_labels: std::collections::HashMap<StopId, String>,
+    manual_tuning_defs: Vec<instrument::ManualTuningDef>,
+    source_tuning_defs:
+        std::collections::BTreeMap<String, aristide_formats::sidecar::TuningOverride>,
+    rank_sources: Vec<String>,
+    console_order: std::collections::BTreeMap<String, Vec<String>>,
+    console_layout: std::collections::BTreeMap<String, instrument::PanelPos>,
+    console_coupled_keys: bool,
+    coupler_key_modes: std::collections::BTreeMap<String, String>,
 }
 
-pub fn prepare(
+/// A non-composite sample set: parsed as-is, its sidecar loaded (or
+/// defaulted). A sidecar `name` renames the organ before anything
+/// downstream sees it — that name is also the key MIDI assignments
+/// are stored under.
+fn load_plain_source(path: &Path) -> Result<(Organ, aristide_formats::sidecar::Sidecar)> {
+    let mut organ = load_organ(path)?;
+    let sidecar = match aristide_formats::sidecar::load_for(path) {
+        Ok(Some(sidecar)) => {
+            tracing::info!(
+                "sidecar: {}",
+                aristide_formats::sidecar::path_for(path).display()
+            );
+            sidecar
+        }
+        Ok(None) => Default::default(),
+        Err(err) => {
+            tracing::warn!("sidecar unreadable, ignoring: {err}");
+            Default::default()
+        }
+    };
+    // A sidecar rename: the set is read as-is, the name the player
+    // gave it lives beside it. The name is also the key MIDI
+    // assignments are stored under, so it applies before anything
+    // downstream sees the organ.
+    let renamed = sidecar.name.trim();
+    if !renamed.is_empty() {
+        organ.name = renamed.to_string();
+    }
+    Ok((organ, sidecar))
+}
+
+/// Load and label every source path: a sample set with its sidecar, or
+/// a composite definition (`.toml`), which assembles first and then
+/// acts like any other source. Per-set decisions — sidecar couplers,
+/// the default registration, channel suggestions — resolve against
+/// each source's own names here, then ride the id maps across.
+fn load_sources(
     paths: &[PathBuf],
-    stops: &[String],
-    sample_rate: f32,
     progress: &dyn Fn(String),
-) -> Result<PreparedInstrument> {
-    anyhow::ensure!(!paths.is_empty(), "no sample set given");
-    let first_path = &paths[0];
+    setup: &mut Setup,
+    load_warnings: &mut Vec<String>,
+) -> Result<Sources> {
     let mut composite_midi: Option<(PathBuf, instrument::MidiDef)> = None;
     let mut single_provenance: std::collections::HashMap<StopId, instrument::StopProvenance> =
         std::collections::HashMap::new();
@@ -268,14 +317,7 @@ pub fn prepare(
     let mut console_coupled_keys = true;
     let mut coupler_key_modes: std::collections::BTreeMap<String, String> =
         std::collections::BTreeMap::new();
-    let mut setup = Setup::default();
-    let mut load_warnings: Vec<String> = Vec::new();
 
-    // Every path is a source: a sample set with its sidecar, or a
-    // composite definition (`.toml`), which assembles first and then
-    // acts like any other source. Per-set decisions — sidecar couplers,
-    // the default registration, channel suggestions — resolve against
-    // each source's own names here, then ride the id maps across.
     let mut sources: Vec<(String, Organ)> = Vec::new();
     let mut sidecars = Vec::new();
     for path in paths {
@@ -334,30 +376,7 @@ pub fn prepare(
             }
             (assembled.organ, assembled.sidecar)
         } else {
-            let mut organ = load_organ(path)?;
-            let sidecar = match aristide_formats::sidecar::load_for(path) {
-                Ok(Some(sidecar)) => {
-                    tracing::info!(
-                        "sidecar: {}",
-                        aristide_formats::sidecar::path_for(path).display()
-                    );
-                    sidecar
-                }
-                Ok(None) => Default::default(),
-                Err(err) => {
-                    tracing::warn!("sidecar unreadable, ignoring: {err}");
-                    Default::default()
-                }
-            };
-            // A sidecar rename: the set is read as-is, the name the
-            // player gave it lives beside it. The name is also the key
-            // MIDI assignments are stored under, so it applies before
-            // anything downstream sees the organ.
-            let renamed = sidecar.name.trim();
-            if !renamed.is_empty() {
-                organ.name = renamed.to_string();
-            }
-            (organ, sidecar)
+            load_plain_source(path)?
         };
         // User-defined couplers join the source's own on the rail; a
         // composite's resolve against its assembled console the same way.
@@ -393,13 +412,34 @@ pub fn prepare(
         sidecars.push(sidecar);
     }
 
-    // With CLI --stops the patterns match the whole combined organ;
-    // each sidecar's default registration instead means its own set's
-    // stops and nothing else's.
+    Ok(Sources {
+        sources,
+        sidecars,
+        composite_midi,
+        single_provenance,
+        stop_labels,
+        manual_tuning_defs,
+        source_tuning_defs,
+        rank_sources,
+        console_order,
+        console_layout,
+        console_coupled_keys,
+        coupler_key_modes,
+    })
+}
+
+/// With CLI `--stops` the patterns match the whole combined organ;
+/// each sidecar's default registration instead means its own set's
+/// stops and nothing else's. Channel suggestions are always per source.
+fn register_and_suggest(
+    sources: &[(String, Organ)],
+    sidecars: &[aristide_formats::sidecar::Sidecar],
+    stops: &[String],
+) -> (Vec<Vec<StopId>>, Vec<Vec<Option<u8>>>) {
     let per_source_drawn: Vec<Vec<StopId>> = if stops.is_empty() {
         sources
             .iter()
-            .zip(&sidecars)
+            .zip(sidecars)
             .map(|((_, organ), sidecar)| {
                 choose_registration(organ, &sidecar.registration.default)
             })
@@ -409,25 +449,45 @@ pub fn prepare(
     };
     let per_source_suggested: Vec<Vec<Option<u8>>> = sources
         .iter()
-        .zip(&sidecars)
+        .zip(sidecars)
         .map(|((_, organ), sidecar)| suggested_channels(organ, &sidecar.midi.channels))
         .collect();
-    // One source stands as itself; several become an implicit composite
-    // — assembled exactly as a definition file with sources and no
-    // pulls would be, every manual and coupler as its own set provides.
-    // Engine-wide settings (wind, tremulant, reverb, tuning…) come from
-    // the first source.
-    let sidecar = &sidecars[0];
-    let (organ, drawn) = if sources.len() == 1 {
+    (per_source_drawn, per_source_suggested)
+}
+
+/// The mutable state `assemble_organ` updates as it resolves the
+/// combined organ: each rank's owning set, each stop's provenance, and
+/// its pitch label, kept as one bundle so the function stays under the
+/// usual argument count.
+struct SourceExtras<'a> {
+    rank_sources: &'a mut Vec<String>,
+    single_provenance: &'a mut std::collections::HashMap<StopId, instrument::StopProvenance>,
+    stop_labels: &'a mut std::collections::HashMap<StopId, String>,
+}
+
+/// One source stands as itself; several become an implicit composite
+/// — assembled exactly as a definition file with sources and no pulls
+/// would be, every manual and coupler as its own set provides.
+/// Engine-wide settings (wind, tremulant, reverb, tuning…) come from
+/// the first source's sidecar, resolved by the caller.
+fn assemble_organ(
+    mut sources: Vec<(String, Organ)>,
+    per_source_drawn: Vec<Vec<StopId>>,
+    stops: &[String],
+    setup: &mut Setup,
+    extras: &mut SourceExtras,
+    load_warnings: &mut Vec<String>,
+) -> Result<(Organ, Vec<StopId>)> {
+    Ok(if sources.len() == 1 {
         let (label, organ) = sources.pop().expect("one source");
         // A composite already reported where each stop came from; a
         // bare set standing as itself is its own provenance — each
         // stop from its own manual, as a division pull would record it.
-        if rank_sources.is_empty() {
-            rank_sources = vec![label.clone(); organ.ranks.len()];
+        if extras.rank_sources.is_empty() {
+            *extras.rank_sources = vec![label.clone(); organ.ranks.len()];
         }
-        if single_provenance.is_empty() {
-            single_provenance = organ
+        if extras.single_provenance.is_empty() {
+            *extras.single_provenance = organ
                 .stops
                 .iter()
                 .map(|stop| {
@@ -499,15 +559,15 @@ pub fn prepare(
         }
         setup.pulls = assembled.division_pulls.clone();
         setup.implicit = true;
-        rank_sources = assembled.rank_sources.clone();
-        single_provenance = assembled
+        *extras.rank_sources = assembled.rank_sources.clone();
+        *extras.single_provenance = assembled
             .provenance
             .iter()
             .cloned()
             .enumerate()
             .map(|(index, prov)| (StopId(index as u32), prov))
             .collect();
-        stop_labels = assembled
+        *extras.stop_labels = assembled
             .pitch_labels
             .iter()
             .cloned()
@@ -528,7 +588,64 @@ pub fn prepare(
             choose_registration(&assembled.organ, stops)
         };
         (assembled.organ, drawn)
-    };
+    })
+}
+
+/// Assemble `paths` (sample sets and composite definitions; several are
+/// combined into one implicit composite), decode the samples, and build
+/// the console. `stops` are CLI registration patterns; empty means each
+/// source's sidecar default. `progress` is told what is happening, for
+/// a UI that is watching the load.
+pub fn prepare(
+    paths: &[PathBuf],
+    stops: &[String],
+    sample_rate: f32,
+    progress: &dyn Fn(String),
+) -> Result<PreparedInstrument> {
+    anyhow::ensure!(!paths.is_empty(), "no sample set given");
+    let first_path = &paths[0];
+    let mut setup = Setup::default();
+    let mut load_warnings: Vec<String> = Vec::new();
+
+    // Every path is a source: a sample set with its sidecar, or a
+    // composite definition (`.toml`), which assembles first and then
+    // acts like any other source. Per-set decisions — sidecar couplers,
+    // the default registration, channel suggestions — resolve against
+    // each source's own names here, then ride the id maps across.
+    let Sources {
+        sources: source_list,
+        sidecars,
+        composite_midi,
+        mut single_provenance,
+        mut stop_labels,
+        manual_tuning_defs,
+        source_tuning_defs,
+        mut rank_sources,
+        console_order,
+        console_layout,
+        console_coupled_keys,
+        coupler_key_modes,
+    } = load_sources(paths, progress, &mut setup, &mut load_warnings)?;
+
+    let (per_source_drawn, per_source_suggested) =
+        register_and_suggest(&source_list, &sidecars, stops);
+    let suggested: Vec<Option<u8>> = per_source_suggested.concat();
+    // Engine-wide settings (wind, tremulant, reverb, tuning…) come from
+    // the first source.
+    let sidecar = sidecars[0].clone();
+
+    let (organ, drawn) = assemble_organ(
+        source_list,
+        per_source_drawn,
+        stops,
+        &mut setup,
+        &mut SourceExtras {
+            rank_sources: &mut rank_sources,
+            single_provenance: &mut single_provenance,
+            stop_labels: &mut stop_labels,
+        },
+        &mut load_warnings,
+    )?;
 
     progress(format!("decoding samples for {}…", organ.name));
     let started = Instant::now();
@@ -668,11 +785,11 @@ pub fn prepare(
             })
             .collect(),
     };
-    for setup in &tremulants {
-        if setup.groups.is_empty() {
+    for setup_ in &tremulants {
+        if setup_.groups.is_empty() {
             tracing::warn!(
                 "tremulant {:?}: no windchest references it — engaging it will do nothing",
-                setup.name
+                setup_.name
             );
         }
     }
@@ -734,7 +851,6 @@ pub fn prepare(
         }
     }
 
-    let suggested: Vec<Option<u8>> = per_source_suggested.concat();
     let mut console = Console::new(organ, loaded.specs, drawn, sample_rate);
     console.set_attack_options(loaded.attack_options);
     let home = loaded.home.map(std::sync::Arc::new);
@@ -1282,6 +1398,30 @@ pub fn prepare(
     })
 }
 
+/// A `reference_key` as the file spells it ("C4", "F#3", or a MIDI
+/// number) resolved to a key, falling back — with a warning, never a
+/// failed load — to `inherited` (the instrument's anchor) or A4.
+/// `pipes = "original" | "exact"`, warning (and keeping the default)
+/// on anything else — a typo must not brick the organ.
+fn parse_pipes(name: &str) -> Option<tuning::PipeRetune> {
+    let parsed = tuning::PipeRetune::parse(name);
+    if parsed.is_none() {
+        tracing::warn!("tuning: unknown pipes mode {name:?}; pipes keep their drift");
+    }
+    parsed
+}
+
+fn reference_key(spec: &aristide_formats::sidecar::KeySpec, inherited: Option<u8>) -> u8 {
+    spec.midi_note().unwrap_or_else(|| {
+        let fallback = inherited.unwrap_or(tuning::PitchReference::A440.key);
+        tracing::warn!(
+            "tuning: reference_key {spec:?} names no key, anchoring on {}",
+            aristide_formats::sidecar::note_name(fallback)
+        );
+        fallback
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1576,28 +1716,4 @@ mod tests {
             "progress was reported"
         );
     }
-}
-
-/// A `reference_key` as the file spells it ("C4", "F#3", or a MIDI
-/// number) resolved to a key, falling back — with a warning, never a
-/// failed load — to `inherited` (the instrument's anchor) or A4.
-/// `pipes = "original" | "exact"`, warning (and keeping the default)
-/// on anything else — a typo must not brick the organ.
-fn parse_pipes(name: &str) -> Option<tuning::PipeRetune> {
-    let parsed = tuning::PipeRetune::parse(name);
-    if parsed.is_none() {
-        tracing::warn!("tuning: unknown pipes mode {name:?}; pipes keep their drift");
-    }
-    parsed
-}
-
-fn reference_key(spec: &aristide_formats::sidecar::KeySpec, inherited: Option<u8>) -> u8 {
-    spec.midi_note().unwrap_or_else(|| {
-        let fallback = inherited.unwrap_or(tuning::PitchReference::A440.key);
-        tracing::warn!(
-            "tuning: reference_key {spec:?} names no key, anchoring on {}",
-            aristide_formats::sidecar::note_name(fallback)
-        );
-        fallback
-    })
 }
