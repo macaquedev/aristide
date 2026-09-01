@@ -15,6 +15,8 @@
 import { commands, localFetch } from "./api.js";
 import { renderIfChanged, resetRender, setText } from "./dom.js";
 import { menuItem } from "./menu.js";
+import { popovers, closeQuickMenus, openingPopover, closeAllPopovers } from "./editor/popovers.js";
+import { wireDragSource } from "./editor/drag-controller.js";
 import {
   formatFootage,
   keyName,
@@ -50,63 +52,6 @@ const KEYBOARD_KINDS = [
   ["pedal", "Pedalboard"],
   ["microtonal", "Microtonal keyboard"],
 ];
-
-/// What opening one of `Editor.popovers`' kinds has always closed among
-/// the others — asymmetric on purpose in spots, not tidied here into a
-/// blanket "close everything": the settings cluster (tuning, midi,
-/// compass, room, bindings, save) never touches trem or the stop
-/// editor; trem closes only tuning/hex/coupler; hex closes only
-/// tuning/coupler; the stop and coupler editors close everything else.
-/// `openingPopover()` reads this so no openXForm hand-lists its own
-/// subset of closeYForm() calls. The save-as dialog is a modal, not
-/// here — it only ever closes the plain save form (openSaveAsForm
-/// does that itself) and nothing closes it back from this table.
-const POPOVER_CLOSES = {
-  tuning: ["hex", "coupler", "midi", "compass", "room", "bindings", "save"],
-  midi: ["tuning", "hex", "coupler", "compass", "room", "bindings", "save"],
-  compass: ["tuning", "hex", "coupler", "midi", "room", "bindings", "save"],
-  room: ["tuning", "hex", "coupler", "midi", "compass", "bindings", "save"],
-  bindings: ["tuning", "hex", "coupler", "midi", "compass", "room", "save"],
-  save: ["tuning", "hex", "coupler", "midi", "compass", "room", "bindings"],
-  trem: ["tuning", "hex", "coupler"],
-  stop: ["tuning", "hex", "coupler", "trem", "midi", "compass", "room", "bindings", "save"],
-  coupler: ["tuning", "hex", "trem", "stop", "midi", "compass", "room", "bindings", "save"],
-  hex: ["tuning", "coupler"],
-};
-
-/// How far the pointer travels before a press on a drag source becomes
-/// a drag rather than a click — GTK's threshold. A mouse button's own
-/// travel wobbles the pointer a few pixels (more on a high-DPI mouse),
-/// and below this nothing is dragged, so a wobbly click stays a click.
-const DRAG_THRESHOLD_PX = 8;
-
-/// Swallows the click a real drag leaves behind if it lands on the
-/// dragged control — which it does only when the browser dispatches the
-/// click to the pressed element rather than to the nearest common
-/// ancestor of press and release, where it may bubble on as any click
-/// elsewhere would. Either way the listener stands down at the next
-/// press, so it can never eat a later, honest click on the control.
-function suppressNextClick(source) {
-  const swallow = (event) => {
-    if (source.contains(event.target)) {
-      event.preventDefault();
-      event.stopImmediatePropagation();
-    }
-    disarm();
-  };
-  const disarm = () => {
-    window.removeEventListener("click", swallow, true);
-    window.removeEventListener("pointerdown", disarm, true);
-  };
-  window.addEventListener("click", swallow, true);
-  window.addEventListener("pointerdown", disarm, true);
-}
-
-function withinRect(rect, { clientX, clientY }) {
-  return (
-    clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom
-  );
-}
 
 /// Anything with behavior of its own — a panel drag must never start on
 /// these, or a drawknob could not be clicked and a key could not play.
@@ -2535,56 +2480,23 @@ export class Editor {
   }
 
   // ---- the popover registry: one source of truth for what's open ----------
-  //
-  // Every popover's kind, its element, and how to close it — so a
-  // closer needn't be named again every place one popover has to make
-  // way for another. `POPOVER_CLOSES` (top of file) is the only place
-  // that says what opening one closes; every openXForm below calls
-  // `openingPopover(kind)` instead of hand-listing closeYForm() calls.
+  // See editor/popovers.js: everything about what each popover is and
+  // what opening it closes lives there now.
 
   get popovers() {
-    return {
-      tuning: { el: this.el.tuning, close: () => this.closeTuningForm() },
-      midi: { el: this.el.midi, close: () => this.closeMidiForm() },
-      compass: { el: this.el.compass, close: () => this.closeCompassForm() },
-      room: { el: this.el.room, close: () => this.closeRoomForm() },
-      bindings: { el: this.el.bindings, close: () => this.closeBindingsForm() },
-      save: { el: this.el.save, close: () => this.closeSaveForm() },
-      trem: { el: this.el.trem, close: () => this.closeTremForm() },
-      stop: { el: this.el.stop, close: () => this.closeStopForm() },
-      coupler: { el: this.el.coupler, close: () => this.closeCouplerForm() },
-      hex: { el: this.el.hex, close: () => this.closeHexForm() },
-      saveAs: { el: this.el.saveAs, close: () => this.closeSaveAsForm() },
-    };
+    return popovers(this);
   }
 
-  /// The three quick menus every popover below makes way for — never
-  /// each other, since a division/keyboard-menu item is how most of
-  /// these popovers open in the first place.
   closeQuickMenus() {
-    this.closeAdd();
-    this.closeDivisionMenu();
-    this.closeKeyboardMenu();
+    closeQuickMenus(this);
   }
 
-  /// Closes the quick menus and whatever `POPOVER_CLOSES[kind]` says
-  /// this kind has always closed, in place of the openXForm functions
-  /// each hand-listing their own subset of closeYForm() calls.
   openingPopover(kind) {
-    this.closeQuickMenus();
-    const registry = this.popovers;
-    for (const other of POPOVER_CLOSES[kind] ?? []) registry[other].close();
+    openingPopover(this, kind);
   }
 
-  /// Every popover and quick menu, closed at once — a click outside
-  /// all of them, or Escape. Never the save-as dialog: it's a modal,
-  /// closed only by its own Escape/Cancel/backdrop handling.
   closeAllPopovers() {
-    this.closeQuickMenus();
-    this.closeCouplersMenu();
-    for (const kind of Object.keys(this.popovers)) {
-      if (kind !== "saveAs") this.popovers[kind].close();
-    }
+    closeAllPopovers(this);
   }
 
   // ---- the tremulant-shape popover: right-click the Tremblant knob --------
@@ -3670,380 +3582,11 @@ export class Editor {
   }
 
   // ---- drag controller: plain when unlocked, ctrl-drag always -------------
-  //
-  // Plain pointer events, not HTML5 drag-and-drop: a floating label
-  // follows the pointer and the drop target is read straight off
-  // `elementFromPoint`. Every drag source waits for ~4px of movement
-  // before committing to a drag — below that it's a click (a drawknob
-  // still toggles its stop; a cheek's dblclick still renames).
+  // See editor/drag-controller.js: the pointer-drag state machine and
+  // its drop-target math live there now.
 
-  binAllowed(kind) {
-    return kind === "stop" || kind === "manual" || kind === "enclosure" || kind === "coupler";
-  }
-
-  manualAllowed(kind) {
-    return kind !== "enclosure";
-  }
-
-  encAllowed(kind) {
-    return kind === "stop";
-  }
-
-  /// The kinds that live in a division's knob rank — the ones a drop
-  /// on a jamb carries a position for.
-  rankKind(kind) {
-    return kind === "stop" || kind === "coupler";
-  }
-
-  /// The dragged control's rank token — the vocabulary the order
-  /// endpoint and the snapshot's `rank` share.
-  dragToken(drag) {
-    return drag.kind === "coupler" ? `c${drag.payload.idx}` : `s${drag.payload.id}`;
-  }
-
-  /// A division's current display rank as tokens, from the snapshot —
-  /// the list a reorder splices into, so seated couplers keep their
-  /// places when a stop moves and vice versa.
-  rankTokens(midx) {
-    const manual = this.lastSnapshot?.manuals.find((m) => m.idx === midx);
-    if (manual?.rank) return [...manual.rank];
-    return (this.lastSnapshot?.stops ?? [])
-      .filter((stop) => stop.midx === midx)
-      .map((stop) => `s${stop.id}`);
-  }
-
-  /// The destination rank with the dragged control where the drop's
-  /// seam showed — in front of `beforeToken`, or at the bottom when
-  /// the drop carried no position (null, or a keyboard drop).
-  spliceRank(midx, drag) {
-    const token = this.dragToken(drag);
-    const tokens = this.rankTokens(midx).filter((t) => t !== token);
-    const before = drag.insert?.beforeToken ?? null;
-    const at = before == null ? tokens.length : tokens.indexOf(before);
-    tokens.splice(at < 0 ? tokens.length : at, 0, token);
-    return tokens;
-  }
-
-  /// `getInfo()` returns `{kind, payload, label}` for the drag about to
-  /// start, or null to refuse it. Called only once the pointer has
-  /// actually moved past the threshold, so it can read live state.
-  /// Whether the drag then also swallows the control's click is
-  /// endDrag's call: a release still over the source was a click.
   wireDragSource(el, getInfo) {
-    el.addEventListener("pointerdown", (event) => {
-      if (event.button !== 0) return;
-      if (!(event.ctrlKey || this.unlocked)) return;
-      event.stopPropagation(); // a control drag is never a panel move
-      const startX = event.clientX;
-      const startY = event.clientY;
-      let moved = false;
-      const onMove = (e) => {
-        if (moved) return;
-        if (Math.hypot(e.clientX - startX, e.clientY - startY) < DRAG_THRESHOLD_PX) return;
-        moved = true;
-        window.removeEventListener("pointermove", onMove);
-        const info = getInfo();
-        if (!info) return;
-        this.startDrag(e, info.kind, info.payload, info.label, el);
-      };
-      const onUp = () => window.removeEventListener("pointermove", onMove);
-      window.addEventListener("pointermove", onMove);
-      window.addEventListener("pointerup", onUp, { once: true });
-    });
-  }
-
-  startDrag(event, kind, payload, label, source) {
-    event.preventDefault();
-    const ghost = document.createElement("div");
-    ghost.className = "organ-drag-ghost";
-    ghost.textContent = label;
-    document.body.append(ghost);
-    this.drag = {
-      kind,
-      payload,
-      ghost,
-      label,
-      source,
-      targetType: null,
-      targetIdx: null,
-      insert: null,
-    };
-    this.positionGhost(event.clientX, event.clientY);
-    if (this.binAllowed(kind)) this.el.bin.classList.add("visible");
-    this._dragMove = (e) => this.dragMove(e);
-    window.addEventListener("pointermove", this._dragMove);
-    window.addEventListener("pointerup", (e) => this.endDrag(e), { once: true });
-  }
-
-  positionGhost(x, y) {
-    if (!this.drag) return;
-    this.drag.ghost.style.left = `${x}px`;
-    this.drag.ghost.style.top = `${y}px`;
-  }
-
-  dragMove(event) {
-    if (!this.drag) return;
-    this.positionGhost(event.clientX, event.clientY);
-    this.applyDropHighlight(this.findDropTarget(event.clientX, event.clientY));
-  }
-
-  findDropTarget(x, y) {
-    const el = document.elementFromPoint(x, y);
-    if (!el || !this.drag) return null;
-    if (el.closest("[data-drop-bin]") && this.binAllowed(this.drag.kind)) return { type: "bin" };
-    const shoe = el.closest(".shoe[data-enclosure]");
-    if (shoe && this.encAllowed(this.drag.kind)) {
-      return { type: "shoe", idx: Number(shoe.dataset.enclosure) };
-    }
-    // The coupler rail takes a dragged coupler home: unseated from
-    // whatever jamb held it, a tablet again.
-    if (this.drag.kind === "coupler" && el.closest(".panel-couplers")) {
-      return { type: "rail" };
-    }
-    const manual = el.closest("[data-drop-manual]");
-    if (manual && this.manualAllowed(this.drag.kind)) {
-      const hit = { type: "manual", idx: Number(manual.dataset.dropManual) };
-      // Over a jamb division a dragged stop or coupler carries a
-      // *position* too: where in the knob rank it would land. A
-      // keyboard is a plain "onto this manual" target, as before.
-      if (this.rankKind(this.drag.kind) && manual.classList.contains("division")) {
-        hit.insert = this.insertionPoint(manual, x, y);
-      }
-      return hit;
-    }
-    return null;
-  }
-
-  /// Where in a division's knob rank the dragged control would land:
-  /// the nearest rank knob — stop or seated coupler, the dragged one
-  /// doesn't count — and which side of it the pointer sits, normalized
-  /// to "before this token", with null meaning the bottom of the rank.
-  /// Works unchanged when a resized jamb has wrapped the rank into
-  /// columns: nearest-knob is a distance, not an index.
-  insertionPoint(division, x, y) {
-    const dragged =
-      this.drag.kind === "coupler"
-        ? `coupler-${this.drag.payload.idx}`
-        : `stop-${this.drag.payload.id}`;
-    const knobs = [
-      ...division.querySelectorAll('.knob[data-key^="stop-"], .knob[data-key^="coupler-"]'),
-    ].filter((knob) => knob.dataset.key !== dragged);
-    if (!knobs.length) return { beforeToken: null, marker: null, side: "after" };
-    let nearest = null;
-    let best = Infinity;
-    for (const knob of knobs) {
-      const rect = knob.getBoundingClientRect();
-      const dx = x - (rect.left + rect.width / 2);
-      const dy = y - (rect.top + rect.height / 2);
-      const d = dx * dx + dy * dy;
-      if (d < best) {
-        best = d;
-        nearest = knob;
-      }
-    }
-    const rect = nearest.getBoundingClientRect();
-    // "stop-12" → "s12", "coupler-3" → "c3": the rank vocabulary.
-    const token = (knob) =>
-      knob.dataset.key.startsWith("coupler-")
-        ? `c${knob.dataset.key.slice("coupler-".length)}`
-        : `s${knob.dataset.key.slice("stop-".length)}`;
-    // Which side of the nearest knob the pointer means: judged along
-    // whichever axis it's further out on, so a wrapped grid reads
-    // left/right within a row and above/below across rows — and the
-    // seam is drawn on the matching edge.
-    const dx = (x - (rect.left + rect.width / 2)) / rect.width;
-    const dy = (y - (rect.top + rect.height / 2)) / rect.height;
-    const before = Math.abs(dx) > Math.abs(dy) ? dx < 0 : dy < 0;
-    const horizontal = Math.abs(dx) > Math.abs(dy);
-    const side = horizontal ? (before ? "left" : "right") : before ? "before" : "after";
-    if (before) {
-      return { beforeToken: token(nearest), marker: nearest, side };
-    }
-    const next = knobs[knobs.indexOf(nearest) + 1] ?? null;
-    return { beforeToken: next ? token(next) : null, marker: nearest, side };
-  }
-
-  applyDropHighlight(hit) {
-    for (const el of this.root.querySelectorAll(".drop-target")) el.classList.remove("drop-target");
-    for (const el of this.root.querySelectorAll(
-      ".insert-before, .insert-after, .insert-left, .insert-right"
-    )) {
-      el.classList.remove("insert-before", "insert-after", "insert-left", "insert-right");
-    }
-    this.el.bin.classList.remove("drop-target");
-    for (const el of this.root.querySelectorAll(".panel-couplers.drop-target")) {
-      el.classList.remove("drop-target");
-    }
-    this.drag.targetType = hit?.type ?? null;
-    this.drag.targetIdx = hit?.idx ?? null;
-    this.drag.insert = hit?.insert
-      ? { manual: hit.idx, beforeToken: hit.insert.beforeToken }
-      : null;
-    this.drag.ghost.textContent = this.drag.label;
-    if (!hit) return;
-
-    if (hit.type === "bin") {
-      this.el.bin.classList.add("drop-target");
-      this.drag.ghost.textContent =
-        this.drag.kind === "enclosure"
-          ? `Remove the ${this.drag.label} box`
-          : this.drag.kind === "manual"
-            ? `Remove ${this.drag.label}`
-            : this.drag.kind === "coupler"
-              ? `Delete the ${this.drag.label} coupler`
-              : `Drop to remove ${this.drag.label}`;
-      return;
-    }
-
-    // Home again: a coupler over the rail reads as its tablet's return
-    // — unless it never left.
-    if (hit.type === "rail") {
-      if (this.drag.payload.midx == null) return;
-      this.root.querySelector('.panel[data-panel="couplers"]')?.classList.add("drop-target");
-      this.drag.ghost.textContent = `${this.drag.label} → the coupler rail`;
-      return;
-    }
-
-    if (hit.type === "shoe") {
-      const shoeEl = this.root.querySelector(`.shoe[data-enclosure="${hit.idx}"]`);
-      shoeEl?.classList.add("drop-target");
-      const enclosure = this.lastSnapshot?.enclosures.find((e) => e.idx === hit.idx);
-      const stop = this.lastSnapshot?.stops.find((s) => s.id === this.drag.payload.id);
-      if (enclosure) {
-        const already = stop?.enc?.includes(hit.idx);
-        this.drag.ghost.textContent = already
-          ? `In ${enclosure.name} — drop to take out`
-          : `Drop to add to ${enclosure.name}`;
-      }
-      return;
-    }
-
-    // Over a jamb division a dragged stop or coupler shows where it
-    // would land — a seam beside the nearest knob — whether it's
-    // coming home to its own rank (a pure reorder) or arriving from
-    // the rail or another manual.
-    if (this.rankKind(this.drag.kind) && hit.insert) {
-      hit.insert.marker?.classList.add(`insert-${hit.insert.side}`);
-      const manual = this.lastSnapshot?.manuals.find((m) => m.idx === hit.idx);
-      this.drag.ghost.textContent =
-        hit.idx === this.drag.payload.midx
-          ? `Place ${this.drag.label} here`
-          : `${this.drag.label} → ${manual?.name ?? "here"}`;
-      return;
-    }
-
-    // Dropping a stop back on its own manual, or a manual's cheek on its
-    // own board, isn't a move — no need to light it up as one.
-    if (this.rankKind(this.drag.kind) && hit.idx === this.drag.payload.midx) return;
-    if (this.drag.kind === "manual" && hit.idx === this.drag.payload.idx) return;
-    for (const el of this.root.querySelectorAll(`[data-drop-manual="${hit.idx}"]`)) {
-      el.classList.add("drop-target");
-    }
-    const manual = this.lastSnapshot?.manuals.find((m) => m.idx === hit.idx);
-    if (manual) this.drag.ghost.textContent = `${this.drag.label} → ${manual.name}`;
-  }
-
-  endDrag(event) {
-    window.removeEventListener("pointermove", this._dragMove);
-    const drag = this.drag;
-    this.drag = null;
-    if (!drag) return;
-    drag.ghost.remove();
-    this.el.bin.classList.remove("visible", "drop-target");
-    for (const el of this.root.querySelectorAll(".drop-target")) el.classList.remove("drop-target");
-    for (const el of this.root.querySelectorAll(
-      ".insert-before, .insert-after, .insert-left, .insert-right"
-    )) {
-      el.classList.remove("insert-before", "insert-after", "insert-left", "insert-right");
-    }
-
-    // Let go where it was picked up: the pointer never left the
-    // control, so nobody meant to drop it anywhere — that was a click
-    // with a wobble, and the control's own click goes through.
-    // Otherwise the click the browser fires after this release belongs
-    // to the drag and must not also toggle or open anything.
-    if (drag.source) {
-      if (withinRect(drag.source.getBoundingClientRect(), event)) return;
-      suppressNextClick(drag.source);
-    }
-
-    const { targetType, targetIdx } = drag;
-    if (!targetType) return;
-
-    if (drag.kind === "stop") {
-      if (targetType === "bin") {
-        this.organCommand(commands.organUnpull(drag.payload.id));
-      } else if (targetType === "shoe") {
-        const enclosure = this.lastSnapshot?.enclosures.find((e) => e.idx === targetIdx);
-        const stop = this.lastSnapshot?.stops.find((s) => s.id === drag.payload.id);
-        if (enclosure) {
-          const already = stop?.enc?.includes(targetIdx);
-          this.organCommand(commands.organEnclosureAssign(enclosure.name, drag.payload.id, !already));
-        }
-      } else if (targetType === "manual") {
-        const sameManual = targetIdx === drag.payload.midx;
-        if (drag.insert && drag.insert.manual === targetIdx) {
-          // The drop carried a position: deal the destination rank out
-          // anew with the dragged stop where the seam showed — tokens,
-          // so any couplers seated in the rank keep their places.
-          const tokens = this.spliceRank(targetIdx, drag);
-          if (sameManual) {
-            this.organCommand(commands.organRankOrder(targetIdx, tokens));
-          } else {
-            // Arriving from another manual: move first (live), then
-            // place — the queue waits each response out, and refusals
-            // surface like any other edit's.
-            this.runQueue([
-              commands.organMove(drag.payload.id, targetIdx),
-              commands.organRankOrder(targetIdx, tokens),
-            ]);
-          }
-        } else if (!sameManual) {
-          // A keyboard drop names no position — the stop joins the
-          // manual at the bottom of its rank, as it always has. Live,
-          // but the server refuses it mid-rebuild (stale names would
-          // poison the file), so it goes through the queue.
-          this.runQueue([commands.organMove(drag.payload.id, targetIdx)]);
-        }
-      }
-    } else if (drag.kind === "coupler") {
-      if (targetType === "bin") {
-        this.showRemoveConfirm("coupler", drag.payload);
-      } else if (targetType === "rail") {
-        // Home to the rail: the seat's division deals its rank out
-        // without the coupler, which unseats it.
-        if (drag.payload.midx != null) {
-          const token = this.dragToken(drag);
-          const tokens = this.rankTokens(drag.payload.midx).filter((t) => t !== token);
-          this.organCommand(commands.organRankOrder(drag.payload.midx, tokens));
-        }
-      } else if (targetType === "manual") {
-        // Seat it in the jamb where the seam showed — or, from a
-        // keyboard drop, at the bottom of that division's rank. The
-        // server unseats it everywhere else.
-        this.organCommand(
-          commands.organRankOrder(targetIdx, this.spliceRank(targetIdx, drag))
-        );
-      }
-    } else if (drag.kind === "manual") {
-      if (targetType === "bin") {
-        this.showRemoveConfirm("manual", drag.payload);
-      } else if (targetType === "manual" && targetIdx !== drag.payload.idx) {
-        this.organCommand(commands.organManualOrder(drag.payload.idx, targetIdx));
-      }
-    } else if (drag.kind === "enclosure" && targetType === "bin") {
-      this.showRemoveConfirm("enclosure", drag.payload);
-    } else if (drag.kind === "offering-stop" && targetType === "manual") {
-      const manual = this.lastSnapshot?.manuals.find((m) => m.idx === targetIdx);
-      if (manual) {
-        this.organCommand(
-          commands.organPull(drag.payload.alias, drag.payload.manualName, manual.name, drag.payload.stopName)
-        );
-      }
-    } else if (drag.kind === "offering-division" && targetType === "manual") {
-      const manual = this.lastSnapshot?.manuals.find((m) => m.idx === targetIdx);
-      if (manual) this.organCommand(commands.organPull(drag.payload.alias, drag.payload.manualName, manual.name));
-    }
+    wireDragSource(this, el, getInfo);
   }
 
   // ---- removal: manuals and swell boxes, both confirmed the same way -----
