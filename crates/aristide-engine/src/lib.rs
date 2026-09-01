@@ -229,24 +229,23 @@ impl Engine {
         let max_stagger =
             (self.release_stagger_frames * batch_scale).min(0.025 * self.sample_rate);
         for voice in self.voices.iter_mut() {
-            if let Voice::Sampled(sampled) = voice {
-                if self.stop_batch.binary_search(&sampled.handle).is_ok() {
-                    let age_ms = (sampled.age_frames as f32 / per_ms) as u32;
-                    if sampled.onset > 0 {
-                        // Released before the onset delay elapsed:
-                        // the pallet never opened, so nothing ever
-                        // sounded and nothing should.
-                        sampled.phase = SamplePhase::FadeOut;
-                        sampled.release.amplitude = 0.0;
-                    } else if sampled.phase == SamplePhase::Held
-                        && sampled.release.pending.is_none()
-                    {
-                        let delay = (wind::xorshift_unit(&mut sampled.rng)
-                            * max_stagger) as u16;
-                        sampled.release.pending = Some((delay, age_ms));
-                    } else if let Some(sample) = self.bank.get(sampled.cursor.sample) {
-                        sampled.begin_release(sample, age_ms, self.sample_rate);
-                    }
+            if let Voice::Sampled(sampled) = voice
+                && self.stop_batch.binary_search(&sampled.handle).is_ok()
+            {
+                let age_ms = (sampled.age_frames as f32 / per_ms) as u32;
+                if sampled.onset > 0 {
+                    // Released before the onset delay elapsed: the
+                    // pallet never opened, so nothing ever sounded and
+                    // nothing should.
+                    sampled.phase = SamplePhase::FadeOut;
+                    sampled.release.amplitude = 0.0;
+                } else if sampled.phase == SamplePhase::Held
+                    && sampled.release.pending.is_none()
+                {
+                    let delay = (wind::xorshift_unit(&mut sampled.rng) * max_stagger) as u16;
+                    sampled.release.pending = Some((delay, age_ms));
+                } else if let Some(sample) = self.bank.get(sampled.cursor.sample) {
+                    sampled.begin_release(sample, age_ms, self.sample_rate);
                 }
             }
         }

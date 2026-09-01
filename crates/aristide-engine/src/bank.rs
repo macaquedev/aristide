@@ -181,7 +181,7 @@ impl Sample {
         if channels == 0 {
             return Err("zero channels".into());
         }
-        if data.len() % channels as usize != 0 {
+        if !data.len().is_multiple_of(channels as usize) {
             return Err(format!(
                 "data length {} not a multiple of {channels} channels",
                 data.len()
@@ -191,12 +191,12 @@ impl Sample {
         if frames == 0 {
             return Err("empty sample".into());
         }
-        if let Some((start, end)) = sustain_loop {
-            if start >= end || end > frames {
-                return Err(format!(
-                    "loop {start}..{end} out of bounds for {frames} frames"
-                ));
-            }
+        if let Some((start, end)) = sustain_loop
+            && (start >= end || end > frames)
+        {
+            return Err(format!(
+                "loop {start}..{end} out of bounds for {frames} frames"
+            ));
         }
         if !(sample_rate_hz.is_finite() && sample_rate_hz > 0.0) {
             return Err(format!("bad sample rate {sample_rate_hz}"));
@@ -494,7 +494,7 @@ impl Sample {
         let Some((loop_start, _)) = self.sustain_loop else {
             return;
         };
-        if !(fundamental_hz > 0.0) {
+        if fundamental_hz.is_nan() || fundamental_hz <= 0.0 {
             return;
         }
         // The nominal pitch is 12-EDO bookkeeping; real pipes sit cents
