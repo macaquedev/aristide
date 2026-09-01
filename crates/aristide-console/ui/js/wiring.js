@@ -42,11 +42,11 @@ export function actionLabel(action) {
 
 /// Split "stop:Montre 8'" into its verb ("stop:") and argument, the way
 /// the server itself reads an action string.
-export function actionVerb(action) {
+function actionVerb(action) {
   const at = action.indexOf(":");
   return at === -1 ? action : action.slice(0, at + 1);
 }
-export function actionArg(action) {
+function actionArg(action) {
   const at = action.indexOf(":");
   return at === -1 ? "" : action.slice(at + 1);
 }
@@ -404,7 +404,7 @@ export function buildControlsList(container, ctx) {
 
 /// One binding: what arrived, what it does, and the two ways to set
 /// each — Listen for the trigger, a pair of selects for the action.
-export function controlRow(ctx, control, slot, catalogue) {
+function controlRow(ctx, control, slot, catalogue) {
   const { snapshot, learning, send } = ctx;
   const listening = learning === slot;
   const action = control?.action ?? "octave-up";

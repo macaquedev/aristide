@@ -30,6 +30,8 @@ import {
   pistonRow,
   keyboardNote,
   PITCH_ACTIONS,
+  emptyNote,
+  option,
 } from "./wiring.js";
 
 // What the native add-source dialog offers. Narrower than the picker's
@@ -1218,12 +1220,12 @@ export class Editor {
   /// sources still offer; clicking one pulls it onto this manual. The
   /// list stays open so a division can be registered in one visit.
   async showDivisionStops(menu, manual) {
-    menu.replaceChildren(this.emptyNote("Reading the sources…"));
+    menu.replaceChildren(emptyNote("Reading the sources…"));
     if (!this.offerings) await this.fetchOfferings(false);
     menu.replaceChildren();
     const sources = this.offerings;
     if (sources == null) {
-      menu.append(this.emptyNote("Couldn't read this organ's sources."));
+      menu.append(emptyNote("Couldn't read this organ's sources."));
       return;
     }
     let any = false;
@@ -1254,7 +1256,7 @@ export class Editor {
     }
     if (!any) {
       menu.append(
-        this.emptyNote("The sources have nothing left to offer — add a sample set first.")
+        emptyNote("The sources have nothing left to offer — add a sample set first.")
       );
     }
   }
@@ -1388,9 +1390,11 @@ export class Editor {
     // ASCII spellings a player can type, black keys under both names.
     for (let key = 0; key <= 127; key++) {
       for (const spelling of keySpellings(key)) {
-        const option = document.createElement("option");
-        option.value = spelling;
-        this.el.pitchNames.append(option);
+        // A bare value, no label: the datalist offers it as typed text,
+        // not the value/label pair wiring.js's option() builds.
+        const entry = document.createElement("option");
+        entry.value = spelling;
+        this.el.pitchNames.append(entry);
       }
     }
 
@@ -1566,14 +1570,7 @@ export class Editor {
   /// own). `pairs` is `[value, label]`.
   setFollowOptions(pairs) {
     renderIfChanged(this.el.tuningFollow, JSON.stringify(pairs), () => {
-      this.el.tuningFollow.replaceChildren(
-        ...pairs.map(([value, label]) => {
-          const option = document.createElement("option");
-          option.value = value;
-          option.textContent = label;
-          return option;
-        })
-      );
+      this.el.tuningFollow.replaceChildren(...pairs.map(([value, label]) => option(value, label)));
     });
   }
 
@@ -2058,7 +2055,7 @@ export class Editor {
       this.el.midiPorts.replaceChildren();
       if (!midi.ports.length) {
         this.el.midiPorts.append(
-          this.emptyNote("No MIDI inputs. Plug the console in — the list finds it by itself.")
+          emptyNote("No MIDI inputs. Plug the console in — the list finds it by itself.")
         );
       }
       for (const port of midi.ports) {
@@ -2974,7 +2971,7 @@ export class Editor {
     this.stopSrcOpen = true;
     this.el.stopForm.classList.add("hidden");
     this.el.stopSrcView.classList.remove("hidden");
-    this.el.stopSrcList.replaceChildren(this.emptyNote("Reading the sources…"));
+    this.el.stopSrcList.replaceChildren(emptyNote("Reading the sources…"));
     if (!this.offerings) await this.fetchOfferings(false);
     this.renderStopSrcList();
   }
@@ -2989,7 +2986,7 @@ export class Editor {
     this.el.stopSrcList.replaceChildren();
     const sources = this.offerings;
     if (sources == null) {
-      this.el.stopSrcList.append(this.emptyNote("Couldn't read this organ's sources."));
+      this.el.stopSrcList.append(emptyNote("Couldn't read this organ's sources."));
       return;
     }
     const stop = this.lastSnapshot?.stops.find((s) => s.id === this.stopOpen);
@@ -3031,7 +3028,7 @@ export class Editor {
       }
     }
     if (!any) {
-      this.el.stopSrcList.append(this.emptyNote("The sources have nothing to offer."));
+      this.el.stopSrcList.append(emptyNote("The sources have nothing to offer."));
     }
   }
 
@@ -3289,12 +3286,7 @@ export class Editor {
       return span;
     };
     const options = (select, entries) => {
-      for (const [value, text] of entries) {
-        const opt = document.createElement("option");
-        opt.value = value;
-        opt.textContent = text;
-        select.append(opt);
-      }
+      for (const [value, text] of entries) select.append(option(value, text));
     };
     const manualEntries = manuals.map((manual) => [String(manual.idx), manual.name]);
 
@@ -3628,7 +3620,7 @@ export class Editor {
       (entry) => entry.dir || entry.name.toLowerCase().endsWith(ext)
     );
     if (!entries.length) {
-      this.el.tuningBrowseList.append(this.emptyNote("Nothing here."));
+      this.el.tuningBrowseList.append(emptyNote("Nothing here."));
       return;
     }
     for (const entry of entries) {
@@ -4230,23 +4222,16 @@ export class Editor {
     const container = this.el.offerings;
     container.replaceChildren();
     if (sources == null) {
-      container.append(this.emptyNote("Couldn't read this organ's sources."));
+      container.append(emptyNote("Couldn't read this organ's sources."));
       return;
     }
     if (!sources.length) {
       container.append(
-        this.emptyNote("No sources yet — double-click the console to add a sample set.")
+        emptyNote("No sources yet — double-click the console to add a sample set.")
       );
       return;
     }
     for (const source of sources) container.append(this.offeringSourceRow(source));
-  }
-
-  emptyNote(text) {
-    const p = document.createElement("p");
-    p.className = "pane-empty";
-    p.textContent = text;
-    return p;
   }
 
   offeringSourceRow(source) {
@@ -4663,12 +4648,7 @@ export class Editor {
     const manuals = this.lastSnapshot?.manuals ?? [];
     for (const select of [this.el.addCouplerSounds, this.el.addCouplerOn]) {
       select.replaceChildren();
-      for (const manual of manuals) {
-        const opt = document.createElement("option");
-        opt.value = manual.idx;
-        opt.textContent = manual.name;
-        select.append(opt);
-      }
+      for (const manual of manuals) select.append(option(manual.idx, manual.name));
     }
     // The classic default: the second manual sounding on the first —
     // and a name to match, ready to be overtyped.
@@ -4769,7 +4749,7 @@ export class Editor {
       (entry) => entry.dir || loadable.test(entry.name)
     );
     if (!entries.length) {
-      this.el.addBrowseList.append(this.emptyNote("Nothing here."));
+      this.el.addBrowseList.append(emptyNote("Nothing here."));
       return;
     }
     for (const entry of entries) {
