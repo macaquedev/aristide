@@ -2648,6 +2648,14 @@ body.no-organ .console { visibility: hidden; }
   box-shadow: var(--bevel);
 }
 .editor-drawer-tab:hover { color: var(--text); }
+/* Drawer out: the tab moves to its edge, above it, and reads engaged —
+   the same pull closes it. Width mirrors .editor-drawer. */
+.editor-drawer-tab.on {
+  right: min(300px, 90vw);
+  z-index: 45;
+  color: var(--text);
+  background: linear-gradient(90deg, #3c4045, #33363a);
+}
 
 .editor-drawer {
   position: fixed;

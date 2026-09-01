@@ -4243,15 +4243,23 @@ export class Editor {
     else this.openDrawer();
   }
 
+  // The tab is a pull, not a launcher: open, it rides the drawer's
+  // edge lit, and pressing it again puts the drawer away.
   openDrawer() {
     this.drawerOpen = true;
     this.el.drawer.classList.remove("hidden");
+    this.el.drawerTab.classList.add("on");
+    this.el.drawerTab.setAttribute("aria-expanded", "true");
+    this.el.drawerTab.setAttribute("aria-label", "Close the library drawer");
     this.fetchOfferings();
   }
 
   closeDrawer() {
     this.drawerOpen = false;
     this.el.drawer.classList.add("hidden");
+    this.el.drawerTab.classList.remove("on");
+    this.el.drawerTab.setAttribute("aria-expanded", "false");
+    this.el.drawerTab.setAttribute("aria-label", "Open the library drawer");
   }
 
   async fetchOfferings(render = true) {
