@@ -49,7 +49,7 @@ impl VoiceStart {
             group: self.spec.group,
             wind_weight: self.spec.wind_weight,
             brightness: self.spec.brightness,
-            enclosure: self.spec.enclosure,
+            enclosures: self.spec.enclosures,
             bus: self.spec.bus,
             delay_frames: self.spec.delay_frames,
             nominal_hz: self.spec.nominal_hz,
@@ -437,7 +437,10 @@ impl Console {
                 else {
                     continue;
                 };
-                for &enclosure in chest.enclosures.iter().take(1) {
+                // Every box the chest sits in, not just the first: a
+                // manual whose stops stand in a box inside another box
+                // must drive both from its expression pedal.
+                for &enclosure in chest.enclosures.iter() {
                     if enclosure < max
                         && !self.manual_enclosures[manual_index].contains(&(enclosure as u8))
                     {
@@ -2774,7 +2777,8 @@ mod tests {
                         nominal_hz: 440.0,
                         home_cents: 0.0,
                         model_cents: 0.0,
-                        enclosure: aristide_engine::enclosure::ENCLOSURE_NONE,
+                        enclosures: [aristide_engine::enclosure::ENCLOSURE_NONE;
+                            aristide_engine::enclosure::MAX_VOICE_ENCLOSURES],
                         bus: 0,
                         delay_frames: 0,
                     },
@@ -3228,7 +3232,8 @@ mod tests {
                     nominal_hz: 440.0,
                     home_cents: 0.0,
                     model_cents: 0.0,
-                    enclosure: aristide_engine::enclosure::ENCLOSURE_NONE,
+                    enclosures: [aristide_engine::enclosure::ENCLOSURE_NONE;
+                        aristide_engine::enclosure::MAX_VOICE_ENCLOSURES],
                     bus: 0,
                     delay_frames: 0,
                 },
@@ -3582,7 +3587,8 @@ mod tests {
                         nominal_hz: 440.0,
                         home_cents: 0.0,
                         model_cents: 0.0,
-                        enclosure: aristide_engine::enclosure::ENCLOSURE_NONE,
+                        enclosures: [aristide_engine::enclosure::ENCLOSURE_NONE;
+                            aristide_engine::enclosure::MAX_VOICE_ENCLOSURES],
                         bus: 0,
                         delay_frames: 0,
                     },
@@ -4562,7 +4568,8 @@ mod tests {
                         nominal_hz: 440.0,
                         home_cents: 0.0,
                         model_cents: 0.0,
-                        enclosure: aristide_engine::enclosure::ENCLOSURE_NONE,
+                        enclosures: [aristide_engine::enclosure::ENCLOSURE_NONE;
+                            aristide_engine::enclosure::MAX_VOICE_ENCLOSURES],
                         bus: 0,
                         delay_frames: 0,
                     },

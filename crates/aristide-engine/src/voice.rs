@@ -9,7 +9,7 @@
 use aristide_model::units::cents_to_ratio;
 
 use crate::bank::Sample;
-use crate::enclosure::Enclosure;
+use crate::enclosure::{Enclosure, ENCLOSURE_NONE, MAX_ENCLOSURES, MAX_VOICE_ENCLOSURES};
 use crate::resample::SincTables;
 use crate::tone::ToneVoice;
 use crate::wind::{self, WindGroup};
@@ -107,15 +107,15 @@ pub(crate) struct Brightness {
     pub(crate) lowpass: [f32; 2],
 }
 
-/// Swell box the voice sits inside, with the box factors cached per
-/// voice: a Held voice re-reads them each block; a released voice keeps
-/// them FROZEN — the tail is room decay that already left the box, so
-/// later shutter moves must not touch it (HW's rule; GO bakes the gain
-/// in likewise).
+/// One swell box the voice sits inside, with the box factors cached
+/// per voice: a Held voice re-reads them each block; a released voice
+/// keeps them FROZEN — the tail is room decay that already left the
+/// box, so later shutter moves must not touch it (HW's rule; GO bakes
+/// the gain in likewise).
 #[derive(Clone, Copy)]
-pub(crate) struct EnclosureState {
+pub(crate) struct EnclosureSlot {
     /// Which box ([`ENCLOSURE_NONE`](crate::enclosure::ENCLOSURE_NONE)
-    /// = none).
+    /// = this slot is unused).
     pub(crate) index: u8,
     /// Broadband box gain, de-zippered per frame with a ~5 ms one-pole
     /// toward `gain_target` (block-stepped gain is audible zipper; a
@@ -128,6 +128,17 @@ pub(crate) struct EnclosureState {
     pub(crate) hi_gain: f32,
     pub(crate) coeff: f32,
     pub(crate) lowpass: [f32; 2],
+}
+
+/// Every box the voice sits inside. Boxes nest — an Echo or Solo box
+/// standing inside the Swell — and a pipe in a nested box is heard
+/// through BOTH shutter fronts, so the legs cascade: gains multiply
+/// (GO composes a chest's enclosures the same way) and the shelves
+/// filter in series. Unused slots are skipped, which keeps the
+/// single-box path bit-identical to the pre-nesting engine.
+#[derive(Clone, Copy)]
+pub(crate) struct EnclosureState {
+    pub(crate) slots: [EnclosureSlot; MAX_VOICE_ENCLOSURES],
 }
 
 /// Everything that only starts moving once the key comes up.
@@ -272,7 +283,13 @@ impl WindState {
     /// every pipe sits at its own phase. All identity when the chest is
     /// quiet (factors 1, no noise).
     #[inline]
-    pub(crate) fn follow_chest(&mut self, chest: &WindGroup, dt: f32, rng: &mut u32) {
+    pub(crate) fn follow_chest(
+        &mut self,
+        chest: &WindGroup,
+        box_loss: f32,
+        dt: f32,
+        rng: &mut u32,
+    ) {
         let params = chest.params();
         // Per-voice flow noise, linearized around the chest factors (a
         // powf per voice per block would also be fine, but ±2 %
@@ -282,6 +299,16 @@ impl WindState {
             self.wander.step(dt, params.flow_noise, rng);
             deviation = self.wander.deviation();
         }
+        // A swell box is the volume its pipes exhaust into, and a pipe
+        // speaks on the DIFFERENCE between its chest and its mouth —
+        // so the overpressure a closed box builds is a pressure LOSS
+        // for every pipe inside it. It is a pressure, not a new
+        // modulation shape, so it enters exactly where flow noise does:
+        // one deviation, three exponents, and the per-pipe lags below
+        // then let pitch answer within a few periods while amplitude
+        // and timbre take the pipe's speech time. Nested boxes were
+        // summed by the caller.
+        deviation -= box_loss;
         let sens = self.sens;
         let target_rate =
             1.0 + (chest.rate_factor() - 1.0) * sens + params.pitch_exponent * deviation;
@@ -317,7 +344,18 @@ impl Brightness {
     }
 }
 
-impl EnclosureState {
+impl EnclosureSlot {
+    /// A slot no voice sits in: skipped everywhere, and the reason a
+    /// single-box voice renders exactly as it did before nesting.
+    pub(crate) const EMPTY: EnclosureSlot = EnclosureSlot {
+        index: ENCLOSURE_NONE,
+        gain: 1.0,
+        gain_target: 1.0,
+        hi_gain: 1.0,
+        coeff: 0.0,
+        lowpass: [0.0; 2],
+    };
+
     /// Re-read the box. Only Held voices do this; a released voice's
     /// tail keeps the factors it left the box with.
     #[inline]
@@ -342,6 +380,55 @@ impl EnclosureState {
         self.gain += ramp * (self.gain_target - self.gain);
         *left *= self.gain;
         *right *= self.gain;
+    }
+}
+
+impl EnclosureState {
+    pub(crate) const UNENCLOSED: EnclosureState = EnclosureState {
+        slots: [EnclosureSlot::EMPTY; MAX_VOICE_ENCLOSURES],
+    };
+
+    /// Does this voice sit in any box at all?
+    #[inline]
+    pub(crate) fn enclosed(&self) -> bool {
+        self.slots.iter().any(|slot| slot.index != ENCLOSURE_NONE)
+    }
+
+    /// Re-read every box (Held voices only, as above).
+    #[inline]
+    pub(crate) fn follow_boxes(&mut self, boxes: &[Enclosure; MAX_ENCLOSURES]) {
+        for slot in self.slots.iter_mut() {
+            if slot.index != ENCLOSURE_NONE {
+                slot.follow_box(&boxes[slot.index as usize]);
+            }
+        }
+    }
+
+    /// The overpressure this voice's mouth sits in, summed over its
+    /// boxes. Nesting stacks additively: an inner box vents into the
+    /// outer one, so its own rise is measured *relative* to the outer
+    /// box's, and referenced to the room the pipe's mouth sees the sum
+    /// along the chain.
+    #[inline]
+    pub(crate) fn pressure_loss(&self, boxes: &[Enclosure; MAX_ENCLOSURES]) -> f32 {
+        let mut loss = 0.0;
+        for slot in self.slots.iter() {
+            if slot.index != ENCLOSURE_NONE {
+                loss += boxes[slot.index as usize].pressure_loss();
+            }
+        }
+        loss
+    }
+
+    /// Every box the voice sits in, cascaded: through the inner
+    /// shutters first, then the outer ones.
+    #[inline]
+    pub(crate) fn apply(&mut self, left: &mut f32, right: &mut f32, lite: bool, ramp: f32) {
+        for slot in self.slots.iter_mut() {
+            if slot.index != ENCLOSURE_NONE {
+                slot.apply(left, right, lite, ramp);
+            }
+        }
     }
 }
 
@@ -782,6 +869,17 @@ impl SampledVoice {
     /// loud one. Exception: a near-silent loop (control-noise samples:
     /// thump → silent loop → thump tail) means the tail is MEANT to be
     /// louder — play it as recorded.
+    ///
+    /// One gain for both channels, deliberately. A stereo recording's
+    /// tail does sit at a different L/R balance from its sustain (demo
+    /// set, measured 2026-09-02: median 0.8 dB, p90 4.4 dB, worst
+    /// 11.4 dB) — but that is the room, not an artifact: the direct
+    /// sound that favours the near mic stops with the pipe and only the
+    /// (more symmetric) diffuse field is left. Matching per channel
+    /// would overwrite the recorded release's stereo image with the
+    /// sustain's. Phase is the opposite case — a phase mismatch buys
+    /// nothing and only cancels — which is why *that* one is corrected
+    /// per channel (`Sample::alignment_turns`).
     fn match_tail_level(&mut self, sample: &Sample) {
         let reference = sample.tail_reference_level();
         self.release.tail_gain = if reference > 1e-5 && self.envelope > 0.02 * reference {

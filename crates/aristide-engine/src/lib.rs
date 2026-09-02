@@ -30,13 +30,13 @@ use std::sync::Arc;
 
 use bank::SampleBank;
 use command::COMMAND_QUEUE_CAPACITY;
-use enclosure::{Enclosure, ENCLOSURE_NONE, MAX_ENCLOSURES};
+use enclosure::{Enclosure, ENCLOSURE_NONE, MAX_ENCLOSURES, MAX_VOICE_ENCLOSURES};
 use resample::SincTables;
 use routing::{Bus, MAX_BUSES, MAX_CHUNK_FRAMES};
 use rtrb::{Consumer, Producer, RingBuffer};
 use tone::{ToneStage, ToneVoice, TONE_ATTACK_SECONDS, TONE_GAIN, TONE_RELEASE_SECONDS};
 use voice::{
-    Brightness, EnclosureState, Onset, PlaybackCursor, ReleaseState, SamplePhase,
+    Brightness, EnclosureSlot, EnclosureState, Onset, PlaybackCursor, ReleaseState, SamplePhase,
     SampledVoice, Voice, WindState,
 };
 use wind::{WindGroup, MAX_WIND_GROUPS};
@@ -85,7 +85,7 @@ struct VoiceSpec {
     group: u8,
     wind_weight: f32,
     brightness: f32,
-    enclosure: u8,
+    enclosures: [u8; MAX_VOICE_ENCLOSURES],
     bus: u8,
     delay_frames: u32,
     nominal_hz: f32,
@@ -313,11 +313,15 @@ impl Engine {
         quietest.map(|(index, _)| index)
     }
 
-    /// What each chest is being asked for this block: the wind weight of
-    /// everything sounding on it, with young voices boosted (the
-    /// pallet-opening gulp).
-    fn aggregate_wind_demand(&self) -> [f32; MAX_WIND_GROUPS] {
-        let mut demand = [0.0f32; MAX_WIND_GROUPS];
+    /// What the wind system is being asked for this block: per chest,
+    /// the wind weight of everything sounding on it with young voices
+    /// boosted (the pallet-opening gulp), and per swell box, the wind
+    /// the pipes inside it are exhausting.
+    fn aggregate_wind_demand(&self) -> Demand {
+        let mut demand = Demand {
+            chests: [0.0f32; MAX_WIND_GROUPS],
+            boxes: [0.0f32; MAX_ENCLOSURES],
+        };
         for voice in self.voices.iter() {
             let Voice::Sampled(sampled) = voice else {
                 continue;
@@ -336,18 +340,29 @@ impl Engine {
             } else {
                 0.0
             };
-            demand[sampled.wind.group as usize] += sampled.wind.weight * (1.0 + boost);
+            demand.chests[sampled.wind.group as usize] += sampled.wind.weight * (1.0 + boost);
+            // The box fills from what the pipe actually exhausts, so
+            // the pallet gulp does NOT count here: that transient goes
+            // into filling the pipe's foot, not out of its mouth. A
+            // pipe in a nested box exhausts into the inner box, which
+            // vents into the outer one — flow is conserved along the
+            // chain, so every box it sits in sees the same draw.
+            for slot in sampled.enclosure.slots.iter() {
+                if slot.index != ENCLOSURE_NONE {
+                    demand.boxes[slot.index as usize] += sampled.wind.weight;
+                }
+            }
         }
         demand
     }
 
     /// One regulator step and one shutter step per block.
-    fn step_wind_and_boxes(&mut self, demand: &[f32; MAX_WIND_GROUPS], dt: f32) {
+    fn step_wind_and_boxes(&mut self, demand: &Demand, dt: f32) {
         for (group, wind) in self.wind.iter_mut().enumerate() {
-            wind.step(demand[group], dt);
+            wind.step(demand.chests[group], dt);
         }
-        for box_state in self.enclosures.iter_mut() {
-            box_state.step(dt, self.sample_rate);
+        for (index, box_state) in self.enclosures.iter_mut().enumerate() {
+            box_state.step(demand.boxes[index], dt, self.sample_rate);
         }
     }
 
@@ -464,7 +479,7 @@ impl Engine {
                 group,
                 wind_weight,
                 brightness,
-                enclosure,
+                enclosures,
                 bus,
                 delay_frames,
                 nominal_hz,
@@ -476,7 +491,7 @@ impl Engine {
                 group,
                 wind_weight,
                 brightness,
-                enclosure,
+                enclosures,
                 bus,
                 delay_frames,
                 nominal_hz,
@@ -598,7 +613,7 @@ impl Engine {
                 a: spec.brightness.clamp(0.0, 1.0),
                 lowpass: [0.0; 2],
             },
-            enclosure: self.seed_enclosure(spec.enclosure),
+            enclosure: self.seed_enclosure(spec.enclosures),
             release: ReleaseState {
                 fade: 0.0,
                 fade_step: 0.0,
@@ -655,27 +670,31 @@ impl Engine {
         }
     }
 
-    /// Voices born inside a box start at the box's CURRENT factors
-    /// (starting at 1.0 would ramp every attack).
-    fn seed_enclosure(&self, enclosure: u8) -> EnclosureState {
-        let index = if (enclosure as usize) < MAX_ENCLOSURES {
-            enclosure
-        } else {
-            ENCLOSURE_NONE
-        };
-        let box_state = self
-            .enclosures
-            .get(index as usize)
-            .copied()
-            .unwrap_or_default();
-        EnclosureState {
-            index,
-            gain: box_state.gain(),
-            gain_target: box_state.gain(),
-            hi_gain: box_state.hi_gain(),
-            coeff: box_state.coeff(),
-            lowpass: [0.0; 2],
+    /// Voices born inside a box start at that box's CURRENT factors
+    /// (starting at 1.0 would ramp every attack). Every membership is
+    /// seeded, and duplicates are dropped — a chest listed twice in one
+    /// box must not attenuate twice.
+    fn seed_enclosure(&self, enclosures: [u8; MAX_VOICE_ENCLOSURES]) -> EnclosureState {
+        let mut state = EnclosureState::UNENCLOSED;
+        let mut used = 0usize;
+        for &enclosure in enclosures.iter() {
+            if (enclosure as usize) >= MAX_ENCLOSURES
+                || state.slots[..used].iter().any(|s| s.index == enclosure)
+            {
+                continue;
+            }
+            let box_state = self.enclosures[enclosure as usize];
+            state.slots[used] = EnclosureSlot {
+                index: enclosure,
+                gain: box_state.gain(),
+                gain_target: box_state.gain(),
+                hi_gain: box_state.hi_gain(),
+                coeff: box_state.coeff(),
+                lowpass: [0.0; 2],
+            };
+            used += 1;
         }
+        state
     }
 
     /// [`Command::SetVoiceRate`]: only Held voices move — a release tail
@@ -841,6 +860,15 @@ impl Engine {
             .unwrap_or(1.0)
     }
 
+    /// Overpressure inside an enclosure, as a fraction of static chest
+    /// pressure (diagnostics and tests).
+    pub fn enclosure_pressure_rise(&self, index: usize) -> f32 {
+        self.enclosures
+            .get(index)
+            .map(|e| e.pressure_loss())
+            .unwrap_or(0.0)
+    }
+
     /// Current pressure of a wind group (diagnostics and tests).
     pub fn wind_pressure(&self, group: usize) -> f32 {
         self.wind
@@ -862,6 +890,13 @@ impl Engine {
             )
         })
     }
+}
+
+/// What one block asks of the wind system: per chest and per swell box.
+#[derive(Clone, Copy)]
+struct Demand {
+    chests: [f32; MAX_WIND_GROUPS],
+    boxes: [f32; MAX_ENCLOSURES],
 }
 
 /// The read-only environment one block of rendering happens against:
@@ -916,9 +951,17 @@ fn render_sampled_voice(
     // re-reads its chest each block; a released voice keeps the factors
     // frozen from its last Held block — the pallet is closed, the tail
     // is room decay, and trem/pressure must not wobble it.
+    let enclosed = sampled.enclosure.enclosed();
     if !lite && sampled.phase == SamplePhase::Held {
         let chest = &wind[sampled.wind.group as usize];
-        sampled.wind.follow_chest(chest, dt, &mut sampled.rng);
+        // What the pipe's mouth sits in: a closed box the pipe is
+        // exhausting into pushes back, and that is a pressure loss.
+        let box_loss = if enclosed {
+            sampled.enclosure.pressure_loss(enclosures)
+        } else {
+            0.0
+        };
+        sampled.wind.follow_chest(chest, box_loss, dt, &mut sampled.rng);
     }
     let (rate_scale, gain, treble) = if lite {
         (1.0f64, master, 1.0f32)
@@ -933,15 +976,13 @@ fn render_sampled_voice(
     // untouched-pressure rendering bit-identical.
     let tilting = sampled.brightness.a > 0.0 && (treble - 1.0).abs() > 1e-4;
 
-    // Swell box: a Held voice tracks its box each block (gain ramped per
-    // frame — pedal sweeps would zipper otherwise); any released/fading
-    // voice keeps the factors frozen from its last Held block. Lite mode
-    // keeps the broadband gain (the pedal must still do something) and
-    // only skips the shutter filter.
-    let enclosed = sampled.enclosure.index != ENCLOSURE_NONE;
+    // Swell boxes: a Held voice tracks every box it sits in, each block
+    // (gain ramped per frame — pedal sweeps would zipper otherwise); any
+    // released/fading voice keeps the factors frozen from its last Held
+    // block, for all of its boxes. Lite mode keeps the broadband gain
+    // (the pedal must still do something) and only skips the filter.
     if enclosed && sampled.phase == SamplePhase::Held {
-        let box_state = &enclosures[sampled.enclosure.index as usize];
-        sampled.enclosure.follow_box(box_state);
+        sampled.enclosure.follow_boxes(enclosures);
     }
     let held = sampled.phase == SamplePhase::Held;
     sampled.cursor.step_glide(frames, held, sinc);
