@@ -879,6 +879,21 @@ fn decode_rank_attacks(
                 })
                 .collect();
             attack_options.insert((rank.id, pipe_index as u16), options);
+            // Wire the mid-hold recording switches. A wave tremulant
+            // engaging or releasing crosses already-held voices from
+            // the recording made under one state into the one made
+            // under the other, so every ordered pair of variants whose
+            // `IsTremulant` differs needs a loop→loop phase map.
+            // Variants that agree on it never switch mid-hold — a note
+            // does not change how hard it was struck, nor how long ago
+            // the pipe last closed — so they cost nothing here.
+            for &(a, from) in variants.iter() {
+                for &(b, to) in variants.iter() {
+                    if attacks[a].wave_tremulant != attacks[b].wave_tremulant {
+                        bank.attach_switch(from.index, to.index);
+                    }
+                }
+            }
         }
 
         // Where the recording's pitch claim comes from: an explicit

@@ -4,6 +4,7 @@ Newest first. One entry per work session; keep entries factual and short.
 Milestones refer to DESIGN.md.
 
 - [2026-09-02 — voicing reaches the pipe](progress/2026-09-02-pipe-voicing.md)
+- [2026-09-02 — a wave tremulant reaches the notes already held](progress/2026-09-02-wave-trem-held-notes.md)
 - [2026-09-02 — the combination action, whole: divisionals, stepper, crescendo, piston rail](progress/2026-09-02-combination-action.md)
 - [2026-09-02 — release tails play off the disk (gap §3e)](progress/2026-09-02-disk-streaming.md)
 - [2026-09-02 — a recorded A/B against GrandOrgue](progress/2026-09-02-ab-grandorgue.md)

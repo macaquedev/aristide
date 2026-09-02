@@ -467,8 +467,9 @@ main thread; a failed load reports and leaves the running organ untouched.
   docs/progress/2026-09-02-ab-grandorgue.md), the whole combination action —
   divisionals honouring GO's `DivisionalsStore*` flags, the stepper, an
   additive crescendo, and the console's piston rail, all stored by name in the
-  organ file (2026-09-02), pipe-scope voicing with a brightness/EQ leg and
-  live voicing edits (2026-09-02). Still open: wave-trem switch on held notes.
+  organ file (2026-09-02), wave-trem switch on held notes (2026-09-02),
+  pipe-scope voicing with a brightness/EQ leg and live voicing edits
+  (2026-09-02). Nothing is left open on this list.
 - **M5 — headless split + GUI**: IPC protocol, native GUI console, multi-window. The
   console shipped 2026-08-13 as a Tauri 2 shell over the web console (replacing the
   egui GUI) and edits the organ in place (see "The console edits the instrument"

@@ -200,6 +200,53 @@ pub(crate) struct ReleaseState {
     pub(crate) wave_trem: bool,
 }
 
+/// A recording switch in flight: the voice is crossfading from its
+/// current sample's sustain loop into ANOTHER recording of the same
+/// pipe, and will carry on `Held` there — what a wave tremulant does
+/// to notes that are already sounding (GO's `SwitchToAnotherAttack`).
+///
+/// The phase stays [`SamplePhase::Held`] throughout, deliberately: the
+/// voice never leaves its loop, so the wind and box following, the
+/// pallet's wind draw, and above all the `past_loop` invariant behave
+/// exactly as they do for any held note. Only the second leg is new.
+#[derive(Clone, Copy)]
+pub(crate) struct SwitchState {
+    /// The incoming recording; `None` = no switch in flight.
+    pub(crate) sample: Option<u32>,
+    /// Cursor into the incoming recording, circling ITS sustain loop
+    /// (a release leg runs off the end of its tail; this one wraps).
+    pub(crate) position: f64,
+    pub(crate) loop_index: u8,
+    /// Crossfade progress 0→1 and its per-frame step (pitch-scaled,
+    /// like the release splice — ~9 fundamental periods).
+    pub(crate) fade: f32,
+    pub(crate) step: f32,
+    /// Level match applied to the incoming leg so the crossfade does
+    /// not step in loudness (see `SampledVoice::start_switch`).
+    pub(crate) gain: f32,
+    /// The incoming recording's playback rate as a factor on the
+    /// voice's own — the two variants are the same pipe but need not
+    /// be the same file sample rate. Folded into the voice's rate at
+    /// handover.
+    pub(crate) rate_ratio: f64,
+    /// Sinc bucket for the post-handover rate, picked control-side at
+    /// switch time so the handover itself stays branch-free.
+    pub(crate) kernel: usize,
+}
+
+impl SwitchState {
+    pub(crate) const IDLE: SwitchState = SwitchState {
+        sample: None,
+        position: 0.0,
+        loop_index: 0,
+        fade: 0.0,
+        step: 0.0,
+        gain: 1.0,
+        rate_ratio: 1.0,
+        kernel: 0,
+    };
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct SampledVoice {
     pub(crate) handle: u64,
@@ -242,6 +289,7 @@ pub(crate) struct SampledVoice {
     pub(crate) brightness: Brightness,
     pub(crate) enclosure: EnclosureState,
     pub(crate) release: ReleaseState,
+    pub(crate) switch: SwitchState,
 }
 
 /// Per-block invariants of a sampled voice's render loop, hoisted out
@@ -268,6 +316,12 @@ pub(crate) struct VoiceBlockContext {
     pub(crate) tail_resident_limit: f64,
     pub(crate) current_loop: Option<(u64, u64)>,
     pub(crate) looping: bool,
+    /// The incoming leg's sustain loop while a recording switch is in
+    /// flight. Fixed for the whole block: unlike the persistent leg,
+    /// the switch cursor never re-draws a random loop mid-fade — it
+    /// only lives for the crossfade, and a loop change would strand
+    /// this cached range.
+    pub(crate) switch_loop: Option<(u64, u64)>,
     /// Engine output sample rate; releases need it to convert dB/s
     /// decay compensation into a per-frame factor.
     pub(crate) output_sr: f32,
@@ -480,18 +534,27 @@ pub(crate) enum Onset {
 
 impl SampledVoice {
     #[inline]
+    /// `second` is the voice's other leg, when it has one: the release
+    /// material it is splicing out to, or — while a recording switch is
+    /// in flight — the recording it is crossing into. A voice never has
+    /// both (a switch is resolved before any release begins), so one
+    /// slot carries both cases and the per-frame path stays two reads.
     pub(crate) fn block_context(
         &self,
         sample: &Sample,
-        external: Option<&Sample>,
+        second: Option<&Sample>,
         rate_scale: f64,
         lite: bool,
         output_sr: f32,
     ) -> VoiceBlockContext {
         let current_loop = sample.loop_at(self.cursor.loop_index as usize);
+        let switch_loop = match (self.switch.sample, second) {
+            (Some(_), Some(target)) => target.loop_at(self.switch.loop_index as usize),
+            _ => None,
+        };
         let streaming = holds_slot(self.stream);
         let (last, resident_limit) = readable(sample, streaming);
-        let (tail_last, tail_resident_limit) = readable(external.unwrap_or(sample), streaming);
+        let (tail_last, tail_resident_limit) = readable(second.unwrap_or(sample), streaming);
         VoiceBlockContext {
             lite,
             rate: self.cursor.rate * rate_scale,
@@ -501,6 +564,7 @@ impl SampledVoice {
             tail_resident_limit,
             current_loop,
             looping: current_loop.is_some(),
+            switch_loop,
             output_sr,
         }
     }
@@ -525,6 +589,15 @@ impl SampledVoice {
         Onset::Speaks(start)
     }
 
+    /// The other sample the voice reads from this block, if any:
+    /// release material during a key-off splice, or the incoming
+    /// recording during a wave-tremulant switch. Never both — a switch
+    /// is settled before any release begins (`resolve_switch`).
+    #[inline]
+    pub(crate) fn second_leg(&self) -> Option<u32> {
+        self.cursor.external_release.or(self.switch.sample)
+    }
+
     /// Track the voice's own loudness (pre-gain) for release level
     /// matching.
     #[inline]
@@ -539,7 +612,7 @@ impl SampledVoice {
     pub(crate) fn tick(
         &mut self,
         sample: &Sample,
-        external: Option<&Sample>,
+        second: Option<&Sample>,
         tables: &SincTables,
         ctx: &VoiceBlockContext,
         crossfade_step: f32,
@@ -553,18 +626,23 @@ impl SampledVoice {
         }
         let (mut left, mut right) =
             self.read_frame(sample, tables, ctx, streams.as_deref_mut());
-        // This frame's output gain, captured BEFORE the phase step
-        // mutates self.gain. The crossfade-completion frame folds
-        // tail_gain into the voice gain for FUTURE frames, but its own
-        // blend already applied tail_gain — returning with the mutated
-        // gain applied it twice, dipping exactly one frame by up to 5x
-        // (tail_gain floor 0.2): an audible tick on every splice
-        // handover.
+        // This frame's output gain, captured BEFORE anything below
+        // mutates self.gain. A completing crossfade folds its level
+        // match into the voice gain for FUTURE frames, but its own
+        // blend already applied that factor — returning with the
+        // mutated gain applied it twice, dipping exactly one frame by
+        // up to 5x (tail_gain floor 0.2): an audible tick on every
+        // splice handover.
         let frame_gain = self.gain;
-        let advance_position = self.step_phase(
+        let mut advance_position = if self.switch.sample.is_some() {
+            self.blend_switch(&mut left, &mut right, second, tables, ctx, rate)
+        } else {
+            true
+        };
+        advance_position &= self.step_phase(
             &mut left,
             &mut right,
-            external.unwrap_or(sample),
+            second.unwrap_or(sample),
             tables,
             ctx,
             rate,
@@ -603,10 +681,20 @@ impl SampledVoice {
         rate
     }
 
-    /// A scheduled release fires when its pallet-delay runs out.
+    /// A scheduled release fires when its pallet-delay runs out — but
+    /// never in the middle of a recording switch. Dropping either leg
+    /// of a switch mid-crossfade is a step (the two legs are level- and
+    /// phase-matched, but a tremmed twin's own undulation is not), and
+    /// a step is a click; splicing the release out of a composite of
+    /// two recordings would need a third cursor for a coincidence
+    /// measured in milliseconds. So the pallet simply waits for the
+    /// crossfade to land: at most one fade length (≤ 184 ms, and only
+    /// for a key released within that window of a tremulant toggle),
+    /// after which the release splices cleanly out of the recording the
+    /// voice actually ended up on.
     #[inline]
     fn fire_pending_release(&mut self, sample: &Sample, output_sr: f32) {
-        if self.phase != SamplePhase::Held {
+        if self.phase != SamplePhase::Held || self.switch.sample.is_some() {
             return;
         }
         if let Some((delay, age_ms)) = self.release.pending {
@@ -869,12 +957,244 @@ impl SampledVoice {
         }
     }
 
+    /// Begin — or redirect — a crossfade into another recording of the
+    /// same pipe. `source` is what the voice plays now, `target` what
+    /// it should play; `rate_ratio` carries a differing file sample
+    /// rate. Returns false when nothing could be wired (the loader
+    /// never paired the two recordings, or neither loops), in which
+    /// case the voice simply keeps the recording it has — today's
+    /// behaviour, silently.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn start_switch(
+        &mut self,
+        source: &Sample,
+        target: &Sample,
+        target_id: u32,
+        rate_ratio: f64,
+        tables: &SincTables,
+        output_rate: f32,
+        age_ms: u32,
+    ) -> bool {
+        if self.switch.sample == Some(target_id) {
+            return true; // already on its way there
+        }
+        if self.cursor.sample == target_id {
+            // The player flipped the tremulant back before the first
+            // crossfade finished. Reversing is exact: the two legs
+            // swap roles and the blend weight is mirrored, and
+            // smoothstep(1 − f) = 1 − smoothstep(f), so the output is
+            // continuous to the last bit.
+            self.reverse_switch();
+            return true;
+        }
+        // A third recording arriving mid-crossfade: settle the one in
+        // flight first (see `resolve_switch`), then start afresh.
+        self.resolve_switch();
+        if self.cursor.sample == target_id {
+            return true;
+        }
+        let Some(option) = source.switch_option(target_id) else {
+            return false;
+        };
+        let position = match (option.alignment(), source.sustain_loop(), target.sustain_loop()) {
+            (Some(alignment), Some((loop_start, _)), _) => {
+                alignment.target(self.cursor.position, loop_start) as f64
+            }
+            (None, _, Some((target_start, _))) => target_start as f64,
+            _ => return false,
+        };
+        // Level match. The voice's envelope follower says how loud it
+        // is RIGHT NOW (attack still swelling, tremulant at a peak or
+        // a trough); the target's stored level says how loud the
+        // recording it is about to play is at the landing point. The
+        // voice's own gain is divided out because the envelope is
+        // measured post-gain — leaving it in would apply that gain a
+        // second time. Clamped: these are two recordings of one pipe,
+        // so anything past a factor of three is a mislabeled pair and
+        // matching it would be worse than not.
+        self.switch.gain = if option.level > 1e-5 && self.gain > 1e-5 && self.envelope > 1e-6 {
+            (self.envelope / (self.gain * option.level)).clamp(0.33, 3.0)
+        } else {
+            1.0
+        };
+        self.switch.sample = Some(target_id);
+        self.switch.position = position;
+        self.switch.loop_index = 0;
+        self.switch.fade = 0.0;
+        self.switch.step = {
+            let step = pitch_scaled_fade_step(source, self.cursor.rate, output_rate, age_ms);
+            // No measured period (unpitched material): fall back to the
+            // engine's own 30 ms release crossfade rather than 0, which
+            // would leave the fade stuck.
+            if step > 0.0 { step } else { 1.0 / (0.03 * output_rate) }
+        };
+        self.switch.rate_ratio = rate_ratio;
+        self.switch.kernel = if rate_ratio == 1.0 {
+            self.cursor.kernel
+        } else {
+            tables.select(self.cursor.rate * rate_ratio)
+        };
+        true
+    }
+
+    /// Swap the two legs of a switch in flight, mirroring the blend
+    /// weight so the output does not move. The outgoing leg carried
+    /// the voice gain and the incoming one `switch.gain` on top, so
+    /// those factors trade places too.
+    fn reverse_switch(&mut self) {
+        let Some(incoming) = self.switch.sample else {
+            return;
+        };
+        self.switch.sample = Some(self.cursor.sample);
+        self.cursor.sample = incoming;
+        std::mem::swap(&mut self.switch.position, &mut self.cursor.position);
+        std::mem::swap(&mut self.switch.loop_index, &mut self.cursor.loop_index);
+        std::mem::swap(&mut self.switch.kernel, &mut self.cursor.kernel);
+        self.gain *= self.switch.gain;
+        self.switch.gain = 1.0 / self.switch.gain;
+        if self.switch.rate_ratio != 1.0 {
+            self.cursor.rate *= self.switch.rate_ratio;
+            self.cursor.rate_target *= self.switch.rate_ratio;
+            self.switch.rate_ratio = 1.0 / self.switch.rate_ratio;
+        }
+        self.switch.fade = 1.0 - self.switch.fade;
+    }
+
+    /// Settle a switch in flight so a crossfade into a THIRD recording
+    /// can start: the leg carrying less than half the blend is dropped.
+    ///
+    /// This is the one place a step is accepted, and the only one where
+    /// it cannot be avoided without a third cursor — it takes a set
+    /// with three or more variants that disagree on `IsTremulant` and
+    /// two tremulant toggles inside one crossfade. The dropped leg is
+    /// the minority one, on material that is by construction
+    /// near-identical (the same pipe, phase-aligned and level-matched),
+    /// and the new crossfade starts on the very next frame. Key-off and
+    /// the plain there-and-back toggle both avoid it entirely
+    /// (`fire_pending_release`, `reverse_switch`).
+    fn resolve_switch(&mut self) {
+        if self.switch.sample.is_none() {
+            return;
+        }
+        if self.switch.fade >= 0.5 {
+            self.complete_switch();
+        } else {
+            self.abandon_switch();
+        }
+    }
+
+    /// Hand the voice over to the incoming recording: its cursor, its
+    /// loop, its release options, its rate. `past_loop` stays false and
+    /// the phase stays `Held` — the voice never left the sustain loop,
+    /// which is exactly what separates this from a release splice.
+    fn complete_switch(&mut self) {
+        let Some(sample) = self.switch.sample.take() else {
+            return;
+        };
+        self.cursor.sample = sample;
+        self.cursor.position = self.switch.position;
+        self.cursor.loop_index = self.switch.loop_index;
+        self.cursor.kernel = self.switch.kernel;
+        self.gain *= self.switch.gain;
+        if self.switch.rate_ratio != 1.0 {
+            self.cursor.rate *= self.switch.rate_ratio;
+            self.cursor.rate_target *= self.switch.rate_ratio;
+        }
+        self.switch.gain = 1.0;
+        self.switch.rate_ratio = 1.0;
+        self.switch.fade = 0.0;
+    }
+
+    /// Drop the incoming leg and stay where we are.
+    fn abandon_switch(&mut self) {
+        self.switch.sample = None;
+        self.switch.gain = 1.0;
+        self.switch.rate_ratio = 1.0;
+        self.switch.fade = 0.0;
+    }
+
+    /// One frame of the switch crossfade: read the incoming leg out of
+    /// its own loop, blend, advance. Returns false on the frame the
+    /// handover completes — the new cursor has already advanced, so the
+    /// caller must not advance it again against a block context that
+    /// still describes the old recording.
+    #[inline]
+    fn blend_switch(
+        &mut self,
+        left: &mut f32,
+        right: &mut f32,
+        target: Option<&Sample>,
+        tables: &SincTables,
+        ctx: &VoiceBlockContext,
+        rate: f64,
+    ) -> bool {
+        let Some(target) = target else {
+            // The incoming recording is not in the bank after all:
+            // stay put rather than read from nothing.
+            self.abandon_switch();
+            return true;
+        };
+        // No stream plumbing here, deliberately: the incoming leg only
+        // ever circles the target's sustain loop, and only release
+        // material is ever streamed off the disk — the loop is always
+        // in the resident head.
+        let (in_l, in_r) = if ctx.lite {
+            target.read(self.switch.position)
+        } else {
+            tables.read(
+                self.switch.kernel,
+                target,
+                self.switch.position,
+                ctx.switch_loop,
+            )
+        };
+        // Same raised-cosine blend as the release splice: a linear fade
+        // dips audibly where the two legs decorrelate.
+        let fade = self.switch.fade;
+        let weight = fade * fade * (3.0 - 2.0 * fade);
+        let gain = self.switch.gain;
+        *left += (in_l * gain - *left) * weight;
+        *right += (in_r * gain - *right) * weight;
+        self.switch.fade += self.switch.step;
+        self.advance_switch_cursor(ctx, rate);
+        if self.switch.fade >= 1.0 {
+            self.complete_switch();
+            return false;
+        }
+        true
+    }
+
+    /// Advance the incoming leg, wrapping in ITS loop. No random
+    /// re-draw of the loop on each pass: the leg lives only for the
+    /// crossfade, and changing loop mid-fade would strand the block
+    /// context's cached range.
+    #[inline]
+    fn advance_switch_cursor(&mut self, ctx: &VoiceBlockContext, rate: f64) {
+        self.switch.position += rate * self.switch.rate_ratio;
+        let Some((start, end)) = ctx.switch_loop else {
+            return;
+        };
+        if self.switch.position < end as f64 {
+            return;
+        }
+        let overshoot = self.switch.position - end as f64;
+        self.switch.position = (start as f64 + overshoot).min(end as f64 - 1.0);
+    }
+
     /// Key released: splice to a separate release (selected by hold
     /// duration) or the embedded tail, whichever the sample offers.
     pub(crate) fn begin_release(&mut self, sample: &Sample, age_ms: u32, output_rate: f32) {
         match self.phase {
             SamplePhase::Held | SamplePhase::Crossfade => {}
             _ => return,
+        }
+        // Never out of a switch in flight: `sample` is the recording
+        // the voice is *leaving*, so its release options and phase map
+        // are the wrong ones, and there is no clean way to drop a
+        // half-blended leg. The scheduled release fires a frame after
+        // the crossfade lands instead (see `fire_pending_release`).
+        if self.switch.sample.is_some() {
+            return;
         }
         if self.phase == SamplePhase::Held
             && sample.sustain_loop().is_some()
