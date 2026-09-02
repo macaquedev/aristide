@@ -20,8 +20,11 @@ use std::path::{Path, PathBuf};
 
 use aristide_engine::bank::Sample;
 
-/// Bump on ANY layout change here or in `Sample::write_cache`.
-const MAGIC: &[u8; 8] = b"ARISBK02";
+/// Bump on ANY layout change here or in `Sample::write_cache` — and on
+/// any change to what the persisted analysis *means*, since a stale
+/// entry restores the old numbers verbatim (03: stereo-joint release
+/// alignment, 2026-09-02).
+const MAGIC: &[u8; 8] = b"ARISBK03";
 
 /// What one decoded file's cache entry restores. `info` is present for
 /// attacks (the pitch metadata the spec pipeline needs) and absent for

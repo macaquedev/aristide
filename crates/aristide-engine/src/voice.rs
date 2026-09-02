@@ -869,6 +869,17 @@ impl SampledVoice {
     /// loud one. Exception: a near-silent loop (control-noise samples:
     /// thump → silent loop → thump tail) means the tail is MEANT to be
     /// louder — play it as recorded.
+    ///
+    /// One gain for both channels, deliberately. A stereo recording's
+    /// tail does sit at a different L/R balance from its sustain (demo
+    /// set, measured 2026-09-02: median 0.8 dB, p90 4.4 dB, worst
+    /// 11.4 dB) — but that is the room, not an artifact: the direct
+    /// sound that favours the near mic stops with the pipe and only the
+    /// (more symmetric) diffuse field is left. Matching per channel
+    /// would overwrite the recorded release's stereo image with the
+    /// sustain's. Phase is the opposite case — a phase mismatch buys
+    /// nothing and only cancels — which is why *that* one is corrected
+    /// per channel (`Sample::alignment_turns`).
     fn match_tail_level(&mut self, sample: &Sample) {
         let reference = sample.tail_reference_level();
         self.release.tail_gain = if reference > 1e-5 && self.envelope > 0.02 * reference {

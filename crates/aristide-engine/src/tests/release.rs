@@ -494,3 +494,120 @@ fn early_release_does_not_strike_like_a_bell() {
     );
     assert!(peak > 0.02 * DEFAULT_MASTER_GAIN, "release went silent");
 }
+
+/// A stereo pipe whose two channels are recorded at an inter-channel
+/// phase set by the mics, and whose *tail* carries a different one —
+/// what the demo set's own releases do (measured 2026-09-02: median
+/// 0.013 turns of loop-to-tail inter-channel shift, p90 0.11, worst
+/// 0.47). `shift` is the mismatch in turns.
+fn stereo_pipe_bank(period: usize, shift: f64) -> Arc<SampleBank> {
+    let omega = std::f64::consts::TAU / period as f64;
+    let loop_start = period * 4;
+    let loop_end = period * 12;
+    let frames = period * 24;
+    // The mic offset the sustain was recorded at; the tail adds `shift`.
+    let inter_channel = 0.1 * std::f64::consts::TAU;
+    let mut data = vec![0.0f32; frames * 2];
+    for n in 0..frames {
+        let right_phase = if n >= loop_end {
+            inter_channel + shift * std::f64::consts::TAU
+        } else {
+            inter_channel
+        };
+        // Flat tail: the dip measurement must read cancellation, not
+        // the room's own decay.
+        data[n * 2] = (0.5 * (omega * n as f64).sin()) as f32;
+        data[n * 2 + 1] = (0.5 * (omega * n as f64 + right_phase).sin()) as f32;
+    }
+    let mut sample = Sample::new(
+        data,
+        2,
+        48000.0,
+        Some((loop_start as u64, loop_end as u64)),
+        loop_end as u64,
+    )
+    .expect("valid");
+    // Pin the crossfade so the whole fade — cancellation is deepest at
+    // its midpoint — fits the measurement window.
+    sample.set_release_crossfade_ms(30);
+    sample.align_release(48000.0 / period as f32);
+    assert!(sample.release_alignment().is_some(), "alignment built");
+    let mut bank = SampleBank::default();
+    bank.push(sample);
+    Arc::new(bank)
+}
+
+/// Worst period-length RMS of one channel through the crossfade,
+/// relative to the level it held before the release.
+fn channel_dip_ratio(bank: Arc<SampleBank>, stop_after: usize, period: usize, channel: usize) -> f32 {
+    let (mut engine, mut handle) = Engine::new(48000.0, bank);
+    engine.set_release_stagger(0.0);
+    handle.send(Command::StartVoice {
+        handle: 1,
+        sample: 0,
+        rate: 1.0,
+        gain: 1.0,
+        group: 0,
+        wind_weight: 0.0,
+        brightness: 0.0,
+        enclosure: ENCLOSURE_NONE,
+        bus: 0,
+        delay_frames: 0,
+        nominal_hz: 0.0,
+    });
+    let mut buffer = vec![0.0f32; stop_after * 2];
+    engine.process(&mut buffer, 2);
+    let held: Vec<f32> = buffer.chunks(2).map(|frame| frame[channel]).collect();
+    let steady = rms(&held[held.len() - period..]);
+
+    handle.send(Command::StopVoice { handle: 1 });
+    // 30 ms crossfade = 1440 frames at 48 kHz.
+    let mut buffer = vec![0.0f32; 1440 * 2];
+    engine.process(&mut buffer, 2);
+    let fade: Vec<f32> = buffer.chunks(2).map(|frame| frame[channel]).collect();
+    let mut worst = f32::MAX;
+    let mut start = 0;
+    while start + period <= fade.len() {
+        worst = worst.min(rms(&fade[start..start + period]));
+        start += period / 8;
+    }
+    worst / steady
+}
+
+#[test]
+fn stereo_release_splice_serves_both_channels() {
+    let period = 480; // 100 Hz at 48 kHz
+    // A quarter-period loop-to-tail inter-channel shift: the worst the
+    // demo set actually shows (Trompette 8' F#3, 0.47 turns) rounded
+    // down to a case both strategies can be reasoned about exactly.
+    // Aligning on the left alone would leave the right channel a
+    // quarter period out, cancelling to cos(45 deg) = 0.71 of its held
+    // level at the fade midpoint; splitting the error puts both at
+    // cos(22.5 deg) = 0.92.
+    for stop_after in [9600, 9660, 9720, 9780, 9840, 9903, 10025] {
+        let left = channel_dip_ratio(stereo_pipe_bank(period, 0.25), stop_after, period, 0);
+        let right = channel_dip_ratio(stereo_pipe_bank(period, 0.25), stop_after, period, 1);
+        println!("stop at {stop_after}: L holds {left:.3}, R holds {right:.3}");
+        assert!(
+            right > 0.85,
+            "stop at {stop_after}: right channel cancelled to {right:.2} of held level"
+        );
+        assert!(
+            left > 0.85,
+            "stop at {stop_after}: left channel cancelled to {left:.2} of held level"
+        );
+        // The point of the joint target: neither channel is privileged.
+        assert!(
+            (left - right).abs() < 0.06,
+            "stop at {stop_after}: L {left:.3} vs R {right:.3} — the splice is channel-biased"
+        );
+    }
+    // With no mismatch there is nothing to trade off and both channels
+    // must be as clean as a mono splice.
+    let left = channel_dip_ratio(stereo_pipe_bank(period, 0.0), 9720, period, 0);
+    let right = channel_dip_ratio(stereo_pipe_bank(period, 0.0), 9720, period, 1);
+    assert!(
+        left > 0.95 && right > 0.95,
+        "matched-phase stereo splice should be near-perfect: L {left:.3}, R {right:.3}"
+    );
+}
