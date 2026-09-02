@@ -234,14 +234,13 @@ impl State {
                 // A `divisional:<manual>:<n>` names its manual inside
                 // the action text rather than in the row's `manual`
                 // field, so it is rewritten here rather than above.
-                if let Some((named, slot)) = control
+                let renamed = control
                     .action
                     .strip_prefix("divisional:")
                     .and_then(|rest| rest.rsplit_once(':'))
-                {
-                    if named.eq_ignore_ascii_case(old) {
-                        control.action = format!("divisional:{name}:{slot}");
-                    }
+                    .filter(|(named, _)| named.eq_ignore_ascii_case(old));
+                if let Some((_, slot)) = renamed {
+                    control.action = format!("divisional:{name}:{slot}");
                 }
             }
             // Divisionals are keyed by manual name for the same reason
