@@ -101,9 +101,14 @@ pub(crate) struct WindState {
 /// Tilt filter: `out = lp + treble·(x − lp)` splits the signal at
 /// roughly the pipe's 2nd harmonic so pressure can breathe the timbre.
 /// `a` is the one-pole coefficient; 0 bypasses the filter entirely.
+///
+/// The voicer's own tilt rides the SAME filter: `tilt` is a static
+/// treble factor multiplied into the wind model's, so `brightness_db`
+/// costs no second filter and, at 1.0, changes not one sample.
 #[derive(Clone, Copy)]
 pub(crate) struct Brightness {
     pub(crate) a: f32,
+    pub(crate) tilt: f32,
     pub(crate) lowpass: [f32; 2],
 }
 
@@ -198,6 +203,15 @@ pub(crate) struct ReleaseState {
 pub(crate) struct SampledVoice {
     pub(crate) handle: u64,
     pub(crate) gain: f32,
+    /// Live voicing trim: a multiplier on the gain the voice STARTED
+    /// with, de-zippered toward `trim_target` with the same ~5 ms
+    /// one-pole the box gain uses. Both sit at exactly 1.0 until a
+    /// [`SetVoiceTrim`](crate::Command::SetVoiceTrim) arrives, and the
+    /// render loop skips the multiply entirely while they do — a
+    /// voicer's knob drag under a held key must fade, but a voice
+    /// nobody is voicing must render as it always did.
+    pub(crate) trim: f32,
+    pub(crate) trim_target: f32,
     /// Fast envelope follower on the voice's own (pre-gain) output —
     /// what "how loud am I right now" means at release time.
     pub(crate) envelope: f32,

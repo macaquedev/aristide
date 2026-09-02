@@ -15,7 +15,9 @@ pub enum Command {
     /// `group` is the wind group the voice draws from and `wind_weight`
     /// how much it draws (0 = draws nothing, e.g. action noises).
     /// `brightness` is the voice's tilt-filter one-pole coefficient
-    /// (control-side from the pipe's pitch; 0 bypasses the filter).
+    /// (control-side from the pipe's pitch; 0 bypasses the filter) and
+    /// `voicing_tilt` the voicer's own treble factor through that same
+    /// filter (linear, from `brightness_db`; 1.0 = untouched).
     /// `enclosures` are the swell boxes the voice sits inside, innermost
     /// first ([`ENCLOSURE_NONE`](crate::enclosure::ENCLOSURE_NONE) in
     /// every unused slot; all of them for unenclosed divisions). Boxes
@@ -34,6 +36,7 @@ pub enum Command {
         group: u8,
         wind_weight: f32,
         brightness: f32,
+        voicing_tilt: f32,
         enclosures: [u8; MAX_VOICE_ENCLOSURES],
         bus: u8,
         delay_frames: u32,
@@ -76,6 +79,16 @@ pub enum Command {
         rate: f32,
         glide_ms: f32,
     },
+    /// Re-voice a sounding voice in place: `gain` is a multiplier on
+    /// the gain it STARTED with (so the press's velocity and the
+    /// pipe's own level survive a live edit) and `tilt` its treble
+    /// factor, replacing whatever `voicing_tilt` it started with.
+    ///
+    /// Only Held voices move, the same rule [`SetVoiceRate`] and the
+    /// shutters follow: a release tail is room decay that already left
+    /// the pipe. The gain slews over ~5 ms so dragging a level knob
+    /// under a held chord is a fade, not a staircase.
+    SetVoiceTrim { handle: u64, gain: f32, tilt: f32 },
     /// Release the voice started with `handle`. Loop-less (percussive)
     /// voices ignore this and play to their end.
     StopVoice { handle: u64 },

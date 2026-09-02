@@ -13,6 +13,7 @@ mod windchest;
 mod swell;
 mod buses;
 mod golden;
+mod voicing;
 
 /// 100-frame mono ramp 0..1, loop frames 20..=59, release tail at 60.
 fn test_bank() -> Arc<SampleBank> {
@@ -99,6 +100,7 @@ fn release_dip_ratio(bank: Arc<SampleBank>, stop_after: usize, period: usize) ->
         group: 0,
         wind_weight: 0.0,
         brightness: 0.0,
+        voicing_tilt: 1.0,
         enclosures: [ENCLOSURE_NONE; MAX_VOICE_ENCLOSURES],
         bus: 0,
         delay_frames: 0,
@@ -210,6 +212,7 @@ fn enclosure_test_engine(full_sweep_s: f32) -> (Engine, EngineHandle) {
         group: 0,
         wind_weight: 0.0,
         brightness: 0.0,
+        voicing_tilt: 1.0,
         enclosures: [0, ENCLOSURE_NONE],
         bus: 0,
         delay_frames: 0,

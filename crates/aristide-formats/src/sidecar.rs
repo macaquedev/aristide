@@ -133,15 +133,26 @@ pub struct VoicingConfig {
     /// ```
     #[serde(default, rename = "delay")]
     pub delays: Vec<OnsetDelayDef>,
-    /// Level and fine-tuning adjustments by stop pattern — the fix for
-    /// one honking stop or a division out of balance, without touching
-    /// the set:
+    /// Level, tone and fine-tuning adjustments by stop pattern — the
+    /// fix for one honking stop, one screaming pipe, or a division out
+    /// of balance, without touching the set:
     ///
     /// ```toml
     /// [[voicing.adjust]]
     /// stops = ["Trompette*"]
     /// gain_db = -2.5
     /// cents = 1.5
+    ///
+    /// [[voicing.adjust]]
+    /// stops = ["Trompette 8"]
+    /// keys = "C2..B2"          # the bass octave alone
+    /// gain_db = -4.0
+    ///
+    /// [[voicing.adjust]]
+    /// stops = ["Fourniture IV"]
+    /// key = "F#3"              # one pipe
+    /// rank = "Tierce"          # one rank of it
+    /// brightness_db = -3.0
     /// ```
     #[serde(default, rename = "adjust")]
     pub adjusts: Vec<VoicingAdjustDef>,
@@ -155,24 +166,133 @@ pub struct OnsetDelayDef {
     pub ms: f64,
 }
 
-/// One level/tuning voicing rule. Cents ride the same pitch math as
-/// tuning (wind draw and brightness follow the sounding pitch).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// One level/tone/tuning voicing rule. Cents ride the same pitch math
+/// as tuning (wind draw and brightness follow the sounding pitch).
+///
+/// A rule may narrow to part of a stop: `keys`/`key` pick the pipes by
+/// the keys that sound them, `rank` picks one rank inside a mixture.
+/// A field left out is not "0" — it says nothing, and the pipe keeps
+/// what a broader rule gave it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VoicingAdjustDef {
     pub stops: Vec<String>,
-    #[serde(default)]
-    pub gain_db: f64,
-    #[serde(default)]
-    pub cents: f64,
+    /// The keys this rule speaks about, as an inclusive span in
+    /// scientific pitch notation (`"C2..B3"`, C4 = middle C) or as raw
+    /// key numbers (`"48..59"` — what a microtonal manual's keys are).
+    /// A bare note (`"F#3"`) is one key. Absent = every key the stop
+    /// answers to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keys: Option<String>,
+    /// Exactly one key, spelled as a name or a number — the same thing
+    /// as a one-key `keys`, in the spelling `[[couplers.define]]` uses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<KeySpec>,
+    /// One rank inside the stop, by the rank's name — a mixture's
+    /// tierce voiced apart from its octaves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rank: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gain_db: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cents: Option<f64>,
+    /// Treble tilt in dB: a one-pole high shelf hinged at the pipe's
+    /// 2nd harmonic — the same filter form the wind model breathes the
+    /// timbre with and the swell shutters close over. Positive
+    /// brightens (more upper work), negative darkens; 0 (and absence)
+    /// bypasses the filter exactly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brightness_db: Option<f64>,
     /// The footage the stop should speak at (`16`, `4`, `"2 2/3"`…),
     /// against 8' as unison. The shift is priced like tuning: whole
     /// semitones re-anchor each key to the neighbouring pipe that
     /// really sounds there (a unit-organ extension, not a tape-speed
     /// trick); only the sub-semitone remainder is bent. Absent, the
     /// stop speaks at whatever pitch its samples were cut for.
-    #[serde(default)]
+    ///
+    /// A footage is a fact about the whole stop — which rank of pipes
+    /// each key draws on — so it is read only on an unnarrowed rule; a
+    /// `keys`/`key`/`rank` rule carrying one warns and is ignored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pitch: Option<FootageSpec>,
+}
+
+impl VoicingAdjustDef {
+    /// The keys this rule speaks about, inclusive, or `None` for the
+    /// whole compass. `Some(Err(…))` is a span that doesn't parse.
+    pub fn key_span(&self) -> Option<Result<(i32, i32), String>> {
+        match (&self.key, &self.keys) {
+            (None, None) => None,
+            (Some(key), None) => Some(match key_number(key) {
+                Some(key) => Ok((key, key)),
+                None => Err(format!("{key:?} is not a key")),
+            }),
+            (None, Some(text)) => Some(match parse_key_span(text) {
+                Some(span) => Ok(span),
+                None => Err(format!("{text:?} is not a key or a key span")),
+            }),
+            (Some(_), Some(_)) => {
+                Some(Err("key and keys name the same thing — give one".into()))
+            }
+        }
+    }
+
+    /// Does this rule narrow to less than the whole stop?
+    pub fn is_narrowed(&self) -> bool {
+        self.key.is_some() || self.keys.is_some() || self.rank.is_some()
+    }
+}
+
+/// A [`KeySpec`] as an absolute key number. Unlike
+/// [`KeySpec::midi_note`] this is not capped at MIDI's 127: a widened
+/// or microtonal manual's keys run past it, exactly as `[[manual]]`
+/// hex anchors do.
+pub fn key_number(key: &KeySpec) -> Option<i32> {
+    match key {
+        KeySpec::Number(n) => i32::try_from(*n).ok().filter(|&n| n >= 0),
+        KeySpec::Name(name) => parse_note_name(name).map(i32::from),
+    }
+}
+
+/// `"C2..B3"` → (36, 59); `"F#3"` → (54, 54); `"48..59"` → (48, 59).
+/// Ends are inclusive — an organist reads "C2 to B3" as both included
+/// — and are accepted in either order. Names are the scientific pitch
+/// notation the rest of the files use (C4 = middle C); numbers are raw
+/// key numbers, which is what a microtonal manual has instead of note
+/// names.
+pub fn parse_key_span(text: &str) -> Option<(i32, i32)> {
+    let text = text.trim();
+    let one = |part: &str| -> Option<i32> {
+        let part = part.trim();
+        match part.parse::<i32>() {
+            Ok(number) if number >= 0 => Some(number),
+            _ => parse_note_name(part).map(i32::from),
+        }
+    };
+    match text.split_once("..") {
+        // "C2..=B3" too: Rust's inclusive spelling reads the same way
+        // and costs nothing to accept.
+        Some((low, high)) => {
+            let (low, high) = (one(low)?, one(high.strip_prefix('=').unwrap_or(high))?);
+            Some((low.min(high), low.max(high)))
+        }
+        None => one(text).map(|key| (key, key)),
+    }
+}
+
+/// The reverse of [`parse_key_span`], for writers: note names when the
+/// span sits inside MIDI's range and the keyboard has note names, raw
+/// numbers otherwise (a microtonal manual's keys are numbers).
+pub fn format_key_span(span: (i32, i32), named: bool) -> String {
+    let spell = |key: i32| match (named, u8::try_from(key)) {
+        (true, Ok(key)) if key <= 127 => note_name(key),
+        _ => key.to_string(),
+    };
+    if span.0 == span.1 {
+        spell(span.0)
+    } else {
+        format!("{}..{}", spell(span.0), spell(span.1))
+    }
 }
 
 /// A stop's footage in a voicing rule: a TOML number (`16`, `2.667`)
@@ -1038,6 +1158,77 @@ ms = 12.5
         let empty: Sidecar = toml::from_str("").expect("parses");
         assert!(empty.routing.buses.is_empty());
         assert!(empty.voicing.delays.is_empty());
+    }
+
+    /// Key spans are how a voicing rule narrows to pipes. Names are
+    /// scientific pitch notation (C4 = middle C), numbers are raw key
+    /// numbers — what a microtonal manual has instead of names.
+    #[test]
+    fn key_spans_parse_names_numbers_and_round_trip() {
+        assert_eq!(parse_key_span("C2..B3"), Some((36, 59)));
+        assert_eq!(parse_key_span(" C2 .. B3 "), Some((36, 59)));
+        assert_eq!(parse_key_span("C2..=B3"), Some((36, 59)), "Rust's spelling too");
+        assert_eq!(parse_key_span("B3..C2"), Some((36, 59)), "either order");
+        assert_eq!(parse_key_span("F#3"), Some((54, 54)), "one key");
+        assert_eq!(parse_key_span("Gb3"), Some((54, 54)), "spelled either way");
+        assert_eq!(parse_key_span("48..59"), Some((48, 59)), "microtonal key numbers");
+        assert_eq!(parse_key_span("200..240"), Some((200, 240)), "past MIDI's 127");
+        assert_eq!(parse_key_span("H4"), None);
+        assert_eq!(parse_key_span("C2.."), None);
+        assert_eq!(parse_key_span(""), None);
+        // Round trip through the writer's spelling, both vocabularies.
+        for span in [(36, 59), (54, 54)] {
+            assert_eq!(parse_key_span(&format_key_span(span, true)), Some(span));
+            assert_eq!(parse_key_span(&format_key_span(span, false)), Some(span));
+        }
+        assert_eq!(format_key_span((36, 59), true), "C2..B3");
+        assert_eq!(format_key_span((54, 54), true), "F#3");
+        assert_eq!(format_key_span((48, 59), false), "48..59");
+        assert_eq!(format_key_span((200, 200), true), "200", "no name past MIDI");
+    }
+
+    /// A narrowed rule parses as itself, and an unnarrowed one leaves
+    /// every field unsaid rather than zero — absence is what makes the
+    /// fall-through to a broader rule possible.
+    #[test]
+    fn voicing_rules_narrow_to_keys_and_ranks() {
+        let text = r#"
+[[voicing.adjust]]
+stops = ["Trompette 8"]
+gain_db = -2.0
+
+[[voicing.adjust]]
+stops = ["Trompette 8"]
+keys = "C2..B2"
+gain_db = -5.0
+brightness_db = -3.0
+
+[[voicing.adjust]]
+stops = ["Fourniture IV"]
+key = "F#3"
+rank = "Tierce"
+cents = -4.0
+"#;
+        let sidecar: Sidecar = toml::from_str(text).expect("parses");
+        let rules = &sidecar.voicing.adjusts;
+        assert_eq!(rules.len(), 3);
+        assert_eq!(rules[0].key_span(), None, "the whole stop");
+        assert!(!rules[0].is_narrowed());
+        assert_eq!(rules[0].gain_db, Some(-2.0));
+        assert_eq!(rules[0].cents, None, "unsaid, not zero");
+        assert_eq!(rules[0].brightness_db, None);
+        assert_eq!(rules[1].key_span(), Some(Ok((36, 47))));
+        assert_eq!(rules[1].brightness_db, Some(-3.0));
+        assert_eq!(rules[2].key_span(), Some(Ok((54, 54))));
+        assert_eq!(rules[2].rank.as_deref(), Some("Tierce"));
+        assert!(rules[2].is_narrowed());
+        // `key` and `keys` naming the same thing is a mistake, caught
+        // where the loader can report it rather than silently picking.
+        let both: Sidecar = toml::from_str(
+            "[[voicing.adjust]]\nstops = [\"x\"]\nkey = \"C3\"\nkeys = \"C3..D3\"\n",
+        )
+        .expect("parses");
+        assert!(both.voicing.adjusts[0].key_span().expect("narrowed").is_err());
     }
 
     #[test]

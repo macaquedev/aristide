@@ -85,10 +85,23 @@ struct VoiceSpec {
     group: u8,
     wind_weight: f32,
     brightness: f32,
+    voicing_tilt: f32,
     enclosures: [u8; MAX_VOICE_ENCLOSURES],
     bus: u8,
     delay_frames: u32,
     nominal_hz: f32,
+}
+
+/// A voicing tilt the RT side will accept: finite, and inside ±12 dB.
+/// Voicing is trimming, not filter design — a shelf steeper than that
+/// is a different pipe, and the clamp keeps a typo'd sidecar from
+/// turning one rank into a sine or a razor.
+fn sane_tilt(tilt: f32) -> f32 {
+    if tilt.is_finite() {
+        tilt.clamp(0.25, 4.0)
+    } else {
+        1.0
+    }
 }
 
 /// RT side. Owned by the audio callback; every method here upholds the
@@ -479,6 +492,7 @@ impl Engine {
                 group,
                 wind_weight,
                 brightness,
+                voicing_tilt,
                 enclosures,
                 bus,
                 delay_frames,
@@ -491,6 +505,7 @@ impl Engine {
                 group,
                 wind_weight,
                 brightness,
+                voicing_tilt,
                 enclosures,
                 bus,
                 delay_frames,
@@ -547,6 +562,9 @@ impl Engine {
                 rate,
                 glide_ms,
             } => self.set_voice_rate(handle, rate, glide_ms),
+            Command::SetVoiceTrim { handle, gain, tilt } => {
+                self.set_voice_trim(handle, gain, tilt)
+            }
             Command::StopVoice { handle } => {
                 // Batched: applied in one pool pass at the top of the
                 // next process() (same block — commands drain first).
@@ -588,6 +606,8 @@ impl Engine {
         let voice = SampledVoice {
             handle: spec.handle,
             gain: spec.gain,
+            trim: 1.0,
+            trim_target: 1.0,
             envelope: 0.0,
             bus: spec.bus.min(MAX_BUSES as u8 - 1),
             // Onset delays are bounded only against nonsense (30 s
@@ -611,6 +631,7 @@ impl Engine {
             wind: self.seed_wind(&spec, group),
             brightness: Brightness {
                 a: spec.brightness.clamp(0.0, 1.0),
+                tilt: sane_tilt(spec.voicing_tilt),
                 lowpass: [0.0; 2],
             },
             enclosure: self.seed_enclosure(spec.enclosures),
@@ -695,6 +716,28 @@ impl Engine {
             used += 1;
         }
         state
+    }
+
+    /// [`Command::SetVoiceTrim`]: a live voicing edit landing on a
+    /// sounding pipe. Held voices only, for the same reason rate
+    /// glides and shutter moves are: a tail has left the pipe. The
+    /// gain becomes a de-zipper target; the tilt is a static filter
+    /// factor and lands at once (a treble shelf stepping is inaudible
+    /// where a level step is a click).
+    fn set_voice_trim(&mut self, handle: u64, gain: f32, tilt: f32) {
+        if !gain.is_finite() || gain < 0.0 {
+            return;
+        }
+        let tilt = sane_tilt(tilt);
+        for voice in self.voices.iter_mut() {
+            if let Voice::Sampled(sampled) = voice
+                && sampled.handle == handle
+                && sampled.phase == SamplePhase::Held
+            {
+                sampled.trim_target = gain;
+                sampled.brightness.tilt = tilt;
+            }
+        }
     }
 
     /// [`Command::SetVoiceRate`]: only Held voices move — a release tail
@@ -963,18 +1006,25 @@ fn render_sampled_voice(
         };
         sampled.wind.follow_chest(chest, box_loss, dt, &mut sampled.rng);
     }
+    // The voicer's tilt is a static factor on the same filter the wind
+    // model breathes through — one filter, two contributions, so a
+    // voiced-down pipe still brightens when the chest steadies.
+    let tilt = sampled.brightness.tilt;
     let (rate_scale, gain, treble) = if lite {
-        (1.0f64, master, 1.0f32)
+        (1.0f64, master, tilt)
     } else {
         (
             sampled.wind.rate as f64,
             master * sampled.wind.gain,
-            sampled.wind.treble,
+            sampled.wind.treble * tilt,
         )
     };
     // Bypass the tilt filter while it would do nothing: keeps
     // untouched-pressure rendering bit-identical.
     let tilting = sampled.brightness.a > 0.0 && (treble - 1.0).abs() > 1e-4;
+    // Likewise the live voicing trim: exactly 1.0 until someone voices
+    // this voice, and skipped entirely while it is.
+    let trimming = sampled.trim != 1.0 || sampled.trim_target != 1.0;
 
     // Swell boxes: a Held voice tracks every box it sits in, each block
     // (gain ramped per frame — pedal sweeps would zipper otherwise); any
@@ -1033,6 +1083,11 @@ fn render_sampled_voice(
             return false;
         };
         sampled.follow_envelope(left, right, refs.envelope_step);
+        if trimming {
+            sampled.trim += refs.enc_ramp * (sampled.trim_target - sampled.trim);
+            left *= sampled.trim;
+            right *= sampled.trim;
+        }
         if tilting {
             sampled.brightness.apply(&mut left, &mut right, treble);
         }

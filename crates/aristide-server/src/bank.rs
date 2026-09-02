@@ -51,6 +51,11 @@ pub struct VoiceSpec {
     /// Tilt-filter coefficient for pressure→brightness coupling
     /// (0 = no filter, e.g. noises).
     pub brightness: f32,
+    /// The voicer's own treble tilt through that same filter, linear
+    /// (`[[voicing.adjust]] brightness_db`, 1.0 = untouched). Specs
+    /// are built per pipe at 1.0; the console stamps the resolved
+    /// value per voice as it prices it, like the bus and the delay.
+    pub voicing_tilt: f32,
     /// Swell boxes (0-based engine indices from the ODF windchest
     /// membership, innermost first;
     /// [`aristide_engine::enclosure::ENCLOSURE_NONE`] in unused slots,
@@ -940,6 +945,7 @@ fn assign_voice_specs(
                     device_rate,
                     p.info.percussive,
                 ),
+                voicing_tilt: 1.0,
                 enclosures: p.enclosures,
                 bus: 0,
                 delay_frames: 0,
@@ -2117,19 +2123,7 @@ mod tests {
                                 handle.send(aristide_engine::Command::StopVoice { handle: h });
                             }
                             for st in starts {
-                                handle.send(aristide_engine::Command::StartVoice {
-                                    handle: st.handle,
-                                    sample: st.spec.sample,
-                                    rate: st.spec.rate,
-                                    gain: st.spec.gain,
-                                    group: st.spec.group,
-                                    wind_weight: st.spec.wind_weight,
-                                    brightness: st.spec.brightness,
-                                    enclosures: st.spec.enclosures,
-                        bus: st.spec.bus,
-                        delay_frames: st.spec.delay_frames,
-                                    nominal_hz: st.spec.nominal_hz,
-                                });
+                                handle.send(st.command());
                             }
                         }
                         Event::Note(key, false) => {
@@ -2287,19 +2281,7 @@ mod tests {
                                 handle.send(aristide_engine::Command::StopVoice { handle: h });
                             }
                             for st in starts {
-                                handle.send(aristide_engine::Command::StartVoice {
-                                    handle: st.handle,
-                                    sample: st.spec.sample,
-                                    rate: st.spec.rate,
-                                    gain: st.spec.gain,
-                                    group: st.spec.group,
-                                    wind_weight: st.spec.wind_weight,
-                                    brightness: st.spec.brightness,
-                                    enclosures: st.spec.enclosures,
-                        bus: st.spec.bus,
-                        delay_frames: st.spec.delay_frames,
-                                    nominal_hz: st.spec.nominal_hz,
-                                });
+                                handle.send(st.command());
                             }
                         }
                         Event::Note(channel, key, false) => {
@@ -2551,19 +2533,7 @@ mod tests {
                     handle.send(aristide_engine::Command::StopVoice { handle: handle_id });
                 }
                 for start in starts {
-                    handle.send(aristide_engine::Command::StartVoice {
-                        handle: start.handle,
-                        sample: start.spec.sample,
-                        rate: start.spec.rate,
-                        gain: start.spec.gain,
-                        group: start.spec.group,
-                        wind_weight: start.spec.wind_weight,
-                        brightness: start.spec.brightness,
-                        enclosures: start.spec.enclosures,
-                        bus: start.spec.bus,
-                        delay_frames: start.spec.delay_frames,
-                        nominal_hz: start.spec.nominal_hz,
-                    });
+                    handle.send(start.command());
                 }
             }
             engine.process(&mut buffer, 2);
@@ -2657,19 +2627,7 @@ mod tests {
                     let (starts, _) = console.note_on_manual(manual_index, key.into(), 127);
                     voices_started += starts.len();
                     for start in starts {
-                        handle.send(aristide_engine::Command::StartVoice {
-                            handle: start.handle,
-                            sample: start.spec.sample,
-                            rate: start.spec.rate,
-                            gain: start.spec.gain,
-                            group: start.spec.group,
-                            wind_weight: start.spec.wind_weight,
-                            brightness: start.spec.brightness,
-                        enclosures: start.spec.enclosures,
-                        bus: start.spec.bus,
-                        delay_frames: start.spec.delay_frames,
-                            nominal_hz: start.spec.nominal_hz,
-                        });
+                        handle.send(start.command());
                     }
                 } else {
                     for h in console.note_off_manual(manual_index, key.into()).0 {
@@ -2762,19 +2720,7 @@ mod tests {
                     handle.send(aristide_engine::Command::StopVoice { handle: h });
                 }
                 for start in starts {
-                    handle.send(aristide_engine::Command::StartVoice {
-                        handle: start.handle,
-                        sample: start.spec.sample,
-                        rate: start.spec.rate,
-                        gain: start.spec.gain,
-                        group: start.spec.group,
-                        wind_weight: start.spec.wind_weight,
-                        brightness: start.spec.brightness,
-                        enclosures: start.spec.enclosures,
-                        bus: start.spec.bus,
-                        delay_frames: start.spec.delay_frames,
-                        nominal_hz: start.spec.nominal_hz,
-                    });
+                    handle.send(start.command());
                 }
                 // Stagger key events across blocks like real playing.
                 engine.process(&mut buffer, 2);
@@ -2854,19 +2800,7 @@ mod tests {
         for &key in &keys {
             let (starts, _) = console.note_on_manual(manual_index, key.into(), 127);
             for start in starts {
-                handle.send(aristide_engine::Command::StartVoice {
-                    handle: start.handle,
-                    sample: start.spec.sample,
-                    rate: start.spec.rate,
-                    gain: start.spec.gain,
-                    group: start.spec.group,
-                    wind_weight: start.spec.wind_weight,
-                    brightness: start.spec.brightness,
-                        enclosures: start.spec.enclosures,
-                        bus: start.spec.bus,
-                        delay_frames: start.spec.delay_frames,
-                    nominal_hz: start.spec.nominal_hz,
-                });
+                handle.send(start.command());
             }
         }
         let block = 256usize;
@@ -2936,19 +2870,7 @@ mod tests {
         let (mut engine, mut handle) =
             aristide_engine::Engine::new(48000.0, std::sync::Arc::new(loaded.bank));
         for start in &starts {
-            assert!(handle.send(aristide_engine::Command::StartVoice {
-                handle: start.handle,
-                sample: start.spec.sample,
-                rate: start.spec.rate,
-                gain: start.spec.gain,
-                group: start.spec.group,
-                wind_weight: start.spec.wind_weight,
-                brightness: start.spec.brightness,
-                        enclosures: start.spec.enclosures,
-                        bus: start.spec.bus,
-                        delay_frames: start.spec.delay_frames,
-                nominal_hz: start.spec.nominal_hz,
-            }));
+            assert!(handle.send(start.command()));
         }
         let mut buffer = vec![0.0f32; 4800 * 2];
         engine.process(&mut buffer, 2);
@@ -3085,19 +3007,7 @@ mod tests {
                 let (mut engine, mut handle) =
                     aristide_engine::Engine::new(48_000.0, bank.clone());
                 for start in &starts {
-                    assert!(handle.send(aristide_engine::Command::StartVoice {
-                        handle: start.handle,
-                        sample: start.spec.sample,
-                        rate: start.spec.rate,
-                        gain: start.spec.gain,
-                        group: start.spec.group,
-                        wind_weight: start.spec.wind_weight,
-                        brightness: start.spec.brightness,
-                        enclosures: start.spec.enclosures,
-                        bus: start.spec.bus,
-                        delay_frames: start.spec.delay_frames,
-                        nominal_hz: start.spec.nominal_hz,
-                    }));
+                    assert!(handle.send(start.command()));
                 }
                 let mut buffer = vec![0.0f32; 4800 * 2];
                 let mut mono = Vec::with_capacity(4800 * 13);
@@ -3255,19 +3165,7 @@ mod tests {
                         assert!(handle.send(aristide_engine::Command::StopVoice { handle: h }));
                     }
                     for start in starts {
-                        assert!(handle.send(aristide_engine::Command::StartVoice {
-                            handle: start.handle,
-                            sample: start.spec.sample,
-                            rate: start.spec.rate,
-                            gain: start.spec.gain,
-                            group: start.spec.group,
-                            wind_weight: start.spec.wind_weight,
-                            brightness: start.spec.brightness,
-                        enclosures: start.spec.enclosures,
-                        bus: start.spec.bus,
-                        delay_frames: start.spec.delay_frames,
-                            nominal_hz: start.spec.nominal_hz,
-                        }));
+                        assert!(handle.send(start.command()));
                     }
                 } else {
                     for h in console.note_off_manual(manual_index, key.into()).0 {
@@ -3455,19 +3353,7 @@ mod tests {
                     }
                     for start in starts {
                         voices_started += 1;
-                        assert!(handle.send(aristide_engine::Command::StartVoice {
-                            handle: start.handle,
-                            sample: start.spec.sample,
-                            rate: start.spec.rate,
-                            gain: start.spec.gain,
-                            group: start.spec.group,
-                            wind_weight: start.spec.wind_weight,
-                            brightness: start.spec.brightness,
-                            enclosures: start.spec.enclosures,
-                        bus: start.spec.bus,
-                        delay_frames: start.spec.delay_frames,
-                            nominal_hz: start.spec.nominal_hz,
-                        }));
+                        assert!(handle.send(start.command()));
                     }
                 } else {
                     for h in console.note_off_manual(manual_index, key.into()).0 {
@@ -3550,19 +3436,7 @@ mod tests {
             let voice = starts.first().expect("voice");
             let (sample, rate) = (voice.spec.sample, voice.spec.rate as f64);
             for st in starts {
-                handle.send(aristide_engine::Command::StartVoice {
-                    handle: st.handle,
-                    sample: st.spec.sample,
-                    rate: st.spec.rate,
-                    gain: st.spec.gain,
-                    group: st.spec.group,
-                    wind_weight: st.spec.wind_weight,
-                    brightness: st.spec.brightness,
-                    enclosures: st.spec.enclosures,
-                        bus: st.spec.bus,
-                        delay_frames: st.spec.delay_frames,
-                    nominal_hz: st.spec.nominal_hz,
-                });
+                handle.send(st.command());
             }
             let block = 512usize;
             let mut buffer = vec![0.0f32; block * 2];
@@ -3689,19 +3563,7 @@ mod tests {
                             handle.send(aristide_engine::Command::StopVoice { handle: h });
                         }
                         for st in starts {
-                            handle.send(aristide_engine::Command::StartVoice {
-                                handle: st.handle,
-                                sample: st.spec.sample,
-                                rate: st.spec.rate,
-                                gain: st.spec.gain,
-                                group: st.spec.group,
-                                wind_weight: st.spec.wind_weight,
-                                brightness: st.spec.brightness,
-                        enclosures: st.spec.enclosures,
-                        bus: st.spec.bus,
-                        delay_frames: st.spec.delay_frames,
-                                nominal_hz: st.spec.nominal_hz,
-                            });
+                            handle.send(st.command());
                         }
                     } else {
                         for h in console.note_off_manual(manual_index, key.into()).0 {
@@ -3826,19 +3688,7 @@ mod tests {
                             handle.send(aristide_engine::Command::StopVoice { handle: h });
                         }
                         for st in starts {
-                            handle.send(aristide_engine::Command::StartVoice {
-                                handle: st.handle,
-                                sample: st.spec.sample,
-                                rate: st.spec.rate,
-                                gain: st.spec.gain,
-                                group: st.spec.group,
-                                wind_weight: st.spec.wind_weight,
-                                brightness: st.spec.brightness,
-                        enclosures: st.spec.enclosures,
-                        bus: st.spec.bus,
-                        delay_frames: st.spec.delay_frames,
-                                nominal_hz: st.spec.nominal_hz,
-                            });
+                            handle.send(st.command());
                         }
                     } else {
                         for h in console.note_off_manual(manual, key.into()).0 {
@@ -3989,19 +3839,7 @@ mod tests {
                                     .map(|p| smp.sample_rate_hz() as f64 / p)
                                     .unwrap_or(0.0),
                             );
-                            handle.send(aristide_engine::Command::StartVoice {
-                                handle: st.handle,
-                                sample: st.spec.sample,
-                                rate: st.spec.rate,
-                                gain: st.spec.gain,
-                                group: st.spec.group,
-                                wind_weight: st.spec.wind_weight,
-                                brightness: st.spec.brightness,
-                                enclosures: st.spec.enclosures,
-                        bus: st.spec.bus,
-                        delay_frames: st.spec.delay_frames,
-                                nominal_hz: st.spec.nominal_hz,
-                            });
+                            handle.send(st.command());
                         }
                     }
                     if frame <= off_at && off_at < frame + block {
@@ -4101,19 +3939,7 @@ mod tests {
                         handle.send(aristide_engine::Command::StopVoice { handle: h });
                     }
                     for st in starts {
-                        handle.send(aristide_engine::Command::StartVoice {
-                            handle: st.handle,
-                            sample: st.spec.sample,
-                            rate: st.spec.rate,
-                            gain: st.spec.gain,
-                            group: st.spec.group,
-                            wind_weight: st.spec.wind_weight,
-                            brightness: st.spec.brightness,
-                        enclosures: st.spec.enclosures,
-                        bus: st.spec.bus,
-                        delay_frames: st.spec.delay_frames,
-                            nominal_hz: st.spec.nominal_hz,
-                        });
+                        handle.send(st.command());
                     }
                 } else {
                     for h in console.note_off_manual(manual_index, key.into()).0 {
@@ -4166,19 +3992,7 @@ mod tests {
                     on = true;
                     let (starts, _) = console.note_on_manual(manual_index, 60, 127);
                     for st in starts {
-                        handle.send(aristide_engine::Command::StartVoice {
-                            handle: st.handle,
-                            sample: st.spec.sample,
-                            rate: st.spec.rate,
-                            gain: st.spec.gain,
-                            group: st.spec.group,
-                            wind_weight: st.spec.wind_weight,
-                            brightness: st.spec.brightness,
-                        enclosures: st.spec.enclosures,
-                        bus: st.spec.bus,
-                        delay_frames: st.spec.delay_frames,
-                            nominal_hz: st.spec.nominal_hz,
-                        });
+                        handle.send(st.command());
                     }
                 }
                 if !off && frame >= hold_frames {
@@ -4280,19 +4094,7 @@ mod tests {
                 sent_on = true;
                 let (starts, _) = console.note_on_manual(manual_index, 60, 127);
                 for st in starts {
-                    handle.send(aristide_engine::Command::StartVoice {
-                        handle: st.handle,
-                        sample: st.spec.sample,
-                        rate: st.spec.rate,
-                        gain: st.spec.gain,
-                        group: st.spec.group,
-                        wind_weight: st.spec.wind_weight,
-                        brightness: st.spec.brightness,
-                        enclosures: st.spec.enclosures,
-                        bus: st.spec.bus,
-                        delay_frames: st.spec.delay_frames,
-                        nominal_hz: st.spec.nominal_hz,
-                    });
+                    handle.send(st.command());
                 }
             }
             if !sent_off && frame >= hold_frames {

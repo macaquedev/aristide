@@ -99,6 +99,7 @@ fn golden_render(lite: bool) -> (u64, f32) {
         group,
         wind_weight,
         brightness,
+        voicing_tilt: 1.0,
         enclosures,
         bus,
         delay_frames,
