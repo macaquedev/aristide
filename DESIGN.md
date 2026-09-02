@@ -455,7 +455,8 @@ main thread; a failed load reports and leaves the running organ untouched.
   releases. First real organ sound. ✅ (RAM-resident; disk streaming moved to M4 and
   landed there 2026-09-02)
 - **M4 — engine quality pass**: phase-aligned multi-releases, sinc resampling, voicing,
-  tremulants, wind model. The "better than Hauptwerk" milestone; A/B against GO.
+  tremulants, wind model. The "better than Hauptwerk" milestone; A/B against GO. ✅
+  (2026-09-02; deferrals named in each progress note)
   Shipped: sinc resampling + phase-aligned releases (2026-08-08), wind supply model
   (2026-08-09), convolution reverb, enclosures (2026-08-12), multi-loop/multi-release
   and attack selection, sounding tremulants (2026-08-26; wind-valve physics
