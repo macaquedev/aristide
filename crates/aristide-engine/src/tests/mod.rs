@@ -13,6 +13,7 @@ mod windchest;
 mod swell;
 mod buses;
 mod golden;
+mod streaming;
 
 /// 100-frame mono ramp 0..1, loop frames 20..=59, release tail at 60.
 fn test_bank() -> Arc<SampleBank> {

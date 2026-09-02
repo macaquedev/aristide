@@ -634,7 +634,30 @@ fn decode_samples(
     } else {
         None
     };
-    let loaded = bank::build(organ, sample_rate, sample_bits, cache_path.as_deref())?;
+    // Streaming policy: attacks and sustain loops always stay in RAM;
+    // this decides whether the release tails behind them do.
+    let policy = bank::StreamingPolicy {
+        mode: match sidecar.samples.streaming.to_ascii_lowercase().as_str() {
+            "on" | "true" => bank::StreamingMode::On,
+            "off" | "false" => bank::StreamingMode::Off,
+            "auto" => bank::StreamingMode::Auto,
+            other => {
+                tracing::warn!(
+                    "[samples] streaming = {other:?} is not auto/on/off; using auto"
+                );
+                bank::StreamingMode::Auto
+            }
+        },
+        ram_budget_mb: sidecar.samples.ram_budget_mb,
+    };
+    let loaded = bank::build_with(
+        organ,
+        sample_rate,
+        sample_bits,
+        cache_path.as_deref(),
+        policy,
+    )?;
+    let streamed = loaded.bank.streamed_bytes();
     tracing::info!(
         "samples: {} files, {:.1} MiB resident, {} skipped, in {:.1?}",
         loaded.bank.len(),
@@ -642,6 +665,18 @@ fn decode_samples(
         loaded.skipped.len(),
         started.elapsed()
     );
+    if streamed > 0 {
+        tracing::info!(
+            "streaming: {} of {} samples play their tails from disk ({:.1} MiB \
+             streamed vs {:.1} MiB resident), {} slots × {} threads",
+            loaded.bank.streamed_samples(),
+            loaded.bank.len(),
+            streamed as f64 / (1024.0 * 1024.0),
+            loaded.bank.resident_bytes() as f64 / (1024.0 * 1024.0),
+            aristide_engine::stream::DEFAULT_SLOTS,
+            aristide_engine::stream::DEFAULT_WORKERS,
+        );
+    }
     for note in loaded.skipped.iter().take(10) {
         tracing::warn!("skipped: {note}");
     }

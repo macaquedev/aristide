@@ -22,6 +22,7 @@ pub mod enclosure;
 pub mod resample;
 pub mod reverb;
 pub mod routing;
+pub mod stream;
 mod tone;
 mod voice;
 pub mod wind;
@@ -33,6 +34,7 @@ use command::COMMAND_QUEUE_CAPACITY;
 use enclosure::{Enclosure, ENCLOSURE_NONE, MAX_ENCLOSURES};
 use resample::SincTables;
 use routing::{Bus, MAX_BUSES, MAX_CHUNK_FRAMES};
+use stream::{StreamRt, DENIED_SLOT, NO_SLOT};
 use rtrb::{Consumer, Producer, RingBuffer};
 use tone::{ToneStage, ToneVoice, TONE_ATTACK_SECONDS, TONE_GAIN, TONE_RELEASE_SECONDS};
 use voice::{
@@ -138,6 +140,10 @@ pub struct Engine {
     envelope_step: f32,
     /// ~5 ms one-pole coefficient de-zippering per-voice enclosure gain.
     enc_ramp: f32,
+    /// Disk-streaming slots, when the loaded bank has samples whose
+    /// tails live on disk. `None` = everything is resident and not one
+    /// instruction of the streaming path runs.
+    streams: Option<StreamRt>,
 }
 
 impl Engine {
@@ -168,6 +174,7 @@ impl Engine {
             kill_step: 1.0 / (KILL_FADE_SECONDS * sample_rate),
             envelope_step: 1.0 - (-1.0 / (0.01 * sample_rate)).exp(),
             enc_ramp: 1.0 - (-1.0 / (0.005 * sample_rate)).exp(),
+            streams: None,
         };
         // Sixteen chests must not share one random sequence and one
         // tremulant phase — decorrelated once, here, they drift apart
@@ -176,6 +183,19 @@ impl Engine {
             group.decorrelate(index);
         }
         (engine, EngineHandle { commands: producer })
+    }
+
+    /// Give the engine the audio-thread side of a stream pool (built
+    /// control-side by [`stream::attach`], fed by threads the host
+    /// spawns). Every allocation it will ever need is already made.
+    pub fn set_streams(&mut self, streams: StreamRt) {
+        self.streams = Some(streams);
+    }
+
+    /// How many stream slots are serving a voice right now — `None`
+    /// when the loaded bank streams nothing.
+    pub fn stream_slots_active(&self) -> Option<usize> {
+        self.streams.as_ref().map(|rt| rt.active_slots())
     }
 
     /// Render one interleaved buffer, mixing every active voice onto
@@ -363,6 +383,7 @@ impl Engine {
             buses,
             bank,
             sinc,
+            streams,
             wind,
             enclosures,
             free_slots,
@@ -393,6 +414,11 @@ impl Engine {
         for bus in buses.iter_mut() {
             bus.begin_chunk(frames);
         }
+        // Slots the streamer threads have finished with become
+        // allocatable again here, before any voice asks for one.
+        if let Some(rt) = streams.as_mut() {
+            rt.reclaim();
+        }
 
         for index in 0..voices.len() {
             let voice = &mut voices[index];
@@ -412,9 +438,16 @@ impl Engine {
                     }
                     alive
                 }
-                Voice::Sampled(sampled) => render_sampled_voice(sampled, buses, &refs),
+                Voice::Sampled(sampled) => {
+                    render_sampled_voice(sampled, buses, &refs, streams.as_mut())
+                }
             };
             if !alive {
+                if let Voice::Sampled(sampled) = voice
+                    && let Some(rt) = streams.as_mut()
+                {
+                    rt.release(sampled.stream);
+                }
                 *voice = Voice::Idle;
                 free_slots.push(index as u16);
             }
@@ -580,6 +613,8 @@ impl Engine {
             onset: spec.delay_frames.min((30.0 * self.sample_rate) as u32),
             age_frames: 0,
             rng: (spec.handle as u32).wrapping_mul(0x9E37_79B9) | 1,
+            stream: NO_SLOT,
+            starving: false,
             phase: SamplePhase::Held,
             cursor: PlaybackCursor {
                 sample: spec.sample,
@@ -891,6 +926,7 @@ fn render_sampled_voice(
     sampled: &mut SampledVoice,
     buses: &mut [Bus],
     refs: &BlockRefs<'_>,
+    mut streams: Option<&mut StreamRt>,
 ) -> bool {
     let BlockRefs {
         bank,
@@ -957,6 +993,9 @@ fn render_sampled_voice(
     let mut current_loop_index = sampled.cursor.loop_index;
     let mut current_external_id = sampled.cursor.external_release;
     let mut external = current_external_id.and_then(|id| bank.get(id));
+    if let Some(rt) = streams.as_deref_mut() {
+        acquire_stream_slot(sampled, current, external, rt);
+    }
     let mut ctx = sampled.block_context(current, external, rate_scale, lite, output_sr);
     let scratch = buses[sampled.bus as usize].mix_target(frames);
     for frame in start_frame..frames {
@@ -988,6 +1027,7 @@ fn render_sampled_voice(
             &ctx,
             refs.crossfade_step,
             refs.kill_step,
+            streams.as_deref_mut(),
         ) else {
             return false;
         };
@@ -1003,7 +1043,52 @@ fn render_sampled_voice(
         scratch[frame * 2] += left * gain;
         scratch[frame * 2 + 1] += right * gain;
     }
+    if sampled.starving {
+        sampled.starving = false;
+        if let Some(rt) = streams {
+            rt.note_underrun(sampled.stream);
+        }
+    }
     true
+}
+
+/// Arm a stream slot for a voice that is about to read release material
+/// off the disk. Tails are the only streamed material, so this is either
+/// a voice that just released (its tail cursor starts at the head of the
+/// stored region) or a long one-shot whose cursor has entered the head.
+/// A voice that finds no free slot plays its resident head and fades —
+/// exhaustion shortens a tail, it never glitches.
+fn acquire_stream_slot(
+    sampled: &mut SampledVoice,
+    current: &bank::Sample,
+    external: Option<&bank::Sample>,
+    rt: &mut StreamRt,
+) {
+    if sampled.stream != NO_SLOT {
+        return;
+    }
+    let releasing = matches!(
+        sampled.phase,
+        SamplePhase::Crossfade | SamplePhase::Tail
+    );
+    let target = if releasing {
+        external.unwrap_or(current)
+    } else {
+        current
+    };
+    let Some(region) = target.stream() else {
+        return;
+    };
+    if !releasing {
+        // Held: only once the cursor is inside the resident head, so a
+        // held note never holds a slot it does not need.
+        let head = stream::HEAD_SECONDS * target.sample_rate_hz() as f64;
+        if sampled.cursor.position + head < target.resident_frames() as f64 {
+            return;
+        }
+    }
+    let slot = rt.acquire(region, target.channels() as usize, target.format());
+    sampled.stream = if slot == NO_SLOT { DENIED_SLOT } else { slot };
 }
 
 #[cfg(test)]
