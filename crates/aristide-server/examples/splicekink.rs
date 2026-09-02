@@ -22,7 +22,7 @@
 //! Usage: cargo run --release -p aristide-server --example splicekink -- DIR [--tsv PATH]
 
 use aristide_engine::bank::{Sample, SampleBank};
-use aristide_engine::enclosure::ENCLOSURE_NONE;
+use aristide_engine::enclosure::{ENCLOSURE_NONE, MAX_VOICE_ENCLOSURES};
 use aristide_engine::{Command, Engine};
 use aristide_formats::wav;
 use std::sync::Arc;
@@ -159,7 +159,7 @@ fn main() -> anyhow::Result<()> {
                 group: 0,
                 wind_weight: 0.0,
                 brightness: 0.0,
-                enclosure: ENCLOSURE_NONE,
+                enclosures: [ENCLOSURE_NONE; MAX_VOICE_ENCLOSURES],
                 bus: 0,
                 delay_frames: 0,
                 nominal_hz: 0.0,
