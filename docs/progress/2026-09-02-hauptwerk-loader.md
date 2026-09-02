@@ -36,8 +36,10 @@ UNVERIFIED there.
 - Keyboards with console codes 1–5 become manuals (pedal = `ManualId(0)`);
   divisions with pipe stops but no keyboard get a floating manual.
 - Stops sound ranks through `StopRank` rows of action type/effect 1/1;
-  every other code is noise plumbing (key/stop/blower noises), counted
-  into one warning. Division-to-rank offsets and ranges become
+  every other code is noise plumbing (key/stop/blower noises), dropped
+  quietly — it is in every set, so a per-load warning would be noise
+  itself (first cut warned; the console showed it as unresolved file
+  lines). Division-to-rank offsets and ranges become
   `RankRange`s clipped to both compasses. Stops without rows follow their
   primary-rank hint.
 - Pipes fold the per-pipe 64′ harmonic into `nominal_frequency_hz` (the

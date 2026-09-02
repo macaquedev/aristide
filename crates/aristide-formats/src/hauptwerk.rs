@@ -15,7 +15,7 @@
 //! and their samples are not WAV, and no attempt is ever made to read
 //! either (the project's legal boundary — see CLAUDE.md).
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use aristide_model::units::equal_ladder_hz;
@@ -290,7 +290,6 @@ struct Builder<'a> {
     built_ranks: HashMap<i64, Option<RankId>>,
     windchest_numbers: BTreeMap<WindKey, u32>,
     organ: Organ,
-    skipped_noise_ranks: HashSet<i64>,
     conditional_attacks_skipped: usize,
     conditional_releases_skipped: usize,
 }
@@ -314,7 +313,6 @@ impl<'a> Builder<'a> {
             built_ranks: HashMap::new(),
             windchest_numbers: BTreeMap::new(),
             organ: Organ::default(),
-            skipped_noise_ranks: HashSet::new(),
             conditional_attacks_skipped: 0,
             conditional_releases_skipped: 0,
         }
@@ -341,18 +339,10 @@ impl<'a> Builder<'a> {
                     .to_string(),
             ));
         }
-        let skipped = self
-            .pipes_by_rank
-            .keys()
-            .filter(|rank| !self.built_ranks.contains_key(rank))
-            .count()
-            + self.skipped_noise_ranks.len();
-        if skipped > 0 {
-            self.warn(format!(
-                "{skipped} noise ranks (blower, key and stop action) skipped: Aristide has \
-                 no noise ranks yet"
-            ));
-        }
+        // Noise ranks and control-selected samples are things Aristide
+        // does not model yet (notes §11), present in every set: not
+        // worth a warning on every load. Genuine anomalies in what IS
+        // loaded stay in `warnings`.
         if self.conditional_attacks_skipped + self.conditional_releases_skipped > 0 {
             self.warn(format!(
                 "{} attack and {} release samples chosen by a continuous control or key \
@@ -806,13 +796,11 @@ impl<'a> Builder<'a> {
     }
 
     fn read_stops(&mut self, keyboards: &Keyboards) {
-        let mut noise_only = 0usize;
         let mut next_stop = 0u32;
         let stops: Vec<&Row> = self.t.rows("Stop").iter().collect();
         for stop in stops {
             let links = self.pipe_stop_ranks(stop);
             if links.is_empty() {
-                noise_only += 1;
                 continue;
             }
             let Some(manual_id) = stop
@@ -889,13 +877,8 @@ impl<'a> Builder<'a> {
             });
         }
         // Noise carriers masquerade as stops (blower, coupler and
-        // tremulant action noises); they are skipped silently unless
-        // they are all there is.
-        if noise_only > 0 {
-            self.warn(format!(
-                "{noise_only} noise-only stops (blower, action noises) skipped"
-            ));
-        }
+        // tremulant action noises) in every set; only an organ made of
+        // nothing else is worth a word, and `build` refuses that one.
     }
 
     /// The tremulant whose switch selects a stop's alternate (tremmed)
@@ -1100,11 +1083,9 @@ impl<'a> Builder<'a> {
             self.organ_tuning_cents + layer.float("PitchLvl_DetuningPercentSemitones").unwrap_or(0.0);
         let (attacks, first_sample) = self.read_attacks(layer_id, wave_tremulant.map(|_| false));
         if attacks.is_empty() {
-            if self.releases_by_layer.contains_key(&layer_id) {
-                // Release-only layers are action noises (key-off sounds).
-                self.skipped_noise_ranks
-                    .insert(pipe.int("RankID").unwrap_or(-1));
-            } else {
+            // Release-only layers are key-off noises; anything else
+            // without an attack is a hole in the set.
+            if !self.releases_by_layer.contains_key(&layer_id) {
                 self.warn(format!("pipe {pipe_id} (note {note}) has no attack sample; silent"));
             }
             return (built, key);
@@ -1893,10 +1874,16 @@ mod tests {
     }
 
     #[test]
-    fn noise_carriers_are_counted_not_loaded() {
+    fn noise_carriers_are_dropped_without_fuss() {
         let (_fixture, result) = load_fixture("noise");
-        assert!(result.warnings.iter().any(|w| w.contains("noise-only stops")));
-        assert!(result.warnings.iter().any(|w| w.contains("2 noise ranks")), "{:?}", result.warnings);
+        let organ = &result.organ;
+        assert!(organ.stops.iter().all(|s| s.name != "Blower"));
+        assert!(organ.ranks.iter().all(|r| !r.name.starts_with("Noises")));
+        assert!(
+            !result.warnings.iter().any(|w| w.to_lowercase().contains("noise")),
+            "every set has noises; no nagging: {:?}",
+            result.warnings
+        );
     }
 
     #[test]

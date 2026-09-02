@@ -209,7 +209,8 @@ samples. §6.
 Stops with no `StopRank` rows at all fall back to `Hint_PrimaryAssociatedRankID`
 (OdfEdit notes some Grabowski sets do this). Stops with rows but none of type 1/1 are
 noise carriers — Solignac has a "stop" for the blower, one for the coupler's click and
-one for the tremulant's — and are counted into one warning, not loaded.
+one for the tremulant's — and are dropped without a warning: every set has them, and a
+warning that fires on every load says nothing.
 
 **`Rank`.** `Name`, and `SoundEngine01_Layer1Desc`…`Layer8Desc` naming the layers its
 pipes carry ("Main"; a second one in Grabowski sets holds tremmed samples, §6).
