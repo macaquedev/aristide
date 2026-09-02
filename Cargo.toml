@@ -28,6 +28,7 @@ serde = { version = "1", features = ["derive"] }
 # would catch a field landing inside the wrong object.
 serde_json = "1"
 toml = "0.9"
+quick-xml = "0.41"
 
 [profile.release]
 lto = "thin"

@@ -110,7 +110,7 @@ pub struct PreparedInstrument {
 
 pub fn load_organ(path: &Path) -> Result<Organ> {
     let started = Instant::now();
-    let result = aristide_formats::grandorgue::load(path)
+    let result = aristide_formats::load_set(path)
         .with_context(|| format!("loading {}", path.display()))?;
     tracing::info!(
         "organ: {} ({} stops, {} ranks) in {:.1?}",

@@ -36,12 +36,7 @@ pub enum OdfError {
     },
 }
 
-/// A parsed organ plus non-fatal deviations encountered on the way.
-#[derive(Debug)]
-pub struct LoadResult {
-    pub organ: Organ,
-    pub warnings: Vec<String>,
-}
+pub use crate::LoadResult;
 
 pub fn load(path: &Path) -> Result<LoadResult, OdfError> {
     let bytes = std::fs::read(path)?;

@@ -617,7 +617,7 @@ pub fn load(path: &Path) -> Result<Assembled, InstrumentError> {
             dir.join(source_path)
         };
         let loaded =
-            crate::grandorgue::load(&resolved).map_err(|e| InstrumentError::Source {
+            crate::load_set(&resolved).map_err(|e| InstrumentError::Source {
                 alias: alias.clone(),
                 path: resolved.clone(),
                 message: e.to_string(),

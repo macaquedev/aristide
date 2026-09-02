@@ -1,5 +1,6 @@
-//! Load a GrandOrgue .organ file and print a summary. Usage:
+//! Load a sample set (GrandOrgue or Hauptwerk) and print a summary. Usage:
 //! cargo run -p aristide-formats --example inspect -- path/to/set.organ
+//! (or path/to/OrganDefinitions/x.Organ_Hauptwerk_xml)
 
 use std::path::Path;
 
@@ -7,7 +8,7 @@ fn main() -> anyhow::Result<()> {
     let path = std::env::args()
         .nth(1)
         .ok_or_else(|| anyhow::anyhow!("usage: inspect <file.organ>"))?;
-    let result = aristide_formats::grandorgue::load(Path::new(&path))?;
+    let result = aristide_formats::load_set(Path::new(&path))?;
     let organ = &result.organ;
 
     println!("organ: {}", organ.name);

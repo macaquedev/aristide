@@ -631,7 +631,7 @@ pub(super) fn offerings_json(path: &std::path::Path) -> Result<String, String> {
             json_string(alias),
             json_string(&resolved.display().to_string())
         ));
-        match aristide_formats::grandorgue::load(&resolved) {
+        match aristide_formats::load_set(&resolved) {
             Ok(loaded) => {
                 let organ = loaded.organ;
                 out.push_str(&format!(",\"name\":{},\"manuals\":[", json_string(&organ.name)));
