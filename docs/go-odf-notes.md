@@ -93,7 +93,7 @@ paths elsewhere in the codebase, e.g. `src/grandorgue/GOMetronome.cpp` line 92:
 | `NumberOfReversiblePistons` | int | yes | 0–32 | not needed for pure playback |
 | `NumberOfDivisionalCouplers` | int | yes | 0–8 | |
 | `NumberOfGenerals` | int | yes | 0–99 | combination-system only, not needed for playback |
-| `DivisionalsStoreIntermanualCouplers` / `...IntramanualCouplers` / `...Tremulants` / `GeneralsStoreDivisionalCouplers` | Y/N | yes | — | combination-system only |
+| `DivisionalsStoreIntermanualCouplers` / `...IntramanualCouplers` / `...Tremulants` / `GeneralsStoreDivisionalCouplers` | Y/N | yes | GO defaults all N | combination-system only — **Aristide reads the three `Divisionals*` flags** (see below) |
 | `CombinationsStoreNonDisplayedDrawstops` | Y/N | no | default N | combination-system only |
 | `HauptwerkOrganFileFormatVersion` | string | no | — | Hauptwerk-compat metadata, ignored by GO logic |
 | `ChurchAddress`, `OrganBuilder`, `OrganBuildDate`, `OrganComments`, `RecordingDetails`, `InfoFilename` | string | no | — | pure metadata, not needed for playback |
@@ -102,6 +102,30 @@ paths elsewhere in the codebase, e.g. `src/grandorgue/GOMetronome.cpp` line 92:
 Also present at organ level (root of the pipe-config inheritance tree, §8):
 `AmplitudeLevel`, `Gain`, `PitchTuning`, `PitchCorrection`, `TrackerDelay`, `Percussive` —
 all optional, same semantics as at Windchest/Rank/Pipe level.
+
+**How far a divisional reaches** (2026-09-02): the three `DivisionalsStore*` flags
+are *not* "combination-system only" for a player who wants pistons that behave like
+their own console's, so Aristide's loader reads them into
+`aristide_model::CombinationScope` (`grandorgue.rs`, `[Organ]`). They mean:
+
+| Flag | GO applies it in | Effect |
+|---|---|---|
+| `DivisionalsStoreIntermanualCouplers` | `GOCoupler.cpp:259-264` | divisionals also store the division's couplers **whose destination manual differs from their source** (`GOCoupler::IsIntermanual`, `GOCoupler.cpp:447`) |
+| `DivisionalsStoreIntramanualCouplers` | same | …and those that stay on their own manual (octave couplers, unison off) |
+| `DivisionalsStoreTremulants` | `GOTremulant.cpp:79-83` | divisionals also store the division's tremulants |
+
+GO's own defaults for all five combination flags are `false`
+(`GOOrganModel.cpp:44-47`), and a divisional's scope is that manual's own stops,
+couplers, tremulants and switches (`GOCombinationDefinition::InitDivisional`) — a
+coupler belongs to the manual it is *defined under*, i.e. the manual whose keys it
+borrows. The GO demo set answers `Inter=Y, Intra=Y, Trem=N`.
+
+The crescendo is not in the ODF at all: GO keeps four banks of `CRESCENDO_STEPS = 32`
+stages in its settings (`GOSetter.cpp`), with a per-bank add/override mode; a
+drawstop's engaged state is an OR over named internal states, the crescendo owning
+one of them (`GODrawstop::SetInternalState` / `CalculateResultState`), which is what
+makes its "add" mode additive over the hand registration. There is no conventional
+MIDI CC for it — GO learns whatever the shoe sends.
 
 Source: `src/grandorgue/model/GOOrganModel.cpp` lines 69-225 (`GOOrganModel::Load`),
 `src/grandorgue/GOOrganController.cpp` lines 181-230 (`ReadOrganFile`, metadata-only keys).

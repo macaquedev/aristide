@@ -3,6 +3,7 @@
 Newest first. One entry per work session; keep entries factual and short.
 Milestones refer to DESIGN.md.
 
+- [2026-09-02 — the combination action, whole: divisionals, stepper, crescendo, piston rail](progress/2026-09-02-combination-action.md)
 - [2026-09-02 — Hauptwerk sets load (M7 opens)](progress/2026-09-02-hauptwerk-loader.md)
 - [2026-09-01 — tuning scopes: sets, stops, ranks within stops](progress/2026-09-01-tuning-scopes.md)
 - [2026-09-01 — console size in Preferences](progress/2026-09-01-console-size.md)
