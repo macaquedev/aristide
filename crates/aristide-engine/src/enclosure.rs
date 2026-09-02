@@ -17,6 +17,14 @@
 //!   through a linkage; the pedal cannot teleport them. A critically
 //!   damped second-order slew (HW models accel+damping coefficients)
 //!   both sounds right and kills control zipper.
+//! - **Closed-box pressure rise**: the box is not only an acoustic
+//!   filter, it is the volume the enclosed pipes exhaust *into*. With
+//!   the shutters shut their outflow pressurizes it, and a pipe speaks
+//!   on the difference between its chest and its mouth — so the rise
+//!   is a small pressure loss for every pipe in the box (HW's
+//!   `WindModel_BoxPressureRisePctAtMaxLoadWhenClosed`, 1–5 %: "a very
+//!   slight, but just discernible detuning when the box is fully
+//!   closed"). See [`Enclosure::step`] for the derivation.
 //!
 //! The per-voice filter leg lives in the engine's voice loop; this
 //! module owns the box state and its per-block factors. Everything
@@ -31,6 +39,24 @@ pub const MAX_ENCLOSURES: usize = 16;
 
 /// Voice marker for "not enclosed".
 pub const ENCLOSURE_NONE: u8 = u8::MAX;
+
+/// Enclosure memberships one voice can carry. Real instruments do nest
+/// boxes — an Echo or Solo box standing inside the Swell is standard
+/// English and American practice, and GrandOrgue lets a windchest join
+/// any number of them — but two deep is the realistic maximum, and a
+/// fixed pair keeps the voice's state small and its render loop
+/// branch-free for the overwhelmingly common single-box case.
+pub const MAX_VOICE_ENCLOSURES: usize = 2;
+
+/// Flow conductance of the shutter front wide open, as a multiple of
+/// the closed box's residual leakage (gaps around the shutters, the
+/// grille, the joinery). A swell front is square metres of opening
+/// against a few hundred square centimetres of residual gap, so two
+/// orders of magnitude is the conservative end. It is the ONE number
+/// that decides how fast cracking the shutters vents the box, and it
+/// is why HW's parameter is named "…WhenClosed": at 10 % open the
+/// steady rise is already down to ~9 % of its closed value.
+const SHUTTER_VENT_RATIO: f32 = 100.0;
 
 #[derive(Debug, Clone, Copy)]
 pub struct EnclosureParams {
@@ -54,6 +80,21 @@ pub struct EnclosureParams {
     /// Full-sweep settle time of the shutter inertia model, seconds.
     /// ≤0 disables (pedal drives the shutters directly).
     pub full_sweep_s: f32,
+    /// Static-pressure rise inside the box at full enclosed load with
+    /// the shutters shut, as a percentage of chest pressure — HW's
+    /// `WindModel_BoxPressureRisePctAtMaxLoadWhenClosed` (1–5 %
+    /// suggested; above that the box robs its own wind). 0 disables
+    /// the leg entirely.
+    pub pressure_rise_pct: f32,
+    /// Enclosed wind draw that counts as "full load", in the same
+    /// units and on the same scale as a chest's
+    /// [`reference_demand`](crate::wind::WindParams::reference_demand)
+    /// — a box usually holds exactly one division, so one full chorus
+    /// on the box is one full chorus on its chest.
+    pub reference_demand: f32,
+    /// Fill/leak time constant of the CLOSED box, seconds; the open
+    /// box vents `SHUTTER_VENT_RATIO` times faster. Derived below.
+    pub fill_seconds: f32,
 }
 
 impl Default for EnclosureParams {
@@ -65,6 +106,11 @@ impl Default for EnclosureParams {
             corner_closed_hz: 1_000.0,
             taper: 1.0,
             full_sweep_s: 0.5,
+            // HW's suggested band is 1–5 %; its midpoint is the
+            // "just discernible when fully closed" the docs describe.
+            pressure_rise_pct: 2.0,
+            reference_demand: 30.0,
+            fill_seconds: 0.25,
         }
     }
 }
@@ -79,6 +125,8 @@ pub struct Enclosure {
     /// Shutter position after inertia.
     position: f32,
     velocity: f32,
+    /// Overpressure inside the box as a fraction of chest pressure.
+    pressure_rise: f32,
     /// Cached per-block factors.
     gain: f32,
     hi_gain: f32,
@@ -93,6 +141,7 @@ impl Default for Enclosure {
             target: 1.0,
             position: 1.0,
             velocity: 0.0,
+            pressure_rise: 0.0,
             gain: 1.0,
             hi_gain: 1.0,
             coeff: 0.0,
@@ -112,8 +161,42 @@ impl Enclosure {
         }
     }
 
-    /// Advance the shutter model by `dt` seconds and refresh factors.
-    pub fn step(&mut self, dt: f32, sample_rate: f32) {
+    /// Advance the shutter model by `dt` seconds under the enclosed
+    /// wind draw `demand`, and refresh the factors.
+    ///
+    /// **The pressure leg, from first principles.** The box is a
+    /// semi-sealed volume `V` the enclosed pipes exhaust into. Mass
+    /// balance over it, linearized about the static pressure, is
+    ///
+    /// ```text
+    /// (V/ρc²)·dδp/dt = Q_in − C(k)·δp
+    /// ```
+    ///
+    /// with `Q_in` the volume flow the sounding enclosed pipes push in
+    /// (exactly the wind draw the chest model already aggregates) and
+    /// `C(k)` the flow conductance out — the shutter gaps at opening
+    /// `k` plus the box's own leakage. That is a first-order lag whose
+    /// steady state and time constant are set by the SAME conductance:
+    ///
+    /// ```text
+    /// δp∞ = Q_in / C(k)        τ = V / (ρc²·C(k))
+    /// ```
+    ///
+    /// So the closed box builds slowly to its full rise, and cracking
+    /// the shutters both collapses the rise and dumps it fast — which
+    /// is why HW's parameter is calibrated "when closed" only.
+    ///
+    /// Magnitudes, to check the calibration is physical: a 30 m³ box,
+    /// a division pushing ~0.1 m³/s, and HW's 2 % of an 800 Pa chest
+    /// (16 Pa) imply a residual leak area of ~190 cm² (16 Pa drives a
+    /// ~5 m/s jet through it) — a plausible swell front. The same
+    /// numbers give `τ = 2V·δp∞/(ρc²·Q_in) ≈ 0.07 s`, and across
+    /// small-box/light-registration to big-chamber/full-organ the band
+    /// is roughly 0.03–0.5 s. Air fills a box fast; the audible
+    /// smoothing comes from the per-voice speech lags downstream, not
+    /// from here. `fill_seconds` defaults to 0.25 s — mid-band and on
+    /// the slow side, so the detuning swells in rather than snapping.
+    pub fn step(&mut self, demand: f32, dt: f32, sample_rate: f32) {
         let p = self.params;
         if p.full_sweep_s > 1e-3 {
             // Critically damped second-order slew: settles to ~2 % in
@@ -132,6 +215,25 @@ impl Enclosure {
         } else {
             self.position = self.target;
             self.velocity = 0.0;
+        }
+
+        // The pressure leg (derivation above). `vent` is C(k)/C_closed:
+        // the shutter front wide open passes SHUTTER_VENT_RATIO times
+        // what the closed box leaks, and both the steady rise and the
+        // time constant scale as its reciprocal.
+        if p.pressure_rise_pct > 0.0 && p.reference_demand > 0.0 {
+            let vent = 1.0 + (SHUTTER_VENT_RATIO - 1.0) * self.position;
+            // Load capped like the chest regulator's, so a freak tutti
+            // on one box cannot drive the model somewhere silly.
+            let load = (demand / p.reference_demand).min(3.0);
+            let target = 0.01 * p.pressure_rise_pct * load / vent;
+            let tau = p.fill_seconds.max(1e-3) / vent;
+            // Exact one-pole: stable at any block size, and a wide-open
+            // box (τ ≈ 2.5 ms) simply tracks, as it should.
+            let alpha = 1.0 - (-dt / tau).exp();
+            self.pressure_rise += (target - self.pressure_rise) * alpha;
+        } else {
+            self.pressure_rise = 0.0;
         }
 
         let closed = (1.0 - self.position).max(0.0).powf(p.taper.max(0.05));
@@ -167,6 +269,15 @@ impl Enclosure {
         self.position
     }
 
+    /// Overpressure inside the box, as a fraction of static chest
+    /// pressure. A pipe speaks on the difference between its chest and
+    /// its mouth, so for every voice in this box this is a pressure
+    /// *loss* of the same size.
+    #[inline]
+    pub fn pressure_loss(&self) -> f32 {
+        self.pressure_rise
+    }
+
     #[inline]
     pub fn params(&self) -> &EnclosureParams {
         &self.params
@@ -181,7 +292,7 @@ mod tests {
     fn settle(enclosure: &mut Enclosure, seconds: f32, sr: f32) {
         let dt = 0.005;
         for _ in 0..((seconds / dt) as usize) {
-            enclosure.step(dt, sr);
+            enclosure.step(0.0, dt, sr);
         }
     }
 
@@ -236,7 +347,7 @@ mod tests {
             ..EnclosureParams::default()
         });
         e.set_target(0.25);
-        e.step(0.005, 44_100.0);
+        e.step(0.0, 0.005, 44_100.0);
         assert_eq!(e.position(), 0.25);
     }
 

@@ -103,7 +103,7 @@ fn start(handle: &mut EngineHandle, voice: u64) {
         group: 0,
         wind_weight: 0.0,
         brightness: 0.0,
-        enclosure: ENCLOSURE_NONE,
+        enclosures: [ENCLOSURE_NONE; MAX_VOICE_ENCLOSURES],
         bus: 0,
         delay_frames: 0,
         nominal_hz: 0.0,

@@ -528,6 +528,15 @@ pub struct EnclosuresConfig {
     /// pedal drives the shutters directly).
     #[serde(default = "default_full_sweep_s")]
     pub full_sweep_s: f64,
+    /// How far the static pressure rises inside a closed box when its
+    /// pipes are drawing full load, as a percentage — the pipes exhaust
+    /// into the box, so a shut box pushes back and everything in it
+    /// goes very slightly flat. Hauptwerk's
+    /// `WindModel_BoxPressureRisePctAtMaxLoadWhenClosed`, suggested
+    /// 1–5 % ("a very slight, but just discernible detuning"); higher
+    /// values start robbing the box's own wind. 0 disables it.
+    #[serde(default = "default_pressure_rise_pct")]
+    pub pressure_rise_pct: f64,
 }
 
 fn default_expression_cc() -> u8 {
@@ -554,6 +563,10 @@ fn default_full_sweep_s() -> f64 {
     0.5
 }
 
+fn default_pressure_rise_pct() -> f64 {
+    2.0
+}
+
 impl Default for EnclosuresConfig {
     fn default() -> Self {
         EnclosuresConfig {
@@ -564,6 +577,7 @@ impl Default for EnclosuresConfig {
             corner_closed_hz: default_corner_closed_hz(),
             taper: default_taper(),
             full_sweep_s: default_full_sweep_s(),
+            pressure_rise_pct: default_pressure_rise_pct(),
         }
     }
 }

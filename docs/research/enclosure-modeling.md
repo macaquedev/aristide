@@ -138,15 +138,24 @@ would couple enclosures to the future M6 routing work.
    (the tail is room decay that already left the box) and what both HW
    and GO ship. Frozen ≠ unfiltered: a tail released with the box
    closed keeps the closed-box filter forever.
-5. **Wind coupling (closed-box pressure rise):** deferred. HW's 1–5%
-   "just discernible" detuning needs the enclosure to be a node in the
-   wind topology; our wind groups are per-ODF-windchest and the
-   audible payoff is marginal. Documented as future sidecar work
-   alongside inter-chest coupling (see gap analysis §10).
-6. **Multiple enclosures per windchest:** GO multiplies attenuations;
-   real sets almost never use it (demo set: one per chest). A voice
-   carries ONE enclosure index; extra memberships log a load warning.
-   Revisit if a real set needs it.
+5. **Wind coupling (closed-box pressure rise):** shipped 2026-09-02.
+   The box is the volume its pipes exhaust into, so it did not need to
+   become a node in the chest topology after all — it is its own
+   first-order fill/leak, driven by the enclosed draw and vented
+   through a conductance that sets both the steady rise and the time
+   constant. The pipe sees the rise as a pressure *loss* (it speaks on
+   chest minus mouth), which rides the existing pressure exponents and
+   per-voice speech lags. Sidecar `pressure_rise_pct`, default 2%
+   (HW's midpoint); `fill_seconds` 0.25 s, derived in
+   docs/progress/2026-09-02-box-pressure-and-nested-boxes.md.
+6. **Multiple enclosures per windchest:** shipped 2026-09-02. Boxes
+   nest in real instruments (a Solo or Echo box inside the Swell), and
+   both formats carry it — GO's `NumberOfEnclosures` list, HW's
+   per-pipe `EnclosurePipe` rows. A voice carries
+   `MAX_VOICE_ENCLOSURES = 2` memberships; gains multiply and shelves
+   filter in series (GO's rule), each box keeps its own de-zipper, all
+   freeze together at release, and the pressure rises stack. Deeper
+   nesting logs a load warning.
 7. **MIDI:** expression CC (default CC11, GO-convention `swell` also
    accepts CC7 per sidecar) on the channel of the enclosure's manuals;
    sidecar can pin `cc` and `channel` per enclosure. HTTP console gets
@@ -154,7 +163,8 @@ would couple enclosures to the future M6 routing work.
 
 Tunable constants exposed in the sidecar (`[[enclosure]]`): `floor_db`
 (overrides ODF AmpMinimumLevel), `shelf_db`, `corner_open_hz`,
-`corner_closed_hz`, `taper`, `full_sweep_s`. Defaults above; the
+`corner_closed_hz`, `taper`, `full_sweep_s`, `pressure_rise_pct`.
+Defaults above; the
 user's ear is the spec for all of them.
 
 ## Citations

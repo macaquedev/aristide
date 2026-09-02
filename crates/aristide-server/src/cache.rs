@@ -30,8 +30,12 @@ use std::path::{Path, PathBuf};
 use aristide_engine::bank::{Sample, StreamRegion};
 use aristide_engine::stream::{StreamStores, TailSink};
 
-/// Bump on ANY layout change here or in `Sample::write_cache`.
-const MAGIC: &[u8; 8] = b"ARISBK03";
+/// Bump on ANY layout change here or in `Sample::write_cache` — and on
+/// any change to what the persisted analysis *means*, since a stale
+/// entry restores the old numbers verbatim (03: stereo-joint release
+/// alignment; 04: entries split head/tail for streaming, both
+/// 2026-09-02).
+const MAGIC: &[u8; 8] = b"ARISBK04";
 /// Companion file holding the samples' streamed tails.
 const TAIL_MAGIC: &[u8; 8] = b"ARISTL01";
 /// Header bytes before the first tail — every recorded offset is

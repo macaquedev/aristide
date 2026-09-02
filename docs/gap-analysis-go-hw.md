@@ -55,6 +55,16 @@ depths. (HW V Features Data Sheet p12; UG5 p213.)
   shutter filtering.
 - Release tails freeze their enclosure state at key-off (`lib.rs::process`
   refreshes box factors only while `Held`) — HW's correct rule.
+- **Closed-box pressure rise** (2026-09-02): the enclosed pipes exhaust into
+  the box, so a shut box builds overpressure on a first-order fill/leak whose
+  steady state and time constant share one shutter-dependent conductance; the
+  pipe sees it as a pressure *loss* and it rides the existing wind exponents
+  and per-voice speech lags. Sidecar `[enclosures] pressure_rise_pct`, default
+  2 % (HW's midpoint) → ≈ −1 cent at full load with the box shut.
+- **Nested boxes** (2026-09-02): a voice carries up to
+  `MAX_VOICE_ENCLOSURES = 2` memberships; gains multiply and shelves filter in
+  series (GO's composition rule), each box keeps its own de-zipper, all freeze
+  together at release, and pressure rises stack additively down the chain.
 - Control: sidecar `[enclosures] cc` (default CC11) → `Console::expression_manual`
   (moves every box a manual's stops sit in); generic `Action::Enclosure(name)`
   bindings for any MIDI trigger/computer key; `POST /api/enclosure`; console UI.
@@ -68,8 +78,9 @@ depths. (HW V Features Data Sheet p12; UG5 p213.)
   overrides are earmarked for the voicing layer (`sidecar.rs` comment).
 - ODF `MIDIInputNumber` is parsed but never consumed — per-enclosure independent
   CC assignment from the ODF isn't wired (bindings cover it manually).
-- A chest in multiple enclosures uses only the first, with a warning
-  (`server/bank.rs::chest_enclosures`). GO composes all of them.
+- Boxes nested more than two deep are dropped with a warning
+  (`server/bank.rs::resolve_chest_enclosures`); GO composes any number. No
+  known instrument nests three.
 - No per-pipe filter/gain depths (HW voicing territory). `MAX_ENCLOSURES = 16`.
 
 ---
@@ -389,6 +400,15 @@ unchanged since 2026-08-12:
   an explicit `CuePoint` outranks the wav cue chunk (junk inside the loop
   falls back); `ReleaseEnd` trims the attack's embedded tail; separate
   releases are cut to their `CuePoint..ReleaseEnd` window at decode.
+- ~~Splice alignment measured one channel only.~~ ✅ (2026-09-02): the phase
+  map was built from channel 0, so on a stereo pipe whose loop-to-tail
+  inter-channel phase shifts (demo set: median 0.013 turns, worst 0.47) the
+  right channel spliced up to half a period out. Both alignment paths now
+  target the amplitude-weighted circular mean of the channels' requirements,
+  minimizing total cancelled crossfade power; mono is bit-identical and
+  `ReleaseAlignment::target` is unchanged. Neither GO nor HW documents any
+  per-channel splice alignment. See
+  `docs/progress/2026-09-02-stereo-release-alignment.md`.
 - **No release truncation** — ⚠ still open. HW: load-time truncation with
   frequency-shaped decays for the "wet set → short tails → convolution" dry
   workflow, plus real-time truncation; GO: per-pipe `ReleaseTail` ms voicing.

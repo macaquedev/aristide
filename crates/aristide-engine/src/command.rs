@@ -2,7 +2,7 @@
 
 use rtrb::Producer;
 
-use crate::enclosure::EnclosureParams;
+use crate::enclosure::{EnclosureParams, MAX_VOICE_ENCLOSURES};
 use crate::routing;
 use crate::wind::{self, WindParams};
 
@@ -16,9 +16,11 @@ pub enum Command {
     /// how much it draws (0 = draws nothing, e.g. action noises).
     /// `brightness` is the voice's tilt-filter one-pole coefficient
     /// (control-side from the pipe's pitch; 0 bypasses the filter).
-    /// `enclosure` is the swell box the voice sits inside
-    /// ([`ENCLOSURE_NONE`](crate::enclosure::ENCLOSURE_NONE) for
-    /// unenclosed divisions).
+    /// `enclosures` are the swell boxes the voice sits inside, innermost
+    /// first ([`ENCLOSURE_NONE`](crate::enclosure::ENCLOSURE_NONE) in
+    /// every unused slot; all of them for unenclosed divisions). Boxes
+    /// nest — a Solo or Echo box inside the Swell — and their gains and
+    /// shelves cascade.
     /// `bus` is the output bus the voice renders onto (0 = the main
     /// pair) and `delay_frames` an onset delay: the voice waits that
     /// many output frames before speaking — per-pipe tracker/speaking
@@ -32,7 +34,7 @@ pub enum Command {
         group: u8,
         wind_weight: f32,
         brightness: f32,
-        enclosure: u8,
+        enclosures: [u8; MAX_VOICE_ENCLOSURES],
         bus: u8,
         delay_frames: u32,
         /// The pipe's sounding frequency in Hz — how big a pipe this

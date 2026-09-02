@@ -82,6 +82,8 @@ fn golden_bank() -> Arc<SampleBank> {
     Arc::new(bank)
 }
 
+const NO_BOX: [u8; MAX_VOICE_ENCLOSURES] = [ENCLOSURE_NONE; MAX_VOICE_ENCLOSURES];
+
 /// Renders the fixed script and returns (hash, peak).
 fn golden_render(lite: bool) -> (u64, f32) {
     const BLOCKS: usize = 200;
@@ -89,7 +91,7 @@ fn golden_render(lite: bool) -> (u64, f32) {
     let (mut engine, mut handle) = Engine::new(48_000.0, golden_bank());
     engine.set_lite(lite);
     let start = |handle_id: u64, sample, rate, gain, group, wind_weight, brightness,
-                 enclosure, bus, delay_frames, nominal_hz| Command::StartVoice {
+                 enclosures, bus, delay_frames, nominal_hz| Command::StartVoice {
         handle: handle_id,
         sample,
         rate,
@@ -97,7 +99,7 @@ fn golden_render(lite: bool) -> (u64, f32) {
         group,
         wind_weight,
         brightness,
-        enclosure,
+        enclosures,
         bus,
         delay_frames,
         nominal_hz,
@@ -150,10 +152,10 @@ fn golden_render(lite: bool) -> (u64, f32) {
                 });
             }
             1 => {
-                handle.send(start(1, 0, 1.0, 0.8, 0, 1.0, 0.2, 0, 0, 0, 400.0));
-                handle.send(start(2, 0, 0.5, 0.6, 0, 1.0, 0.1, ENCLOSURE_NONE, 1, 64, 200.0));
-                handle.send(start(3, 2, 1.3, 0.4, 1, 0.5, 0.0, 0, 0, 0, 800.0));
-                handle.send(start(4, 3, 1.0, 0.9, 0, 0.0, 0.0, ENCLOSURE_NONE, 0, 0, 0.0));
+                handle.send(start(1, 0, 1.0, 0.8, 0, 1.0, 0.2, [0, ENCLOSURE_NONE], 0, 0, 400.0));
+                handle.send(start(2, 0, 0.5, 0.6, 0, 1.0, 0.1, NO_BOX, 1, 64, 200.0));
+                handle.send(start(3, 2, 1.3, 0.4, 1, 0.5, 0.0, [0, ENCLOSURE_NONE], 0, 0, 800.0));
+                handle.send(start(4, 3, 1.0, 0.9, 0, 0.0, 0.0, NO_BOX, 0, 0, 0.0));
             }
             5 => {
                 handle.send(Command::SetTremulant {
@@ -229,5 +231,9 @@ fn engine_output_is_bit_exact() {
     assert_eq!(lite_hash, GOLDEN_HASH_LITE, "lite-mode output changed");
 }
 
-const GOLDEN_HASH: u64 = 0x6AB5_6B42_A985_D428;
+// Rerecorded 2026-09-02 (closed-box pressure rise): the script's two
+// enclosed voices draw wind, so closing the box at block 20 now also
+// pressurizes it and detunes them slightly. Lite mode steps neither
+// the chests nor the boxes, so its hash is untouched.
+const GOLDEN_HASH: u64 = 0x4CD4_9EF4_EB08_CF88;
 const GOLDEN_HASH_LITE: u64 = 0x9333_3E2B_59C2_F760;

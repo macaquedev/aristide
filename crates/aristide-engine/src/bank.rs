@@ -298,23 +298,84 @@ impl Sample {
         Ok(sample)
     }
 
-    /// Fundamental phase (radians) of the waveform at `start`, by
-    /// projecting `window` frames onto sin/cos at `period` — immune to
-    /// harmonic content, unlike correlation peaks.
-    fn quadrature_phase(&self, start: u64, window: u64, period: f64) -> f64 {
+    /// Fundamental phase (radians) and amplitude of one channel at
+    /// `start`, by projecting `window` frames onto sin/cos at `period`
+    /// — immune to harmonic content, unlike correlation peaks.
+    ///
+    /// The amplitude is what weights the channels against each other
+    /// when a stereo splice cannot satisfy both (see
+    /// [`Sample::alignment_turns`]).
+    pub fn quadrature(&self, channel: u16, start: u64, window: u64, period: f64) -> (f64, f64) {
         let ch = self.channels as usize;
+        let channel = (channel as usize).min(ch - 1);
         // Resident frames only: analysis runs before any split, and
         // what runs after it (release attaching) reads the head.
         let window = window.min(self.resident_frames().saturating_sub(start));
         let mut re = 0.0f64;
         let mut im = 0.0f64;
         for i in 0..window {
-            let x = self.data.get((start + i) as usize * ch) as f64;
+            let x = self.data.get((start + i) as usize * ch + channel) as f64;
             let angle = core::f64::consts::TAU * i as f64 / period;
             re += x * angle.cos();
             im += x * angle.sin();
         }
-        im.atan2(re)
+        let amplitude = (re * re + im * im).sqrt() * 2.0 / window.max(1) as f64;
+        (im.atan2(re), amplitude)
+    }
+
+    /// Turns of tail offset that put the tail's fundamental back in
+    /// phase with the loop's, for a voice sitting at phase 0 — the one
+    /// number the whole bucket table is built from. `tail_side` is
+    /// `self` for an embedded tail, the release file for a separate
+    /// one.
+    ///
+    /// A stereo pipe recording carries the same fundamental in both
+    /// channels, separated by the inter-channel phase its mic geometry
+    /// imposes. That separation is only identical in loop and tail when
+    /// both are one continuous take at one placement: a separate
+    /// release file, or a tail whose reverberant field has decayed into
+    /// a different L/R balance than the sustain's, shifts it — and then
+    /// NO single tail frame continues both channels. Aligning on the
+    /// left alone (what we did until 2026-09-02) left the right channel
+    /// spliced at up to half a period of error.
+    ///
+    /// So minimize the discontinuity energy over the channels instead.
+    /// Crossfading a leg of amplitude `a` into one of amplitude `b` at
+    /// a fundamental phase error `ε` loses `2ab(1 − cos ε) ≈ ab·ε²` of
+    /// the sum's power, so channel `c` is weighted by the product of
+    /// its loop and tail fundamental amplitudes and the optimum is the
+    /// weighted circular mean of the per-channel requirements. For any
+    /// mismatch below half a period that beats either channel alone;
+    /// at exactly half a period (no possible splice) it ties. Mono
+    /// reduces to the left-channel answer bit for bit.
+    fn alignment_turns(
+        &self,
+        loop_start: u64,
+        tail_side: &Sample,
+        tail_start: u64,
+        window: u64,
+        period: f64,
+    ) -> f64 {
+        let turns_of = |channel: u16| {
+            let (theta_loop, amplitude_loop) = self.quadrature(channel, loop_start, window, period);
+            let (theta_tail, amplitude_tail) =
+                tail_side.quadrature(channel, tail_start, window, period);
+            let turns = (theta_tail - theta_loop) / core::f64::consts::TAU;
+            (turns, amplitude_loop * amplitude_tail)
+        };
+        let (base, base_weight) = turns_of(0);
+        let channels = self.channels.min(tail_side.channels);
+        let mut weighted = 0.0f64;
+        let mut total = base_weight;
+        for channel in 1..channels {
+            let (turns, weight) = turns_of(channel);
+            // Shortest arc from the reference channel: a phase error is
+            // circular, so the mean has to be taken the short way round.
+            let offset = turns - base;
+            weighted += weight * (offset - (offset + 0.5).floor());
+            total += weight;
+        }
+        if total > 0.0 { base + weighted / total } else { base }
     }
 
     /// Measure the true fundamental period from the sustain loop by
@@ -601,13 +662,12 @@ impl Sample {
         // period — NOT correlation argmax: on principal pipes with
         // strong 2nd harmonics the argmax could lock a half period off
         // (fundamental cancels, octave reinforces = a missing-
-        // fundamental strike, i.e. exactly a bell).
-        let theta_loop = self.quadrature_phase(loop_start, window * 4, period);
-        let theta_tail = self.quadrature_phase(tail, window * 4, period);
+        // fundamental strike, i.e. exactly a bell). Stereo splices
+        // answer to both channels at once (see alignment_turns).
+        let base_turns = self.alignment_turns(loop_start, self, tail, window * 4, period);
         let offsets = (0..ALIGNMENT_BUCKETS)
             .map(|bucket| {
-                let turns = (theta_tail - theta_loop) / core::f64::consts::TAU
-                    + bucket as f64 / ALIGNMENT_BUCKETS as f64;
+                let turns = base_turns + bucket as f64 / ALIGNMENT_BUCKETS as f64;
                 let delta = (period * turns.rem_euclid(1.0)).round() as u64;
                 (tail + delta.min(period_frames.saturating_sub(1))) as u32
             })
@@ -706,15 +766,14 @@ impl Sample {
                 let period_frames = period.round().max(4.0) as u64;
                 let window = (period_frames * 4).clamp(128, 2048);
                 if target.frames() > period_frames + window {
-                    // Quadrature phases (harmonic-immune; see
-                    // align_release) — cross-file this time.
-                    let theta_loop = self.quadrature_phase(loop_start, window, period);
-                    let theta_target = target.quadrature_phase(0, window, period);
+                    // Quadrature phases (harmonic-immune, and stereo-
+                    // joint; see align_release) — cross-file this time,
+                    // which is exactly the case where the two channels
+                    // can disagree: a separate release is its own take.
+                    let base_turns = self.alignment_turns(loop_start, target, 0, window, period);
                     let offsets = (0..ALIGNMENT_BUCKETS)
                         .map(|bucket| {
-                            let turns = (theta_target - theta_loop)
-                                / core::f64::consts::TAU
-                                + bucket as f64 / ALIGNMENT_BUCKETS as f64;
+                            let turns = base_turns + bucket as f64 / ALIGNMENT_BUCKETS as f64;
                             let delta = (period * turns.rem_euclid(1.0)).round() as u64;
                             delta.min(period_frames.saturating_sub(1)) as u32
                         })
