@@ -22,6 +22,23 @@ import { formatFootage, keyName } from "./pitch.js";
 const SHARPS = new Set([1, 3, 6, 8, 10]);
 const isSharp = (midi) => SHARPS.has(midi % 12);
 
+/// How many piston faces the rail lays out when the organ has said
+/// nothing else: eight generals under the thumbs and six divisionals
+/// per manual is the common English/American console bank, and it is
+/// only ever a *minimum* — `pistonSlots` extends the row to cover any
+/// higher slot the player has already stored into (a MIDI console with
+/// twelve thumb pistons binds them all; the rail must then show them).
+const GENERAL_PISTONS = 8;
+const DIVISIONAL_PISTONS = 6;
+
+/// The piston numbers to draw: 1..n, plus anything stored past n.
+function pistonSlots(stored, n) {
+  const slots = [];
+  for (let i = 1; i <= n; i++) slots.push(i);
+  for (const slot of stored ?? []) if (slot > n) slots.push(slot);
+  return slots.sort((a, b) => a - b);
+}
+
 /// Naturals strictly before `midi`, counting from `first` — the x
 /// position of a key is derived from this.
 function naturalsBefore(first, midi) {
@@ -132,6 +149,15 @@ export class Console {
       // at all — same as an organ without a swell box.
       (snapshot.enclosures ?? []).filter((e) => e.displayed).map((e) => e.name),
       snapshot.reverb != null,
+      // How many piston faces the rails need: storing into a slot past
+      // the default bank widens the row, so the stored slots are
+      // structure. Storing is a deliberate gesture, never a poll, so
+      // this cannot churn the DOM under a pointer.
+      pistonSlots(snapshot.generals ?? [], GENERAL_PISTONS),
+      Object.entries(snapshot.combinations?.divisionals ?? {}).map(([manual, slots]) => [
+        manual,
+        pistonSlots(slots, DIVISIONAL_PISTONS),
+      ]),
     ]);
     renderIfChanged(this.el.canvas, signature, () => this.build(snapshot));
     this.refresh(snapshot);
@@ -368,11 +394,18 @@ export class Console {
 
     // Keyboard panels: one per manual. Positioning does the stacking
     // (highest manual on top, pedal at the bottom), not the DOM order.
+    // The divisionals ride with their keyboard, where a console puts
+    // them: the pistons under a manual belong to that division and to
+    // no other.
     for (const manual of snapshot.manuals) {
       const kind = kindOf(manual);
       const body = this.panel(`keyboard:${manual.name}`, `keyboard panel-${kind}`, `${manual.name} · keyboard`);
       body.append(this.keyboard(manual, kind));
+      body.append(this.divisionalRail(manual, snapshot));
     }
+
+    // The console-wide half of the combination action.
+    this.pistonRail(snapshot);
 
     // The swell shoes, a rack of their own beside the pedalboard.
     const shoes = this.shoes(snapshot);
@@ -421,6 +454,228 @@ export class Console {
     );
     knob.classList.add("coupler");
     return knob;
+  }
+
+  // ---- the combination action ---------------------------------------
+
+  /// One piston face: a small beveled button carrying its number,
+  /// lit while the setter is armed over it and marked when it has a
+  /// registration stored. Right-click binds it, like every other
+  /// control on this console (editor.js decorates `data-action`).
+  piston(key, label, action, onPress) {
+    const piston = document.createElement("button");
+    piston.className = "piston";
+    piston.dataset.key = key;
+    piston.dataset.action = action;
+    piston.title = `${action} — right-click to bind a piston, pedal or key`;
+    const face = document.createElement("span");
+    face.className = "piston-face";
+    face.textContent = label;
+    piston.append(face);
+    piston.addEventListener("click", () => onPress());
+    return piston;
+  }
+
+  /// A small labelled button for the rail's verbs (Set, Cancel, the
+  /// stepper's arrows). `action`, when given, makes it bindable.
+  railButton(key, label, onPress, action, hint) {
+    const button = document.createElement("button");
+    button.className = "rail-button";
+    button.dataset.key = key;
+    if (action) {
+      button.dataset.action = action;
+      button.title = `${hint ?? action} — right-click to bind a piston, pedal or key`;
+    } else if (hint) {
+      button.title = hint;
+    }
+    const face = document.createElement("span");
+    face.className = "tab";
+    face.textContent = label;
+    button.append(face);
+    button.addEventListener("click", () => onPress());
+    return button;
+  }
+
+  /// One division's pistons, under its keyboard. A divisional recalls
+  /// (or, with Set armed, stores) a registration for that division
+  /// alone — the server decides how far "that division" reaches from
+  /// the set's own `DivisionalsStore*` answers.
+  divisionalRail(manual, snapshot) {
+    const rail = document.createElement("div");
+    rail.className = "divisional-rail";
+    rail.dataset.manual = manual.idx;
+    const stored = snapshot.combinations?.divisionals?.[manual.idx] ?? [];
+    for (const n of pistonSlots(stored, DIVISIONAL_PISTONS)) {
+      rail.append(
+        this.piston(
+          `divisional-${manual.idx}-${n}`,
+          n,
+          `divisional:${manual.name}:${n}`,
+          () => this.send(commands.divisional(manual.idx, n))
+        )
+      );
+    }
+    return rail;
+  }
+
+  /// The console-wide combination rail: generals, Set and Cancel, the
+  /// stepper with its frame readout, and the crescendo pedal with
+  /// its stage readout.
+  pistonRail(snapshot) {
+    const body = this.panel("pistons", "pistons", "Combinations");
+    const rail = document.createElement("div");
+    rail.className = "piston-rail";
+
+    const generals = document.createElement("div");
+    generals.className = "piston-bank";
+    for (const n of pistonSlots(snapshot.generals ?? [], GENERAL_PISTONS)) {
+      generals.append(
+        this.piston(`general-${n}`, n, `general:${n}`, () =>
+          this.send(commands.general(n))
+        )
+      );
+    }
+    rail.append(generals);
+
+    // Set is a latch, not a momentary: it stays lit until the press it
+    // arms happens, which is the whole point of it.
+    rail.append(
+      this.railButton(
+        "setter",
+        "Set",
+        () => this.send(commands.setter()),
+        "set",
+        "Arm the setter: the next general or divisional press stores instead of recalling"
+      ),
+      this.railButton(
+        "cancel-rail",
+        "Cancel",
+        () => this.cancel(),
+        "cancel",
+        "Push in every drawknob and release every coupler"
+      )
+    );
+
+    const stepper = document.createElement("div");
+    stepper.className = "piston-stepper";
+    stepper.append(
+      this.railButton(
+        "stepper-prev",
+        "‹",
+        () => this.send(commands.stepper("prev")),
+        "stepper:prev",
+        "Back one frame"
+      )
+    );
+    this.el.stepperFrame = document.createElement("span");
+    this.el.stepperFrame.className = "readout stepper-frame";
+    this.el.stepperFrame.title = "Where the sequencer stands, of how many frames";
+    stepper.append(this.el.stepperFrame);
+    stepper.append(
+      this.railButton(
+        "stepper-next",
+        "›",
+        () => this.send(commands.stepper("next")),
+        "stepper:next",
+        "On one frame"
+      ),
+      this.railButton(
+        "stepper-store",
+        "Store",
+        () => this.send(commands.stepperStore()),
+        "stepper:store",
+        "Write the console into this frame"
+      ),
+      this.railButton(
+        "stepper-insert",
+        "+",
+        () => this.send(commands.stepperInsert()),
+        "stepper:insert",
+        "Insert a new frame after this one, holding the console as it stands"
+      ),
+      this.railButton(
+        "stepper-delete",
+        "−",
+        () => this.send(commands.stepperDelete()),
+        null,
+        "Delete this frame"
+      )
+    );
+    rail.append(stepper);
+
+    const crescendo = document.createElement("div");
+    crescendo.className = "crescendo";
+    const label = document.createElement("span");
+    label.className = "rail-label";
+    label.textContent = "Crescendo";
+    this.el.crescendoStage = document.createElement("span");
+    this.el.crescendoStage.className = "readout crescendo-stage";
+    const track = document.createElement("div");
+    track.className = "crescendo-track";
+    track.dataset.action = "crescendo";
+    track.title =
+      "The crescendo pedal: drag to add the stages in turn, over whatever " +
+      "the drawknobs say — right-click to bind the shoe that works it";
+    const fill = document.createElement("div");
+    fill.className = "crescendo-fill";
+    const thumb = document.createElement("div");
+    thumb.className = "crescendo-thumb";
+    track.append(fill, thumb);
+    this.wireCrescendo(track, snapshot);
+    crescendo.append(label, track, this.el.crescendoStage);
+    rail.append(crescendo);
+
+    body.append(rail);
+  }
+
+  /// The crescendo on the rail is the pedal itself, laid flat: drag it
+  /// and the stages come on in turn. Same throttle as a swell shoe —
+  /// this is a foot's travel, and every stage between here and there
+  /// is passed through, so a sweep adds stops the way a roller does.
+  wireCrescendo(track, snapshot) {
+    const stages = snapshot.combinations?.crescendo_stages ?? 32;
+    const key = "crescendo";
+    let lastSent = 0;
+    const stageAt = (event) => {
+      const rect = track.getBoundingClientRect();
+      const along = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
+      return Math.round(along * stages);
+    };
+    const set = (event) => {
+      const stage = stageAt(event);
+      this.setCrescendo(stage, stages);
+      const now = performance.now();
+      if (now - lastSent > 33) {
+        lastSent = now;
+        this.send(commands.crescendo(stage));
+      }
+      return stage;
+    };
+    track.addEventListener("pointerdown", (event) => {
+      event.preventDefault();
+      this.dragging.add(key);
+      track.setPointerCapture(event.pointerId);
+      set(event);
+    });
+    track.addEventListener("pointermove", (event) => {
+      if (this.dragging.has(key)) set(event);
+    });
+    track.addEventListener("pointerup", (event) => {
+      this.dragging.delete(key);
+      this.send(commands.crescendo(set(event)));
+    });
+  }
+
+  /// Paint the crescendo's position. Through a CSS variable and
+  /// `setText`, never by rebuilding: this readout is repainted every
+  /// poll, and a text node swapped under a press costs the click on
+  /// WebKit (dom.js).
+  setCrescendo(stage, stages) {
+    const track = this.root.querySelector(".crescendo-track");
+    if (track) track.style.setProperty("--stage", stages ? stage / stages : 0);
+    if (this.el.crescendoStage) {
+      setText(this.el.crescendoStage, `${stage} / ${stages}`);
+    }
   }
 
   /// General cancel: pushes in every stop and releases every coupler.
@@ -720,6 +975,11 @@ export class Console {
     if (this.panels.has("couplers")) stack.push("couplers");
     for (const manual of [...manuals].reverse()) stack.push(`keyboard:${manual.name}`);
     if (pedal) stack.push(`keyboard:${pedal.name}`);
+    // The combination rail sits under the pedalboard, where the toe
+    // studs are: generals are reached with the thumbs on a real
+    // console, but on screen the space below the keys is the only one
+    // that doesn't crowd the manuals.
+    if (this.panels.has("pistons")) stack.push("pistons");
 
     const innerLeft = PAD + groupWidth(leftJambs) + (leftJambs.length ? GAP : 0);
     const innerRight = W - PAD - groupWidth(rightJambs) - (rightJambs.length ? GAP : 0);
@@ -761,11 +1021,48 @@ export class Console {
       this.layoutPanels(snapshot);
     }
 
-    for (const stop of snapshot.stops) this.setToggle(`stop-${stop.id}`, stop.on);
+    for (const stop of snapshot.stops) {
+      this.setToggle(`stop-${stop.id}`, stop.on);
+      // A stop the crescendo is holding but the hand hasn't drawn: lit
+      // without the knob being out, so the player can see at a glance
+      // why it is speaking and that pulling the pedal back will take
+      // it away. `hand` rides the snapshot only when the two layers
+      // disagree, so this is exactly "the pedal's doing".
+      this.setFlag(`stop-${stop.id}`, "crescendo-held", stop.hand === false);
+    }
     for (const coupler of snapshot.couplers) {
       this.setToggle(`coupler-${coupler.idx}`, coupler.on);
     }
     this.setToggle("trem", snapshot.tremulant);
+
+    const combos = snapshot.combinations;
+    this.setToggle("setter", !!snapshot.setter);
+    // Marked from the snapshot both ways round, so a piston that has
+    // been cleared loses its mark rather than keeping a stale one.
+    const stored = new Set((snapshot.generals ?? []).map((slot) => `general-${slot}`));
+    for (const [manual, slots] of Object.entries(combos?.divisionals ?? {})) {
+      for (const slot of slots) stored.add(`divisional-${manual}-${slot}`);
+    }
+    for (const piston of this.root.querySelectorAll(".piston")) {
+      piston.classList.toggle("stored", stored.has(piston.dataset.key));
+    }
+    if (combos) {
+      if (this.el.stepperFrame) {
+        setText(
+          this.el.stepperFrame,
+          combos.frames ? `${combos.frame} / ${combos.frames}` : "—"
+        );
+      }
+      if (!this.dragging.has("crescendo")) {
+        this.setCrescendo(combos.crescendo, combos.crescendo_stages);
+      }
+      // A crescendo with no stages stored does nothing however far the
+      // pedal travels, and saying so is kinder than letting the player
+      // conclude the pedal is broken.
+      this.root
+        .querySelector(".crescendo")
+        ?.classList.toggle("empty", !(combos.crescendo_stored ?? []).length);
+    }
 
     for (const manual of snapshot.manuals) {
       const board = this.root.querySelector(`.keyboard[data-manual="${manual.idx}"]`);
@@ -816,6 +1113,14 @@ export class Console {
         : ""
     );
     this.el.tuning.classList.toggle("hidden", !tuning);
+  }
+
+  /// Like `setToggle`, for a class that isn't the engaged state —
+  /// a crescendo hold, a piston with something stored in it.
+  setFlag(key, className, on) {
+    for (const control of this.root.querySelectorAll(`[data-key="${key}"]`)) {
+      control.classList.toggle(className, on);
+    }
   }
 
   setToggle(key, on) {
