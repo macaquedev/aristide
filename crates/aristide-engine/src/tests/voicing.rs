@@ -49,7 +49,7 @@ fn the_voicing_tilt_measures_the_decibels_it_was_asked_for() {
     for asked in [-6.0f32, -3.0, 3.0, 6.0] {
         let measured = 20.0 * (tilted_level(asked) / flat).log10();
         assert!(
-            (measured - asked).abs() < 0.5,
+            (measured - asked).abs() < 0.1,
             "asked {asked} dB, measured {measured:.2} dB"
         );
     }

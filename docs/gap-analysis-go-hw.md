@@ -364,11 +364,27 @@ divisions, MIDI learn on everything. (UG5 pp213–215.)
   organ hasn't got is reported and skipped, never dropped from the file).
   `POST /api/general?n=&store=`, `"generals"`/`"setter"` in the state JSON.
 
+- **Pipe-scope voicing, a brightness leg, live edits** (2026-09-02): a
+  `[[voicing.adjust]]` rule may narrow to keys (`keys = "C2..B3"`, `key =
+  "F#3"`, raw key numbers on a microtonal manual) and to one rank of a
+  mixture, and carries `brightness_db` — a treble tilt through the same
+  one-pole shelf the wind model breathes with, hinged at the pipe's 2nd
+  harmonic, bit-identical at 0 dB. Rules do **not** stack: per field, the
+  rule speaking about the fewest keys wins, then one naming a rank, then
+  the later line; an unsaid field falls through. `POST /api/organ/voicing`
+  sets any field at any scope, writes the rule, and lands live — level and
+  tone as a ramped `SetVoiceTrim` on the held voice, pitch as the existing
+  glide, a re-price only when a pitch trim re-anchors keys onto other
+  pipes. Console: the stop editor's Brightness field, and a per-key
+  popover on right-clicking a key while a stop's editor is open.
+
 **Remaining:**
-- Voicing at *pipe* scope (key ranges) and a brightness/EQ leg; a console
-  voicing editor and live HTTP adjustment (sidecar is load-time).
 - Divisionals, the stepper/sequencer, crescendo; GO's `DivisionalsStore*`
   semantics; a console piston rail (UI work, screenshot harness).
+- Per-pipe *modulation depths* per target with polarity (HW's voicing
+  screens): Aristide's wind/box responses are per-pipe but derived from
+  the pipe's pitch, not separately dialable.
+- Stereo balance / per-perspective mix and parametric EQ beyond the tilt.
 - HW-style release truncation as a voicing parameter (from §8).
 
 ---
@@ -537,14 +553,15 @@ Re-verified 2026-08-26 — all still accurate, list grown:
 | ~~Memory (i16 + load cache + parallel decode)~~ | §3 | ✅ landed 2026-08-26 (residue: streaming, per-rank load options) |
 | Release ODF keys + truncation | §8 | yes (small) |
 | Loop crossfade baking | §9 | yes (small) |
-| Voicing sidecar (gain/cents/brightness) + combination action | §7 | control-side only |
+| ~~Voicing sidecar (gain/cents/brightness) + pipe scope~~ | §7 | ✅ landed 2026-09-02 (residue: combination action) |
 | ODF `AudioGroup` → buses; multi-device; record-header fix | §5 residue + §12h | yes |
 | Pitch residue (`IgnorePitch`/`AcceptsRetuning`, temperament table) | §6 residue | yes (small) |
 | Correctness nits | §12b | small, anytime |
 
 Status ledger: §1 ✅, §2 ✅ (residue), §3 ✅ (residue: streaming, load
 options), §4 ✅ (residue), §5 ✅ (residue), §6 ✅ (residue), §7 ✅ core
-(residue: divisionals/sequencer/crescendo, pipe-scope voicing, UI),
+(residue: divisionals/sequencer/crescendo and their piston rail;
+pipe-scope voicing landed 2026-09-02),
 §8 ✅ (residue: truncation), §9 ✅, §12a/c/d/g/h ✅;
 §10, §11, §12b/e/f ⚠ open. What remains is residue and the HW-only
 fidelity gaps — no whole package blocks real use any more.

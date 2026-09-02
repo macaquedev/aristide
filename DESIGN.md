@@ -459,10 +459,10 @@ main thread; a failed load reports and leaves the running organ untouched.
   and attack selection, sounding tremulants (2026-08-26; wind-valve physics
   2026-08-27), voicing trims + generals with a setter, 16-bit residency + load cache
   (2026-08-26), closed-box pressure rise + nested (multi-box) windchests
-  (2026-09-02), stereo release alignment (2026-09-02). Still open: disk
+  (2026-09-02), stereo release alignment (2026-09-02), pipe-scope voicing with a
+  brightness/EQ leg and live voicing edits (2026-09-02). Still open: disk
   streaming for sets beyond RAM; wave-trem switch on held notes;
-  pipe-scope voicing, a brightness/EQ
-  leg and live voicing edits; divisionals, stepper, crescendo and a piston rail; a
+  divisionals, stepper, crescendo and a piston rail; a
   recorded A/B against GrandOrgue.
 - **M5 — headless split + GUI**: IPC protocol, native GUI console, multi-window. The
   console shipped 2026-08-13 as a Tauri 2 shell over the web console (replacing the
