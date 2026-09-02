@@ -464,9 +464,11 @@ main thread; a failed load reports and leaves the running organ untouched.
   (2026-09-02), stereo release alignment (2026-09-02), disk streaming of
   release tails (2026-09-02), a recorded A/B against GrandOrgue (2026-09-02,
   headless rig + analysis in `tools/ab/`, see
-  docs/progress/2026-09-02-ab-grandorgue.md). Still open: wave-trem switch on
-  held notes; pipe-scope voicing, a brightness/EQ leg and live voicing edits;
-  divisionals, stepper, crescendo and a piston rail.
+  docs/progress/2026-09-02-ab-grandorgue.md), the whole combination action —
+  divisionals honouring GO's `DivisionalsStore*` flags, the stepper, an
+  additive crescendo, and the console's piston rail, all stored by name in the
+  organ file (2026-09-02). Still open: wave-trem switch on held notes;
+  pipe-scope voicing, a brightness/EQ leg and live voicing edits.
 - **M5 — headless split + GUI**: IPC protocol, native GUI console, multi-window. The
   console shipped 2026-08-13 as a Tauri 2 shell over the web console (replacing the
   egui GUI) and edits the organ in place (see "The console edits the instrument"

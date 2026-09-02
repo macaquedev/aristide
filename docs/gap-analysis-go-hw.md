@@ -345,7 +345,7 @@ metadata path below survives only for pipes that cannot be measured.
 
 ---
 
-## 7. Voicing tools & combination action — ✅ CORE LANDED (2026-08-26)
+## 7. Voicing tools & combination action — ✅ COMBINATION ACTION COMPLETE (2026-09-02); voicing core landed 2026-08-26
 
 **GO:** per-pipe hierarchical config editable live in the UI and persisted per
 organ (.cmb): Amplitude, Gain dB, ManualTuning, TrackerDelay, ReleaseTail ms,
@@ -374,12 +374,27 @@ divisions, MIDI learn on everything. (UG5 pp213–215.)
   per-organ user config (bindings' text-vocabulary rule: a name the loaded
   organ hasn't got is reported and skipped, never dropped from the file).
   `POST /api/general?n=&store=`, `"generals"`/`"setter"` in the state JSON.
+- **The rest of the combination action** (2026-09-02): `divisional:<manual>:<n>`
+  scoped to one division, honouring GO's `DivisionalsStore*` flags (parsed
+  from `[Organ]`; a coupler belongs to the manual it reads *from*, a
+  tremulant to the division whose wind it blows on); a stepper
+  (`stepper:next|prev|goto:<n>|store|insert`) whose ends are walls;
+  a 32-stage **additive** crescendo — hand ∪ overlay sounds, rolling back
+  removes only what the pedal added — bound to a CC by MIDI learn, stages
+  stored with Set + `crescendo:<stage>`. All of it stored by *name* in the
+  organ file's `[combinations]`, which also fixed generals being wiped on
+  every reload. `POST /api/{divisional,stepper,crescendo,setter}`; the
+  console grew a Combinations panel (generals, Set, Cancel, the stepper,
+  the crescendo pedal) with divisionals under each keyboard, every one of
+  them right-click bindable. See docs/progress/2026-09-02-combination-action.md.
 
 **Remaining:**
 - Voicing at *pipe* scope (key ranges) and a brightness/EQ leg; a console
   voicing editor and live HTTP adjustment (sidecar is load-time).
-- Divisionals, the stepper/sequencer, crescendo; GO's `DivisionalsStore*`
-  semantics; a console piston rail (UI work, screenshot harness).
+- Crescendo banks (GO has four) and a per-bank override mode; GO's
+  `GeneralsStoreDivisionalCouplers` and
+  `CombinationsStoreNonDisplayedDrawstops` (we have neither divisional
+  couplers nor non-displayed drawstops).
 - HW-style release truncation as a voicing parameter (from §8).
 
 ---

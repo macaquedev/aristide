@@ -2464,6 +2464,206 @@ body[data-density="spacious"] .keyboard.microtonal {
   color: var(--text-dim);
 }
 
+/* ---- the combination rail --------------------------------------------- */
+
+/* Generals, Set/Cancel, the stepper and the crescendo in one strip —
+   the same panel chrome as the coupler rail, since both are banks of
+   console switches rather than anything the hands play. */
+.piston-rail {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 6px 10px;
+  border-radius: 5px;
+  background: var(--surface);
+  border: 1px solid #000000d0;
+  box-shadow: var(--bevel);
+}
+
+.piston-bank,
+.piston-stepper,
+.crescendo {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+/* Groups are told apart by a seam, not by spacing alone: the rail is
+   dense and four banks in a row would otherwise read as one. */
+.piston-stepper,
+.crescendo {
+  padding-left: 14px;
+  border-left: 1px solid #00000090;
+  box-shadow: inset 1px 0 0 #ffffff0c;
+}
+
+/* One thumb piston: square, engraved with its number, and marked when
+   it has a registration in it. */
+.piston {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid #000000d0;
+  border-radius: 4px;
+  cursor: pointer;
+  background: linear-gradient(180deg, #3d4045, #303337);
+  box-shadow: var(--bevel);
+  transition: filter 0.1s ease;
+}
+.piston:hover { filter: brightness(1.15); }
+.piston:active { filter: brightness(0.9); }
+
+.piston-face {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+/* An empty piston is a blank ivory face; one with something stored
+   wears the accent as a hairline underline — visible at a glance
+   across a bank, but never as loud as an engaged control, because a
+   piston is momentary and is never "on". */
+.piston.stored {
+  box-shadow: var(--bevel), inset 0 -2px 0 var(--accent-soft);
+}
+.piston.stored .piston-face { color: var(--text); }
+
+/* The divisionals sit under their keyboard, tucked to the left where
+   the thumb pistons are on a real console. */
+.divisional-rail {
+  display: flex;
+  gap: 5px;
+  padding: 6px 12px 0;
+}
+
+.rail-button {
+  height: 26px;
+  min-width: 26px;
+  padding: 0 8px;
+  border: 1px solid #000000d0;
+  border-radius: 3px;
+  cursor: pointer;
+  background: linear-gradient(180deg, #383b3f, #2e3134);
+  box-shadow: var(--bevel);
+  transition: filter 0.1s ease;
+}
+.rail-button:hover { filter: brightness(1.1); }
+.rail-button:active { filter: brightness(0.9); }
+.rail-button .tab {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+}
+/* Set latches: it stays lit until the press it arms happens, which is
+   the only way to see that the next piston will write rather than
+   recall. */
+.rail-button.on {
+  background: linear-gradient(180deg, #ffffff26, #ffffff00 45%), var(--accent);
+  box-shadow: var(--bevel), 0 0 8px var(--accent-soft);
+}
+.rail-button.on .tab { color: var(--accent-ink); }
+.rail-button[data-key="cancel-rail"]:hover { border-color: var(--danger); }
+.rail-button[data-key="cancel-rail"]:hover .tab { color: var(--danger); }
+
+.rail-label {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+/* LCD-style values, like the bar's tuning readout. */
+.readout {
+  min-width: 48px;
+  padding: 0 6px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 3px;
+  background: var(--well);
+  box-shadow: var(--bevel-well);
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text);
+}
+
+/* The crescendo pedal, laid flat: the same fader as a swell shoe,
+   turned on its side, because it is the same gesture — a foot on a
+   travel. */
+.crescendo-track {
+  position: relative;
+  width: 140px;
+  height: 22px;
+  border-radius: 3px;
+  cursor: pointer;
+  background:
+    linear-gradient(#ffffff14, #ffffff14) 25% 50% / 1px 10px no-repeat,
+    linear-gradient(#ffffff14, #ffffff14) 50% 50% / 1px 10px no-repeat,
+    linear-gradient(#ffffff14, #ffffff14) 75% 50% / 1px 10px no-repeat,
+    var(--well);
+  border: 1px solid #000000d0;
+  box-shadow: var(--bevel-well);
+  touch-action: none;
+}
+
+.crescendo-fill {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  left: 4px;
+  width: calc((100% - 8px) * var(--stage, 0));
+  border-radius: 2px;
+  background: var(--accent-soft);
+}
+
+.crescendo-thumb {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  width: 10px;
+  left: calc(4px + (100% - 18px) * var(--stage, 0));
+  border-radius: 2px;
+  border: 1px solid #000000d0;
+  background:
+    linear-gradient(180deg, #ffffff22, #ffffff00 45%),
+    linear-gradient(90deg, #4a4d52 0 38%, var(--accent) 38% 62%, #4a4d52 62%);
+  pointer-events: none;
+}
+
+/* No stage stored: the pedal is real but has nothing to add, and a
+   travel that does nothing would read as a broken control. */
+.crescendo.empty { opacity: 0.45; }
+
+/* A stop the crescendo is holding that the hand has not drawn: the
+   knob is *out of its socket in sound only*. It keeps the dark face of
+   an undrawn knob — the drawknob really is still in, and the pedal is
+   about to take the stop away again — but wears the accent as a ring
+   and lettering, so it is unmistakably speaking. The distinction has
+   to survive at a glance across a full jamb, which is why it is the
+   whole outline and not a pip. Overrides `.knob.on`, which this stop
+   also carries (it *is* sounding). */
+.knob.crescendo-held.on {
+  background: linear-gradient(180deg, #34373b, #2b2e31);
+  box-shadow: var(--bevel), inset 0 0 0 1px var(--accent), 0 0 8px var(--accent-soft);
+}
+.knob.crescendo-held.on .face,
+.knob.crescendo-held.on .stop-pitch {
+  color: var(--accent);
+}
+
 /* ---- density presets --------------------------------------------------- */
 
 /* Two overlays on the regular layout, set as body[data-density] by

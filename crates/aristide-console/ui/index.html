@@ -391,6 +391,29 @@
     </form>
   </div>
 
+  <!-- The piston-binding popover: right-click any combination control
+       in edit mode — a general, a divisional, Set, Cancel, a stepper
+       button — to bind the thumb piston, toe stud or key that works
+       it. The row is the same quick-bind row the stop and coupler
+       editors carry: one machinery, several places, so a piston on the
+       screen and a piston under a thumb are wired the same way. -->
+  <div class="editor-add hidden" id="editor-piston">
+    <div class="editor-add-form">
+      <span class="editor-tuning-head">
+        <span class="rail-label" id="editor-piston-title">Piston</span>
+      </span>
+      <div class="settings-row">
+        <span class="rail-label"
+          title="A MIDI piston, toe stud, pedal or computer key that works this control">Bound to</span>
+        <span class="piston-box" id="editor-piston-pistons"></span>
+      </div>
+      <p class="pane-note" id="editor-piston-note"></p>
+      <span class="editor-add-form-actions">
+        <button class="ghost" type="button" id="editor-piston-close">Close</button>
+      </span>
+    </div>
+  </div>
+
   <!-- The stop-editor popover: right-click any drawknob in edit mode.
        Name and voicing (footage/cents/gain) post live, field by field —
        no rebuild, the tuning popover's own contract. Retargeting the

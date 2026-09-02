@@ -72,7 +72,7 @@ pub struct PreparedInstrument {
     pub reverb: Option<(Arc<aristide_engine::reverb::PreparedIr>, f32)>,
     /// Set when the loaded organ is a composite definition file loaded
     /// alone: that file owns the rig's MIDI wiring.
-    pub composite: Option<(PathBuf, instrument::MidiDef)>,
+    pub composite: Option<(PathBuf, instrument::MidiDef, instrument::CombinationsDef)>,
     pub suggested_channels: Vec<Option<u8>>,
     pub setup: Setup,
     /// Per stop: where it came from — the coordinates per-stop file
@@ -243,7 +243,7 @@ fn load_impulse_response(
 struct Sources {
     sources: Vec<(String, Organ)>,
     sidecars: Vec<aristide_formats::sidecar::Sidecar>,
-    composite_midi: Option<(PathBuf, instrument::MidiDef)>,
+    composite_midi: Option<(PathBuf, instrument::MidiDef, instrument::CombinationsDef)>,
     single_provenance: std::collections::HashMap<StopId, instrument::StopProvenance>,
     stop_labels: std::collections::HashMap<StopId, String>,
     manual_tuning_defs: Vec<instrument::ManualTuningDef>,
@@ -298,7 +298,7 @@ fn load_sources(
     setup: &mut Setup,
     load_warnings: &mut Vec<String>,
 ) -> Result<Sources> {
-    let mut composite_midi: Option<(PathBuf, instrument::MidiDef)> = None;
+    let mut composite_midi: Option<(PathBuf, instrument::MidiDef, instrument::CombinationsDef)> = None;
     let mut single_provenance: std::collections::HashMap<StopId, instrument::StopProvenance> =
         std::collections::HashMap::new();
     let mut stop_labels: std::collections::HashMap<StopId, String> =
@@ -341,7 +341,7 @@ fn load_sources(
                 path.display()
             );
             if paths.len() == 1 {
-                composite_midi = Some((path.clone(), assembled.midi));
+                composite_midi = Some((path.clone(), assembled.midi, assembled.combinations));
                 setup.adopted = assembled.adopted;
                 // Assembled stops are ids in placement order, so the
                 // provenance vec zips onto them by index.
