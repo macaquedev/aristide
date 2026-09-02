@@ -866,18 +866,375 @@ mod tests {
         assert!(state.trems[0].engaged, "the stored tremulant returns");
     }
 
+    /// Every stop on one manual, with its drawn state — what the
+    /// divisional tests read the console back with.
+    fn stops_on(state: &State, manual: usize) -> Vec<(String, bool)> {
+        let Control::Organ(console) = &state.control else {
+            panic!("organ expected");
+        };
+        console
+            .stop_states()
+            .iter()
+            .filter(|(_, _, _, midx, _)| *midx == manual)
+            .map(|(_, name, _, _, drawn)| (name.to_string(), *drawn))
+            .collect()
+    }
+
+    fn draw(state: &mut State, name: &str, on: bool) {
+        let Control::Organ(console) = &mut state.control else {
+            panic!("organ expected");
+        };
+        let id = console
+            .stop_states()
+            .iter()
+            .find(|(_, stop, ..)| *stop == name)
+            .map(|(id, ..)| *id)
+            .unwrap_or_else(|| panic!("no stop named {name:?}"));
+        console.set_drawn(id, on);
+    }
+
+    fn coupler_on(state: &State, name: &str) -> bool {
+        let Control::Organ(console) = &state.control else {
+            panic!("organ expected");
+        };
+        console
+            .coupler_states()
+            .iter()
+            .find(|(_, coupler, ..)| *coupler == name)
+            .map(|(_, _, engaged, _)| *engaged)
+            .unwrap_or_else(|| panic!("no coupler named {name:?}"))
+    }
+
+    fn set_coupler_by_name(state: &mut State, name: &str, on: bool) {
+        let Control::Organ(console) = &mut state.control else {
+            panic!("organ expected");
+        };
+        let index = console
+            .coupler_states()
+            .iter()
+            .find(|(_, coupler, ..)| *coupler == name)
+            .map(|(index, ..)| *index)
+            .unwrap_or_else(|| panic!("no coupler named {name:?}"));
+        console.set_coupler(index, on);
+    }
+
+    /// A divisional reaches its own division and nothing else: the
+    /// other manuals' stops are exactly where the hand left them.
+    #[test]
+    fn divisionals_stay_inside_their_division() {
+        let Some((state, _)) = demo_state("Montre 8'") else {
+            return;
+        };
+        let mut state = state.lock().expect("state");
+        // Montre 8' is on the First Manual; give the Second one a stop
+        // that must survive the divisional untouched.
+        draw(&mut state, "Hautbois 8'", true);
+        state.setter_armed = true;
+        state.divisional(FIRST, 1);
+        assert!(!state.setter_armed, "storing disarms the setter");
+
+        draw(&mut state, "Montre 8'", false);
+        draw(&mut state, "Prestant 4'", true);
+        draw(&mut state, "Hautbois 8'", false);
+
+        state.divisional(FIRST, 1);
+        let first = stops_on(&state, FIRST);
+        assert!(
+            first.iter().any(|(name, on)| name == "Montre 8'" && *on),
+            "the division's stored stop returns"
+        );
+        assert!(
+            first.iter().any(|(name, on)| name == "Prestant 4'" && !*on),
+            "a stop the division did not store is retired"
+        );
+        assert!(
+            stops_on(&state, SECOND)
+                .iter()
+                .any(|(name, on)| name == "Hautbois 8'" && !*on),
+            "another division is not the divisional's business"
+        );
+    }
+
+    /// GO's `DivisionalsStore*` flags, honoured. The demo ODF says
+    /// couplers yes (both kinds), tremulants no — so a First Manual
+    /// divisional carries II/I and leaves the Tremblant alone.
+    #[test]
+    fn divisionals_follow_the_odf_store_flags() {
+        let Some((state, _)) = demo_state("Montre 8'") else {
+            return;
+        };
+        let mut state = state.lock().expect("state");
+        assert!(
+            matches!(&state.control, Control::Organ(console)
+                if console.combination_scope().divisional_intermanual_couplers
+                    && console.combination_scope().divisional_intramanual_couplers
+                    && !console.combination_scope().divisional_tremulants),
+            "the demo ODF's own answers reached the console"
+        );
+        set_coupler_by_name(&mut state, "II/I", true);
+        state.set_tremulant(true);
+        state.setter_armed = true;
+        state.divisional(FIRST, 2);
+
+        set_coupler_by_name(&mut state, "II/I", false);
+        state.set_tremulant(false);
+        state.divisional(FIRST, 2);
+        assert!(
+            coupler_on(&state, "II/I"),
+            "an intermanual coupler of this division is stored and recalled"
+        );
+        assert!(
+            !state.trems[0].engaged,
+            "tremulants are out of scope on this set, so the divisional leaves it"
+        );
+
+        // A coupler belonging to another division is never touched.
+        set_coupler_by_name(&mut state, "I/P", true);
+        state.divisional(FIRST, 2);
+        assert!(coupler_on(&state, "I/P"), "the Pedal's coupler is the Pedal's");
+    }
+
+    /// With `DivisionalsStoreTremulants` on, the division's own
+    /// tremulant comes along — "its own" being the one blowing on the
+    /// wind its pipes stand on.
+    #[test]
+    fn divisionals_carry_tremulants_when_the_console_says_so() {
+        let scope = aristide_model::CombinationScope {
+            divisional_intermanual_couplers: false,
+            divisional_intramanual_couplers: false,
+            divisional_tremulants: true,
+        };
+        let Some((state, _)) = demo_state_scoped("Hautbois 8'", Some(scope)) else {
+            return;
+        };
+        let mut state = state.lock().expect("state");
+        // The demo's Tremblant blows on the Récit chest, which is the
+        // Second Manual's — group 2 (chest 3, 0-based in the engine).
+        state.trems[0].groups = match &state.control {
+            Control::Organ(console) => console.manual_wind_groups(SECOND),
+            _ => panic!("organ expected"),
+        };
+        state.set_tremulant(true);
+        set_coupler_by_name(&mut state, "16' II", true);
+        state.setter_armed = true;
+        state.divisional(SECOND, 1);
+
+        state.set_tremulant(false);
+        set_coupler_by_name(&mut state, "16' II", false);
+        state.divisional(SECOND, 1);
+        assert!(state.trems[0].engaged, "the division's tremulant returns");
+        assert!(
+            !coupler_on(&state, "16' II"),
+            "with the coupler flags off, the division's own coupler was never stored"
+        );
+    }
+
+    /// The stepper: store, insert, walk. Frames are positions, and the
+    /// ends are walls.
+    #[test]
+    fn the_stepper_walks_and_stores_frames() {
+        let Some((state, _)) = demo_state("Montre 8'") else {
+            return;
+        };
+        let mut state = state.lock().expect("state");
+        state.stepper_store(); // frame 1: Montre 8'
+        draw(&mut state, "Montre 8'", false);
+        draw(&mut state, "Prestant 4'", true);
+        state.stepper_insert(); // frame 2: Prestant 4'
+        assert_eq!(state.stepper_frames(), 2);
+        assert_eq!(state.stepper_frame, 1);
+
+        state.stepper_prev();
+        assert_eq!(state.stepper_frame, 0);
+        let drawn = stops_on(&state, FIRST);
+        assert!(drawn.iter().any(|(name, on)| name == "Montre 8'" && *on));
+        assert!(drawn.iter().any(|(name, on)| name == "Prestant 4'" && !*on));
+
+        state.stepper_next();
+        assert_eq!(state.stepper_frame, 1);
+        assert!(stops_on(&state, FIRST)
+            .iter()
+            .any(|(name, on)| name == "Prestant 4'" && *on));
+        // The end is a wall: pressing on stays put rather than wrapping
+        // round to the beginning mid-piece.
+        state.stepper_next();
+        assert_eq!(state.stepper_frame, 1, "the sequence stops at its end");
+        state.stepper_goto(1);
+        assert_eq!(state.stepper_frame, 0);
+        state.stepper_goto(99);
+        assert_eq!(state.stepper_frame, 1, "past the end clamps, never grows");
+    }
+
+    /// The crescendo is an overlay, not a registration: hand ∪ pedal
+    /// sounds, and rolling back takes away only what the pedal added.
+    #[test]
+    fn the_crescendo_adds_over_the_hand_and_takes_back_only_its_own() {
+        let Some((state, _)) = demo_state("Montre 8'") else {
+            return;
+        };
+        let mut state = state.lock().expect("state");
+        // Stage 1 adds the stop the hand already has plus one it hasn't.
+        state.midi_config.organs.entry("test organ".into()).or_default().crescendo =
+            [(1u8, vec!["Montre 8'".to_string(), "Prestant 4'".to_string()])]
+                .into_iter()
+                .collect();
+
+        state.set_crescendo(1);
+        let drawn = stops_on(&state, FIRST);
+        assert!(drawn.iter().any(|(name, on)| name == "Montre 8'" && *on));
+        assert!(
+            drawn.iter().any(|(name, on)| name == "Prestant 4'" && *on),
+            "the pedal adds a stop the hand hasn't drawn"
+        );
+        if let Control::Organ(console) = &state.control {
+            let prestant = console
+                .stop_states()
+                .iter()
+                .find(|(_, name, ..)| *name == "Prestant 4'")
+                .map(|(id, ..)| *id)
+                .expect("Prestant exists");
+            assert!(!console.is_hand_drawn(prestant), "the knob itself stays in");
+        }
+
+        state.set_crescendo(0);
+        let drawn = stops_on(&state, FIRST);
+        assert!(
+            drawn.iter().any(|(name, on)| name == "Montre 8'" && *on),
+            "a stop the hand also drew survives the pedal coming back"
+        );
+        assert!(
+            drawn.iter().any(|(name, on)| name == "Prestant 4'" && !*on),
+            "what the pedal added, the pedal takes away"
+        );
+    }
+
+    /// Cancel is a thumb on the jamb: it clears the hand and cannot
+    /// move the pedal, so the crescendo keeps what it holds.
+    #[test]
+    fn cancel_clears_the_hand_but_not_the_crescendo() {
+        let Some((state, _)) = demo_state("Montre 8'") else {
+            return;
+        };
+        let mut state = state.lock().expect("state");
+        state.midi_config.organs.entry("test organ".into()).or_default().crescendo =
+            [(1u8, vec!["Prestant 4'".to_string()])].into_iter().collect();
+        state.set_crescendo(1);
+        if let Control::Organ(console) = &mut state.control {
+            console.cancel();
+        }
+        let drawn = stops_on(&state, FIRST);
+        assert!(drawn.iter().any(|(name, on)| name == "Montre 8'" && !*on));
+        assert!(
+            drawn.iter().any(|(name, on)| name == "Prestant 4'" && *on),
+            "the pedal is still where the foot left it"
+        );
+        state.set_crescendo(0);
+        assert!(stops_on(&state, FIRST).iter().all(|(_, on)| !*on), "now silent");
+    }
+
+    /// Set + a crescendo stage's piston stores the *hand*, never the
+    /// sounding set — or every store would fold the overlay into
+    /// itself and ratchet the stage upwards.
+    #[test]
+    fn storing_a_crescendo_stage_captures_the_drawknobs() {
+        let Some((state, _)) = demo_state("Montre 8'") else {
+            return;
+        };
+        let mut state = state.lock().expect("state");
+        state.midi_config.organs.entry("test organ".into()).or_default().crescendo =
+            [(1u8, vec!["Prestant 4'".to_string()])].into_iter().collect();
+        state.set_crescendo(1);
+        state.store_crescendo(2);
+        let stored = state.midi_config.organs["test organ"].crescendo[&2].clone();
+        assert_eq!(
+            stored,
+            vec!["Montre 8'".to_string()],
+            "only what the hand has drawn, not what the pedal is holding"
+        );
+    }
+
+    /// A stored name this organ hasn't got is reported and skipped —
+    /// never fatal, and never dropped from the file.
+    #[test]
+    fn a_stored_name_the_organ_lacks_is_skipped() {
+        let Some((state, _)) = demo_state("Montre 8'") else {
+            return;
+        };
+        let mut state = state.lock().expect("state");
+        state.midi_config.organs.entry("test organ".into()).or_default().generals.insert(
+            4,
+            config::Registration {
+                stops: vec!["Prestant 4'".into(), "Vox Humana of Another Organ 8'".into()],
+                couplers: vec!["V/IV".into()],
+                tremulants: vec!["Tremolo That Isn't".into()],
+            },
+        );
+        state.general(4);
+        assert!(
+            stops_on(&state, FIRST)
+                .iter()
+                .any(|(name, on)| name == "Prestant 4'" && *on),
+            "the names that do resolve still land"
+        );
+        assert_eq!(
+            state.midi_config.organs["test organ"].generals[&4].stops.len(),
+            2,
+            "the unresolved name stays in the file"
+        );
+    }
+
+    /// The pedal's travel maps onto the stages end to end: heel adds
+    /// nothing, toe stands on the last stage.
+    #[test]
+    fn a_controller_sweeps_the_whole_crescendo() {
+        let Some((state, _)) = demo_state("Montre 8'") else {
+            return;
+        };
+        let mut state = state.lock().expect("state");
+        let binding = Binding {
+            channel: None,
+            trigger: control::Trigger::Control(4),
+            action: control::Action::Crescendo,
+            subject: Subject::None,
+        };
+        for (value, expected) in [(0u8, 0u8), (64, 16), (127, crate::state::CRESCENDO_STAGES)] {
+            state.run(&binding, "Test Keyboard", value);
+            assert_eq!(state.crescendo_stage, expected, "cc {value}");
+        }
+    }
+
+    /// The demo set's manuals, in console order: 0 Pedal, 1 First
+    /// Manual, 2 Second Manual. Named here so the combination tests
+    /// below read as organ rather than as indices.
+    const FIRST: usize = 1;
+    const SECOND: usize = 2;
+
     /// A live state on the demo set, with `stop` drawn so notes make
     /// voices (held keys are only recorded for pipes that speak).
     fn demo_state(stop: &str) -> Option<(Arc<Mutex<State>>, usize)> {
+        demo_state_scoped(stop, None)
+    }
+
+    /// The same, with the console's divisional reach overridden — the
+    /// demo ODF says inter- and intramanual couplers yes, tremulants
+    /// no, and the tests want both sides of each answer.
+    fn demo_state_scoped(
+        stop: &str,
+        scope: Option<aristide_model::CombinationScope>,
+    ) -> Option<(Arc<Mutex<State>>, usize)> {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../testsets/grandorgue-demo/demo.organ");
         if !path.is_file() {
             eprintln!("skipping: demo set not present");
             return None;
         }
-        let organ = aristide_formats::grandorgue::load(&path)
+        let mut organ = aristide_formats::grandorgue::load(&path)
             .expect("demo set loads")
             .organ;
+        if let Some(scope) = scope {
+            organ.combinations = scope;
+        }
+        let organ = organ;
         let target = organ
             .stops
             .iter()
@@ -920,6 +1277,8 @@ mod tests {
                 params: Default::default(),
             }],
             setter_armed: false,
+            stepper_frame: 0,
+            crescendo_stage: 0,
             master_gain: 0.178,
             reverb_wet: None,
             expression_cc: 11,

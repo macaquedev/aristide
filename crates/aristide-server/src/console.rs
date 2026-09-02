@@ -110,7 +110,26 @@ struct PipeKey {
 pub struct Console {
     organ: Organ,
     specs: HashMap<(RankId, u16), VoiceSpec>,
+    /// What is actually speaking-capable right now: `hand ∪ crescendo`.
+    /// Everything downstream of the registration reads this and only
+    /// this, so the layering below costs the sounding path nothing.
     drawn: Vec<StopId>,
+    /// The stops the player's own hand has drawn — the drawknobs'
+    /// physical state, which is what a general or a crescendo stage
+    /// captures and what Cancel pushes back in.
+    ///
+    /// The split exists because a crescendo pedal is *additive*: a
+    /// stop the pedal is holding must go back off when the foot comes
+    /// back, and a stop the hand also drew must stay. One boolean per
+    /// stop cannot say which, so there are two layers and the sounding
+    /// set is their union — the same shape GrandOrgue reaches for,
+    /// where a drawstop is an OR over named internal states with the
+    /// empty name standing for the hand (`GODrawstop::SetInternalState`,
+    /// `CalculateResultState`).
+    hand: Vec<StopId>,
+    /// The stops the crescendo holds at its current stage: the union
+    /// of every stage up to where the pedal stands.
+    crescendo: Vec<StopId>,
     /// Engaged couplers, as indices into `organ.couplers`.
     engaged_couplers: Vec<usize>,
     /// Per coupler: still on the console? Picked in the Organ setup —
@@ -328,6 +347,10 @@ impl Console {
         let mut console = Console {
             organ,
             specs,
+            // A default registration is the hand's: nothing has
+            // touched the crescendo pedal yet.
+            hand: drawn.clone(),
+            crescendo: Vec::new(),
             drawn,
             device_rate,
             couplers_repitch: false,
@@ -374,6 +397,7 @@ impl Console {
         // Noise stops must never be part of the registration.
         let noise_stops = console.noise_stops.clone();
         console.drawn.retain(|id| !noise_stops.contains(id));
+        console.hand.retain(|id| !noise_stops.contains(id));
         console.map_enclosures();
         console
     }
@@ -1024,8 +1048,10 @@ impl Console {
         if !self.is_drawn(stop) {
             return (Vec::new(), Vec::new());
         }
-        let (stopped, _) = self.set_drawn(stop, false);
-        let (_, starts) = self.set_drawn(stop, true);
+        // Through the sounding layer, not the hand's: re-pricing must
+        // not tell the drawknobs anything happened.
+        let (stopped, _) = self.apply_drawn(stop, false);
+        let (_, starts) = self.apply_drawn(stop, true);
         (stopped, starts)
     }
 
@@ -1826,12 +1852,65 @@ impl Console {
         }
     }
 
-    /// Draw or retire a stop. Returns the handles of voices to stop
-    /// (retired pipes, or the noise voice whose note-off plays the
-    /// push-in thump) and the voices to start: the pull-thump noise,
-    /// plus — the pallets under held keys being open — the stop's own
-    /// pipes on those keys, as on a tracker.
+    /// Draw or retire a stop *by hand* — a drawknob, a `stop:` piston,
+    /// a combination recall. The knob moves either way; whether the
+    /// stop stops speaking depends on the crescendo, which may be
+    /// holding it too.
+    ///
+    /// Returns the handles of voices to stop (retired pipes, or the
+    /// noise voice whose note-off plays the push-in thump) and the
+    /// voices to start: the pull-thump noise, plus — the pallets under
+    /// held keys being open — the stop's own pipes on those keys, as
+    /// on a tracker.
     pub fn set_drawn(&mut self, stop: StopId, drawn: bool) -> (Vec<u64>, Vec<VoiceStart>) {
+        if self.noise_stops.contains(&stop) {
+            return (Vec::new(), Vec::new());
+        }
+        if drawn {
+            if !self.hand.contains(&stop) {
+                self.hand.push(stop);
+            }
+        } else {
+            self.hand.retain(|&id| id != stop);
+        }
+        self.apply_drawn(stop, drawn || self.crescendo.contains(&stop))
+    }
+
+    /// Move the crescendo pedal's overlay to exactly `stops` — the
+    /// union of every stage it stands past. Only what the overlay
+    /// *adds* is added, and only what it alone was holding comes off:
+    /// a stop the hand drew as well stays speaking when the foot comes
+    /// back, which is the whole point of an additive crescendo.
+    pub fn set_crescendo(&mut self, stops: Vec<StopId>) -> (Vec<u64>, Vec<VoiceStart>) {
+        let mut wanted: Vec<StopId> = Vec::new();
+        for stop in stops {
+            if !self.noise_stops.contains(&stop) && !wanted.contains(&stop) {
+                wanted.push(stop);
+            }
+        }
+        let mut stopped = Vec::new();
+        let mut starts = Vec::new();
+        for stop in self.crescendo.clone() {
+            if !wanted.contains(&stop) {
+                let (released, _) = self.apply_drawn(stop, self.hand.contains(&stop));
+                stopped.extend(released);
+            }
+        }
+        for &stop in &wanted {
+            if !self.crescendo.contains(&stop) {
+                let (expedited, opened) = self.apply_drawn(stop, true);
+                stopped.extend(expedited);
+                starts.extend(opened);
+            }
+        }
+        self.crescendo = wanted;
+        (stopped, starts)
+    }
+
+    /// Bring one stop's *sounding* state to `drawn`, whichever layer
+    /// asked for it. The pipes, the pallets under held keys and the
+    /// drawknob's own thump all hang off this and nothing else.
+    fn apply_drawn(&mut self, stop: StopId, drawn: bool) -> (Vec<u64>, Vec<VoiceStart>) {
         // Noise stops aren't directly drawable, and a no-op change
         // shouldn't thump.
         if self.noise_stops.contains(&stop) || self.drawn.contains(&stop) == drawn {
@@ -1906,8 +1985,30 @@ impl Console {
         expedited
     }
 
+    /// Whether the stop is speaking-capable — by hand or by pedal.
     pub fn is_drawn(&self, stop: StopId) -> bool {
         self.drawn.contains(&stop)
+    }
+
+    /// Whether the *hand* has this stop drawn. This is what a toggle
+    /// answers to: a piston bound to `stop:` moves the knob, and a
+    /// knob the crescendo happens to be holding must still move, or it
+    /// would read as jammed.
+    pub fn is_hand_drawn(&self, stop: StopId) -> bool {
+        self.hand.contains(&stop)
+    }
+
+    /// The stops the crescendo overlay is holding, so the console can
+    /// draw them as lit-but-not-drawn rather than leaving the player
+    /// to guess why a knob is in and sounding.
+    pub fn crescendo_stops(&self) -> &[StopId] {
+        &self.crescendo
+    }
+
+    /// How far this console's divisionals reach — the set's own answer
+    /// (`DivisionalsStore*`), as the organ file may have revised it.
+    pub fn combination_scope(&self) -> aristide_model::CombinationScope {
+        self.organ.combinations
     }
 
     pub fn coupler_engaged(&self, index: usize) -> bool {
@@ -1966,9 +2067,11 @@ impl Console {
         if self.organ.stops[entry].manual == target_id || self.noise_stops.contains(&stop) {
             return (Vec::new(), Vec::new());
         }
+        // Through the sounding layer: a move is not a drawknob gesture,
+        // so whichever layers held the stop still hold it afterwards.
         let was_drawn = self.is_drawn(stop);
         let (mut stopped, _) = if was_drawn {
-            self.set_drawn(stop, false)
+            self.apply_drawn(stop, false)
         } else {
             (Vec::new(), Vec::new())
         };
@@ -2017,7 +2120,7 @@ impl Console {
         // Expression routing follows the stop to its new division.
         self.map_enclosures();
         let starts = if was_drawn {
-            let (also_stopped, starts) = self.set_drawn(stop, true);
+            let (also_stopped, starts) = self.apply_drawn(stop, true);
             stopped.extend(also_stopped);
             starts
         } else {
@@ -2247,15 +2350,20 @@ impl Console {
         }
     }
 
-    /// General cancel: retire every drawn stop and release every
+    /// General cancel: push in every drawknob and release every
     /// engaged coupler, as the cancel piston does on a real console.
     /// Returns the voice handles to stop — retired pipes, plus the open
     /// noise voices whose note-off is the push-in thump / coupler clack.
-    /// Keys held through a cancel keep sounding only what survives it,
-    /// which is nothing: the organ goes silent.
+    ///
+    /// Cancel is a thumb on the jamb, so it clears the *hand*. It
+    /// cannot move the crescendo pedal — the foot is still where the
+    /// foot was, its contacts are still closed — so a crescendo past
+    /// stage 0 keeps speaking what it holds, shown on the console as
+    /// the pedal's own doing. Bring the pedal back to the heel and the
+    /// organ is silent.
     pub fn cancel(&mut self) -> Vec<u64> {
         let mut stopped = Vec::new();
-        for stop in self.drawn.clone() {
+        for stop in self.hand.clone() {
             let (released, _) = self.set_drawn(stop, false);
             stopped.extend(released);
         }
@@ -2420,6 +2528,63 @@ impl Console {
         boxes.sort_unstable();
         boxes.dedup();
         boxes
+    }
+
+    /// The couplers a divisional for `manual_index` may touch, each
+    /// flagged intermanual.
+    ///
+    /// A coupler belongs to the manual its routes read *from* — the
+    /// keyboard whose keys it borrows, which is where GrandOrgue files
+    /// it too (`[ManualNNN] CouplerNNN`, and `GOCombinationDefinition::
+    /// InitDivisional` walks that manual's own couplers). It is
+    /// intermanual when a route lands on some *other* manual
+    /// (`GOCoupler::IsIntermanual`: source ≠ destination) and
+    /// intramanual otherwise — the octave couplers and unison off,
+    /// which never leave the division.
+    pub fn manual_couplers(&self, manual_index: usize) -> Vec<(usize, bool)> {
+        let Some(manual) = self.organ.manuals.get(manual_index) else {
+            return Vec::new();
+        };
+        self.organ
+            .couplers
+            .iter()
+            .enumerate()
+            .filter(|(_, coupler)| {
+                coupler.routes.iter().any(|route| route.from_manual == manual.id)
+            })
+            .map(|(index, coupler)| {
+                let intermanual = coupler.routes.iter().any(|route| {
+                    route
+                        .target
+                        .as_ref()
+                        .is_some_and(|target| target.manual != route.from_manual)
+                });
+                (index, intermanual)
+            })
+            .collect()
+    }
+
+    /// The engine wind groups one manual's pipes stand on — its ranks'
+    /// windchests, 0-based as the engine numbers them (bank.rs prices
+    /// `group = windchest - 1`). A tremulant belongs to a division
+    /// when it blows on any of these: the division's own wind is the
+    /// only thing that makes a tremulant "the Récit's".
+    pub fn manual_wind_groups(&self, manual_index: usize) -> Vec<u8> {
+        let Some(manual) = self.organ.manuals.get(manual_index) else {
+            return Vec::new();
+        };
+        let mut groups: Vec<u8> = self
+            .organ
+            .stops
+            .iter()
+            .filter(|stop| stop.manual == manual.id && !self.noise_stops.contains(&stop.id))
+            .flat_map(|stop| stop.ranks.iter())
+            .filter_map(|range| self.organ.rank(range.rank))
+            .map(|rank| rank.windchest.saturating_sub(1).min(u8::MAX as u32) as u8)
+            .collect();
+        groups.sort_unstable();
+        groups.dedup();
+        groups
     }
 
     /// Rename the loaded organ. Only the name changes — every stop,
@@ -2590,6 +2755,7 @@ mod tests {
             enclosures: vec![],
             windchests: vec![],
             tremulants: vec![],
+            combinations: Default::default(),
         };
         let mut specs = HashMap::new();
         for rank in 1..=2u32 {
@@ -3044,6 +3210,7 @@ mod tests {
             enclosures: vec![],
             windchests: vec![],
             tremulants: vec![],
+            combinations: Default::default(),
         };
         let mut specs = HashMap::new();
         for pipe in 0..73u16 {
@@ -3396,6 +3563,7 @@ mod tests {
             enclosures: vec![],
             windchests: vec![],
             tremulants: vec![],
+            combinations: Default::default(),
         };
         let mut specs = HashMap::new();
         for rank in 1..=2u32 {
@@ -4375,6 +4543,7 @@ mod tests {
             enclosures: vec![],
             windchests: vec![],
             tremulants: vec![],
+            combinations: Default::default(),
         };
         let mut specs = HashMap::new();
         for rank in 1..=2u32 {

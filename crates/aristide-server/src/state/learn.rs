@@ -1,7 +1,8 @@
 //! Binding resolution and performance controls: turning saved MIDI/key
 //! assignments into the live route table, dispatching bindings and
-//! computer-keyboard keys, generals, tremulant engagement, and the
-//! MIDI-learn gestures that teach a new keyboard or a new control.
+//! computer-keyboard keys, the whole combination action (generals,
+//! divisionals, the stepper, the crescendo), tremulant engagement, and
+//! the MIDI-learn gestures that teach a new keyboard or a new control.
 
 use std::time::Instant;
 
@@ -15,6 +16,50 @@ use crate::bindings::{
     COMPUTER_KEYBOARD, LEARN_TIMEOUT,
 };
 use crate::{config, control};
+
+/// How far a stored registration reaches. A general covers the whole
+/// console; a divisional covers one division — its stops always, its
+/// couplers and tremulants only where the console is wired that way
+/// (see [`aristide_model::CombinationScope`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Scope {
+    Whole,
+    Division(usize),
+}
+
+/// The controls one combination reaches, each as `(id, name, on)`.
+/// Storing reads the `on`s; recalling diffs against them.
+struct Members {
+    stops: Vec<(StopId, String, bool)>,
+    couplers: Vec<(usize, String, bool)>,
+    trems: Vec<(usize, String, bool)>,
+}
+
+/// The names of the members that are on — what a store writes down.
+fn engaged_names<T>(members: &[(T, String, bool)]) -> Vec<String> {
+    members
+        .iter()
+        .filter(|(_, _, on)| *on)
+        .map(|(_, name, _)| name.clone())
+        .collect()
+}
+
+/// Stored names this console cannot answer for, described for the log.
+/// They stay in the file: a name that means nothing today means
+/// something again the moment its stop comes back.
+fn absent_names<T>(kind: &str, wanted: &[String], members: &[(T, String, bool)]) -> Vec<String> {
+    wanted
+        .iter()
+        .filter(|name| !members.iter().any(|(_, known, _)| known == *name))
+        .map(|name| format!("{kind} {name:?}"))
+        .collect()
+}
+
+fn report_missing(what: &str, missing: &[String]) {
+    if !missing.is_empty() {
+        tracing::warn!("{what}: not on this console: {}", missing.join(", "));
+    }
+}
 
 impl State {
     /// Push the saved assignments into the connected ports. Every edit
@@ -361,6 +406,14 @@ impl State {
                 }
                 None => Subject::Device,
             },
+            // A divisional names its manual in the action itself — the
+            // piston is physically under that keyboard, so the binding
+            // carries the division, not the device's default.
+            control::Action::Divisional(name, _) => {
+                let names = self.manual_names();
+                let names: Vec<&str> = names.iter().map(String::as_str).collect();
+                Subject::Manual(one(&names, name)?)
+            }
             _ => Subject::None,
         })
     }
@@ -619,12 +672,41 @@ impl State {
                 let slot = *slot;
                 self.general(slot);
             }
+            (control::Action::Divisional(_, slot), Subject::Manual(manual)) => {
+                let (manual, slot) = (manual, *slot);
+                self.divisional(manual, slot);
+            }
+            (control::Action::StepperNext, _) => self.stepper_next(),
+            (control::Action::StepperPrev, _) => self.stepper_prev(),
+            (control::Action::StepperGoto(frame), _) => {
+                let frame = *frame;
+                self.stepper_goto(frame);
+            }
+            (control::Action::StepperStore, _) => self.stepper_store(),
+            (control::Action::StepperInsert, _) => self.stepper_insert(),
+            (control::Action::Crescendo, _) => {
+                // A shoe's travel read as stages: heel (0) adds
+                // nothing, toe stands on the last stage, and the
+                // rounding puts every stage on an equal slice of the
+                // pedal rather than hiding the ends.
+                let stages = crate::state::CRESCENDO_STAGES as f32;
+                let stage = (value.min(127) as f32 / 127.0 * stages).round() as u8;
+                self.set_crescendo(stage);
+            }
+            (control::Action::CrescendoStage(stage), _) => {
+                let stage = *stage;
+                if self.take_setter() {
+                    self.store_crescendo(stage);
+                } else {
+                    self.set_crescendo(stage);
+                }
+            }
             (control::Action::Set, _) => {
                 self.setter_armed = !self.setter_armed;
                 tracing::info!(
                     "setter {}",
                     if self.setter_armed {
-                        "armed — the next general press stores"
+                        "armed — the next general, divisional or crescendo stage stores"
                     } else {
                         "disarmed"
                     }
@@ -664,54 +746,41 @@ impl State {
     /// setter armed, store the current one (and disarm, as a console's
     /// Set does).
     pub fn general(&mut self, slot: u8) {
-        if self.setter_armed {
-            self.setter_armed = false;
+        if self.take_setter() {
             self.store_general(slot);
         } else {
             self.recall_general(slot);
         }
     }
 
+    /// Consume the armed setter. Every combination piston asks this
+    /// exactly once before deciding what it means, so Set says the same
+    /// thing wherever the next thumb lands — and disarms afterwards,
+    /// as one press of Set on a console arms exactly one store.
+    fn take_setter(&mut self) -> bool {
+        std::mem::take(&mut self.setter_armed)
+    }
+
     /// Capture the console as it stands into a general, by name — the
     /// text vocabulary bindings use, so the file stays honest across
     /// renames — and persist it with the organ's other per-organ state.
     pub fn store_general(&mut self, slot: u8) {
-        let Control::Organ(console) = &self.control else {
+        let Some(registration) = self.capture(Scope::Whole) else {
             return;
         };
-        let stops: Vec<String> = console
-            .stop_states()
-            .iter()
-            .filter(|(_, _, _, _, drawn)| *drawn)
-            .map(|(_, name, _, _, _)| name.to_string())
-            .collect();
-        let couplers: Vec<String> = console
-            .coupler_states()
-            .iter()
-            .filter(|(_, _, engaged, available)| *engaged && *available)
-            .map(|(_, name, _, _)| name.to_string())
-            .collect();
-        let tremulants: Vec<String> = self
-            .trems
-            .iter()
-            .filter(|trem| trem.engaged)
-            .map(|trem| trem.name.clone())
-            .collect();
         tracing::info!(
             "general {slot} stored: {} stop(s), {} coupler(s), {} tremulant(s)",
-            stops.len(),
-            couplers.len(),
-            tremulants.len()
+            registration.stops.len(),
+            registration.couplers.len(),
+            registration.tremulants.len()
         );
         let organ = self.organ_key.clone();
-        self.midi_config.organs.entry(organ).or_default().generals.insert(
-            slot,
-            config::General {
-                stops,
-                couplers,
-                tremulants,
-            },
-        );
+        self.midi_config
+            .organs
+            .entry(organ)
+            .or_default()
+            .generals
+            .insert(slot, registration);
         self.persist();
     }
 
@@ -730,43 +799,437 @@ impl State {
             tracing::info!("general {slot}: nothing stored");
             return;
         };
-        // Tremulant targets first (their toggles need &mut self after
-        // the console borrow ends).
-        let trem_targets: Vec<(usize, bool)> = self
-            .trems
+        let missing = self.recall(&general, Scope::Whole);
+        report_missing(&format!("general {slot}"), &missing);
+    }
+
+    // ---- divisionals ---------------------------------------------------
+
+    /// A divisional piston: the same gesture as a general, over one
+    /// division's own controls. `manual` is an index into the console's
+    /// manuals; bindings resolve the name they carry to one of these
+    /// before the piston is ever pressed.
+    pub fn divisional(&mut self, manual: usize, slot: u8) {
+        if self.take_setter() {
+            self.store_divisional(manual, slot);
+        } else {
+            self.recall_divisional(manual, slot);
+        }
+    }
+
+    pub fn store_divisional(&mut self, manual: usize, slot: u8) {
+        let Some(name) = self.manual_names().get(manual).cloned() else {
+            return;
+        };
+        let Some(registration) = self.capture(Scope::Division(manual)) else {
+            return;
+        };
+        tracing::info!(
+            "{name} divisional {slot} stored: {} stop(s), {} coupler(s), {} tremulant(s)",
+            registration.stops.len(),
+            registration.couplers.len(),
+            registration.tremulants.len()
+        );
+        let organ = self.organ_key.clone();
+        self.midi_config
+            .organs
+            .entry(organ)
+            .or_default()
+            .divisionals
+            .entry(name)
+            .or_default()
+            .insert(slot, registration);
+        self.persist();
+    }
+
+    pub fn recall_divisional(&mut self, manual: usize, slot: u8) {
+        let Some(name) = self.manual_names().get(manual).cloned() else {
+            return;
+        };
+        let Some(divisional) = self
+            .midi_config
+            .organs
+            .get(&self.organ_key)
+            .and_then(|organ| organ.divisionals.get(&name))
+            .and_then(|slots| slots.get(&slot))
+            .cloned()
+        else {
+            tracing::info!("{name} divisional {slot}: nothing stored");
+            return;
+        };
+        let missing = self.recall(&divisional, Scope::Division(manual));
+        report_missing(&format!("{name} divisional {slot}"), &missing);
+    }
+
+    // ---- the stepper ---------------------------------------------------
+
+    /// How many frames the sequence holds.
+    pub fn stepper_frames(&self) -> usize {
+        self.midi_config
+            .organs
+            .get(&self.organ_key)
+            .map(|organ| organ.frames.len())
+            .unwrap_or(0)
+    }
+
+    /// One thumb, one registration per press: forward through the
+    /// sequence. The ends are walls, not wraps — a sequencer that
+    /// looped round to the first frame in the middle of a piece would
+    /// be a trap, and every console that has one stops at the end.
+    pub fn stepper_next(&mut self) {
+        let frames = self.stepper_frames();
+        if frames == 0 {
+            tracing::info!("stepper: no frames yet");
+            return;
+        }
+        self.stepper_to((self.stepper_frame + 1).min(frames - 1));
+    }
+
+    pub fn stepper_prev(&mut self) {
+        self.stepper_to(self.stepper_frame.saturating_sub(1));
+    }
+
+    /// Jump to a frame by its 1-based number, as the file numbers them.
+    /// Past the end it clamps: the sequence grows by `stepper_insert`
+    /// (or the console's + button), never by walking off the edge.
+    pub fn stepper_goto(&mut self, frame: u16) {
+        let frames = self.stepper_frames();
+        if frames == 0 || frame == 0 {
+            return;
+        }
+        self.stepper_to((frame as usize - 1).min(frames - 1));
+    }
+
+    fn stepper_to(&mut self, index: usize) {
+        self.stepper_frame = index;
+        let Some(frame) = self
+            .midi_config
+            .organs
+            .get(&self.organ_key)
+            .and_then(|organ| organ.frames.get(index))
+            .cloned()
+        else {
+            return;
+        };
+        let missing = self.recall(&frame, Scope::Whole);
+        report_missing(&format!("stepper frame {}", index + 1), &missing);
+    }
+
+    /// Write the console into the frame the stepper stands on — an
+    /// empty sequence gains its first frame here.
+    ///
+    /// This is its own action rather than "Set + the stepper's own
+    /// piston" because the stepper's piston is pressed constantly
+    /// while playing: giving it a second, destructive meaning under an
+    /// armed setter would overwrite a frame every time a player armed
+    /// Set and then reached for the next registration.
+    pub fn stepper_store(&mut self) {
+        let Some(registration) = self.capture(Scope::Whole) else {
+            return;
+        };
+        let organ = self.organ_key.clone();
+        let frames = &mut self
+            .midi_config
+            .organs
+            .entry(organ)
+            .or_default()
+            .frames;
+        if frames.is_empty() {
+            frames.push(registration);
+            self.stepper_frame = 0;
+        } else {
+            let index = self.stepper_frame.min(frames.len() - 1);
+            frames[index] = registration;
+            self.stepper_frame = index;
+        }
+        tracing::info!("stepper frame {} stored", self.stepper_frame + 1);
+        self.persist();
+    }
+
+    /// Insert a fresh frame after the current one, store the console
+    /// into it and land there — how a sequence is built forwards, one
+    /// registration at a time, without renumbering anything by hand.
+    pub fn stepper_insert(&mut self) {
+        let Some(registration) = self.capture(Scope::Whole) else {
+            return;
+        };
+        let organ = self.organ_key.clone();
+        let frames = &mut self
+            .midi_config
+            .organs
+            .entry(organ)
+            .or_default()
+            .frames;
+        let at = if frames.is_empty() {
+            0
+        } else {
+            (self.stepper_frame + 1).min(frames.len())
+        };
+        frames.insert(at, registration);
+        self.stepper_frame = at;
+        tracing::info!("stepper frame {} inserted", at + 1);
+        self.persist();
+    }
+
+    /// Drop the frame the stepper stands on and land on the one that
+    /// takes its place (the last frame, if it was the end).
+    pub fn stepper_delete(&mut self) {
+        let organ = self.organ_key.clone();
+        let frames = &mut self
+            .midi_config
+            .organs
+            .entry(organ)
+            .or_default()
+            .frames;
+        if frames.is_empty() || self.stepper_frame >= frames.len() {
+            return;
+        }
+        frames.remove(self.stepper_frame);
+        let last = frames.len().saturating_sub(1);
+        self.stepper_frame = self.stepper_frame.min(last);
+        self.persist();
+    }
+
+    // ---- the crescendo -------------------------------------------------
+
+    /// Where the pedal stands and what it is holding, for the console:
+    /// `(stage, stops it adds)`.
+    pub fn crescendo_overlay(&self) -> Vec<String> {
+        if self.crescendo_stage == 0 {
+            return Vec::new(); // the heel: the pedal adds nothing
+        }
+        let Some(organ) = self.midi_config.organs.get(&self.organ_key) else {
+            return Vec::new();
+        };
+        let mut names: Vec<String> = Vec::new();
+        for (_, stops) in organ.crescendo.range(1..=self.crescendo_stage) {
+            for name in stops {
+                if !names.contains(name) {
+                    names.push(name.clone());
+                }
+            }
+        }
+        names
+    }
+
+    /// Move the crescendo pedal to `stage` (0 = heel, nothing added).
+    ///
+    /// The crescendo is an *overlay*, not a registration: the hand
+    /// keeps whatever the drawknobs say, and what sounds is hand ∪
+    /// crescendo. Rolling the pedal back therefore takes away only
+    /// what the pedal itself put there — a stop the hand also drew
+    /// stays. (GrandOrgue reaches the same result by giving every
+    /// drawstop an OR over named internal states, the crescendo owning
+    /// one of them: `GODrawstop::SetInternalState`.)
+    pub fn set_crescendo(&mut self, stage: u8) {
+        let stage = stage.min(crate::state::CRESCENDO_STAGES);
+        if stage == self.crescendo_stage {
+            return;
+        }
+        self.crescendo_stage = stage;
+        let wanted = self.crescendo_overlay();
+        let State {
+            engine, control, ..
+        } = &mut *self;
+        let Control::Organ(console) = control else {
+            return;
+        };
+        let by_name: Vec<(StopId, String)> = console
+            .stop_states()
             .iter()
-            .enumerate()
-            .map(|(index, trem)| {
-                (index, general.tremulants.iter().any(|n| *n == trem.name))
+            .map(|(id, name, _, _, _)| (*id, name.to_string()))
+            .collect();
+        let mut missing = Vec::new();
+        let mut ids = Vec::new();
+        for name in &wanted {
+            match by_name.iter().find(|(_, known)| known == name) {
+                Some((id, _)) => ids.push(*id),
+                None => missing.push(format!("stop {name:?}")),
+            }
+        }
+        let (stopped, starts) = console.set_crescendo(ids);
+        for handle in stopped {
+            engine.send(Command::StopVoice { handle });
+        }
+        for start in starts {
+            engine.send(start.command());
+        }
+        report_missing(&format!("crescendo stage {stage}"), &missing);
+    }
+
+    /// Store the *hand* registration into one crescendo stage.
+    ///
+    /// The hand, not what is sounding: storing the sounding set while
+    /// the pedal stands on that very stage would fold the overlay into
+    /// itself, and every store would ratchet the stage upwards. What
+    /// the player means by "this stage adds these stops" is exactly
+    /// what their drawknobs say.
+    ///
+    /// The gesture is Set + `crescendo:<stage>` — the same
+    /// arm-then-press idiom as a general, so there is one thing to
+    /// learn — and deliberately *not* the pedal itself: a foot sweeping
+    /// through the stages must never write anything.
+    pub fn store_crescendo(&mut self, stage: u8) {
+        if stage == 0 || stage > crate::state::CRESCENDO_STAGES {
+            tracing::warn!("crescendo: stage {stage} is not one of 1..{}", crate::state::CRESCENDO_STAGES);
+            return;
+        }
+        let Control::Organ(console) = &self.control else {
+            return;
+        };
+        let stops: Vec<String> = console
+            .stop_states()
+            .iter()
+            .filter(|(id, _, _, _, _)| console.is_hand_drawn(*id))
+            .map(|(_, name, _, _, _)| name.to_string())
+            .collect();
+        tracing::info!("crescendo stage {stage} stored: {} stop(s)", stops.len());
+        let organ = self.organ_key.clone();
+        self.midi_config
+            .organs
+            .entry(organ)
+            .or_default()
+            .crescendo
+            .insert(stage, stops);
+        self.persist();
+    }
+
+    // ---- what a combination reaches ------------------------------------
+
+    /// The controls one combination covers, each with its live state:
+    /// the scope question answered in exactly one place, so a store and
+    /// the recall that follows it can never disagree about what was in
+    /// and what was out.
+    fn members(&self, scope: Scope) -> Option<Members> {
+        let console = self.control.organ()?;
+        let manual = match scope {
+            Scope::Whole => None,
+            Scope::Division(index) => Some(index),
+        };
+        let stops = console
+            .stop_states()
+            .iter()
+            .filter(|(_, _, _, midx, _)| manual.is_none_or(|want| *midx == want))
+            .map(|(id, name, _, _, drawn)| (*id, name.to_string(), *drawn))
+            .collect();
+
+        let flags = console.combination_scope();
+        let states: Vec<(usize, String, bool, bool)> = console
+            .coupler_states()
+            .iter()
+            .map(|(index, name, engaged, available)| {
+                (*index, name.to_string(), *engaged, *available)
             })
             .collect();
-        let mut missing: Vec<String> = general
-            .tremulants
+        let couplers: Vec<(usize, String, bool)> = match manual {
+            None => states
+                .iter()
+                .filter(|(_, _, _, available)| *available)
+                .map(|(index, name, engaged, _)| (*index, name.clone(), *engaged))
+                .collect(),
+            Some(index) => {
+                let mine = console.manual_couplers(index);
+                states
+                    .iter()
+                    .filter(|(coupler, _, _, available)| {
+                        *available
+                            && mine.iter().any(|(index, intermanual)| {
+                                index == coupler
+                                    && if *intermanual {
+                                        flags.divisional_intermanual_couplers
+                                    } else {
+                                        flags.divisional_intramanual_couplers
+                                    }
+                            })
+                    })
+                    .map(|(index, name, engaged, _)| (*index, name.clone(), *engaged))
+                    .collect()
+            }
+        };
+
+        let trems: Vec<(usize, String, bool)> = match manual {
+            None => self
+                .trems
+                .iter()
+                .enumerate()
+                .map(|(index, trem)| (index, trem.name.clone(), trem.engaged))
+                .collect(),
+            Some(index) if flags.divisional_tremulants => {
+                // A tremulant is this division's when it blows on wind
+                // the division's own pipes stand on — the only thing
+                // that makes a tremulant "the Récit's" rather than the
+                // console's.
+                let groups = console.manual_wind_groups(index);
+                self.trems
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, trem)| trem.groups.iter().any(|group| groups.contains(group)))
+                    .map(|(index, trem)| (index, trem.name.clone(), trem.engaged))
+                    .collect()
+            }
+            Some(_) => Vec::new(),
+        };
+        Some(Members {
+            stops,
+            couplers,
+            trems,
+        })
+    }
+
+    /// The console as it stands, within `scope`, as names.
+    ///
+    /// What is *sounding* is what gets stored, crescendo included —
+    /// GrandOrgue captures a drawstop's engaged state the same way
+    /// (`GOCombination::FillWithCurrent` reads `GetCombinationState()`,
+    /// which is `IsEngaged()`), and it is what the player hears when
+    /// they press Set: this, please, again.
+    fn capture(&self, scope: Scope) -> Option<config::Registration> {
+        let members = self.members(scope)?;
+        Some(config::Registration {
+            stops: engaged_names(&members.stops),
+            couplers: engaged_names(&members.couplers),
+            tremulants: engaged_names(&members.trems),
+        })
+    }
+
+    /// Bring `registration` back over `scope`: everything in scope
+    /// diffs to the stored state — landing on held keys immediately,
+    /// as pistons on an electric action do. Returns the stored names
+    /// this console hasn't got, for reporting; they are never dropped
+    /// from the file, because the stop they name may well come back.
+    fn recall(&mut self, registration: &config::Registration, scope: Scope) -> Vec<String> {
+        let Some(members) = self.members(scope) else {
+            return Vec::new();
+        };
+        let mut missing = absent_names("stop", &registration.stops, &members.stops);
+        missing.extend(absent_names(
+            "coupler",
+            &registration.couplers,
+            &members.couplers,
+        ));
+        missing.extend(absent_names(
+            "tremulant",
+            &registration.tremulants,
+            &members.trems,
+        ));
+        // Tremulant targets first: toggling one needs `&mut self` after
+        // the console borrow below has ended.
+        let trem_targets: Vec<(usize, bool)> = members
+            .trems
             .iter()
-            .filter(|name| !self.trems.iter().any(|t| t.name == **name))
-            .map(|name| format!("tremulant {name:?}"))
+            .map(|(index, name, _)| (*index, registration.tremulants.contains(name)))
             .collect();
         {
             let State {
                 engine, control, ..
             } = &mut *self;
             let Control::Organ(console) = control else {
-                return;
+                return missing;
             };
-            let stop_states: Vec<(StopId, String, bool)> = console
-                .stop_states()
-                .iter()
-                .map(|(id, name, _, _, drawn)| (*id, name.to_string(), *drawn))
-                .collect();
-            for name in &general.stops {
-                if !stop_states.iter().any(|(_, n, _)| n == name) {
-                    missing.push(format!("stop {name:?}"));
-                }
-            }
-            for (id, name, drawn) in stop_states {
-                let wanted = general.stops.iter().any(|n| *n == name);
-                if wanted != drawn {
-                    let (stopped, starts) = console.set_drawn(id, wanted);
+            for (id, name, drawn) in &members.stops {
+                let wanted = registration.stops.contains(name);
+                if wanted != *drawn {
+                    let (stopped, starts) = console.set_drawn(*id, wanted);
                     for handle in stopped {
                         engine.send(Command::StopVoice { handle });
                     }
@@ -775,28 +1238,10 @@ impl State {
                     }
                 }
             }
-            let coupler_states: Vec<(usize, String, bool, bool)> = console
-                .coupler_states()
-                .iter()
-                .map(|(index, name, engaged, available)| {
-                    (*index, name.to_string(), *engaged, *available)
-                })
-                .collect();
-            for name in &general.couplers {
-                if !coupler_states
-                    .iter()
-                    .any(|(_, n, _, available)| n == name && *available)
-                {
-                    missing.push(format!("coupler {name:?}"));
-                }
-            }
-            for (index, name, engaged, available) in coupler_states {
-                if !available {
-                    continue;
-                }
-                let wanted = general.couplers.iter().any(|n| *n == name);
-                if wanted != engaged {
-                    let (stopped, starts) = console.set_coupler(index, wanted);
+            for (index, name, engaged) in &members.couplers {
+                let wanted = registration.couplers.contains(name);
+                if wanted != *engaged {
+                    let (stopped, starts) = console.set_coupler(*index, wanted);
                     for handle in stopped {
                         engine.send(Command::StopVoice { handle });
                     }
@@ -809,9 +1254,7 @@ impl State {
         for (index, wanted) in trem_targets {
             self.set_tremulant_at(index, wanted);
         }
-        if !missing.is_empty() {
-            tracing::warn!("general {slot}: not on this organ: {}", missing.join(", "));
-        }
+        missing
     }
 
     /// Engage or release every tremulant at once — what the plain

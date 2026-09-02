@@ -66,9 +66,17 @@ const HEADER: &str = "\
 #   action       octave-up, octave-down, transpose-up, transpose-down,
 #                transpose:<n>, transpose-reset, stop:<name>,
 #                coupler:<name>, tremulant, tremulant:<name>,
-#                general:<n>, set, cancel, panic, enclosure:<name>
+#                general:<n>, divisional:<manual>:<n>,
+#                stepper:next, stepper:prev, stepper:goto:<n>,
+#                stepper:store, stepper:insert,
+#                crescendo (a pedal — bind it to a CC),
+#                crescendo:<stage>, set, cancel, panic, enclosure:<name>
 #   manual       optional; which keyboard a pitch action shifts. Absent
 #                means every keyboard on the same device.
+#
+# `set` arms the setter: the next general or divisional press *stores*
+# the console instead of recalling it, then disarms — as a console's Set
+# piston works. Set + crescendo:<stage> stores that crescendo stage.
 #
 # A [[library]] entry is one organ this machine has loaded — the
 # console's picker lists them as Recent, most recent first. Removing
@@ -234,13 +242,31 @@ pub struct OrganConfig {
     /// bindings use), so a combination survives a rename honestly:
     /// anything the loaded organ hasn't got is reported and skipped,
     /// never silently dropped from the file.
-    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub generals: std::collections::BTreeMap<u8, General>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub generals: BTreeMap<u8, Registration>,
+    /// Divisionals: manual name → piston slot → registration. The
+    /// manual is named, like everything else here, so a divisional
+    /// made on "Récit" means nothing at all on an organ without one
+    /// rather than quietly landing on the wrong division.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub divisionals: BTreeMap<String, BTreeMap<u8, Registration>>,
+    /// The stepper's frames, in playing order — a general-shaped
+    /// registration each, walked by one thumb during a piece.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub frames: Vec<Registration>,
+    /// The crescendo pedal's stages: stage number (1..=32) → the stops
+    /// that stage *adds*. The pedal sounds the union of every stage up
+    /// to where it stands, over whatever the hand has drawn.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub crescendo: BTreeMap<u8, Vec<String>>,
 }
 
-/// One stored general: the console state a piston brings back.
+/// One stored registration: the console state a piston brings back.
+/// The same shape serves a general, a divisional and a stepper frame —
+/// they differ in what *scope* the recall applies them over, not in
+/// what is remembered.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct General {
+pub struct Registration {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stops: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -759,11 +785,57 @@ pub fn save(path: &Path, config: &MidiConfig) -> Result<(), String> {
     write_atomically(path, format!("{HEADER}{body}"))
 }
 
-/// A composite organ file's `[midi]` wiring in the shape the server
-/// keeps it. The file is that organ's authority: this replaces whatever
-/// the user config remembers under its name.
-pub fn organ_config_from_file(midi: &aristide_formats::instrument::MidiDef) -> OrganConfig {
+/// A composite organ file's `[midi]` wiring and `[combinations]`
+/// memory in the shape the server keeps them. The file is that organ's
+/// authority: this replaces whatever the user config remembers under
+/// its name — which is exactly why the combinations have to come along.
+/// (Before they did, every reload of a composite silently wiped the
+/// generals: `install` swaps in this value wholesale.)
+pub fn organ_config_from_file(
+    midi: &aristide_formats::instrument::MidiDef,
+    combinations: &aristide_formats::instrument::CombinationsDef,
+) -> OrganConfig {
     let mut organ = OrganConfig::default();
+    for general in &combinations.generals {
+        organ.generals.insert(
+            general.n,
+            Registration {
+                stops: general.stops.clone(),
+                couplers: general.couplers.clone(),
+                tremulants: general.tremulants.clone(),
+            },
+        );
+    }
+    for divisional in &combinations.divisionals {
+        organ
+            .divisionals
+            .entry(divisional.manual.clone())
+            .or_default()
+            .insert(
+                divisional.n,
+                Registration {
+                    stops: divisional.stops.clone(),
+                    couplers: divisional.couplers.clone(),
+                    tremulants: divisional.tremulants.clone(),
+                },
+            );
+    }
+    // `n` decides the order, not the order the tables happen to sit in
+    // the file, so a hand-renumbered sequence reads back as written.
+    // Gaps close: the stepper walks positions, not slot numbers.
+    let mut frames: Vec<_> = combinations.frames.iter().collect();
+    frames.sort_by_key(|frame| frame.n);
+    organ.frames = frames
+        .into_iter()
+        .map(|frame| Registration {
+            stops: frame.stops.clone(),
+            couplers: frame.couplers.clone(),
+            tremulants: frame.tremulants.clone(),
+        })
+        .collect();
+    for stage in &combinations.crescendo {
+        organ.crescendo.insert(stage.stage, stage.stops.clone());
+    }
     for input in &midi.inputs {
         organ.manuals.entry(input.manual.clone()).or_default().push(Input {
             device: input.device.clone(),
@@ -860,6 +932,113 @@ pub fn write_composite_midi(path: &Path, organ: Option<&OrganConfig>) -> Result<
     } else {
         midi["control"] = toml_edit::Item::ArrayOfTables(controls);
     }
+    write_atomically(path, doc.to_string())
+}
+
+/// Rewrite a composite organ file's `[combinations]` tables to match
+/// the live combination memory, touching nothing else — same
+/// comment-preserving contract as the wiring above, because the same
+/// hand-authored file holds both.
+///
+/// The three `divisional_*` flags are *not* ours to write: absent they
+/// mean "as the sample set has it", which is right for almost every
+/// organ, and a player who disagrees says so by hand. Leaving them
+/// alone here keeps a hand-written override from being erased by the
+/// next piston press.
+pub fn write_composite_combinations(
+    path: &Path,
+    organ: Option<&OrganConfig>,
+) -> Result<(), String> {
+    let text =
+        std::fs::read_to_string(path).map_err(|err| format!("{}: {err}", path.display()))?;
+    let mut doc: toml_edit::DocumentMut =
+        text.parse().map_err(|err| format!("{}: {err}", path.display()))?;
+    let table = doc
+        .entry("combinations")
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+    let table = table
+        .as_table_mut()
+        .ok_or_else(|| "[combinations] is not a table".to_string())?;
+    let registration = |target: &mut toml_edit::Table, reg: &Registration| {
+        for (key, names) in [
+            ("stops", &reg.stops),
+            ("couplers", &reg.couplers),
+            ("tremulants", &reg.tremulants),
+        ] {
+            if names.is_empty() {
+                continue;
+            }
+            let mut array = toml_edit::Array::new();
+            for name in names {
+                array.push(name.as_str());
+            }
+            target[key] = toml_edit::value(array);
+        }
+    };
+
+    let mut generals = toml_edit::ArrayOfTables::new();
+    let mut divisionals = toml_edit::ArrayOfTables::new();
+    let mut frames = toml_edit::ArrayOfTables::new();
+    let mut crescendo = toml_edit::ArrayOfTables::new();
+    if let Some(organ) = organ {
+        for (slot, general) in &organ.generals {
+            let mut entry = toml_edit::Table::new();
+            entry["n"] = toml_edit::value(*slot as i64);
+            registration(&mut entry, general);
+            generals.push(entry);
+        }
+        for (manual, slots) in &organ.divisionals {
+            for (slot, divisional) in slots {
+                let mut entry = toml_edit::Table::new();
+                entry["manual"] = toml_edit::value(manual.as_str());
+                entry["n"] = toml_edit::value(*slot as i64);
+                registration(&mut entry, divisional);
+                divisionals.push(entry);
+            }
+        }
+        for (index, frame) in organ.frames.iter().enumerate() {
+            let mut entry = toml_edit::Table::new();
+            entry["n"] = toml_edit::value(index as i64 + 1);
+            registration(&mut entry, frame);
+            frames.push(entry);
+        }
+        for (stage, stops) in &organ.crescendo {
+            if stops.is_empty() {
+                continue;
+            }
+            let mut entry = toml_edit::Table::new();
+            entry["stage"] = toml_edit::value(*stage as i64);
+            let mut array = toml_edit::Array::new();
+            for name in stops {
+                array.push(name.as_str());
+            }
+            entry["stops"] = toml_edit::value(array);
+            crescendo.push(entry);
+        }
+    }
+    for (key, tables) in [
+        ("general", generals),
+        ("divisional", divisionals),
+        ("frame", frames),
+        ("crescendo", crescendo),
+    ] {
+        if tables.is_empty() {
+            table.remove(key);
+        } else {
+            table[key] = toml_edit::Item::ArrayOfTables(tables);
+        }
+    }
+    // Only the flags need a `[combinations]` header of their own; with
+    // just the arrays present, `[[combinations.general]]` says it, and
+    // a bare header above them would be noise.
+    let has_flags = [
+        "divisional_intermanual_couplers",
+        "divisional_intramanual_couplers",
+        "divisional_tremulants",
+    ]
+    .iter()
+    .any(|key| table.contains_key(key));
+    table.set_implicit(!has_flags);
     write_atomically(path, doc.to_string())
 }
 
@@ -3210,13 +3389,99 @@ mod tests {
             toml::from_str(&text).expect("still a valid organ file");
         assert_eq!(definition.midi.inputs.len(), 1);
         assert_eq!(definition.midi.inputs[0].transpose, -12);
-        assert_eq!(organ_config_from_file(&definition.midi), organ);
+        assert_eq!(
+            organ_config_from_file(&definition.midi, &definition.combinations),
+            organ
+        );
         // Wiring emptied: the arrays vanish rather than lingering as [].
         write_composite_midi(&path, None).expect("writes back empty");
         let text = std::fs::read_to_string(&path).expect("reads");
         assert!(!text.contains("midi"));
         assert!(text.contains("# my precious hand-written organ"));
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// The combination action lands in the organ's own file — the same
+    /// home as the wiring, because it is the same kind of fact: how
+    /// this player uses this instrument. It reads back exactly, and a
+    /// hand-written `divisional_*` flag survives a piston press (they
+    /// are never ours to rewrite).
+    #[test]
+    fn combinations_round_trip_through_the_organ_file() {
+        let path = std::env::temp_dir().join("aristide-combinations-test.toml");
+        std::fs::write(
+            &path,
+            "# hand-written\nname = \"Franken\"\n\n\
+             [combinations]\ndivisional_tremulants = true # my console does\n",
+        )
+        .expect("fixture writes");
+        let mut organ = OrganConfig::default();
+        organ.generals.insert(
+            1,
+            Registration {
+                stops: vec!["Montre 8'".into(), "Prestant 4'".into()],
+                couplers: vec!["II/I".into()],
+                tremulants: Vec::new(),
+            },
+        );
+        organ.divisionals.entry("Récit".into()).or_default().insert(
+            3,
+            Registration {
+                stops: vec!["Hautbois 8'".into()],
+                ..Default::default()
+            },
+        );
+        organ.frames = vec![
+            Registration { stops: vec!["Bourdon 8'".into()], ..Default::default() },
+            Registration { stops: vec!["Trompette 8'".into()], ..Default::default() },
+        ];
+        organ.crescendo.insert(1, vec!["Bourdon 8'".into()]);
+        organ.crescendo.insert(2, vec!["Montre 8'".into()]);
+
+        write_composite_combinations(&path, Some(&organ)).expect("writes back");
+        let text = std::fs::read_to_string(&path).expect("reads");
+        assert!(text.contains("# hand-written"));
+        assert!(
+            text.contains("divisional_tremulants = true"),
+            "a hand-written console flag is not ours to erase"
+        );
+        let definition: aristide_formats::instrument::Definition =
+            toml::from_str(&text).expect("still a valid organ file");
+        assert_eq!(
+            definition.combinations.divisional_tremulants,
+            Some(true),
+            "the flag reads back as the file's own override"
+        );
+        assert_eq!(
+            organ_config_from_file(&definition.midi, &definition.combinations),
+            organ,
+            "every general, divisional, frame and crescendo stage returns"
+        );
+        // Emptied: the tables vanish rather than lingering as [].
+        write_composite_combinations(&path, None).expect("writes back empty");
+        let text = std::fs::read_to_string(&path).expect("reads");
+        assert!(!text.contains("[[combinations"), "no empty arrays left behind");
+        assert!(text.contains("divisional_tremulants = true"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Frames are ordered by their own `n`, not by where their tables
+    /// happen to sit — a hand-renumbered sequence reads back as
+    /// written, and gaps close because the stepper walks positions.
+    #[test]
+    fn stepper_frames_read_back_in_their_numbered_order() {
+        let definition: aristide_formats::instrument::Definition = toml::from_str(
+            "name = \"F\"\n\
+             [[combinations.frame]]\nn = 7\nstops = [\"C\"]\n\
+             [[combinations.frame]]\nn = 2\nstops = [\"A\"]\n\
+             [[combinations.frame]]\nn = 5\nstops = [\"B\"]\n",
+        )
+        .expect("parses");
+        let organ = organ_config_from_file(&definition.midi, &definition.combinations);
+        assert_eq!(
+            organ.frames.iter().map(|f| f.stops[0].as_str()).collect::<Vec<_>>(),
+            ["A", "B", "C"]
+        );
     }
 
     /// A small instrument to inventory: two manuals, two stops, one

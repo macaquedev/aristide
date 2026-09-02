@@ -89,8 +89,32 @@ pub enum Action {
     /// Recall the numbered general combination — or store it, when the
     /// setter is armed. The organist's thumb pistons.
     General(u8),
-    /// Arm/disarm the setter: while armed, the next general press
-    /// stores the current registration instead of recalling.
+    /// The numbered divisional of one named manual: the same gesture,
+    /// scoped to that division's stops (and, where the console is
+    /// wired that way, its couplers and tremulants). The pistons under
+    /// each keyboard.
+    Divisional(String, u8),
+    /// Walk the stepper: one thumb, one registration per press, in the
+    /// order the piece needs them.
+    StepperNext,
+    StepperPrev,
+    /// Jump straight to a frame (1-based). One past the end appends an
+    /// empty frame, which is how a sequence grows from a piston.
+    StepperGoto(u16),
+    /// Write the console into the frame the stepper stands on.
+    StepperStore,
+    /// Insert a fresh frame after the current one, store the console
+    /// into it, and land there — building a sequence forwards.
+    StepperInsert,
+    /// The crescendo pedal itself: a position, not an instant, so it
+    /// wants a controller (bind it to whichever CC your shoe sends).
+    Crescendo,
+    /// One crescendo stage as a piston — and, with the setter armed,
+    /// the way a stage is stored.
+    CrescendoStage(u8),
+    /// Arm/disarm the setter: while armed, the next general or
+    /// divisional press stores the current registration instead of
+    /// recalling.
     Set,
     /// Retire everything, as the cancel piston does.
     Cancel,
@@ -120,6 +144,22 @@ impl Action {
             "coupler" => Action::Coupler(named(argument)?),
             "tremulant" => Action::Tremulant(named(argument)),
             "general" => Action::General(argument.parse().ok()?),
+            // `divisional:<manual>:<n>` — the manual is named, and a
+            // name may itself hold a colon, so the *last* colon is the
+            // one that separates the piston number.
+            "divisional" => {
+                let (manual, slot) = argument.rsplit_once(':')?;
+                Action::Divisional(named(manual.trim())?, slot.trim().parse().ok()?)
+            }
+            "stepper" => match argument {
+                "next" => Action::StepperNext,
+                "prev" | "previous" => Action::StepperPrev,
+                "store" => Action::StepperStore,
+                "insert" => Action::StepperInsert,
+                _ => Action::StepperGoto(argument.strip_prefix("goto:")?.trim().parse().ok()?),
+            },
+            "crescendo" if argument.is_empty() => Action::Crescendo,
+            "crescendo" => Action::CrescendoStage(argument.parse().ok()?),
             "set" => Action::Set,
             "cancel" => Action::Cancel,
             "panic" => Action::Panic,
@@ -129,9 +169,11 @@ impl Action {
     }
 
     /// Whether the action wants a position rather than a nudge — the
-    /// one case where a controller's value means something.
+    /// cases where a controller's value means something. A swell shoe
+    /// and a crescendo pedal are both feet on a travel, read the same
+    /// way; everything else is a moment.
     pub fn is_continuous(&self) -> bool {
-        matches!(self, Action::Enclosure(_))
+        matches!(self, Action::Enclosure(_) | Action::Crescendo)
     }
 }
 
@@ -149,6 +191,14 @@ impl fmt::Display for Action {
             Action::Tremulant(None) => write!(f, "tremulant"),
             Action::Tremulant(Some(name)) => write!(f, "tremulant:{name}"),
             Action::General(slot) => write!(f, "general:{slot}"),
+            Action::Divisional(manual, slot) => write!(f, "divisional:{manual}:{slot}"),
+            Action::StepperNext => write!(f, "stepper:next"),
+            Action::StepperPrev => write!(f, "stepper:prev"),
+            Action::StepperGoto(frame) => write!(f, "stepper:goto:{frame}"),
+            Action::StepperStore => write!(f, "stepper:store"),
+            Action::StepperInsert => write!(f, "stepper:insert"),
+            Action::Crescendo => write!(f, "crescendo"),
+            Action::CrescendoStage(stage) => write!(f, "crescendo:{stage}"),
             Action::Set => write!(f, "set"),
             Action::Cancel => write!(f, "cancel"),
             Action::Panic => write!(f, "panic"),
@@ -157,8 +207,11 @@ impl fmt::Display for Action {
     }
 }
 
-/// Every action a UI can offer, in the order it reads best.
-pub const CATALOGUE: [&str; 12] = [
+/// Every action a UI can offer, in the order it reads best. The
+/// trailing-colon entries are the ones that need a target: the UI
+/// completes them from the loaded organ (a stop name, a manual name)
+/// or from a number (a piston slot, a crescendo stage).
+pub const CATALOGUE: [&str; 20] = [
     "octave-up",
     "octave-down",
     "transpose-up",
@@ -166,6 +219,14 @@ pub const CATALOGUE: [&str; 12] = [
     "transpose-reset",
     "tremulant",
     "general:",
+    "divisional:",
+    "stepper:next",
+    "stepper:prev",
+    "stepper:goto:",
+    "stepper:store",
+    "stepper:insert",
+    "crescendo",
+    "crescendo:",
     "set",
     "cancel",
     "panic",
@@ -285,6 +346,14 @@ mod tests {
             "tremulant",
             "tremulant:Tremblant",
             "general:3",
+            "divisional:Grand-Orgue:2",
+            "stepper:next",
+            "stepper:prev",
+            "stepper:goto:12",
+            "stepper:store",
+            "stepper:insert",
+            "crescendo",
+            "crescendo:17",
             "set",
             "cancel",
             "panic",
@@ -295,6 +364,36 @@ mod tests {
         }
         assert_eq!(Action::parse("stop:"), None, "a stop needs a name");
         assert_eq!(Action::parse("fly-to-the-moon"), None);
+        // A divisional is a manual *and* a slot; neither half alone
+        // says anything, and the last colon is the separator so a
+        // manual named with one survives.
+        assert_eq!(Action::parse("divisional:Great"), None);
+        assert_eq!(Action::parse("divisional::3"), None);
+        assert_eq!(
+            Action::parse("divisional:Great: Solo:3"),
+            Some(Action::Divisional("Great: Solo".into(), 3))
+        );
+        assert_eq!(Action::parse("stepper:sideways"), None);
+        assert_eq!(Action::parse("stepper:goto:x"), None);
+        // The pedal reads its controller's position; a stage piston is
+        // a moment like every other piston.
+        assert!(Action::parse("crescendo").expect("parses").is_continuous());
+        assert!(!Action::parse("crescendo:4").expect("parses").is_continuous());
+    }
+
+    #[test]
+    fn every_catalogue_entry_is_a_real_action() {
+        for entry in CATALOGUE {
+            // The trailing-colon entries are stems a UI completes, so
+            // they parse only once a target is appended.
+            let text = match entry {
+                "general:" | "crescendo:" | "stepper:goto:" => format!("{entry}1"),
+                "divisional:" => format!("{entry}Great:1"),
+                "stop:" | "coupler:" => format!("{entry}Montre 8'"),
+                _ => entry.to_string(),
+            };
+            assert!(Action::parse(&text).is_some(), "catalogue entry {text:?}");
+        }
     }
 
     #[test]
