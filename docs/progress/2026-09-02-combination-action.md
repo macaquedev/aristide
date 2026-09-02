@@ -102,6 +102,13 @@ Generals and divisionals capture what is *sounding*, crescendo included
 — GO's `FillWithCurrent` reads a drawstop's engaged state the same way,
 and it is what the player means by pressing Set: this, please, again.
 
+Renaming a manual carries its divisionals and its
+`divisional:<manual>:<n>` bindings across, exactly as it already
+carried the wiring: a rename must not orphan a division's pistons.
+*Removing* a manual does not delete them — that is the "reported and
+skipped, never dropped" rule, and re-adding the division by name brings
+its pistons back.
+
 Every store is refused while the organ is loading. A store snapshots
 the live console's *names* and writes them to the file, which is
 exactly the class of edit that bricked an organ in the field on
