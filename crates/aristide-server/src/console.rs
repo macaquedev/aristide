@@ -57,6 +57,29 @@ impl VoiceStart {
     }
 }
 
+/// One sounding voice that must cross into another recording of its
+/// own pipe without re-striking — what a wave tremulant does to the
+/// notes already under the player's fingers.
+#[derive(Debug, Clone, Copy)]
+pub struct VoiceSwitch {
+    pub handle: u64,
+    pub sample: u32,
+    /// The incoming recording's playback rate as a factor on the
+    /// outgoing one (differing file sample rates).
+    pub rate_factor: f32,
+}
+
+impl VoiceSwitch {
+    /// The engine command that crosses this voice over.
+    pub fn command(&self) -> Command {
+        Command::SwitchVoiceSample {
+            handle: self.handle,
+            sample: self.sample,
+            rate_factor: self.rate_factor,
+        }
+    }
+}
+
 /// One place a played key lands after coupling: the manual and key
 /// that should sound, and the policies the route it travelled grants.
 struct Landing {
@@ -273,6 +296,15 @@ struct Speaking {
     ladder_key: i16,
     stop: StopId,
     rank: RankId,
+    /// The pipe's index in `rank` and the bank sample it is actually
+    /// playing — the coordinates the multi-attack tables are keyed by,
+    /// so a wave tremulant moving mid-hold can ask which recording
+    /// this voice *should* be on and cross it over.
+    pipe: u16,
+    sample: u32,
+    /// The chest the voice draws from: which voices a tremulant
+    /// switch reaches.
+    group: u8,
 }
 
 impl Speaking {
@@ -1585,14 +1617,93 @@ impl Console {
     }
 
     /// Record which recording variant pipes on `group` should prefer —
-    /// the wave tremulant's contribution to attack/release selection.
-    pub fn set_wave_tremulant(&mut self, group: u8, engaged: bool) {
+    /// the wave tremulant's contribution to attack/release selection —
+    /// and return the crossings the notes ALREADY sounding need.
+    ///
+    /// On a real organ the undulation starts the moment the valve
+    /// opens, under whatever is being held; a sampled wave tremulant
+    /// only reaches new presses unless the held voices are moved to
+    /// their other recording too (GO's `SwitchToAnotherAttack`).
+    pub fn set_wave_tremulant(&mut self, group: u8, engaged: bool) -> Vec<VoiceSwitch> {
         let bit = 1u32 << (group as u32).min(31);
         if engaged {
             self.wave_trems |= bit;
         } else {
             self.wave_trems &= !bit;
         }
+        self.switch_held_voices(group, engaged)
+    }
+
+    /// Which recording each voice sounding on `group` should be playing
+    /// now that the chest's wave tremulant has moved.
+    ///
+    /// Only the tremulant dimension of `GetAttack` is re-run. The
+    /// candidates are the variants that agree with the sounding one on
+    /// velocity bound and re-attack window, because neither of those
+    /// facts changed when the tremulant did — a held note did not
+    /// become harder-struck, and re-deriving them would swap
+    /// recordings for reasons the player never gave. Among the
+    /// candidates, one recorded explicitly for the new state beats one
+    /// that serves both states (`IsTremulant` unset), and ties rotate
+    /// on the same xorshift the note-on selection uses.
+    fn switch_held_voices(&mut self, group: u8, engaged: bool) -> Vec<VoiceSwitch> {
+        let sounding: Vec<(PipeKey, Speaking)> = self
+            .speaking
+            .iter()
+            .filter(|(_, voice)| voice.group == group)
+            .map(|(&key, &voice)| (key, voice))
+            .collect();
+        let mut switches = Vec::new();
+        for (key, voice) in sounding {
+            let Some(options) = self.attack_options.get(&(voice.rank, voice.pipe)) else {
+                continue;
+            };
+            let Some(current) = options.iter().find(|o| o.sample == voice.sample).copied()
+            else {
+                continue;
+            };
+            let mut best: Vec<crate::bank::AttackOption> = options
+                .iter()
+                .filter(|option| {
+                    option.min_velocity == current.min_velocity
+                        && option.max_since_release_ms == current.max_since_release_ms
+                        && option.wave_tremulant.is_none_or(|wants| wants == engaged)
+                })
+                .copied()
+                .collect();
+            if best.iter().any(|o| o.wave_tremulant == Some(engaged)) {
+                best.retain(|o| o.wave_tremulant == Some(engaged));
+            }
+            // Already on one of the right recordings: a set whose
+            // variants serve both states has nothing to switch to, and
+            // rotating among equals mid-hold would only pop.
+            if best.is_empty() || best.iter().any(|o| o.sample == voice.sample) {
+                continue;
+            }
+            let pick = if best.len() > 1 {
+                (xorshift(&mut self.rng) as usize) % best.len()
+            } else {
+                0
+            };
+            let chosen = best[pick];
+            let rate_factor = if current.rate_factor > 1e-6 {
+                chosen.rate_factor / current.rate_factor
+            } else {
+                1.0
+            };
+            switches.push(VoiceSwitch {
+                handle: voice.handle,
+                sample: chosen.sample,
+                rate_factor,
+            });
+            if let Some(speaking) = self.speaking.get_mut(&key) {
+                speaking.sample = chosen.sample;
+                // The base rate carries the recording's file rate, so a
+                // later retune diffs against the right number.
+                speaking.rate *= rate_factor;
+            }
+        }
+        switches
     }
 
     fn wave_trem_engaged(&self, group: u8) -> bool {
@@ -1799,6 +1910,9 @@ impl Console {
                         ladder_key: voice.ladder_key,
                         stop: voice.stop,
                         rank: voice.rank,
+                        pipe: voice.pipe,
+                        sample: voice.spec.sample,
+                        group: voice.spec.group,
                     },
                 );
                 if let Some(previous) = self.last_pipe_voice.insert(at, handle) {
@@ -2755,6 +2869,86 @@ mod tests {
             "rate follows the variant: {}",
             starts[0].spec.rate
         );
+    }
+
+    /// A wave tremulant engaging under a held key crosses the sounding
+    /// voice into the tremmed recording, and releasing it crosses back
+    /// — the undulation starts when the valve does, not at the next
+    /// press.
+    #[test]
+    fn a_wave_tremulant_switches_the_notes_already_sounding() {
+        let mut console = test_console();
+        console.set_drawn(StopId(2), false);
+        let mut options = HashMap::new();
+        options.insert(
+            (RankId(1), 24u16),
+            vec![attack(0, 0, None, Some(false)), attack(12, 0, None, Some(true))],
+        );
+        console.set_attack_options(options);
+        let (starts, _) = console.note_on_manual(0, 60, 64);
+        assert_eq!(starts[0].spec.sample, 0, "the plain recording speaks first");
+        let handle = starts[0].handle;
+
+        let engaged = console.set_wave_tremulant(0, true);
+        assert_eq!(engaged.len(), 1, "the held voice is crossed over");
+        assert_eq!(engaged[0].handle, handle, "and it is the same voice");
+        assert_eq!(engaged[0].sample, 12, "into the tremmed recording");
+
+        let released = console.set_wave_tremulant(0, false);
+        assert_eq!(released.len(), 1);
+        assert_eq!(released[0].sample, 0, "and back to the plain one");
+
+        // Idempotent: re-asserting a state nobody left has nothing to
+        // switch, so a repeated MIDI message can't restart a crossfade.
+        assert!(console.set_wave_tremulant(0, false).is_empty());
+    }
+
+    /// The switch changes only the tremulant dimension of the
+    /// selection. A hard-struck voice stays on its velocity layer's
+    /// tremmed twin rather than dropping to the gentle recording, and
+    /// a chest the tremulant doesn't reach is left alone entirely.
+    #[test]
+    fn a_wave_tremulant_switch_keeps_the_velocity_layer_and_its_chest() {
+        let mut console = test_console();
+        console.set_drawn(StopId(2), false);
+        let mut options = HashMap::new();
+        options.insert(
+            (RankId(1), 24u16),
+            vec![
+                attack(0, 0, None, Some(false)),
+                attack(10, 80, None, Some(false)),
+                attack(12, 0, None, Some(true)),
+                attack(13, 80, None, Some(true)),
+            ],
+        );
+        console.set_attack_options(options);
+        let (starts, _) = console.note_on_manual(0, 60, 127);
+        assert_eq!(starts[0].spec.sample, 10, "the hard-strike recording");
+        let switches = console.set_wave_tremulant(0, true);
+        assert_eq!(switches.len(), 1);
+        assert_eq!(
+            switches[0].sample, 13,
+            "the tremmed twin of the SAME velocity layer"
+        );
+        // Another chest's tremulant reaches nothing here.
+        assert!(console.set_wave_tremulant(3, true).is_empty());
+    }
+
+    /// A pipe whose recordings serve both tremulant states has nothing
+    /// to switch to — and must not be crossed into a random equal
+    /// candidate, which would pop for no musical reason.
+    #[test]
+    fn recordings_that_serve_both_states_are_left_alone() {
+        let mut console = test_console();
+        console.set_drawn(StopId(2), false);
+        let mut options = HashMap::new();
+        options.insert(
+            (RankId(1), 24u16),
+            vec![attack(0, 0, None, None), attack(10, 0, None, None)],
+        );
+        console.set_attack_options(options);
+        console.note_on_manual(0, 60, 64);
+        assert!(console.set_wave_tremulant(0, true).is_empty());
     }
 
     /// A whole-octave stop trim is an extension, not a tape-speed

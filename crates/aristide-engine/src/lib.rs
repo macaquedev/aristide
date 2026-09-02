@@ -37,7 +37,7 @@ use rtrb::{Consumer, Producer, RingBuffer};
 use tone::{ToneStage, ToneVoice, TONE_ATTACK_SECONDS, TONE_GAIN, TONE_RELEASE_SECONDS};
 use voice::{
     Brightness, EnclosureSlot, EnclosureState, Onset, PlaybackCursor, ReleaseState, SamplePhase,
-    SampledVoice, Voice, WindState,
+    SampledVoice, SwitchState, Voice, WindState,
 };
 use wind::{WindGroup, MAX_WIND_GROUPS};
 
@@ -547,6 +547,11 @@ impl Engine {
                 rate,
                 glide_ms,
             } => self.set_voice_rate(handle, rate, glide_ms),
+            Command::SwitchVoiceSample {
+                handle,
+                sample,
+                rate_factor,
+            } => self.switch_voice_sample(handle, sample, rate_factor),
             Command::StopVoice { handle } => {
                 // Batched: applied in one pool pass at the top of the
                 // next process() (same block — commands drain first).
@@ -630,6 +635,7 @@ impl Engine {
                 pending: None,
                 wave_trem: self.wave_trems & (1u32 << u32::from(group).min(31)) != 0,
             },
+            switch: SwitchState::IDLE,
         };
         if let Some(slot) = self.allocate_slot() {
             self.voices[slot] = Voice::Sampled(voice);
@@ -718,6 +724,51 @@ impl Engine {
         }
     }
 
+    /// [`Command::SwitchVoiceSample`]: a held voice crosses from its
+    /// current recording's sustain loop into another recording of the
+    /// same pipe. Only Held voices with no release already scheduled
+    /// move — a pallet that is closing must not start undulating, and
+    /// a tail is room decay that already left the pipe (the same rule
+    /// shutter moves and rate glides follow).
+    fn switch_voice_sample(&mut self, handle: u64, sample: u32, rate_factor: f32) {
+        if !(rate_factor.is_finite() && rate_factor > 0.0) {
+            return;
+        }
+        let Some(target) = self.bank.get(sample) else {
+            return;
+        };
+        if target.sustain_loop().is_none() {
+            return;
+        }
+        let per_ms = self.sample_rate / 1000.0;
+        let output_sr = self.sample_rate;
+        let (bank, sinc) = (&self.bank, &self.sinc);
+        for voice in self.voices.iter_mut() {
+            let Voice::Sampled(sampled) = voice else {
+                continue;
+            };
+            if sampled.handle != handle
+                || sampled.phase != SamplePhase::Held
+                || sampled.release.pending.is_some()
+            {
+                continue;
+            }
+            let Some(source) = bank.get(sampled.cursor.sample) else {
+                continue;
+            };
+            let age_ms = (sampled.age_frames as f32 / per_ms) as u32;
+            sampled.start_switch(
+                source,
+                target,
+                sample,
+                f64::from(rate_factor),
+                sinc,
+                output_sr,
+                age_ms,
+            );
+        }
+    }
+
     /// [`Command::KillVoice`]: a short fade, no release tail.
     fn kill_voice(&mut self, handle: u64) {
         for voice in self.voices.iter_mut() {
@@ -725,6 +776,9 @@ impl Engine {
                 && sampled.handle == handle
                 && sampled.phase != SamplePhase::FadeOut
             {
+                // A switch in flight keeps crossfading under the kill
+                // ramp: the ramp scales whatever the two legs sum to,
+                // so there is nothing to unwind.
                 sampled.release.amplitude = 1.0;
                 sampled.release.fade_scale = 1.0;
                 sampled.phase = SamplePhase::FadeOut;
@@ -990,15 +1044,15 @@ fn render_sampled_voice(
         .age_frames
         .saturating_add((frames - start_frame) as u32);
 
-    // The voice can hand over to a separate release sample or switch
-    // loops mid-block; track the refs and per-block invariants it reads
-    // from.
+    // The voice can hand over to a separate release sample, cross into
+    // another recording of its pipe, or switch loops mid-block; track
+    // the refs and per-block invariants it reads from.
     let mut current = sample;
     let mut current_id = sampled.cursor.sample;
     let mut current_loop_index = sampled.cursor.loop_index;
-    let mut current_external_id = sampled.cursor.external_release;
-    let mut external = current_external_id.and_then(|id| bank.get(id));
-    let mut ctx = sampled.block_context(current, external, rate_scale, lite, output_sr);
+    let mut current_second_id = sampled.second_leg();
+    let mut second = current_second_id.and_then(|id| bank.get(id));
+    let mut ctx = sampled.block_context(current, second, rate_scale, lite, output_sr);
     let scratch = buses[sampled.bus as usize].mix_target(frames);
     for frame in start_frame..frames {
         if sampled.cursor.sample != current_id {
@@ -1006,25 +1060,25 @@ fn render_sampled_voice(
                 Some(switched) => {
                     current = switched;
                     current_id = sampled.cursor.sample;
-                    external = None;
-                    current_external_id = None;
+                    current_second_id = sampled.second_leg();
+                    second = current_second_id.and_then(|id| bank.get(id));
                     current_loop_index = sampled.cursor.loop_index;
                     ctx = sampled
-                        .block_context(current, external, rate_scale, lite, output_sr);
+                        .block_context(current, second, rate_scale, lite, output_sr);
                 }
                 None => return false,
             }
         } else if sampled.cursor.loop_index != current_loop_index
-            || sampled.cursor.external_release != current_external_id
+            || sampled.second_leg() != current_second_id
         {
             current_loop_index = sampled.cursor.loop_index;
-            current_external_id = sampled.cursor.external_release;
-            external = current_external_id.and_then(|id| bank.get(id));
-            ctx = sampled.block_context(current, external, rate_scale, lite, output_sr);
+            current_second_id = sampled.second_leg();
+            second = current_second_id.and_then(|id| bank.get(id));
+            ctx = sampled.block_context(current, second, rate_scale, lite, output_sr);
         }
         let Some((mut left, mut right)) = sampled.tick(
             current,
-            external,
+            second,
             sinc,
             &ctx,
             refs.crossfade_step,

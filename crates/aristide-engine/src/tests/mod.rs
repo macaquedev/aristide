@@ -9,6 +9,7 @@ mod allocation;
 mod tone_voice;
 mod playback;
 mod release;
+mod switch;
 mod windchest;
 mod swell;
 mod buses;

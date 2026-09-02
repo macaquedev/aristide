@@ -135,6 +135,43 @@ pub struct Sample {
     /// ms (ODF `ReleaseCrossfadeLength`; 0 = the engine's pitch-scaled
     /// default). Separate releases carry theirs on [`ReleaseOption`].
     release_crossfade_ms: u16,
+    /// Other recordings of the SAME pipe a sounding voice may cross
+    /// into mid-hold — the tremmed/untremmed twins a wave tremulant
+    /// switches between (see [`SwitchOption`]).
+    switches: Vec<SwitchOption>,
+}
+
+/// Another recording of the same pipe that a *held* voice can move to
+/// without re-striking: a wave tremulant engaging or releasing swaps
+/// the tremmed recording for the plain one under the player's fingers.
+///
+/// Structurally this is the release splice pointed at a loop instead
+/// of a tail — same phase map, same level match — with one difference
+/// that matters: the voice does not leave the sustain loop, so both
+/// legs keep wrapping and the voice carries on `Held` in the new
+/// recording afterwards.
+#[derive(Debug, Clone)]
+pub struct SwitchOption {
+    /// Bank index of the recording to cross into.
+    pub sample: u32,
+    /// Phase map from this sample's sustain-loop cycle into a frame of
+    /// the target's *own* sustain loop. `None` when neither recording
+    /// measured a period (unpitched material): the splice then lands
+    /// on the target's loop start, as the unaligned release does.
+    alignment: Option<ReleaseAlignment>,
+    /// Mean |sample| at the target's loop start — what the voice's own
+    /// envelope is matched against so the crossfade doesn't step in
+    /// level. Measured over ~512 frames: long enough to average the
+    /// waveform, far shorter than a tremulant cycle, so a tremmed
+    /// twin's own undulation is preserved rather than flattened.
+    pub level: f32,
+}
+
+impl SwitchOption {
+    #[inline]
+    pub fn alignment(&self) -> Option<&ReleaseAlignment> {
+        self.alignment.as_ref()
+    }
 }
 
 /// A separate recorded release, selectable by how long the note was
@@ -216,6 +253,7 @@ impl Sample {
             tail_eof_level_db: -120.0,
             attack_start: 0,
             release_crossfade_ms: 0,
+            switches: Vec::new(),
         };
         if let Some(tail) = sample.release_start() {
             // Short window (~12 ms at 44.1 k): high pipes' room decay is
@@ -723,6 +761,76 @@ impl Sample {
         &self.releases
     }
 
+    /// Wire a mid-hold recording switch from this sample's sustain loop
+    /// into `target`'s (already in the bank as `target_index`): the two
+    /// are the same pipe recorded under different wave-tremulant
+    /// states, and a held voice crosses between them when the trem is
+    /// engaged or released.
+    ///
+    /// The phase map is built exactly like a separate release's
+    /// ([`Sample::attach_release`]) with the tail replaced by the
+    /// target's own loop, so a voice at any phase of its cycle lands on
+    /// the frame of the other recording that continues that cycle. Both
+    /// phases are measured at THIS sample's period: a tremmed recording
+    /// wobbles in pitch by construction, so its own period is only an
+    /// average and using it on the source side would smear every
+    /// bucket. Aligning on the source's period leaves a residual that
+    /// grows with the trem's pitch depth and the distance travelled
+    /// from the loop start — bounded by half a cycle of the wobble,
+    /// which is what the crossfade is long enough to hide.
+    pub fn attach_switch(&mut self, target: &Sample, target_index: u32) {
+        if self.switches.iter().any(|option| option.sample == target_index) {
+            return;
+        }
+        let (Some((loop_start, loop_end)), Some((target_start, target_end))) =
+            (self.sustain_loop, target.sustain_loop())
+        else {
+            return;
+        };
+        let level = target.mean_abs(target_start, 512.min(target_end - target_start));
+        let alignment = match self.measured_period {
+            Some(period) => {
+                let period_frames = period.round().max(4.0) as u64;
+                let window = (period_frames * 4).clamp(128, 2048);
+                let holds = |start: u64, end: u64| end - start > period_frames + window;
+                if holds(loop_start, loop_end) && holds(target_start, target_end) {
+                    let base_turns =
+                        self.alignment_turns(loop_start, target, target_start, window, period);
+                    let offsets = (0..ALIGNMENT_BUCKETS)
+                        .map(|bucket| {
+                            let turns = base_turns + bucket as f64 / ALIGNMENT_BUCKETS as f64;
+                            let delta = (period * turns.rem_euclid(1.0)).round() as u64;
+                            (target_start + delta.min(period_frames.saturating_sub(1))) as u32
+                        })
+                        .collect();
+                    Some(ReleaseAlignment { period, offsets })
+                } else {
+                    None
+                }
+            }
+            None => None,
+        };
+        self.switches.push(SwitchOption {
+            sample: target_index,
+            alignment,
+            level,
+        });
+    }
+
+    /// The switch wired from this sample into `target` (a linear scan
+    /// over the handful of variants one pipe has — run once per voice
+    /// per tremulant change, never per frame).
+    #[inline]
+    pub fn switch_option(&self, target: u32) -> Option<&SwitchOption> {
+        self.switches.iter().find(|option| option.sample == target)
+    }
+
+    /// Recordings this sample can be swapped for mid-hold.
+    #[inline]
+    pub fn switch_options(&self) -> &[SwitchOption] {
+        &self.switches
+    }
+
     /// The release tail's first frame, if this sample has one to splice to.
     #[inline]
     pub fn release_start(&self) -> Option<u64> {
@@ -926,6 +1034,7 @@ impl Sample {
             tail_eof_level_db,
             attack_start,
             release_crossfade_ms,
+            switches: Vec::new(),
         })
     }
 
@@ -988,6 +1097,26 @@ impl SampleBank {
     #[inline]
     pub fn get(&self, index: u32) -> Option<&Sample> {
         self.samples.get(index as usize)
+    }
+
+    /// Wire the mid-hold recording switch `source` → `target` (see
+    /// [`Sample::attach_switch`]). Both must already be in the bank:
+    /// unlike a release, a switch target is an attack variant that the
+    /// loader pushed in its own right, so the map can only be built
+    /// once both sides have indices.
+    pub fn attach_switch(&mut self, source: u32, target: u32) {
+        let (from, to) = (source as usize, target as usize);
+        if from == to || from.max(to) >= self.samples.len() {
+            return;
+        }
+        // Disjoint borrows of one Vec: split at the higher index so the
+        // two halves each hold exactly one of the pair.
+        let (lower, upper) = self.samples.split_at_mut(from.max(to));
+        if from < to {
+            lower[from].attach_switch(&upper[0], target);
+        } else {
+            upper[0].attach_switch(&lower[to], target);
+        }
     }
 
     pub fn len(&self) -> usize {

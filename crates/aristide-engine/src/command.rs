@@ -76,6 +76,28 @@ pub enum Command {
         rate: f32,
         glide_ms: f32,
     },
+    /// Cross a HELD voice from its current recording's sustain loop
+    /// into another recording of the same pipe, and carry on there:
+    /// what a wave tremulant engaging or releasing does to notes that
+    /// are already sounding (GO's `SwitchToAnotherAttack`). The
+    /// splice is phase-aligned and level-matched, so the undulation
+    /// starts under the player's fingers without a re-strike.
+    ///
+    /// WHICH recording is a control-side decision, deliberately: the
+    /// console already runs GO's `GetAttack` at every pricing site,
+    /// with velocity bounds, re-attack windows and random tie-breaks
+    /// that the RT path has no business re-deriving. The engine only
+    /// needs to be told the destination.
+    ///
+    /// `rate_factor` is the incoming recording's playback rate as a
+    /// factor on the outgoing one — a property of the two files'
+    /// sample rates alone, so it survives whatever tuning drift or
+    /// glide the voice's live rate is currently carrying.
+    SwitchVoiceSample {
+        handle: u64,
+        sample: u32,
+        rate_factor: f32,
+    },
     /// Release the voice started with `handle`. Loop-less (percussive)
     /// voices ignore this and play to their end.
     StopVoice { handle: u64 },

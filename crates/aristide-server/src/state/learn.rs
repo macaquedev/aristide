@@ -873,15 +873,22 @@ impl State {
         let groups = trem.groups.clone();
         if wave {
             // Sample-switching tremulant: new notes on these chests
-            // pick their `wave_tremulant` attack variants, and the
-            // engine selects matching releases at note-off.
+            // pick their `wave_tremulant` attack variants, the engine
+            // selects matching releases at note-off, and the notes
+            // ALREADY sounding cross into their other recording — on a
+            // real organ the undulation starts the moment the valve
+            // does, not at the next press.
+            let mut switches = Vec::new();
             if let Control::Organ(console) = &mut self.control {
                 for &group in &groups {
-                    console.set_wave_tremulant(group, on);
+                    switches.extend(console.set_wave_tremulant(group, on));
                 }
             }
             for group in groups {
                 self.engine.send(Command::SetWaveTremulant { group, engaged: on });
+            }
+            for switch in switches {
+                self.engine.send(switch.command());
             }
         } else {
             for group in groups {
