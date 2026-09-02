@@ -465,7 +465,12 @@ main thread; a failed load reports and leaves the running organ untouched.
   and a full routing matrix, console editors for routing. 2026-09-01: tuning
   scopes — sets, stops, ranks within stops — see
   docs/progress/2026-09-01-tuning-scopes.md.
-- **M7 — HW-unencrypted loader, CLAP wrapper, Windows/macOS CI.**
+- **M7 — HW-unencrypted loader, CLAP wrapper, Windows/macOS CI.** 2026-09-02: the
+  Hauptwerk reader shipped (`aristide-formats::hauptwerk`, format reference
+  `docs/hw-odf-notes.md`, test set AVO Solignac); `load_set` dispatches on extension
+  and everything downstream stays single-`Organ`. Deferred inside it: noise ranks,
+  second-layer tremmed samples, temperament files, the wind-physics tables. See
+  docs/progress/2026-09-02-hauptwerk-loader.md.
 
 ## Test rig
 

@@ -11,9 +11,9 @@ architecture and roadmap.
 
 ## Sample sets
 
-Aristide loads GrandOrgue `.organ` sets and unencrypted Hauptwerk (v1/v2-era) sets
-directly, with Aristide-specific settings stored in sidecar files that never touch
-the original set. Encrypted Hauptwerk sample sets are not supported and never will
+Aristide loads GrandOrgue `.organ` sets and unencrypted Hauptwerk sets (the XML
+`.Organ_Hauptwerk_xml` definitions free sets ship in) directly, with Aristide-specific
+settings stored in sidecar files that never touch the original set. Encrypted Hauptwerk sample sets are not supported and never will
 be — we do not and will not circumvent their protection.
 
 ## Organs are files

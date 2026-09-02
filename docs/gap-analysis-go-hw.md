@@ -470,9 +470,11 @@ d. ~~Bass/Melody couplers skipped.~~ ✅ **Fixed** (`616c03f`): `CouplerType`
    sidecar `[[couplers.define]]`.
 e. **Single audio device via cpal default** — ⚠ still true (named M6 deferral);
    GO drives multiple devices via RtAudio/PortAudio/JACK simultaneously.
-f. **GO-format sets only** — ⚠ still true. The browse UI now *lists*
-   `.organ_hauptwerk_xml` files (`beb4e98`) but no loader exists — selecting
-   one does nothing. HW-unencrypted loader (per DESIGN.md legal boundary) is M7.
+f. ~~GO-format sets only.~~ ✅ **Fixed** (2026-09-02): unencrypted Hauptwerk
+   definitions load through `aristide-formats::hauptwerk` (`docs/hw-odf-notes.md`);
+   encrypted sets are refused at the XML sniff and the first sample's header.
+   Residue: noise ranks, second-layer tremmed samples and temperament files are
+   not read yet (notes §11).
 g. ~~GO synth trem ramps ignored.~~ ✅ **Fixed** (`b1bd337`): ODF
    `StartRate`/`StopRate` (each a `1/rate`-second ramp in GO) map onto
    `ramp_seconds` as their average; sidecar trems keep the 0.7 s default.

@@ -14,13 +14,19 @@ milestone plan (M0–M7). Do not re-litigate locked decisions without the user.
 - Sample-set formats are read as-is; Aristide-specific data (voicing, tuning,
   routing, effects) goes in TOML sidecar files, never into the loaded set.
 - `docs/go-odf-notes.md` is the authority for the GrandOrgue format — it was
-  compiled from GO's loader source. Extend it (with citations) rather than guessing.
+  compiled from GO's loader source — and `docs/hw-odf-notes.md` for the Hauptwerk
+  format. Extend them (with citations) rather than guessing.
 
 ## Practical notes
 
 - Test fixture: `testsets/grandorgue-demo/` (gitignored; 21 MB). If missing, unzip
   `packages/*.orgue` (a plain zip) from a shallow clone of GrandOrgue/grandorgue.
   Its samples are WavPack with `.wav` extensions — that's normal; `wav::read` sniffs.
+- Hauptwerk fixture: `testsets/avo-solignac/` (gitignored; 2 GB). The free AVO
+  Solignac package (hauptwerk-augustine.info, `AVO_Solignac.Organ.CompPkg.Hauptwerk.rar`,
+  a plain RAR v4) unpacked so that `OrganDefinitions/` and `OrganInstallationPackages/`
+  sit directly inside it. `docs/hw-odf-notes.md` is the authority for the Hauptwerk
+  format, same rule as the GO notes.
 - Requires system `libwavpack` (+ `libasound2-dev`/`alsa-lib` to build cpal).
 - This machine may be a headless dev server: `cargo test`/`clippy` prove correctness
   here; anything audible is verified by the user pulling to their desktop and running
