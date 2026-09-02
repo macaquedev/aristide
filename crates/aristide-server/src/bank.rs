@@ -153,11 +153,15 @@ pub struct StreamingPolicy {
 }
 
 impl StreamingPolicy {
+    /// The two ends of the policy, for tests: the server itself always
+    /// builds one from the sidecar.
+    #[cfg(test)]
     pub const OFF: StreamingPolicy = StreamingPolicy {
         mode: StreamingMode::Off,
         ram_budget_mb: None,
     };
 
+    #[cfg(test)]
     pub const ON: StreamingPolicy = StreamingPolicy {
         mode: StreamingMode::On,
         ram_budget_mb: None,
