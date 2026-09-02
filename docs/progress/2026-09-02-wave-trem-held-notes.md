@@ -67,6 +67,11 @@ the second leg is new, and it rides the block context's existing
 "second sample" slot (a voice never has both a release leg and a
 switch leg — see below), so the per-frame path is still two reads.
 
+The switch leg needs no disk-streaming plumbing either: it only ever
+circles the target's sustain loop, and `Sample::canonical_split` keeps
+everything through the end of the last loop resident — a held note
+must never wait for a disk, which is exactly the case here.
+
 ## Who chooses
 
 The mapping sample → its tremmed twin is a *control-side* fact, so the

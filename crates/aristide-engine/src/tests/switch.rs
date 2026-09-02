@@ -307,9 +307,9 @@ fn a_key_off_mid_crossfade_releases_cleanly_and_ends() {
     for _ in 0..8 {
         span.extend(render(&mut engine, 6000));
     }
-    for channel in 0..2 {
+    for (channel, steady) in before.iter().enumerate() {
         assert!(
-            max_step(&span, channel) <= 1.15 * before[channel],
+            max_step(&span, channel) <= 1.15 * steady,
             "channel {channel}: releasing mid-crossfade steps"
         );
     }

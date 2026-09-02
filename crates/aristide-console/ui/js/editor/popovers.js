@@ -17,16 +17,19 @@
 /// plain save form (openSaveAsForm does that itself) and nothing
 /// closes it back from this table.
 export const POPOVER_CLOSES = {
-  tuning: ["hex", "coupler", "midi", "compass", "room", "bindings", "save"],
-  midi: ["tuning", "hex", "coupler", "compass", "room", "bindings", "save"],
-  compass: ["tuning", "hex", "coupler", "midi", "room", "bindings", "save"],
-  room: ["tuning", "hex", "coupler", "midi", "compass", "bindings", "save"],
-  bindings: ["tuning", "hex", "coupler", "midi", "compass", "room", "save"],
-  save: ["tuning", "hex", "coupler", "midi", "compass", "room", "bindings"],
+  tuning: ["hex", "coupler", "midi", "compass", "room", "bindings", "save", "piston"],
+  midi: ["tuning", "hex", "coupler", "compass", "room", "bindings", "save", "piston"],
+  compass: ["tuning", "hex", "coupler", "midi", "room", "bindings", "save", "piston"],
+  room: ["tuning", "hex", "coupler", "midi", "compass", "bindings", "save", "piston"],
+  bindings: ["tuning", "hex", "coupler", "midi", "compass", "room", "save", "piston"],
+  save: ["tuning", "hex", "coupler", "midi", "compass", "room", "bindings", "piston"],
   trem: ["tuning", "hex", "coupler"],
-  stop: ["tuning", "hex", "coupler", "trem", "midi", "compass", "room", "bindings", "save"],
-  coupler: ["tuning", "hex", "trem", "stop", "midi", "compass", "room", "bindings", "save"],
+  stop: ["tuning", "hex", "coupler", "trem", "midi", "compass", "room", "bindings", "save", "piston"],
+  coupler: ["tuning", "hex", "trem", "stop", "midi", "compass", "room", "bindings", "save", "piston"],
   hex: ["tuning", "coupler"],
+  // The piston popover is a single quick-bind row; it makes way for
+  // everything and everything makes way for it.
+  piston: ["tuning", "hex", "coupler", "trem", "stop", "midi", "compass", "room", "bindings", "save"],
 };
 
 export function popovers(editor) {
@@ -41,6 +44,7 @@ export function popovers(editor) {
     stop: { el: editor.el.stop, close: () => editor.closeStopForm() },
     coupler: { el: editor.el.coupler, close: () => editor.closeCouplerForm() },
     hex: { el: editor.el.hex, close: () => editor.closeHexForm() },
+    piston: { el: editor.el.piston, close: () => editor.closePistonForm() },
     saveAs: { el: editor.el.saveAs, close: () => editor.closeSaveAsForm() },
   };
 }
