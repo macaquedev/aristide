@@ -640,6 +640,40 @@ impl Coupler {
     }
 }
 
+/// How far a divisional piston reaches on this console.
+///
+/// A divisional always sets the stops of its own division — that is
+/// what makes it a divisional. Whether it *also* moves that division's
+/// couplers and tremulants is a wiring choice, and consoles genuinely
+/// differ: on many instruments the Swell divisionals leave "Swell to
+/// Great" exactly where the hand left it, on others they take it with
+/// them. GrandOrgue states the answer in the ODF's `[Organ]` header —
+/// `DivisionalsStoreIntermanualCouplers`,
+/// `DivisionalsStoreIntramanualCouplers`, `DivisionalsStoreTremulants`
+/// (docs/go-odf-notes.md; applied in GO's `GOCoupler.cpp:259-264` and
+/// `GOTremulant.cpp:79-83`) — and GO's own defaults are all `false`
+/// (`GOOrganModel.cpp:44-47`), so a set that says nothing gets a
+/// stops-only divisional, which is ours too.
+///
+/// Inter- versus intramanual is GO's distinction and it is the useful
+/// one: a coupler is intermanual when it carries keys onto a
+/// *different* manual (`GOCoupler::IsIntermanual` — source manual ≠
+/// destination), intramanual when it stays on its own (octave
+/// couplers, unison off).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CombinationScope {
+    /// Divisionals also store couplers reaching another manual.
+    #[serde(default)]
+    pub divisional_intermanual_couplers: bool,
+    /// Divisionals also store the division's own octave/unison-off
+    /// couplers.
+    #[serde(default)]
+    pub divisional_intramanual_couplers: bool,
+    /// Divisionals also store the division's tremulants.
+    #[serde(default)]
+    pub divisional_tremulants: bool,
+}
+
 /// A complete instrument, format-neutral.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Organ {
@@ -654,6 +688,9 @@ pub struct Organ {
     pub windchests: Vec<Windchest>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tremulants: Vec<Tremulant>,
+    /// How far this console's divisional pistons reach.
+    #[serde(default)]
+    pub combinations: CombinationScope,
 }
 
 impl Organ {

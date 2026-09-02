@@ -23,6 +23,21 @@ export const PITCH_ACTIONS = [
 ];
 export const NAMED_ACTIONS = ["stop:", "coupler:", "enclosure:"];
 
+/// The stems whose target is a *number* — a piston slot, a crescendo
+/// stage, a stepper frame — with how far the offered range runs. The
+/// server takes any number; these are just what a menu can sensibly
+/// list, and the bank sizes match the console's own piston rail.
+export const NUMBERED_ACTIONS = {
+  "general:": 12,
+  "crescendo:": 32,
+  "stepper:goto:": 32,
+};
+
+/// The one stem whose target is a manual *and* a number: a divisional
+/// piston belongs to a division, so it needs both.
+export const DIVISIONAL_ACTION = "divisional:";
+export const DIVISIONAL_PISTONS = 8;
+
 const ACTION_LABELS = {
   "octave-up": "Octave up",
   "octave-down": "Octave down",
@@ -32,30 +47,83 @@ const ACTION_LABELS = {
   tremulant: "Tremulant",
   cancel: "General cancel",
   panic: "Panic",
+  set: "Set (arm the setter)",
   "stop:": "Stop…",
   "coupler:": "Coupler…",
   "enclosure:": "Enclosure…",
+  "general:": "General piston…",
+  "divisional:": "Divisional piston…",
+  "stepper:next": "Stepper: next frame",
+  "stepper:prev": "Stepper: previous frame",
+  "stepper:goto:": "Stepper: go to frame…",
+  "stepper:store": "Stepper: store this frame",
+  "stepper:insert": "Stepper: insert a frame",
+  crescendo: "Crescendo pedal (a shoe)",
+  "crescendo:": "Crescendo stage…",
 };
 export function actionLabel(action) {
   return ACTION_LABELS[action] ?? action;
 }
 
-/// Split "stop:Montre 8'" into its verb ("stop:") and argument, the way
-/// the server itself reads an action string.
-function actionVerb(action) {
-  const at = action.indexOf(":");
-  return at === -1 ? action : action.slice(0, at + 1);
+/// Which catalogue entry an action string belongs to. An action is
+/// either an entry outright ("cancel", "stepper:next") or a *stem* plus
+/// a target ("stop:Montre 8'", "crescendo:12", "divisional:Récit:3"), so
+/// the longest stem it starts with wins — "stepper:goto:5" is a goto,
+/// not a mangled "stepper:". Null when the server knows an action this
+/// console's catalogue doesn't.
+function actionEntry(action, catalogue) {
+  if (catalogue.includes(action)) return action;
+  let best = null;
+  for (const entry of catalogue) {
+    if (entry.endsWith(":") && action.startsWith(entry)) {
+      if (!best || entry.length > best.length) best = entry;
+    }
+  }
+  return best;
 }
-function actionArg(action) {
-  const at = action.indexOf(":");
-  return at === -1 ? "" : action.slice(at + 1);
+
+/// What follows the stem: the stop name, the piston number, the
+/// "<manual>:<n>" pair.
+function actionArg(action, entry) {
+  return entry && entry.endsWith(":") && action.startsWith(entry)
+    ? action.slice(entry.length)
+    : "";
 }
 
 function namesFor(verb, snapshot) {
   if (verb === "stop:") return (snapshot.stops ?? []).map((s) => s.name);
   if (verb === "coupler:") return (snapshot.couplers ?? []).map((c) => c.name);
   if (verb === "enclosure:") return (snapshot.enclosures ?? []).map((e) => e.name);
+  if (verb === DIVISIONAL_ACTION) return (snapshot.manuals ?? []).map((m) => m.name);
   return [];
+}
+
+/// A stem's default target, so choosing "General piston…" from the
+/// menu sends something the server can parse rather than a bare stem.
+function defaultTarget(entry, snapshot) {
+  if (entry === DIVISIONAL_ACTION) {
+    const manual = (snapshot.manuals ?? [])[0]?.name;
+    return manual ? `${manual}:1` : null;
+  }
+  if (entry in NUMBERED_ACTIONS) return "1";
+  if (NAMED_ACTIONS.includes(entry)) return namesFor(entry, snapshot)[0] ?? null;
+  return "";
+}
+
+/// "Récit:3" → ["Récit", "3"]. The *last* colon separates, as the
+/// server's own parser does, so a manual named with one survives.
+function splitLast(text) {
+  const at = text.lastIndexOf(":");
+  return at === -1 ? [text, ""] : [text.slice(0, at), text.slice(at + 1)];
+}
+
+/// The numbers 1..n as `<option>`s — the target select for a piston
+/// slot, a crescendo stage or a stepper frame.
+function numberOptions(select, n, selected) {
+  for (let i = 1; i <= n; i++) select.append(option(String(i), String(i)));
+  select.value = selected && Number(selected) >= 1 && Number(selected) <= n
+    ? String(Number(selected))
+    : "1";
 }
 
 // A handful of physical keys read better as the character they print
@@ -408,7 +476,7 @@ function controlRow(ctx, control, slot, catalogue) {
   const { snapshot, learning, send } = ctx;
   const listening = learning === slot;
   const action = control?.action ?? "octave-up";
-  const verb = actionVerb(action);
+  const verb = actionEntry(action, catalogue);
 
   const row = document.createElement("div");
   row.className = "control-row";
@@ -424,28 +492,59 @@ function controlRow(ctx, control, slot, catalogue) {
   const actionSelect = document.createElement("select");
   actionSelect.className = "control-action";
   for (const entry of catalogue) actionSelect.append(option(entry, actionLabel(entry)));
-  actionSelect.value = catalogue.includes(verb) ? verb : catalogue[0];
+  actionSelect.value = verb && catalogue.includes(verb) ? verb : catalogue[0];
   actionSelect.addEventListener("change", () => {
-    const named = NAMED_ACTIONS.includes(actionSelect.value);
-    // A named action means nothing without a target; default to the
-    // first one on the list rather than sending a bare "stop:".
-    const names = named ? namesFor(actionSelect.value, snapshot) : [];
-    const next = named ? `${actionSelect.value}${names[0] ?? ""}` : actionSelect.value;
-    send(commands.controlBind(slot, next));
+    // A stem means nothing without a target; default to the first one
+    // rather than sending a bare "stop:" or "general:".
+    const target = defaultTarget(actionSelect.value, snapshot);
+    send(commands.controlBind(slot, `${actionSelect.value}${target ?? ""}`));
   });
   row.append(actionSelect);
 
-  if (NAMED_ACTIONS.includes(actionSelect.value)) {
-    const names = namesFor(actionSelect.value, snapshot);
-    const arg = actionArg(action);
+  const stem = actionSelect.value;
+  const arg = actionArg(action, stem);
+  /// One target select on this row, sending "<stem><value>".
+  const targetSelect = (fill, compose = (value) => value) => {
     const target = document.createElement("select");
     target.className = "control-target";
-    for (const name of names) target.append(option(name, name));
-    target.value = names.includes(arg) ? arg : names[0] ?? "";
+    fill(target);
     target.addEventListener("change", () =>
-      send(commands.controlBind(slot, `${actionSelect.value}${target.value}`))
+      send(commands.controlBind(slot, `${stem}${compose(target.value)}`))
     );
     row.append(target);
+    return target;
+  };
+
+  if (NAMED_ACTIONS.includes(stem)) {
+    const names = namesFor(stem, snapshot);
+    targetSelect((target) => {
+      for (const name of names) target.append(option(name, name));
+      target.value = names.includes(arg) ? arg : names[0] ?? "";
+    });
+  } else if (stem in NUMBERED_ACTIONS) {
+    targetSelect((target) => numberOptions(target, NUMBERED_ACTIONS[stem], arg));
+  } else if (stem === DIVISIONAL_ACTION) {
+    // A divisional is a manual *and* a slot, so it wears two selects
+    // and either of them rewrites the whole action.
+    const [argManual, argSlot] = splitLast(arg);
+    const names = namesFor(stem, snapshot);
+    let manual = names.includes(argManual) ? argManual : names[0] ?? "";
+    let piston = argSlot || "1";
+    targetSelect(
+      (target) => {
+        for (const name of names) target.append(option(name, name));
+        target.value = manual;
+        target.addEventListener("change", () => (manual = target.value));
+      },
+      (value) => `${value}:${piston}`
+    );
+    targetSelect(
+      (target) => {
+        numberOptions(target, DIVISIONAL_PISTONS, piston);
+        target.addEventListener("change", () => (piston = target.value));
+      },
+      (value) => `${manual}:${value}`
+    );
   } else if (PITCH_ACTIONS.includes(verb)) {
     const manuals = snapshot.manuals ?? [];
     const target = document.createElement("select");

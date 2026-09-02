@@ -169,10 +169,21 @@ at load, rank enable/disable. (UG5 p76; DS5 p14.)
   440 ms cold → ~30 ms warm.
 - **(c) parallel decode**: every unique file decodes and analyzes on a worker
   pool (`available_parallelism`), assembly stays sequential.
+- **(e) disk streaming of release tails** (2026-09-02): everything through the
+  last sustain loop stays resident — a held note never waits for a disk — plus
+  0.35 s of each tail so the splice at note-off starts instantly; the rest is
+  read from a seekable store by streamer threads into per-voice SPSC rings and
+  a linear window the sinc kernels dot against. Streamed tails are **bit-
+  identical** to resident ones. The load cache became the store: entries are
+  always split (`<hash>.samples` head + `<hash>.tails`), so one cache serves
+  both residencies and a warm streaming load copies no audio at all. Failures
+  are fades, never clicks — an underrun freezes on the last frame it has and
+  takes the 15 ms kill ramp; a release that finds no free slot plays its
+  resident head and the EOF guard fades it. Sidecar `[samples] streaming =
+  auto|on|off` + `ram_budget_mb`. Demo set: 85.8 → 55.1 MiB resident.
+  See docs/progress/2026-09-02-disk-streaming.md.
 
 **Remaining (the true residue):**
-- **(e) streaming** — the big one; still needed for sets that exceed RAM even
-  at 16-bit. Design sketched in DESIGN.md/bank.rs comments.
 - (d) per-rank load options (mono downmix, first-loop/first-release-only,
   rank disable).
 - Lossless delta compression (GO's) would buy another ~1.5–2× at RT decode
@@ -334,7 +345,7 @@ metadata path below survives only for pipes that cannot be measured.
 
 ---
 
-## 7. Voicing tools & combination action — ✅ CORE LANDED (2026-08-26)
+## 7. Voicing tools & combination action — ✅ COMBINATION ACTION COMPLETE (2026-09-02); voicing core landed 2026-08-26
 
 **GO:** per-pipe hierarchical config editable live in the UI and persisted per
 organ (.cmb): Amplitude, Gain dB, ManualTuning, TrackerDelay, ReleaseTail ms,
@@ -363,6 +374,19 @@ divisions, MIDI learn on everything. (UG5 pp213–215.)
   per-organ user config (bindings' text-vocabulary rule: a name the loaded
   organ hasn't got is reported and skipped, never dropped from the file).
   `POST /api/general?n=&store=`, `"generals"`/`"setter"` in the state JSON.
+- **The rest of the combination action** (2026-09-02): `divisional:<manual>:<n>`
+  scoped to one division, honouring GO's `DivisionalsStore*` flags (parsed
+  from `[Organ]`; a coupler belongs to the manual it reads *from*, a
+  tremulant to the division whose wind it blows on); a stepper
+  (`stepper:next|prev|goto:<n>|store|insert`) whose ends are walls;
+  a 32-stage **additive** crescendo — hand ∪ overlay sounds, rolling back
+  removes only what the pedal added — bound to a CC by MIDI learn, stages
+  stored with Set + `crescendo:<stage>`. All of it stored by *name* in the
+  organ file's `[combinations]`, which also fixed generals being wiped on
+  every reload. `POST /api/{divisional,stepper,crescendo,setter}`; the
+  console grew a Combinations panel (generals, Set, Cancel, the stepper,
+  the crescendo pedal) with divisionals under each keyboard, every one of
+  them right-click bindable. See docs/progress/2026-09-02-combination-action.md.
 
 - **Pipe-scope voicing, a brightness leg, live edits** (2026-09-02): a
   `[[voicing.adjust]]` rule may narrow to keys (`keys = "C2..B3"`, `key =
@@ -379,8 +403,10 @@ divisions, MIDI learn on everything. (UG5 pp213–215.)
   popover on right-clicking a key while a stop's editor is open.
 
 **Remaining:**
-- Divisionals, the stepper/sequencer, crescendo; GO's `DivisionalsStore*`
-  semantics; a console piston rail (UI work, screenshot harness).
+- Crescendo banks (GO has four) and a per-bank override mode; GO's
+  `GeneralsStoreDivisionalCouplers` and
+  `CombinationsStoreNonDisplayedDrawstops` (we have neither divisional
+  couplers nor non-displayed drawstops).
 - Per-pipe *modulation depths* per target with polarity (HW's voicing
   screens): Aristide's wind/box responses are per-pipe but derived from
   the pipe's pitch, not separately dialable.
@@ -553,15 +579,15 @@ Re-verified 2026-08-26 — all still accurate, list grown:
 | ~~Memory (i16 + load cache + parallel decode)~~ | §3 | ✅ landed 2026-08-26 (residue: streaming, per-rank load options) |
 | Release ODF keys + truncation | §8 | yes (small) |
 | Loop crossfade baking | §9 | yes (small) |
-| ~~Voicing sidecar (gain/cents/brightness) + pipe scope~~ | §7 | ✅ landed 2026-09-02 (residue: combination action) |
+| ~~Voicing sidecar (gain/cents/brightness) + pipe scope + combination action~~ | §7 | ✅ landed 2026-08-26 / 2026-09-02 |
 | ODF `AudioGroup` → buses; multi-device; record-header fix | §5 residue + §12h | yes |
 | Pitch residue (`IgnorePitch`/`AcceptsRetuning`, temperament table) | §6 residue | yes (small) |
 | Correctness nits | §12b | small, anytime |
 
 Status ledger: §1 ✅, §2 ✅ (residue), §3 ✅ (residue: streaming, load
 options), §4 ✅ (residue), §5 ✅ (residue), §6 ✅ (residue), §7 ✅ core
-(residue: divisionals/sequencer/crescendo and their piston rail;
-pipe-scope voicing landed 2026-09-02),
+(residue: crescendo banks, divisional couplers; the combination action
+and pipe-scope voicing both landed 2026-09-02),
 §8 ✅ (residue: truncation), §9 ✅, §12a/c/d/g/h ✅;
 §10, §11, §12b/e/f ⚠ open. What remains is residue and the HW-only
 fidelity gaps — no whole package blocks real use any more.

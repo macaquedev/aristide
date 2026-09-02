@@ -380,6 +380,11 @@ export class Editor {
       saveAsError: root.getElementById("save-as-error"),
       stopPistons: root.getElementById("editor-stop-pistons"),
       couplerPistons: root.getElementById("editor-coupler-pistons"),
+      piston: root.getElementById("editor-piston"),
+      pistonTitle: root.getElementById("editor-piston-title"),
+      pistonNote: root.getElementById("editor-piston-note"),
+      pistonPistons: root.getElementById("editor-piston-pistons"),
+      pistonClose: root.getElementById("editor-piston-close"),
       addCouplerRestore: root.getElementById("editor-add-coupler-restore"),
       hex: root.getElementById("editor-hex"),
       hexTitle: root.getElementById("editor-hex-title"),
@@ -405,6 +410,7 @@ export class Editor {
     this.wireKeyVoicingForm();
     this.wireStopForm();
     this.wireCouplerForm();
+    this.wirePistonForm();
     this.wireMidiForm();
     this.wireCompassForm();
     this.wireRoomForm();
@@ -565,6 +571,7 @@ export class Editor {
     if (this.tremOpen != null) this.syncTremForm();
     if (this.keyVoicing != null) this.syncKeyVoicing();
     if (this.stopOpen != null) this.syncStopForm();
+    if (this.pistonAction != null) this.syncPistonForm();
     if (this.couplerOpen != null) this.syncCouplerForm();
     if (!this.el.couplersMenu.classList.contains("hidden")) this.syncCouplersMenu();
     if (this.midiManual != null) this.syncMidiForm();
@@ -640,6 +647,7 @@ export class Editor {
     this.wireKeyboardContextMenu();
     this.wireKeyVoicing();
     this.wireCouplerContextMenus();
+    this.wirePistonContextMenus();
     this.wireCouplerDrags();
     this.wireCouplersPanel();
     this.wirePanelMoves(snapshot);
@@ -1643,6 +1651,61 @@ export class Editor {
 
   syncPistonRow(container, action) {
     syncPistonRow(this, container, action);
+  }
+
+  // ---- the piston-binding popover: right-click any combination control --
+  //
+  // Generals, divisionals, Set, Cancel and the stepper's buttons all
+  // carry `data-action` (console.js), so one handler covers the lot:
+  // the popover is nothing but that action's quick-bind row, and the
+  // player's own thumb piston ends up doing exactly what the button
+  // on screen does.
+
+  wirePistonForm() {
+    this.el.pistonClose.addEventListener("click", () => this.closePistonForm());
+  }
+
+  openPistonForm(action, label, x, y) {
+    openingPopover(this, "piston");
+    this.pistonAction = action;
+    this.el.pistonTitle.textContent = label;
+    this.el.pistonNote.textContent =
+      "Press Listen, then the piston, toe stud or key you mean — it will " +
+      "do the same thing this button does.";
+    this.el.piston.classList.remove("hidden");
+    this.positionPopover(this.el.piston, x, y);
+    this.syncPistonForm();
+  }
+
+  closePistonForm() {
+    this.pistonAction = null;
+    this.el.piston.classList.add("hidden");
+  }
+
+  syncPistonForm() {
+    if (this.pistonAction == null) return;
+    this.syncPistonRow(this.el.pistonPistons, this.pistonAction);
+  }
+
+  /// Right-click a combination control in edit mode: bind it. Same
+  /// reach-through-the-lock contract as the stop and coupler menus.
+  wirePistonContextMenus() {
+    for (const control of this.root.querySelectorAll("[data-action]")) {
+      control.addEventListener("contextmenu", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (!this.unlocked && !event.ctrlKey) {
+          this.nudgeUnlock();
+          return;
+        }
+        this.openPistonForm(
+          control.dataset.action,
+          control.dataset.action,
+          event.clientX,
+          event.clientY
+        );
+      });
+    }
   }
 
   // ---- the coupler-route popover: right-click any coupler rocker ----------

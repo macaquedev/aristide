@@ -144,6 +144,11 @@ pub struct Definition {
     /// cosmetic, never read by anything that assembles the instrument.
     #[serde(default)]
     pub console: ConsoleDef,
+    /// The combination action's memory: generals, divisionals, the
+    /// stepper's frames and the crescendo's stages. Player usage, not
+    /// instrument — it lands in the organ's own file like the wiring.
+    #[serde(default)]
+    pub combinations: CombinationsDef,
 }
 
 /// One `[sources]` entry: a bare path, or a table adding options.
@@ -435,6 +440,128 @@ pub struct ConsoleDef {
     pub coupler_keys: BTreeMap<String, String>,
 }
 
+/// The combination action's memory, as the organ file spells it.
+///
+/// Everything here is stored by **name**, the same text vocabulary the
+/// bindings use: a registration made on this organ says something
+/// honest about a renamed or rebuilt one, or nothing at all. A name
+/// the loaded organ hasn't got is reported and skipped at recall — it
+/// is never dropped from the file, because the stop it names may well
+/// come back.
+///
+/// ```toml
+/// [combinations]
+/// divisional_intermanual_couplers = true
+///
+/// [[combinations.general]]
+/// n = 1
+/// stops = ["Montre 8", "Prestant 4"]
+/// couplers = ["II/I"]
+///
+/// [[combinations.divisional]]
+/// manual = "Grand-Orgue"
+/// n = 1
+/// stops = ["Montre 8"]
+///
+/// [[combinations.frame]]      # one step of the stepper/sequencer
+/// n = 1
+/// stops = ["Bourdon 8"]
+///
+/// [[combinations.crescendo]]  # one of the pedal's 32 stages
+/// stage = 1
+/// stops = ["Bourdon 8"]
+/// ```
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CombinationsDef {
+    /// Overrides of the set's own `DivisionalsStore*` answers — a
+    /// console fact the player may disagree with. Absent = whatever
+    /// the sources said (see [`aristide_model::CombinationScope`]).
+    #[serde(default)]
+    pub divisional_intermanual_couplers: Option<bool>,
+    #[serde(default)]
+    pub divisional_intramanual_couplers: Option<bool>,
+    #[serde(default)]
+    pub divisional_tremulants: Option<bool>,
+    #[serde(default, rename = "general")]
+    pub generals: Vec<GeneralDef>,
+    #[serde(default, rename = "divisional")]
+    pub divisionals: Vec<DivisionalDef>,
+    #[serde(default, rename = "frame")]
+    pub frames: Vec<FrameDef>,
+    #[serde(default, rename = "crescendo")]
+    pub crescendo: Vec<CrescendoDef>,
+}
+
+impl CombinationsDef {
+    /// The file's own answers laid over the sources' — each flag the
+    /// file states wins, the rest stay as the sets defined them.
+    pub fn apply_scope(&self, scope: &mut aristide_model::CombinationScope) {
+        if let Some(on) = self.divisional_intermanual_couplers {
+            scope.divisional_intermanual_couplers = on;
+        }
+        if let Some(on) = self.divisional_intramanual_couplers {
+            scope.divisional_intramanual_couplers = on;
+        }
+        if let Some(on) = self.divisional_tremulants {
+            scope.divisional_tremulants = on;
+        }
+    }
+}
+
+/// One general piston's stored registration, by slot number.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GeneralDef {
+    pub n: u8,
+    #[serde(default)]
+    pub stops: Vec<String>,
+    #[serde(default)]
+    pub couplers: Vec<String>,
+    #[serde(default)]
+    pub tremulants: Vec<String>,
+}
+
+/// One divisional piston: a registration scoped to one manual.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DivisionalDef {
+    pub manual: String,
+    pub n: u8,
+    #[serde(default)]
+    pub stops: Vec<String>,
+    #[serde(default)]
+    pub couplers: Vec<String>,
+    #[serde(default)]
+    pub tremulants: Vec<String>,
+}
+
+/// One frame of the stepper: a general-shaped registration at a
+/// position in the sequence. `n` is 1-based and decides the order, so
+/// the file can be hand-reordered without moving whole blocks.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FrameDef {
+    pub n: u16,
+    #[serde(default)]
+    pub stops: Vec<String>,
+    #[serde(default)]
+    pub couplers: Vec<String>,
+    #[serde(default)]
+    pub tremulants: Vec<String>,
+}
+
+/// One stage of the crescendo pedal: the stops it *adds*. Stage 1 is
+/// the pedal's first click off the heel; the pedal sounds the union of
+/// every stage up to where it stands.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CrescendoDef {
+    pub stage: u8,
+    #[serde(default)]
+    pub stops: Vec<String>,
+}
+
 /// One panel's top-left corner — and, once resized, its size — as
 /// fractions of the console canvas (0..1 on each axis). Size absent
 /// means the panel hugs its content, as it always has.
@@ -582,6 +709,9 @@ pub struct Assembled {
     /// The file's `[console.coupler_keys]` — per-coupler `"never"` /
     /// `"always"` overrides of `coupled_keys`, by console name.
     pub console_coupler_keys: BTreeMap<String, String>,
+    /// The file's `[combinations]` — every stored registration, by
+    /// name, exactly as written.
+    pub combinations: CombinationsDef,
     /// The file's top-level `adopted` flag — see `Definition::adopted`.
     pub adopted: bool,
     pub warnings: Vec<String>,
@@ -737,7 +867,17 @@ pub fn assemble(
 
     let manual_tuning = manual_tuning_defs(def);
     let source_tuning = source_tuning_defs(def);
-    let (organ, rank_sources) = finish_assembly(&mut assembly, def);
+    let (mut organ, rank_sources) = finish_assembly(&mut assembly, def);
+    // How far divisionals reach is a console fact of the *set*: the
+    // first source that states one supplies it (a composite of several
+    // sets has one combination action, not one per set), and the
+    // file's own `[combinations]` flags override that.
+    organ.combinations = sources
+        .iter()
+        .map(|(_, source)| source.combinations)
+        .find(|scope| *scope != aristide_model::CombinationScope::default())
+        .unwrap_or_default();
+    def.combinations.apply_scope(&mut organ.combinations);
 
     Ok(Assembled {
         organ,
@@ -754,6 +894,7 @@ pub fn assemble(
         console_order: def.console.order.clone(),
         console_coupled_keys: def.console.coupled_keys,
         console_coupler_keys: def.console.coupler_keys.clone(),
+        combinations: def.combinations.clone(),
         adopted: def.adopted,
         warnings: assembly.warnings,
     })
@@ -1730,6 +1871,9 @@ impl Assembly<'_> {
             enclosures: std::mem::take(&mut self.enclosures),
             windchests: std::mem::take(&mut self.windchests),
             tremulants: std::mem::take(&mut self.tremulants),
+            // Settled by `assemble` once the sources and the file's
+            // own `[combinations]` have both had their say.
+            combinations: aristide_model::CombinationScope::default(),
         }
     }
 }
@@ -1874,6 +2018,7 @@ mod tests {
                     stop_rate: 6,
                 },
             }],
+            combinations: Default::default(),
         }
     }
 

@@ -22,6 +22,17 @@ mod edit;
 mod learn;
 mod tuning;
 
+/// How many stages the crescendo pedal has above the heel.
+///
+/// 32 is GrandOrgue's number (`CRESCENDO_STEPS` in `GOSetter.cpp`) and
+/// it is the right order of magnitude for the thing being modelled: a
+/// crescendo roller closes a bank of contacts as it turns, and thirty-
+/// odd of them is what the mechanism affords. Stage 0 is the heel —
+/// the pedal adding nothing — so there are 32 *storable* stages, as in
+/// GO, and "off" is a position rather than a stage that has to be left
+/// empty.
+pub const CRESCENDO_STAGES: u8 = 32;
+
 /// What MIDI input drives: the sampled organ console, or the M1 tone.
 pub enum Control {
     Tone,
@@ -154,9 +165,17 @@ pub struct State {
     /// loaded). The plain `tremulant` action/endpoint toggles them all;
     /// named actions (`tremulant:Tremblant`) reach one.
     pub trems: Vec<TremControl>,
-    /// The combination setter: while armed, the next general press
-    /// stores the current registration instead of recalling.
+    /// The combination setter: while armed, the next general,
+    /// divisional or crescendo-stage press stores the current
+    /// registration instead of recalling.
     pub setter_armed: bool,
+    /// Where the stepper stands, 0-based into the organ's frames. A
+    /// sequence with no frames stands at 0 and does nothing.
+    pub stepper_frame: usize,
+    /// Where the crescendo pedal stands: 0 (heel, nothing added) up to
+    /// [`CRESCENDO_STAGES`]. The overlay it holds is the union of every
+    /// stage up to here.
+    pub crescendo_stage: u8,
     pub master_gain: f32,
     /// Reverb wet level; `None` = no IR loaded.
     pub reverb_wet: Option<f32>,
@@ -312,7 +331,7 @@ pub struct Installed {
     /// Set when the loaded organ is a composite file loaded alone:
     /// that file's MIDI wiring replaces whatever this organ's name
     /// carried before.
-    pub composite: Option<(PathBuf, instrument::MidiDef)>,
+    pub composite: Option<(PathBuf, instrument::MidiDef, instrument::CombinationsDef)>,
     pub setup: Setup,
     pub provenance: std::collections::HashMap<StopId, instrument::StopProvenance>,
     pub stop_voicing: std::collections::HashMap<StopId, load::StopVoicing>,
@@ -357,6 +376,8 @@ impl State {
             ltn_cache: HashMap::new(),
             trems: Vec::new(),
             setter_armed: false,
+            stepper_frame: 0,
+            crescendo_stage: 0,
             master_gain,
             reverb_wet: None,
             expression_cc: 11,
@@ -387,15 +408,18 @@ impl State {
         // Assignments are per organ, so the loaded set's own name is
         // the key its wiring is stored under.
         self.organ_key = loaded.console.organ_name().to_string();
-        // A composite file owns its MIDI wiring: whatever it says
-        // replaces anything the user config remembers under this
-        // organ's name, and every later change is written back into
-        // the file.
-        if let Some((_, midi)) = &loaded.composite {
+        // A composite file owns its MIDI wiring *and* its combination
+        // memory: whatever it says replaces anything the user config
+        // remembers under this organ's name, and every later change is
+        // written back into the file. Both halves have to come across
+        // together — this insert is wholesale, so a general the file
+        // didn't carry would be wiped by every reload.
+        if let Some((_, midi, combinations)) = &loaded.composite {
             let organ_key = self.organ_key.clone();
-            self.midi_config
-                .organs
-                .insert(organ_key, config::organ_config_from_file(midi));
+            self.midi_config.organs.insert(
+                organ_key,
+                config::organ_config_from_file(midi, combinations),
+            );
         }
         // Every source lands in the library, so the picker can offer
         // it next time without the command line.
@@ -409,7 +433,12 @@ impl State {
         self.setter_armed = false;
         self.reverb_wet = loaded.reverb_wet;
         self.expression_cc = loaded.expression_cc;
-        self.composite_path = loaded.composite.map(|(path, _)| path);
+        // A fresh organ stands at the heel with the sequence at its
+        // start; nothing about where the last one's pedal was means
+        // anything here.
+        self.crescendo_stage = 0;
+        self.stepper_frame = 0;
+        self.composite_path = loaded.composite.map(|(path, _, _)| path);
         self.setup = loaded.setup;
         self.provenance = loaded.provenance;
         self.stop_voicing = loaded.stop_voicing;
@@ -710,6 +739,9 @@ impl State {
             let organ = self.midi_config.organ(&self.organ_key);
             if let Err(err) = config::write_composite_midi(path, organ) {
                 tracing::warn!("midi wiring not saved to {}: {err}", path.display());
+            }
+            if let Err(err) = config::write_composite_combinations(path, organ) {
+                tracing::warn!("combinations not saved to {}: {err}", path.display());
             }
         }
         let Some(path) = self.config_path.clone() else {

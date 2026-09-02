@@ -21,20 +21,23 @@
 /// plain save form (openSaveAsForm does that itself) and nothing
 /// closes it back from this table.
 export const POPOVER_CLOSES = {
-  tuning: ["hex", "coupler", "midi", "compass", "room", "bindings", "save", "keyVoicing"],
-  midi: ["tuning", "hex", "coupler", "compass", "room", "bindings", "save", "keyVoicing"],
-  compass: ["tuning", "hex", "coupler", "midi", "room", "bindings", "save", "keyVoicing"],
-  room: ["tuning", "hex", "coupler", "midi", "compass", "bindings", "save", "keyVoicing"],
-  bindings: ["tuning", "hex", "coupler", "midi", "compass", "room", "save", "keyVoicing"],
-  save: ["tuning", "hex", "coupler", "midi", "compass", "room", "bindings", "keyVoicing"],
+  tuning: ["hex", "coupler", "midi", "compass", "room", "bindings", "save", "piston", "keyVoicing"],
+  midi: ["tuning", "hex", "coupler", "compass", "room", "bindings", "save", "piston", "keyVoicing"],
+  compass: ["tuning", "hex", "coupler", "midi", "room", "bindings", "save", "piston", "keyVoicing"],
+  room: ["tuning", "hex", "coupler", "midi", "compass", "bindings", "save", "piston", "keyVoicing"],
+  bindings: ["tuning", "hex", "coupler", "midi", "compass", "room", "save", "piston", "keyVoicing"],
+  save: ["tuning", "hex", "coupler", "midi", "compass", "room", "bindings", "piston", "keyVoicing"],
   trem: ["tuning", "hex", "coupler"],
-  stop: ["tuning", "hex", "coupler", "trem", "midi", "compass", "room", "bindings", "save", "keyVoicing"],
+  stop: ["tuning", "hex", "coupler", "trem", "midi", "compass", "room", "bindings", "save", "piston", "keyVoicing"],
   // The key-voicing popover is a subview of the stop editor: it closes
   // the others but NOT the editor it belongs to, and nothing but a
   // close-everything closes it back.
-  keyVoicing: ["tuning", "hex", "coupler", "trem", "midi", "compass", "room", "bindings", "save"],
-  coupler: ["tuning", "hex", "trem", "stop", "midi", "compass", "room", "bindings", "save", "keyVoicing"],
+  keyVoicing: ["tuning", "hex", "coupler", "trem", "midi", "compass", "room", "bindings", "save", "piston"],
+  coupler: ["tuning", "hex", "trem", "stop", "midi", "compass", "room", "bindings", "save", "piston", "keyVoicing"],
   hex: ["tuning", "coupler"],
+  // The piston popover is a single quick-bind row; it makes way for
+  // everything and everything makes way for it.
+  piston: ["tuning", "hex", "coupler", "trem", "stop", "midi", "compass", "room", "bindings", "save", "keyVoicing"],
 };
 
 export function popovers(editor) {
@@ -50,6 +53,7 @@ export function popovers(editor) {
     stop: { el: editor.el.stop, close: () => editor.closeStopForm() },
     coupler: { el: editor.el.coupler, close: () => editor.closeCouplerForm() },
     hex: { el: editor.el.hex, close: () => editor.closeHexForm() },
+    piston: { el: editor.el.piston, close: () => editor.closePistonForm() },
     saveAs: { el: editor.el.saveAs, close: () => editor.closeSaveAsForm() },
   };
 }

@@ -13,6 +13,7 @@ mod windchest;
 mod swell;
 mod buses;
 mod golden;
+mod streaming;
 mod voicing;
 
 /// 100-frame mono ramp 0..1, loop frames 20..=59, release tail at 60.

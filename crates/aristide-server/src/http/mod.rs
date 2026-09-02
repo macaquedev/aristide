@@ -155,6 +155,10 @@ fn respond(
         (Method::Post, "/api/note") => play::note(state, query),
         (Method::Post, "/api/panic") => play::panic_button(state, query),
         (Method::Post, "/api/general") => play::general(state, query),
+        (Method::Post, "/api/divisional") => play::divisional(state, query),
+        (Method::Post, "/api/stepper") => play::stepper(state, query),
+        (Method::Post, "/api/crescendo") => play::crescendo(state, query),
+        (Method::Post, "/api/setter") => play::setter(state, query),
         (Method::Post, "/api/trem") => room::trem(state, query),
         (Method::Post, "/api/trem/params") => room::trem_params(state, query),
         (Method::Post, "/api/enclosure") => room::enclosure(state, query),
@@ -415,6 +419,8 @@ mod tests {
                 params: Default::default(),
             }],
             setter_armed: false,
+            stepper_frame: 0,
+            crescendo_stage: 0,
             master_gain: 0.178,
             reverb_wet: Some(0.25),
             expression_cc: 11,
@@ -911,6 +917,66 @@ mod tests {
             !cancelled.contains("\"on\":true"),
             "cancel left something drawn: {cancelled}"
         );
+    }
+
+    /// The combination action over HTTP, and the shape the piston rail
+    /// reads it in: every endpoint is the on-screen twin of a binding
+    /// action, and the snapshot says where the stepper and the pedal
+    /// stand without the console having to guess.
+    #[test]
+    fn the_combination_endpoints_move_the_console_and_ride_the_snapshot() {
+        let Some(state) = demo_state() else { return };
+        let stage = |body: &str, field: &str| -> i64 {
+            body.split(&format!("\"{field}\":"))
+                .nth(1)
+                .and_then(|rest| rest.split(&[',', '}'][..]).next())
+                .and_then(|value| value.parse::<i64>().ok())
+                .unwrap_or_else(|| panic!("{field} in the snapshot: {body}"))
+        };
+
+        // Set arms; the general press that follows stores and disarms.
+        respond(&state, &Method::Post, "/api/stop?id=1&on=1");
+        respond(&state, &Method::Post, "/api/setter?on=1");
+        assert!(state_json(&state).contains("\"setter\":true"));
+        respond(&state, &Method::Post, "/api/general?n=2");
+        let body = state_json(&state);
+        assert!(body.contains("\"setter\":false"), "storing disarmed: {body}");
+        assert!(body.contains("\"generals\":[2]"), "slot 2 has something in it: {body}");
+
+        respond(&state, &Method::Post, "/api/cancel");
+        respond(&state, &Method::Post, "/api/general?n=2");
+        assert!(
+            state_json(&state)[..state_json(&state).find("\"manuals\"").expect("manuals")]
+                .contains("\"on\":true"),
+            "the general recalled its registration"
+        );
+
+        // The stepper: a frame is stored, walked to and counted.
+        respond(&state, &Method::Post, "/api/stepper?store=1");
+        respond(&state, &Method::Post, "/api/stepper?insert=1");
+        let body = state_json(&state);
+        assert_eq!(stage(&body, "frames"), 2, "two frames: {body}");
+        assert_eq!(stage(&body, "frame"), 2, "standing on the new one");
+        respond(&state, &Method::Post, "/api/stepper?go=prev");
+        assert_eq!(stage(&state_json(&state), "frame"), 1);
+
+        // The crescendo: a stage stored, the pedal moved onto it, the
+        // overlay visible as `cres` without the hand having drawn it.
+        respond(&state, &Method::Post, "/api/cancel");
+        respond(&state, &Method::Post, "/api/stop?id=16&on=1");
+        respond(&state, &Method::Post, "/api/crescendo?stage=1&store=1");
+        respond(&state, &Method::Post, "/api/cancel");
+        let body = state_json(&state);
+        assert_eq!(stage(&body, "crescendo"), 0, "the pedal starts at the heel");
+        assert_eq!(stage(&body, "crescendo_stages"), 32, "GO's own count");
+        respond(&state, &Method::Post, "/api/crescendo?stage=1");
+        let body = state_json(&state);
+        assert!(body.contains("\"cres\":true"), "the overlay rides the stop: {body}");
+        assert!(body.contains("\"hand\":false"), "…as the pedal's doing, not the hand's");
+        respond(&state, &Method::Post, "/api/crescendo?stage=0");
+        let body = state_json(&state);
+        assert!(!body.contains("\"cres\":true"), "back to the heel: {body}");
+        assert!(!body.contains("\"hand\":false"), "and no stop is out of step");
     }
 
     #[test]
@@ -2401,6 +2467,8 @@ mod tests {
             ltn_cache: std::collections::HashMap::new(),
             trems: Vec::new(),
             setter_armed: false,
+            stepper_frame: 0,
+            crescendo_stage: 0,
             master_gain: 0.178,
             reverb_wet: None,
             expression_cc: 11,

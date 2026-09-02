@@ -7,6 +7,7 @@ mod console;
 mod control;
 mod http;
 mod load;
+mod spool;
 mod state;
 mod tuning;
 
@@ -216,7 +217,9 @@ fn main() -> Result<()> {
         dsp_over_budget: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         dsp_budget_ns: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         record: record_tx,
+        stream_counters: aristide_engine::stream::StreamCounters::default(),
         stream: None,
+        stream_threads: None,
     };
     let mut handle = audio.start(Arc::new(aristide_engine::bank::SampleBank::default()), None)?;
     if let Some(gain) = args.master_gain {
@@ -274,6 +277,8 @@ fn main() -> Result<()> {
     }
 
     let mut reported_overruns = 0u32;
+    let mut reported_underruns = 0u64;
+    let mut reported_denials = 0u64;
     loop {
         // Loads run here, on the thread that owns the stream. The lock
         // is NOT held while loading: the console keeps answering, and
@@ -325,6 +330,19 @@ fn main() -> Result<()> {
                  {engine_over} block(s) ever over — {verdict}"
             );
             reported_overruns = total;
+        }
+        // Streaming health: a tail that ran dry took a fast fade, and a
+        // release that found no free slot played its resident head only.
+        // Neither clicks, but both mean the disk (or the pool) is short.
+        let underruns = audio.stream_counters.underruns.load(Relaxed);
+        let denials = audio.stream_counters.denials.load(Relaxed);
+        if underruns > reported_underruns || denials > reported_denials {
+            tracing::warn!(
+                "streaming: {underruns} tail(s) ran dry and faded, {denials} release(s) \
+                 found no free slot — a faster disk, or fewer simultaneous releases"
+            );
+            reported_underruns = underruns;
+            reported_denials = denials;
         }
         if SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
             break;

@@ -99,6 +99,12 @@ struct Snapshot {
     tremulant: bool,
     generals: Vec<u8>,
     setter: bool,
+    /// The combination action beyond the generals: which divisionals
+    /// each manual has stored, where the stepper stands, and where the
+    /// crescendo pedal stands with what it is adding. Present whenever
+    /// an organ is loaded, so the piston rail never has to guess.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    combinations: Option<CombinationsView>,
     gain: F32,
     #[serde(skip_serializing_if = "Option::is_none")]
     organ: Option<String>,
@@ -155,6 +161,22 @@ struct Snapshot {
     setup: Option<SetupView>,
 }
 
+/// The combination action's live state, for the piston rail.
+#[derive(Serialize)]
+struct CombinationsView {
+    /// Divisionals with something stored: manual index → piston slots.
+    divisionals: BTreeMap<usize, Vec<u8>>,
+    /// Where the stepper stands, 1-based, and how many frames there
+    /// are — `frame` is 0 when the sequence is empty.
+    frame: usize,
+    frames: usize,
+    /// Where the crescendo pedal stands (0 = heel) and how far it goes.
+    crescendo: u8,
+    crescendo_stages: u8,
+    /// Which stages have anything stored — the rail's little ladder.
+    crescendo_stored: Vec<u8>,
+}
+
 #[derive(Serialize)]
 struct StopView {
     id: u32,
@@ -162,7 +184,18 @@ struct StopView {
     manual: String,
     midx: usize,
     enc: Vec<u32>,
+    /// Whether the stop is speaking-capable: hand **or** crescendo.
     on: bool,
+    /// Whether the crescendo pedal is holding it. `on && !hand` is a
+    /// stop the pedal added — the console lights it without drawing
+    /// the knob, so the player can see why it is sounding.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    cres: bool,
+    /// Whether the player's own hand has it drawn. Absent means it
+    /// equals `on`, which is the case for every stop the crescendo
+    /// isn't touching.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hand: Option<bool>,
     /// Where the stop came from — what the console's stop editor shows.
     #[serde(skip_serializing_if = "Option::is_none")]
     src: Option<SourceView>,
@@ -740,6 +773,12 @@ fn snapshot(state: &State) -> Snapshot {
                     midx: manual_index.min(u32::MAX as usize),
                     enc: console.stop_enclosures(id),
                     on: drawn,
+                    cres: console.crescendo_stops().contains(&id),
+                    // Sent only when the two layers disagree: the
+                    // console reads an absent `hand` as "same as on",
+                    // and an older client that ignores it is right
+                    // about every stop the pedal isn't holding.
+                    hand: (console.is_hand_drawn(id) != drawn).then_some(!drawn),
                     src: state.provenance.get(&id).map(|prov| SourceView {
                         from: prov.source.clone(),
                         manual: prov.source_manual.clone(),
@@ -989,6 +1028,39 @@ fn snapshot(state: &State) -> Snapshot {
             .map(|organ| organ.generals.keys().copied().collect())
             .unwrap_or_default(),
         setter: state.setter_armed,
+        combinations: console.map(|console| {
+            let organ = state.midi_config.organs.get(&state.organ_key);
+            let names = console.manual_states();
+            CombinationsView {
+                divisionals: organ
+                    .map(|organ| {
+                        organ
+                            .divisionals
+                            .iter()
+                            .filter_map(|(manual, slots)| {
+                                let index =
+                                    names.iter().position(|(_, name, ..)| *name == manual)?;
+                                Some((index, slots.keys().copied().collect()))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                frame: state.stepper_frame + usize::from(state.stepper_frames() > 0),
+                frames: state.stepper_frames(),
+                crescendo: state.crescendo_stage,
+                crescendo_stages: crate::state::CRESCENDO_STAGES,
+                crescendo_stored: organ
+                    .map(|organ| {
+                        organ
+                            .crescendo
+                            .iter()
+                            .filter(|(_, stops)| !stops.is_empty())
+                            .map(|(stage, _)| *stage)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            }
+        }),
         gain: F32(state.master_gain),
         organ: console.map(|console| console.organ_name().to_string()),
         // The picker's world: what could be loaded, what is loading

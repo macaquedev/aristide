@@ -162,7 +162,13 @@ pub(crate) struct AudioOutput {
     /// Where each new engine's recording tap goes; the recorder thread
     /// drains them all into one WAV.
     pub(crate) record: Option<std::sync::mpsc::Sender<(rtrb::Consumer<f32>, u16)>>,
+    /// Streaming health across every organ this process has loaded.
+    pub(crate) stream_counters: aristide_engine::stream::StreamCounters,
     pub(crate) stream: Option<cpal::Stream>,
+    /// Threads feeding the current engine's stream slots. Dropped (and
+    /// joined) with the stream they belong to, never before it: the
+    /// engine reads their rings until the moment it dies.
+    pub(crate) stream_threads: Option<aristide_engine::stream::StreamThreads>,
 }
 
 impl AudioOutput {
@@ -218,11 +224,14 @@ impl AudioOutput {
         // stream on the device, and the old engine (with its bank) dies
         // with it here on the control side, never on the audio thread.
         self.stream = None;
+        // Only now are the old slots gone, so the threads that were
+        // filling them can be stopped and joined.
+        self.stream_threads = None;
         #[cfg(target_os = "linux")]
         AUDIO_TID.store(0, std::sync::atomic::Ordering::Release);
-        let (stream, handle) =
+        let (stream, handle, threads) =
             match self.build(cpal::BufferSize::Fixed(self.buffer_frames), &bank, &reverb) {
-                Ok(pair) => pair,
+                Ok(triple) => triple,
                 Err(err) => {
                     tracing::warn!(
                         "device refused a {}-frame buffer ({err}); using its default \
@@ -234,6 +243,7 @@ impl AudioOutput {
             };
         stream.play()?;
         self.stream = Some(stream);
+        self.stream_threads = threads;
         // Each stream gets a fresh callback thread; promote it again.
         #[cfg(target_os = "linux")]
         std::thread::spawn(promote_audio_thread_via_rtkit);
@@ -245,8 +255,27 @@ impl AudioOutput {
         buffer_size: cpal::BufferSize,
         bank: &Arc<aristide_engine::bank::SampleBank>,
         reverb: &Option<(Arc<aristide_engine::reverb::PreparedIr>, f32)>,
-    ) -> Result<(cpal::Stream, EngineHandle)> {
+    ) -> Result<(cpal::Stream, EngineHandle, Option<aristide_engine::stream::StreamThreads>)> {
         let (mut engine, handle) = Engine::new(self.sample_rate, Arc::clone(bank));
+        // Streamed banks get their slot pool and the threads that fill
+        // it; a fully resident bank gets neither, and not one
+        // instruction of the streaming path runs.
+        let mut stream_threads = None;
+        if let Some((rt, workers)) = aristide_engine::stream::attach(
+            bank,
+            aristide_engine::stream::DEFAULT_SLOTS,
+            aristide_engine::stream::DEFAULT_WORKERS,
+            self.stream_counters.clone(),
+        ) {
+            tracing::info!(
+                "streaming: {} slots on {} threads for {:.1} MiB of tails",
+                rt.slot_count(),
+                aristide_engine::stream::DEFAULT_WORKERS,
+                bank.streamed_bytes() as f64 / (1024.0 * 1024.0)
+            );
+            engine.set_streams(rt);
+            stream_threads = Some(aristide_engine::stream::spawn(workers));
+        }
         engine.set_reverb(
             reverb.as_ref().map(|(ir, _)| Arc::clone(ir)),
             reverb.as_ref().map_or(0.0, |(_, wet)| *wet),
@@ -306,7 +335,7 @@ impl AudioOutput {
         if let (Some(sender), Some(consumer)) = (&self.record, tap) {
             let _ = sender.send((consumer, self.channels.min(u16::MAX as usize) as u16));
         }
-        Ok((stream, handle))
+        Ok((stream, handle, stream_threads))
     }
 }
 /// The recording tap's writer: drains every engine's tap ring into one

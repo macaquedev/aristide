@@ -84,6 +84,25 @@ export const commands = {
     `/api/note?manual=${manual}&key=${key}&on=${on ? 1 : 0}`,
   panic: () => "/api/panic",
   cancel: () => "/api/cancel",
+  // The combination action. Each of these is the on-screen twin of a
+  // binding action, and the server routes both to one method — the
+  // piston rail and a thumb piston mean exactly the same thing.
+  // `store` on a general/divisional is what an armed setter does; the
+  // rail sends it explicitly so a click never depends on the setter
+  // being armed a moment ago.
+  general: (n, store) => `/api/general?n=${n}` + (store ? "&store=1" : ""),
+  divisional: (manual, n, store) =>
+    `/api/divisional?manual=${manual}&n=${n}` + (store ? "&store=1" : ""),
+  setter: (on) => `/api/setter` + (on == null ? "" : `?on=${on ? 1 : 0}`),
+  // `go` is "next", "prev" or a 1-based frame; the editing gestures are
+  // their own flags.
+  stepper: (go) => `/api/stepper?go=${go}`,
+  stepperStore: () => "/api/stepper?store=1",
+  stepperInsert: () => "/api/stepper?insert=1",
+  stepperDelete: () => "/api/stepper?delete=1",
+  // Stage 0 is the heel. `store` writes the drawknobs into that stage.
+  crescendo: (stage, store) =>
+    `/api/crescendo?stage=${stage}` + (store ? "&store=1" : ""),
   // A manual's compass, MIDI notes 0-127. Omitting low/high goes back to
   // the sample set's own (native) compass rather than declaring one.
   organCompass: (manual, low, high) =>

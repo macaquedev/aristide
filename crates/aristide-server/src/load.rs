@@ -110,7 +110,7 @@ pub struct PreparedInstrument {
     pub reverb: Option<(Arc<aristide_engine::reverb::PreparedIr>, f32)>,
     /// Set when the loaded organ is a composite definition file loaded
     /// alone: that file owns the rig's MIDI wiring.
-    pub composite: Option<(PathBuf, instrument::MidiDef)>,
+    pub composite: Option<(PathBuf, instrument::MidiDef, instrument::CombinationsDef)>,
     pub suggested_channels: Vec<Option<u8>>,
     pub setup: Setup,
     /// Per stop: where it came from — the coordinates per-stop file
@@ -284,7 +284,7 @@ fn load_impulse_response(
 struct Sources {
     sources: Vec<(String, Organ)>,
     sidecars: Vec<aristide_formats::sidecar::Sidecar>,
-    composite_midi: Option<(PathBuf, instrument::MidiDef)>,
+    composite_midi: Option<(PathBuf, instrument::MidiDef, instrument::CombinationsDef)>,
     single_provenance: std::collections::HashMap<StopId, instrument::StopProvenance>,
     stop_labels: std::collections::HashMap<StopId, String>,
     manual_tuning_defs: Vec<instrument::ManualTuningDef>,
@@ -339,7 +339,7 @@ fn load_sources(
     setup: &mut Setup,
     load_warnings: &mut Vec<String>,
 ) -> Result<Sources> {
-    let mut composite_midi: Option<(PathBuf, instrument::MidiDef)> = None;
+    let mut composite_midi: Option<(PathBuf, instrument::MidiDef, instrument::CombinationsDef)> = None;
     let mut single_provenance: std::collections::HashMap<StopId, instrument::StopProvenance> =
         std::collections::HashMap::new();
     let mut stop_labels: std::collections::HashMap<StopId, String> =
@@ -382,7 +382,7 @@ fn load_sources(
                 path.display()
             );
             if paths.len() == 1 {
-                composite_midi = Some((path.clone(), assembled.midi));
+                composite_midi = Some((path.clone(), assembled.midi, assembled.combinations));
                 setup.adopted = assembled.adopted;
                 // Assembled stops are ids in placement order, so the
                 // provenance vec zips onto them by index.
@@ -675,7 +675,30 @@ fn decode_samples(
     } else {
         None
     };
-    let loaded = bank::build(organ, sample_rate, sample_bits, cache_path.as_deref())?;
+    // Streaming policy: attacks and sustain loops always stay in RAM;
+    // this decides whether the release tails behind them do.
+    let policy = bank::StreamingPolicy {
+        mode: match sidecar.samples.streaming.to_ascii_lowercase().as_str() {
+            "on" | "true" => bank::StreamingMode::On,
+            "off" | "false" => bank::StreamingMode::Off,
+            "auto" => bank::StreamingMode::Auto,
+            other => {
+                tracing::warn!(
+                    "[samples] streaming = {other:?} is not auto/on/off; using auto"
+                );
+                bank::StreamingMode::Auto
+            }
+        },
+        ram_budget_mb: sidecar.samples.ram_budget_mb,
+    };
+    let loaded = bank::build_with(
+        organ,
+        sample_rate,
+        sample_bits,
+        cache_path.as_deref(),
+        policy,
+    )?;
+    let streamed = loaded.bank.streamed_bytes();
     tracing::info!(
         "samples: {} files, {:.1} MiB resident, {} skipped, in {:.1?}",
         loaded.bank.len(),
@@ -683,6 +706,18 @@ fn decode_samples(
         loaded.skipped.len(),
         started.elapsed()
     );
+    if streamed > 0 {
+        tracing::info!(
+            "streaming: {} of {} samples play their tails from disk ({:.1} MiB \
+             streamed vs {:.1} MiB resident), {} slots × {} threads",
+            loaded.bank.streamed_samples(),
+            loaded.bank.len(),
+            streamed as f64 / (1024.0 * 1024.0),
+            loaded.bank.resident_bytes() as f64 / (1024.0 * 1024.0),
+            aristide_engine::stream::DEFAULT_SLOTS,
+            aristide_engine::stream::DEFAULT_WORKERS,
+        );
+    }
     for note in loaded.skipped.iter().take(10) {
         tracing::warn!("skipped: {note}");
     }

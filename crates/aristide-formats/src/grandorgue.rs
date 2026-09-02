@@ -298,12 +298,27 @@ impl Builder<'_> {
         let (windchest_chains, windchests) =
             self.read_windchests(windchest_count, enclosure_count, tremulant_count, organ_chain)?;
 
+        // How far this console's divisionals reach. Playback never
+        // consults these, which is why the notes call them
+        // "combination-system only" — but the combination action does,
+        // and the set is the only honest source for them. GO's own
+        // defaults are all N (GOOrganModel.cpp:44-47), so a header
+        // that omits them means a stops-only divisional.
+        let combinations = aristide_model::CombinationScope {
+            divisional_intermanual_couplers: organ_section
+                .bool_or("DivisionalsStoreIntermanualCouplers", false)?,
+            divisional_intramanual_couplers: organ_section
+                .bool_or("DivisionalsStoreIntramanualCouplers", false)?,
+            divisional_tremulants: organ_section.bool_or("DivisionalsStoreTremulants", false)?,
+        };
+
         let mut organ = Organ {
             name,
             base_path: std::mem::take(&mut self.base_path),
             enclosures,
             windchests,
             tremulants,
+            combinations,
             ..Organ::default()
         };
 
