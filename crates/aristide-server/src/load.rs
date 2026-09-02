@@ -797,6 +797,11 @@ fn configure_enclosures(
                 corner_closed_hz: boxes.corner_closed_hz.clamp(100.0, 20_000.0) as f32,
                 taper: boxes.taper.clamp(0.2, 5.0) as f32,
                 full_sweep_s: boxes.full_sweep_s.clamp(0.0, 5.0) as f32,
+                // Ceiling well above HW's suggested 1–5 %: past that a
+                // box robs its own wind, which is a legitimate (if
+                // extreme) thing to ask a sidecar for.
+                pressure_rise_pct: boxes.pressure_rise_pct.clamp(0.0, 20.0) as f32,
+                ..aristide_engine::enclosure::EnclosureParams::default()
             },
         ));
     }

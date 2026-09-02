@@ -571,13 +571,15 @@ fn perform_load(
     }
     for &(enclosure, params) in &enclosures {
         tracing::info!(
-            "enclosure {}: floor {:.1} dB, shelf {:.1} dB @ {:.0}→{:.0} Hz, sweep {:.2} s (CC{})",
+            "enclosure {}: floor {:.1} dB, shelf {:.1} dB @ {:.0}→{:.0} Hz, \
+             sweep {:.2} s, closed pressure rise {:.1} % (CC{})",
             enclosure,
             params.floor_db,
             params.shelf_db,
             params.corner_open_hz,
             params.corner_closed_hz,
             params.full_sweep_s,
+            params.pressure_rise_pct,
             expression_cc
         );
         handle.send(Command::SetEnclosure { enclosure, params });

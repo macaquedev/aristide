@@ -51,10 +51,12 @@ pub struct VoiceSpec {
     /// Tilt-filter coefficient for pressure→brightness coupling
     /// (0 = no filter, e.g. noises).
     pub brightness: f32,
-    /// Swell box (0-based engine index from the ODF windchest
-    /// membership; [`aristide_engine::enclosure::ENCLOSURE_NONE`] for
-    /// unenclosed divisions).
-    pub enclosure: u8,
+    /// Swell boxes (0-based engine indices from the ODF windchest
+    /// membership, innermost first;
+    /// [`aristide_engine::enclosure::ENCLOSURE_NONE`] in unused slots,
+    /// all of them for unenclosed divisions). Boxes nest, and both
+    /// GO and Hauptwerk let a chest belong to several.
+    pub enclosures: [u8; aristide_engine::enclosure::MAX_VOICE_ENCLOSURES],
     /// Output bus (0 = the main pair). Specs are built per pipe with
     /// the defaults; the console stamps these per stop from the
     /// sidecar's `[routing]`/`[voicing]` before a voice starts.
@@ -142,10 +144,10 @@ pub fn build(
     };
     let mut staged: Vec<StagedPipe> = Vec::new();
     for (rank_index, rank) in organ.ranks.iter().enumerate() {
-        let enclosure = chest_enclosures
-            .get(&rank.windchest)
-            .copied()
-            .unwrap_or(aristide_engine::enclosure::ENCLOSURE_NONE);
+        let enclosures = chest_enclosures.get(&rank.windchest).copied().unwrap_or(
+            [aristide_engine::enclosure::ENCLOSURE_NONE;
+                aristide_engine::enclosure::MAX_VOICE_ENCLOSURES],
+        );
         // Pipes decode first, then pitch decisions settle rank-wide
         // (the junk-metadata guard below needs the whole rank in view)
         // before specs are built.
@@ -160,7 +162,7 @@ pub fn build(
         staged.extend(stage_rank_pipes(
             rank,
             rank_index,
-            enclosure,
+            enclosures,
             pending,
             &mut skipped,
             &bank,
@@ -188,25 +190,49 @@ pub fn build(
     })
 }
 
-/// Windchest number → enclosure engine index. A voice carries ONE
-/// enclosure; GO multiplies when a chest sits in several boxes, but
-/// no real set seen does — warn and take the first.
-fn resolve_chest_enclosures(organ: &Organ, skipped: &mut Vec<String>) -> HashMap<u32, u8> {
-    let mut chest_enclosures: HashMap<u32, u8> = HashMap::new();
+/// Windchest number → the enclosure engine indices its pipes sit in.
+/// Boxes nest — an Echo or Solo box inside the Swell — so a chest can
+/// legitimately belong to several: GO's `[WindchestGroupNNN]` lists
+/// them by `NumberOfEnclosures`/`EnclosureNNN` and composes them all,
+/// and the Hauptwerk reader keys a windchest by its whole sorted
+/// enclosure set. The voice carries
+/// [`MAX_VOICE_ENCLOSURES`](aristide_engine::enclosure::MAX_VOICE_ENCLOSURES)
+/// of them; anything beyond that is dropped with a warning.
+fn resolve_chest_enclosures(
+    organ: &Organ,
+    skipped: &mut Vec<String>,
+) -> HashMap<u32, [u8; aristide_engine::enclosure::MAX_VOICE_ENCLOSURES]> {
+    const SLOTS: usize = aristide_engine::enclosure::MAX_VOICE_ENCLOSURES;
+    let mut chest_enclosures = HashMap::new();
     for chest in &organ.windchests {
-        let Some(&first) = chest.enclosures.first() else {
+        if chest.enclosures.is_empty() {
             continue;
-        };
-        if chest.enclosures.len() > 1 {
-            skipped.push(format!(
-                "windchest {} ({}) sits in {} enclosures; using the first",
-                chest.number,
-                chest.name,
-                chest.enclosures.len()
-            ));
         }
-        let index = (first as usize).min(aristide_engine::enclosure::MAX_ENCLOSURES - 1) as u8;
-        chest_enclosures.insert(chest.number, index);
+        let mut slots = [aristide_engine::enclosure::ENCLOSURE_NONE; SLOTS];
+        let mut used = 0usize;
+        for &member in &chest.enclosures {
+            if (member as usize) >= aristide_engine::enclosure::MAX_ENCLOSURES {
+                continue;
+            }
+            let index = member as u8;
+            if slots[..used].contains(&index) {
+                continue;
+            }
+            if used == SLOTS {
+                skipped.push(format!(
+                    "windchest {} ({}) sits in {} enclosures; the engine                      nests {SLOTS}, so enclosure {member} is ignored",
+                    chest.number,
+                    chest.name,
+                    chest.enclosures.len()
+                ));
+                break;
+            }
+            slots[used] = index;
+            used += 1;
+        }
+        if used > 0 {
+            chest_enclosures.insert(chest.number, slots);
+        }
     }
     chest_enclosures
 }
@@ -674,7 +700,7 @@ fn decode_rank_attacks(
 fn stage_rank_pipes(
     rank: &aristide_model::Rank,
     rank_index: usize,
-    enclosure: u8,
+    enclosures: [u8; aristide_engine::enclosure::MAX_VOICE_ENCLOSURES],
     pending: Vec<PendingPipe>,
     skipped: &mut Vec<String>,
     bank: &SampleBank,
@@ -760,7 +786,7 @@ fn stage_rank_pipes(
             original_cents: p.original_cents,
             metadata_cents: metadata,
             measured_cents,
-            enclosure,
+            enclosures,
         });
     }
     staged
@@ -914,7 +940,7 @@ fn assign_voice_specs(
                     device_rate,
                     p.info.percussive,
                 ),
-                enclosure: p.enclosure,
+                enclosures: p.enclosures,
                 bus: 0,
                 delay_frames: 0,
             },
@@ -1010,7 +1036,7 @@ struct StagedPipe {
     rank_index: usize,
     pipe_index: u16,
     info: DecodedInfo,
-    enclosure: u8,
+    enclosures: [u8; aristide_engine::enclosure::MAX_VOICE_ENCLOSURES],
     /// Playback offset as the set voiced it: PitchTuning et al.
     original_cents: f64,
     /// The offset the metadata path would retune by, when it would.
@@ -1890,6 +1916,49 @@ mod tests {
         assert!(((spec.rate as f64).log2() * 1200.0 + 600.0).abs() < 1.0);
     }
 
+    /// Boxes nest: GO's `[WindchestGroupNNN]` may list several
+    /// enclosures (`NumberOfEnclosures`) and the Hauptwerk reader keys
+    /// a windchest by its whole sorted enclosure set, so a chest inside
+    /// a box inside a box must reach the voice as BOTH memberships —
+    /// no set in `testsets/` nests, so this is checked on a synthetic
+    /// organ. Beyond the engine's slots the surplus is dropped with a
+    /// note, and duplicates never attenuate twice.
+    #[test]
+    fn a_chest_carries_every_box_it_sits_in() {
+        let chest = |number: u32, enclosures: Vec<u32>| aristide_model::Windchest {
+            number,
+            name: format!("chest {number}"),
+            enclosures,
+            tremulants: Vec::new(),
+        };
+        let organ = Organ {
+            windchests: vec![
+                chest(1, vec![]),
+                chest(2, vec![3]),
+                chest(3, vec![3, 1]),
+                chest(4, vec![2, 2]),
+                chest(5, vec![0, 1, 2]),
+            ],
+            ..Organ::default()
+        };
+        let mut skipped = Vec::new();
+        let resolved = resolve_chest_enclosures(&organ, &mut skipped);
+        assert!(!resolved.contains_key(&1), "an unenclosed chest joins no box");
+        assert_eq!(
+            resolved[&2],
+            [3, aristide_engine::enclosure::ENCLOSURE_NONE]
+        );
+        assert_eq!(resolved[&3], [3, 1], "inner box first, outer box second");
+        assert_eq!(
+            resolved[&4],
+            [2, aristide_engine::enclosure::ENCLOSURE_NONE],
+            "a box listed twice must not attenuate twice"
+        );
+        assert_eq!(resolved[&5], [0, 1], "the third box does not fit");
+        assert_eq!(skipped.len(), 1, "exactly the dropped membership warns");
+        assert!(skipped[0].contains("enclosure 2 is ignored"), "{}", skipped[0]);
+    }
+
     /// The demo set's two ODF enclosures must reach the voice specs:
     /// Récit chest (3) → enclosure 0, enclosed Great chest (2) →
     /// enclosure 1, unenclosed chest (1) → none. And an expression
@@ -1924,10 +1993,10 @@ mod tests {
                 .copied()
                 .unwrap_or_else(|| panic!("spec for {pattern}"))
         };
-        assert_eq!(spec_for("Hautbois").enclosure, 0);
-        assert_eq!(spec_for("Plein jeu III").enclosure, 1);
+        assert_eq!(spec_for("Hautbois").enclosures[0], 0);
+        assert_eq!(spec_for("Plein jeu III").enclosures[0], 1);
         assert_eq!(
-            spec_for("Montre").enclosure,
+            spec_for("Montre").enclosures[0],
             aristide_engine::enclosure::ENCLOSURE_NONE
         );
 
@@ -1975,7 +2044,7 @@ mod tests {
             .filter(|s| s.name.contains("Hautbois") && !s.name.contains("noise"))
             .map(|stop| {
                 let range = stop.ranks.first().expect("ranks");
-                loaded.specs[&(range.rank, range.first_pipe)].enclosure
+                loaded.specs[&(range.rank, range.first_pipe)].enclosures[0]
             })
             .collect();
         assert_eq!(hautbois, vec![0, 2]);
@@ -2056,7 +2125,7 @@ mod tests {
                                     group: st.spec.group,
                                     wind_weight: st.spec.wind_weight,
                                     brightness: st.spec.brightness,
-                                    enclosure: st.spec.enclosure,
+                                    enclosures: st.spec.enclosures,
                         bus: st.spec.bus,
                         delay_frames: st.spec.delay_frames,
                                     nominal_hz: st.spec.nominal_hz,
@@ -2226,7 +2295,7 @@ mod tests {
                                     group: st.spec.group,
                                     wind_weight: st.spec.wind_weight,
                                     brightness: st.spec.brightness,
-                                    enclosure: st.spec.enclosure,
+                                    enclosures: st.spec.enclosures,
                         bus: st.spec.bus,
                         delay_frames: st.spec.delay_frames,
                                     nominal_hz: st.spec.nominal_hz,
@@ -2490,7 +2559,7 @@ mod tests {
                         group: start.spec.group,
                         wind_weight: start.spec.wind_weight,
                         brightness: start.spec.brightness,
-                        enclosure: start.spec.enclosure,
+                        enclosures: start.spec.enclosures,
                         bus: start.spec.bus,
                         delay_frames: start.spec.delay_frames,
                         nominal_hz: start.spec.nominal_hz,
@@ -2596,7 +2665,7 @@ mod tests {
                             group: start.spec.group,
                             wind_weight: start.spec.wind_weight,
                             brightness: start.spec.brightness,
-                        enclosure: start.spec.enclosure,
+                        enclosures: start.spec.enclosures,
                         bus: start.spec.bus,
                         delay_frames: start.spec.delay_frames,
                             nominal_hz: start.spec.nominal_hz,
@@ -2701,7 +2770,7 @@ mod tests {
                         group: start.spec.group,
                         wind_weight: start.spec.wind_weight,
                         brightness: start.spec.brightness,
-                        enclosure: start.spec.enclosure,
+                        enclosures: start.spec.enclosures,
                         bus: start.spec.bus,
                         delay_frames: start.spec.delay_frames,
                         nominal_hz: start.spec.nominal_hz,
@@ -2793,7 +2862,7 @@ mod tests {
                     group: start.spec.group,
                     wind_weight: start.spec.wind_weight,
                     brightness: start.spec.brightness,
-                        enclosure: start.spec.enclosure,
+                        enclosures: start.spec.enclosures,
                         bus: start.spec.bus,
                         delay_frames: start.spec.delay_frames,
                     nominal_hz: start.spec.nominal_hz,
@@ -2875,7 +2944,7 @@ mod tests {
                 group: start.spec.group,
                 wind_weight: start.spec.wind_weight,
                 brightness: start.spec.brightness,
-                        enclosure: start.spec.enclosure,
+                        enclosures: start.spec.enclosures,
                         bus: start.spec.bus,
                         delay_frames: start.spec.delay_frames,
                 nominal_hz: start.spec.nominal_hz,
@@ -3024,7 +3093,7 @@ mod tests {
                         group: start.spec.group,
                         wind_weight: start.spec.wind_weight,
                         brightness: start.spec.brightness,
-                        enclosure: start.spec.enclosure,
+                        enclosures: start.spec.enclosures,
                         bus: start.spec.bus,
                         delay_frames: start.spec.delay_frames,
                         nominal_hz: start.spec.nominal_hz,
@@ -3194,7 +3263,7 @@ mod tests {
                             group: start.spec.group,
                             wind_weight: start.spec.wind_weight,
                             brightness: start.spec.brightness,
-                        enclosure: start.spec.enclosure,
+                        enclosures: start.spec.enclosures,
                         bus: start.spec.bus,
                         delay_frames: start.spec.delay_frames,
                             nominal_hz: start.spec.nominal_hz,
@@ -3394,7 +3463,7 @@ mod tests {
                             group: start.spec.group,
                             wind_weight: start.spec.wind_weight,
                             brightness: start.spec.brightness,
-                            enclosure: start.spec.enclosure,
+                            enclosures: start.spec.enclosures,
                         bus: start.spec.bus,
                         delay_frames: start.spec.delay_frames,
                             nominal_hz: start.spec.nominal_hz,
@@ -3489,7 +3558,7 @@ mod tests {
                     group: st.spec.group,
                     wind_weight: st.spec.wind_weight,
                     brightness: st.spec.brightness,
-                    enclosure: st.spec.enclosure,
+                    enclosures: st.spec.enclosures,
                         bus: st.spec.bus,
                         delay_frames: st.spec.delay_frames,
                     nominal_hz: st.spec.nominal_hz,
@@ -3628,7 +3697,7 @@ mod tests {
                                 group: st.spec.group,
                                 wind_weight: st.spec.wind_weight,
                                 brightness: st.spec.brightness,
-                        enclosure: st.spec.enclosure,
+                        enclosures: st.spec.enclosures,
                         bus: st.spec.bus,
                         delay_frames: st.spec.delay_frames,
                                 nominal_hz: st.spec.nominal_hz,
@@ -3765,7 +3834,7 @@ mod tests {
                                 group: st.spec.group,
                                 wind_weight: st.spec.wind_weight,
                                 brightness: st.spec.brightness,
-                        enclosure: st.spec.enclosure,
+                        enclosures: st.spec.enclosures,
                         bus: st.spec.bus,
                         delay_frames: st.spec.delay_frames,
                                 nominal_hz: st.spec.nominal_hz,
@@ -3928,7 +3997,7 @@ mod tests {
                                 group: st.spec.group,
                                 wind_weight: st.spec.wind_weight,
                                 brightness: st.spec.brightness,
-                                enclosure: st.spec.enclosure,
+                                enclosures: st.spec.enclosures,
                         bus: st.spec.bus,
                         delay_frames: st.spec.delay_frames,
                                 nominal_hz: st.spec.nominal_hz,
@@ -4040,7 +4109,7 @@ mod tests {
                             group: st.spec.group,
                             wind_weight: st.spec.wind_weight,
                             brightness: st.spec.brightness,
-                        enclosure: st.spec.enclosure,
+                        enclosures: st.spec.enclosures,
                         bus: st.spec.bus,
                         delay_frames: st.spec.delay_frames,
                             nominal_hz: st.spec.nominal_hz,
@@ -4105,7 +4174,7 @@ mod tests {
                             group: st.spec.group,
                             wind_weight: st.spec.wind_weight,
                             brightness: st.spec.brightness,
-                        enclosure: st.spec.enclosure,
+                        enclosures: st.spec.enclosures,
                         bus: st.spec.bus,
                         delay_frames: st.spec.delay_frames,
                             nominal_hz: st.spec.nominal_hz,
@@ -4219,7 +4288,7 @@ mod tests {
                         group: st.spec.group,
                         wind_weight: st.spec.wind_weight,
                         brightness: st.spec.brightness,
-                        enclosure: st.spec.enclosure,
+                        enclosures: st.spec.enclosures,
                         bus: st.spec.bus,
                         delay_frames: st.spec.delay_frames,
                         nominal_hz: st.spec.nominal_hz,
