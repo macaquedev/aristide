@@ -506,17 +506,17 @@ export class Editor {
     // the menu's Recent list) would otherwise fail into silence: the
     // picker shows load_error only while it is up, so the error strip
     // carries it here. Warnings ride along — an organ whose file lines
-    // were healed over loads emptier than the file intends, and that
-    // must say so where the player is looking. Only transitions matter
-    // — repainting on every poll would clobber the strip's own
-    // transient command errors.
+    // were healed over, or whose sample set had holes, loads emptier
+    // than intended, and that must say so where the player is looking.
+    // Only transitions matter — repainting on every poll would clobber
+    // the strip's own transient command errors.
     const warnings = snapshot.load_warnings ?? [];
     const loadError =
       snapshot.load_error ??
       (warnings.length
-        ? `the organ loaded, but ${warnings.length} line${
+        ? `the organ loaded with ${warnings.length} warning${
             warnings.length === 1 ? "" : "s"
-          } of its file did not resolve — e.g. ${warnings[0]}`
+          } — e.g. ${warnings[0]}`
         : null);
     if (loadError !== this.lastLoadError) {
       this.lastLoadError = loadError;
