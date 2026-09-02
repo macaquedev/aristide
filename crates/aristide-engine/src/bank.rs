@@ -4,10 +4,12 @@
 //! wrapped in an `Arc`, and handed to the engine at construction. The RT
 //! path only ever reads it, so the invariants in the crate root hold.
 //!
-//! M3 state: every sample is fully decoded in RAM. The `Sample` layout
-//! (contiguous interleaved f32 + frame-based markers) is what a future
-//! disk streamer will fill ring buffers with, so streaming replaces the
-//! storage behind this API rather than the API itself.
+//! M4 state: a sample is resident from its first frame through the end
+//! of its last sustain loop plus a head of its release tail; anything
+//! past that split may live in a seekable store on disk and reach the
+//! audio thread through [`crate::stream`]. `frames()` is still the whole
+//! recording — the split is invisible to every caller but the reader,
+//! which asks whether a position is resident before it reads.
 
 /// Phase buckets per waveform period in a [`ReleaseAlignment`] table.
 pub(crate) const ALIGNMENT_BUCKETS: usize = 64;
@@ -41,6 +43,54 @@ impl ReleaseAlignment {
         let bucket = ((phase * ALIGNMENT_BUCKETS as f64) as usize).min(ALIGNMENT_BUCKETS - 1);
         self.offsets[bucket] as u64
     }
+}
+
+/// Storage width of one audio value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SampleFormat {
+    F32,
+    I16,
+}
+
+impl SampleFormat {
+    #[inline]
+    pub fn bytes(self) -> usize {
+        match self {
+            SampleFormat::F32 => 4,
+            SampleFormat::I16 => 2,
+        }
+    }
+}
+
+/// Where a sample's non-resident audio lives: a byte range of one of
+/// the bank's [`crate::stream::StreamStores`], holding the frames from
+/// `first_frame` to the end of the recording in the sample's own
+/// resident format.
+///
+/// `first_frame` sits [`crate::stream::OVERLAP_FRAMES`] *before* the
+/// split, so the stored region duplicates the last few resident frames
+/// — that is what lets a sinc window straddle the crossing without ever
+/// splicing RAM to disk inside one kernel.
+#[derive(Debug, Clone, Copy)]
+pub struct StreamRegion {
+    pub store: u16,
+    pub offset: u64,
+    pub first_frame: u64,
+    pub frames: u64,
+}
+
+/// A tail shorter than this is not worth a stream slot (nor the split
+/// in the cache): ~85 ms at 48 kHz.
+const MIN_TAIL_FRAMES: u64 = 4096;
+
+/// Where one sample's tail sits in the load cache's companion tail
+/// file. The cache always splits, whatever residency the load that
+/// wrote it used, so either mode can read either cache.
+#[derive(Debug, Clone, Copy)]
+pub struct CachedTail {
+    pub offset: u64,
+    pub len: u64,
+    pub first_frame: u64,
 }
 
 /// Dequantization scale for 16-bit resident audio.
@@ -78,6 +128,14 @@ impl SampleData {
         }
     }
 
+    #[inline]
+    pub fn format(&self) -> SampleFormat {
+        match self {
+            SampleData::F32(_) => SampleFormat::F32,
+            SampleData::I16(_) => SampleFormat::I16,
+        }
+    }
+
     /// Resident bytes of audio.
     pub fn bytes(&self) -> usize {
         match self {
@@ -91,8 +149,16 @@ impl SampleData {
 /// embedded release tail after the loop.
 #[derive(Debug, Clone)]
 pub struct Sample {
-    /// Interleaved samples, normalized to `[-1.0, 1.0]`.
+    /// Interleaved samples, normalized to `[-1.0, 1.0]`. Holds the
+    /// whole recording unless the sample has been split for streaming,
+    /// in which case it holds frames `0..resident_frames()` and the
+    /// rest lives in `stream`.
     data: SampleData,
+    /// Frames of the whole recording, resident or not.
+    total_frames: u64,
+    /// The non-resident remainder, once [`Sample::offload_tail`] has
+    /// moved it to a store.
+    stream: Option<StreamRegion>,
     channels: u16,
     sample_rate_hz: f32,
     /// Sustain loop as a half-open frame range; `None` = one-shot
@@ -203,6 +269,8 @@ impl Sample {
         }
         let mut sample = Sample {
             data: SampleData::F32(data),
+            total_frames: frames,
+            stream: None,
             channels,
             sample_rate_hz,
             sustain_loop,
@@ -240,7 +308,9 @@ impl Sample {
     pub fn quadrature(&self, channel: u16, start: u64, window: u64, period: f64) -> (f64, f64) {
         let ch = self.channels as usize;
         let channel = (channel as usize).min(ch - 1);
-        let window = window.min(self.frames().saturating_sub(start));
+        // Resident frames only: analysis runs before any split, and
+        // what runs after it (release attaching) reads the head.
+        let window = window.min(self.resident_frames().saturating_sub(start));
         let mut re = 0.0f64;
         let mut im = 0.0f64;
         for i in 0..window {
@@ -442,6 +512,7 @@ impl Sample {
     /// followers.
     fn mean_abs(&self, start: u64, window: u64) -> f32 {
         let ch = self.channels as usize;
+        let window = window.min(self.resident_frames().saturating_sub(start));
         let mut sum = 0.0f64;
         for frame in start..start + window {
             let base = frame as usize * ch;
@@ -604,9 +675,28 @@ impl Sample {
         self.release_alignment = Some(ReleaseAlignment { period, offsets });
     }
 
+    /// Frames of the whole recording — including any that stream.
     #[inline]
     pub fn frames(&self) -> u64 {
+        self.total_frames
+    }
+
+    /// Frames held in RAM. Equal to [`Sample::frames`] unless the tail
+    /// has been offloaded.
+    #[inline]
+    pub fn resident_frames(&self) -> u64 {
         (self.data.len() / self.channels as usize) as u64
+    }
+
+    /// The non-resident region, when this sample streams.
+    #[inline]
+    pub fn stream(&self) -> Option<StreamRegion> {
+        self.stream
+    }
+
+    #[inline]
+    pub fn format(&self) -> SampleFormat {
+        self.data.format()
     }
 
     #[inline]
@@ -755,12 +845,195 @@ impl Sample {
         self.release_crossfade_ms
     }
 
+    /// Where this sample's streamed region begins, if it has one worth
+    /// having. The split is a property of the recording, not of the
+    /// runtime policy, so a cache written by a fully-resident load can
+    /// still be streamed from (and the other way round).
+    ///
+    /// Everything from the first frame through the end of the last
+    /// sustain loop stays resident — a held note must never wait for a
+    /// disk — plus [`crate::stream::HEAD_SECONDS`] of the tail, so the
+    /// splice at note-off starts instantly. Loop-less samples (separate
+    /// releases, percussives, noises) keep the same head from frame 0.
+    /// A sample with a loop but no tail past it never splits: there is
+    /// nothing behind the loop to stream.
+    pub fn canonical_split(&self) -> Option<u64> {
+        let head = (crate::stream::HEAD_SECONDS * self.sample_rate_hz as f64) as u64;
+        let split = match (self.release_start(), self.sustain_loop) {
+            (Some(tail), _) => tail + head,
+            (None, None) => head,
+            (None, Some(_)) => return None,
+        };
+        let split = split.max(crate::stream::OVERLAP_FRAMES);
+        (split + MIN_TAIL_FRAMES <= self.total_frames).then_some(split)
+    }
+
+    /// Bytes of the resident audio as it is stored — the POD byte view
+    /// the cache and the streamer both move around.
+    fn data_bytes(&self) -> &[u8] {
+        match &self.data {
+            // SAFETY: f32/i16 are plain-old-data; a byte view for bulk
+            // I/O, as in `write_cache`.
+            SampleData::F32(data) => unsafe {
+                std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4)
+            },
+            SampleData::I16(data) => unsafe {
+                std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 2)
+            },
+        }
+    }
+
+    /// Byte length of one frame in the resident format.
+    #[inline]
+    fn frame_bytes(&self) -> usize {
+        self.channels as usize * self.data.format().bytes()
+    }
+
+    /// Move everything past the canonical split into `sink`, freeing the
+    /// RAM it occupied. Returns false when this sample has no tail worth
+    /// streaming (it stays whole).
+    pub fn offload_tail(
+        &mut self,
+        store: u16,
+        sink: &mut dyn crate::stream::TailSink,
+    ) -> std::io::Result<bool> {
+        if self.stream.is_some() {
+            return Ok(true);
+        }
+        let Some(split) = self.canonical_split() else {
+            return Ok(false);
+        };
+        let first_frame = split - crate::stream::OVERLAP_FRAMES;
+        let frame_bytes = self.frame_bytes();
+        let offset = sink.append(&self.data_bytes()[first_frame as usize * frame_bytes..])?;
+        self.stream = Some(StreamRegion {
+            store,
+            offset,
+            first_frame,
+            frames: self.total_frames - first_frame,
+        });
+        let resident_values = split as usize * self.channels as usize;
+        match &mut self.data {
+            SampleData::F32(data) => {
+                data.truncate(resident_values);
+                data.shrink_to_fit();
+            }
+            SampleData::I16(data) => {
+                data.truncate(resident_values);
+                data.shrink_to_fit();
+            }
+        }
+        Ok(true)
+    }
+
+    /// Point a prefix-only sample (one the cache handed back) at the
+    /// region of a store holding its tail.
+    pub fn attach_stream(&mut self, region: StreamRegion) {
+        self.stream = Some(region);
+    }
+
+    /// Put a cached tail back in RAM, making the sample whole again.
+    /// The stored region overlaps the resident prefix by
+    /// [`crate::stream::OVERLAP_FRAMES`]; those frames are dropped.
+    pub fn absorb_tail(&mut self, bytes: &[u8]) -> Result<(), String> {
+        let frame_bytes = self.frame_bytes();
+        let resident = self.resident_frames();
+        if resident >= self.total_frames {
+            return Ok(());
+        }
+        let overlap = crate::stream::OVERLAP_FRAMES.min(resident) as usize * frame_bytes;
+        if bytes.len() < overlap || !(bytes.len() - overlap).is_multiple_of(frame_bytes) {
+            return Err("cached tail is not a whole number of frames".into());
+        }
+        let frames = (bytes.len() - overlap) / frame_bytes;
+        if resident + frames as u64 != self.total_frames {
+            return Err(format!(
+                "cached tail is {frames} frames, expected {}",
+                self.total_frames - resident
+            ));
+        }
+        let channels = self.channels as usize;
+        let payload = &bytes[overlap..];
+        match &mut self.data {
+            SampleData::F32(data) => data.resize(data.len() + frames * channels, 0.0),
+            SampleData::I16(data) => data.resize(data.len() + frames * channels, 0),
+        }
+        let start = resident as usize * frame_bytes;
+        // SAFETY: POD byte view of the freshly grown storage.
+        let target = unsafe {
+            match &mut self.data {
+                SampleData::F32(data) => {
+                    std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut u8, data.len() * 4)
+                }
+                SampleData::I16(data) => {
+                    std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut u8, data.len() * 2)
+                }
+            }
+        };
+        target[start..start + payload.len()].copy_from_slice(payload);
+        self.stream = None;
+        Ok(())
+    }
+
+    /// Hand this sample's tail to `sink` (the load cache's tail file):
+    /// straight from RAM when the sample is whole, or copied out of the
+    /// store it streams from when it is not.
+    pub fn write_tail(
+        &self,
+        sink: &mut dyn crate::stream::TailSink,
+        stores: Option<&crate::stream::StreamStores>,
+    ) -> std::io::Result<Option<CachedTail>> {
+        match self.stream {
+            Some(region) => {
+                let stores = stores.ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "streamed sample without its store",
+                    )
+                })?;
+                let total = region.frames * self.frame_bytes() as u64;
+                let mut buffer = vec![0u8; (1 << 20).min(total.max(1) as usize)];
+                let mut done = 0u64;
+                let mut offset = None;
+                while done < total {
+                    let take = buffer.len().min((total - done) as usize);
+                    stores.read_exact_at(region.store, region.offset + done, &mut buffer[..take])?;
+                    let at = sink.append(&buffer[..take])?;
+                    offset.get_or_insert(at);
+                    done += take as u64;
+                }
+                Ok(Some(CachedTail {
+                    offset: offset.unwrap_or(0),
+                    len: total,
+                    first_frame: region.first_frame,
+                }))
+            }
+            None => {
+                let Some(split) = self.canonical_split() else {
+                    return Ok(None);
+                };
+                let first_frame = split - crate::stream::OVERLAP_FRAMES;
+                let bytes = &self.data_bytes()[first_frame as usize * self.frame_bytes()..];
+                let offset = sink.append(bytes)?;
+                Ok(Some(CachedTail {
+                    offset,
+                    len: bytes.len() as u64,
+                    first_frame,
+                }))
+            }
+        }
+    }
+
     /// Write this sample for the server's load cache: every field the
     /// decode-and-analysis phase produced, so a cache hit skips both.
     /// Attached releases are deliberately NOT written — caching happens
     /// pre-attach (bank indices are an assembly fact, and re-attaching
     /// is cheap). Little-endian, guarded by the cache's own version tag.
-    pub fn write_cache(&self, out: &mut impl std::io::Write) -> std::io::Result<()> {
+    pub fn write_cache(
+        &self,
+        out: &mut impl std::io::Write,
+        tail: Option<CachedTail>,
+    ) -> std::io::Result<()> {
         fn put_opt_u64(out: &mut impl std::io::Write, v: Option<u64>) -> std::io::Result<()> {
             match v {
                 Some(v) => {
@@ -803,6 +1076,16 @@ impl Sample {
         out.write_all(&self.tail_eof_level_db.to_le_bytes())?;
         out.write_all(&self.attack_start.to_le_bytes())?;
         out.write_all(&self.release_crossfade_ms.to_le_bytes())?;
+        out.write_all(&self.total_frames.to_le_bytes())?;
+        match tail {
+            Some(tail) => {
+                out.write_all(&[1])?;
+                out.write_all(&tail.offset.to_le_bytes())?;
+                out.write_all(&tail.len.to_le_bytes())?;
+                out.write_all(&tail.first_frame.to_le_bytes())?;
+            }
+            None => out.write_all(&[0])?,
+        }
         match &self.data {
             SampleData::F32(data) => {
                 out.write_all(&[0])?;
@@ -829,7 +1112,9 @@ impl Sample {
 
     /// Rebuild a sample [`Sample::write_cache`] wrote. Any structural
     /// surprise is an error — the caller treats it as a cache miss.
-    pub fn read_cache(input: &mut impl std::io::Read) -> std::io::Result<Sample> {
+    pub fn read_cache(
+        input: &mut impl std::io::Read,
+    ) -> std::io::Result<(Sample, Option<CachedTail>)> {
         use std::io::{Error, ErrorKind, Read};
         fn get<const N: usize>(input: &mut impl Read) -> std::io::Result<[u8; N]> {
             let mut bytes = [0u8; N];
@@ -885,6 +1170,15 @@ impl Sample {
         let tail_eof_level_db = f32::from_le_bytes(get::<4>(input)?);
         let attack_start = get_u64(input)?;
         let release_crossfade_ms = u16::from_le_bytes(get::<2>(input)?);
+        let total_frames = get_u64(input)?;
+        let tail = match get::<1>(input)?[0] {
+            0 => None,
+            _ => Some(CachedTail {
+                offset: get_u64(input)?,
+                len: get_u64(input)?,
+                first_frame: get_u64(input)?,
+            }),
+        };
         let tag = get::<1>(input)?[0];
         let len = get_len(input, 1 << 33)?;
         let data = match tag {
@@ -911,8 +1205,14 @@ impl Sample {
         if channels == 0 || data.len() % channels as usize != 0 {
             return Err(Error::new(ErrorKind::InvalidData, "cache shape invalid"));
         }
-        Ok(Sample {
+        let resident = (data.len() / channels as usize) as u64;
+        if total_frames < resident || (tail.is_none() && total_frames != resident) {
+            return Err(Error::new(ErrorKind::InvalidData, "cache frame count invalid"));
+        }
+        Ok((Sample {
             data,
+            total_frames,
+            stream: None,
             channels,
             sample_rate_hz,
             sustain_loop,
@@ -926,7 +1226,7 @@ impl Sample {
             tail_eof_level_db,
             attack_start,
             release_crossfade_ms,
-        })
+        }, tail))
     }
 
     /// Resident interleaved data + channel count, for the sinc reader.
@@ -954,7 +1254,9 @@ impl Sample {
     /// the last frame clamp to it.
     #[inline]
     pub fn read(&self, position: f64) -> (f32, f32) {
-        let last = self.frames() - 1;
+        // Resident frames only: a streamed position is served through
+        // the reader's stream window, never from here.
+        let last = self.resident_frames().saturating_sub(1);
         let index = (position as u64).min(last);
         let next = (index + 1).min(last);
         let fraction = (position - index as f64) as f32;
@@ -977,6 +1279,9 @@ impl Sample {
 #[derive(Debug, Clone, Default)]
 pub struct SampleBank {
     samples: Vec<Sample>,
+    /// The files this bank's streamed regions live in, when any of its
+    /// samples has been split. Shared with the streamer threads.
+    stores: Option<std::sync::Arc<crate::stream::StreamStores>>,
 }
 
 impl SampleBank {
@@ -1021,9 +1326,36 @@ impl SampleBank {
         checksum
     }
 
-    /// Total decoded audio held, in bytes.
+    /// Total decoded audio held in RAM, in bytes.
     pub fn resident_bytes(&self) -> usize {
         self.samples.iter().map(|s| s.data.bytes()).sum()
+    }
+
+    /// Audio this bank plays from disk instead of RAM, in bytes.
+    pub fn streamed_bytes(&self) -> usize {
+        self.samples
+            .iter()
+            .filter_map(|sample| {
+                let region = sample.stream()?;
+                Some((region.frames - crate::stream::OVERLAP_FRAMES.min(region.frames)) as usize
+                    * sample.frame_bytes())
+            })
+            .sum()
+    }
+
+    /// How many samples stream.
+    pub fn streamed_samples(&self) -> usize {
+        self.samples.iter().filter(|s| s.stream().is_some()).count()
+    }
+
+    /// Hand the bank the stores its regions point into. Called once,
+    /// control-side, before the bank is shared with the engine.
+    pub fn set_stores(&mut self, stores: std::sync::Arc<crate::stream::StreamStores>) {
+        self.stores = Some(stores);
+    }
+
+    pub fn stores(&self) -> Option<std::sync::Arc<crate::stream::StreamStores>> {
+        self.stores.clone()
     }
 }
 

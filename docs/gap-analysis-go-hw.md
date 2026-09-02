@@ -169,10 +169,21 @@ at load, rank enable/disable. (UG5 p76; DS5 p14.)
   440 ms cold → ~30 ms warm.
 - **(c) parallel decode**: every unique file decodes and analyzes on a worker
   pool (`available_parallelism`), assembly stays sequential.
+- **(e) disk streaming of release tails** (2026-09-02): everything through the
+  last sustain loop stays resident — a held note never waits for a disk — plus
+  0.35 s of each tail so the splice at note-off starts instantly; the rest is
+  read from a seekable store by streamer threads into per-voice SPSC rings and
+  a linear window the sinc kernels dot against. Streamed tails are **bit-
+  identical** to resident ones. The load cache became the store: entries are
+  always split (`<hash>.samples` head + `<hash>.tails`), so one cache serves
+  both residencies and a warm streaming load copies no audio at all. Failures
+  are fades, never clicks — an underrun freezes on the last frame it has and
+  takes the 15 ms kill ramp; a release that finds no free slot plays its
+  resident head and the EOF guard fades it. Sidecar `[samples] streaming =
+  auto|on|off` + `ram_budget_mb`. Demo set: 85.8 → 55.1 MiB resident.
+  See docs/progress/2026-09-02-disk-streaming.md.
 
 **Remaining (the true residue):**
-- **(e) streaming** — the big one; still needed for sets that exceed RAM even
-  at 16-bit. Design sketched in DESIGN.md/bank.rs comments.
 - (d) per-rank load options (mono downmix, first-loop/first-release-only,
   rank disable).
 - Lossless delta compression (GO's) would buy another ~1.5–2× at RT decode

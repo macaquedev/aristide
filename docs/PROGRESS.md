@@ -3,6 +3,7 @@
 Newest first. One entry per work session; keep entries factual and short.
 Milestones refer to DESIGN.md.
 
+- [2026-09-02 — release tails play off the disk (gap §3e)](progress/2026-09-02-disk-streaming.md)
 - [2026-09-02 — a recorded A/B against GrandOrgue](progress/2026-09-02-ab-grandorgue.md)
 - [2026-09-02 — the release splice serves both channels](progress/2026-09-02-stereo-release-alignment.md)
 - [2026-09-02 — the swell box pushes back, and boxes nest](progress/2026-09-02-box-pressure-and-nested-boxes.md)

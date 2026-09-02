@@ -173,6 +173,19 @@ impl SincTables {
         self.kernels.len() - 1
     }
 
+    /// Tap count of one kernel — what a streamed read must have
+    /// contiguous in its window.
+    #[inline]
+    pub(crate) fn taps(&self, kernel_index: usize) -> usize {
+        self.kernels[kernel_index].taps
+    }
+
+    /// How many frames before the integer position a read starts at.
+    #[inline]
+    pub(crate) fn left_taps(&self, kernel_index: usize) -> usize {
+        self.kernels[kernel_index].left_taps
+    }
+
     /// Interpolated stereo read at a fractional frame position, through
     /// the kernel at `kernel_index` (from [`SincTables::select`]).
     ///
@@ -226,29 +239,7 @@ impl SincTables {
                     &all[start..start + count],
                 ),
                 crate::bank::SampleData::I16(all) => {
-                    let window = &all[start..start + count];
-                    #[cfg(target_arch = "x86_64")]
-                    unsafe {
-                        if self.use_avx2 && channels == 1 {
-                            let value = dot_blended_mono_avx2_i16(row0, row1, row_mix, window);
-                            return (value, value);
-                        }
-                        if channels == 1 {
-                            let value = dot_blended_mono_sse2_i16(row0, row1, row_mix, window);
-                            (value, value)
-                        } else {
-                            dot_blended_stereo_sse2_i16(row0, row1, row_mix, window)
-                        }
-                    }
-                    #[cfg(not(target_arch = "x86_64"))]
-                    {
-                        debug_assert!(count <= MAX_WINDOW);
-                        let mut converted = [0.0f32; MAX_WINDOW];
-                        for (out, value) in converted[..count].iter_mut().zip(window) {
-                            *out = f32::from(*value) * crate::bank::I16_SCALE;
-                        }
-                        self.dot_window(row0, row1, row_mix, channels, &converted[..count])
-                    }
+                    self.dot_window_i16(row0, row1, row_mix, channels, &all[start..start + count])
                 }
             };
         }
@@ -278,6 +269,113 @@ impl SincTables {
         } else {
             (left, right)
         }
+    }
+
+    /// The same dot product over a 16-bit window (see
+    /// [`SincTables::read`]): SIMD kernels sign-extend in-register and
+    /// fold the dequantization scale into the final sum, so 16-bit
+    /// residency costs no scalar pre-pass.
+    #[inline]
+    fn dot_window_i16(
+        &self,
+        row0: &[f32],
+        row1: &[f32],
+        row_mix: f32,
+        channels: usize,
+        window: &[i16],
+    ) -> (f32, f32) {
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            if self.use_avx2 && channels == 1 {
+                let value = dot_blended_mono_avx2_i16(row0, row1, row_mix, window);
+                return (value, value);
+            }
+            if channels == 1 {
+                let value = dot_blended_mono_sse2_i16(row0, row1, row_mix, window);
+                (value, value)
+            } else {
+                dot_blended_stereo_sse2_i16(row0, row1, row_mix, window)
+            }
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            let count = window.len();
+            debug_assert!(count <= MAX_WINDOW);
+            let mut converted = [0.0f32; MAX_WINDOW];
+            for (out, value) in converted[..count].iter_mut().zip(window) {
+                *out = f32::from(*value) * crate::bank::I16_SCALE;
+            }
+            self.dot_window(row0, row1, row_mix, channels, &converted[..count])
+        }
+    }
+
+    /// Interpolated stereo read out of a streamer's window — the same
+    /// kernels, the same arithmetic, over frames that came off a disk
+    /// instead of out of the bank. A tail therefore sounds bit-for-bit
+    /// the same whether it was resident or streamed.
+    ///
+    /// `window_start` is the sample frame the window's first frame is,
+    /// and the window is a plain contiguous run of frames (the streamer
+    /// linearizes its ring for exactly this reason). Taps that fall off
+    /// either end clamp, as they do at a sample's own edges; the caller
+    /// decides whether that clamp means "end of the recording" or "the
+    /// disk lost the race".
+    #[inline]
+    pub(crate) fn read_window(
+        &self,
+        kernel_index: usize,
+        window: &crate::stream::StreamWindow<'_>,
+        window_start: u64,
+        window_frames: usize,
+        channels: usize,
+        position: f64,
+    ) -> (f32, f32) {
+        let kernel = &self.kernels[kernel_index];
+        let taps = kernel.taps;
+        let base = position.floor();
+        let fraction = position - base;
+        let scaled = fraction * PHASES as f64;
+        let row_index = scaled as usize;
+        let row_mix = (scaled - row_index as f64) as f32;
+        let row0 = &kernel.coefficients[row_index * taps..row_index * taps + taps];
+        let row1 = &kernel.coefficients[(row_index + 1) * taps..(row_index + 1) * taps + taps];
+
+        let first_tap = base as i64 - kernel.left_taps as i64 - window_start as i64;
+        if first_tap >= 0 && first_tap as usize + taps <= window_frames {
+            let start = first_tap as usize * channels;
+            let count = taps * channels;
+            return match window {
+                crate::stream::StreamWindow::F32(all) => {
+                    self.dot_window(row0, row1, row_mix, channels, &all[start..start + count])
+                }
+                crate::stream::StreamWindow::I16(all) => {
+                    self.dot_window_i16(row0, row1, row_mix, channels, &all[start..start + count])
+                }
+            };
+        }
+
+        // Edge of the window: map every tap individually, clamped.
+        let last = window_frames as i64 - 1;
+        let mut left = 0.0f32;
+        let mut right = 0.0f32;
+        for tap in 0..taps {
+            let frame = (first_tap + tap as i64).clamp(0, last.max(0)) as usize;
+            let coefficient = row0[tap] + (row1[tap] - row0[tap]) * row_mix;
+            let (l, r) = match window {
+                crate::stream::StreamWindow::F32(all) => (
+                    all[frame * channels],
+                    all[frame * channels + (channels > 1) as usize],
+                ),
+                crate::stream::StreamWindow::I16(all) => (
+                    f32::from(all[frame * channels]) * crate::bank::I16_SCALE,
+                    f32::from(all[frame * channels + (channels > 1) as usize])
+                        * crate::bank::I16_SCALE,
+                ),
+            };
+            left += coefficient * l;
+            right += coefficient * r;
+        }
+        (left, right)
     }
 
     /// The blended-row dot product over one contiguous window — the

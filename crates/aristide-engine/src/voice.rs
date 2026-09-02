@@ -11,6 +11,7 @@ use aristide_model::units::cents_to_ratio;
 use crate::bank::Sample;
 use crate::enclosure::{Enclosure, ENCLOSURE_NONE, MAX_ENCLOSURES, MAX_VOICE_ENCLOSURES};
 use crate::resample::SincTables;
+use crate::stream::{holds_slot, StreamRt};
 use crate::tone::ToneVoice;
 use crate::wind::{self, WindGroup};
 
@@ -212,6 +213,15 @@ pub(crate) struct SampledVoice {
     /// pallet-opening attack boost.
     pub(crate) age_frames: u32,
     pub(crate) rng: u32,
+    /// Stream slot feeding this voice's tail, or
+    /// [`NO_SLOT`](crate::stream::NO_SLOT) /
+    /// [`DENIED_SLOT`](crate::stream::DENIED_SLOT). A voice
+    /// holds at most one: only one of its cursors ever reads release
+    /// material, and the crossfade hands that cursor straight on.
+    pub(crate) stream: u16,
+    /// The stream window could not answer a read — the disk lost the
+    /// race. The voice takes the fast fade rather than glitching.
+    pub(crate) starving: bool,
     pub(crate) phase: SamplePhase,
     pub(crate) cursor: PlaybackCursor,
     pub(crate) wind: WindState,
@@ -228,8 +238,20 @@ pub(crate) struct SampledVoice {
 pub(crate) struct VoiceBlockContext {
     pub(crate) lite: bool,
     pub(crate) rate: f64,
+    /// Last frame the voice may read from its own sample, and from the
+    /// separate release it is fading into. For a streamed sample these
+    /// are the whole recording when the voice holds a slot, and the
+    /// resident end when it does not (the EOF guard then fades the tail
+    /// out where the RAM runs out instead of cutting it).
     pub(crate) last: f64,
     pub(crate) tail_last: f64,
+    /// Position from which reads must go through the stream window
+    /// instead of RAM ([`crate::stream::CROSSOVER_FRAMES`] before the
+    /// resident end, the one point where either side can serve a whole
+    /// kernel). `INFINITY` for anything fully resident — one
+    /// predictable compare, never taken.
+    pub(crate) resident_limit: f64,
+    pub(crate) tail_resident_limit: f64,
     pub(crate) current_loop: Option<(u64, u64)>,
     pub(crate) looping: bool,
     /// Engine output sample rate; releases need it to convert dB/s
@@ -453,11 +475,16 @@ impl SampledVoice {
         output_sr: f32,
     ) -> VoiceBlockContext {
         let current_loop = sample.loop_at(self.cursor.loop_index as usize);
+        let streaming = holds_slot(self.stream);
+        let (last, resident_limit) = readable(sample, streaming);
+        let (tail_last, tail_resident_limit) = readable(external.unwrap_or(sample), streaming);
         VoiceBlockContext {
             lite,
             rate: self.cursor.rate * rate_scale,
-            last: (sample.frames() - 1) as f64,
-            tail_last: (external.unwrap_or(sample).frames() - 1) as f64,
+            last,
+            tail_last,
+            resident_limit,
+            tail_resident_limit,
             current_loop,
             looping: current_loop.is_some(),
             output_sr,
@@ -494,6 +521,7 @@ impl SampledVoice {
     /// Render one frame and advance. Returns `None` when the voice ends.
     /// End-of-data checks happen on entry so every read frame is emitted.
     #[inline]
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn tick(
         &mut self,
         sample: &Sample,
@@ -502,13 +530,15 @@ impl SampledVoice {
         ctx: &VoiceBlockContext,
         crossfade_step: f32,
         kill_step: f32,
+        mut streams: Option<&mut StreamRt>,
     ) -> Option<(f32, f32)> {
         let rate = self.bend_rate(ctx.rate);
         self.fire_pending_release(sample, ctx.output_sr);
         if self.ended(ctx) {
             return None;
         }
-        let (mut left, mut right) = self.read_frame(sample, tables, ctx);
+        let (mut left, mut right) =
+            self.read_frame(sample, tables, ctx, streams.as_deref_mut());
         // This frame's output gain, captured BEFORE the phase step
         // mutates self.gain. The crossfade-completion frame folds
         // tail_gain into the voice gain for FUTURE frames, but its own
@@ -526,7 +556,17 @@ impl SampledVoice {
             rate,
             crossfade_step,
             kill_step,
+            streams,
         );
+        // The disk lost the race: the read clamped on the last frame it
+        // had, so the waveform is frozen, not jumped. Ramp it out fast
+        // (15 ms) — an underrun must cost a fade, never a click.
+        if self.starving && self.phase != SamplePhase::FadeOut {
+            self.phase = SamplePhase::FadeOut;
+            self.release.amplitude = 1.0;
+            self.release.fade_scale = 1.0;
+            self.cursor.past_loop = true;
+        }
         self.apply_tail_charge(&mut left, &mut right);
         self.apply_eof_guard(&mut left, &mut right, ctx.last);
         self.decay_tail();
@@ -583,10 +623,11 @@ impl SampledVoice {
     /// The persistent leg's read.
     #[inline]
     fn read_frame(
-        &self,
+        &mut self,
         sample: &Sample,
         tables: &SincTables,
         ctx: &VoiceBlockContext,
+        streams: Option<&mut StreamRt>,
     ) -> (f32, f32) {
         // Cursors still circling the sustain loop wrap their kernel taps
         // across the seam; tail reads clamp at the sample edges.
@@ -595,11 +636,61 @@ impl SampledVoice {
         } else {
             ctx.current_loop
         };
-        if ctx.lite {
-            sample.read(self.cursor.position)
-        } else {
-            tables.read(self.cursor.kernel, sample, self.cursor.position, seam)
+        self.read_source(
+            sample,
+            tables,
+            ctx,
+            self.cursor.position,
+            ctx.resident_limit,
+            seam,
+            streams,
+        )
+    }
+
+    /// One frame of `sample` at `position`. Resident positions read
+    /// exactly as they always have; past `limit` the frames come from
+    /// this voice's stream window instead, through the same kernels.
+    #[inline]
+    #[allow(clippy::too_many_arguments)]
+    fn read_source(
+        &mut self,
+        sample: &Sample,
+        tables: &SincTables,
+        ctx: &VoiceBlockContext,
+        position: f64,
+        limit: f64,
+        seam: Option<(u64, u64)>,
+        streams: Option<&mut StreamRt>,
+    ) -> (f32, f32) {
+        if position < limit {
+            return if ctx.lite {
+                sample.read(position)
+            } else {
+                tables.read(self.cursor.kernel, sample, position, seam)
+            };
         }
+        let slot = self.stream;
+        let channels = sample.channels() as usize;
+        let kernel = self.cursor.kernel;
+        let taps = tables.taps(kernel);
+        let first_tap = position.floor() as i64 - tables.left_taps(kernel) as i64;
+        if let Some(rt) = streams
+            && let Some((window, start, frames)) = rt.window(slot, first_tap, taps)
+        {
+            let value = if ctx.lite {
+                window.read_linear(start, frames, channels, position)
+            } else {
+                tables.read_window(kernel, &window, start, frames, channels, position)
+            };
+            if rt.underrun(slot) {
+                self.starving = true;
+            }
+            return value;
+        }
+        // No slot, or a slot that has nothing: hold on the last resident
+        // frame. `starving` turns that into a fade one frame later.
+        self.starving = true;
+        sample.read(position.min(limit))
     }
 
     /// This frame's phase bookkeeping: blend the release leg in, or step
@@ -617,6 +708,7 @@ impl SampledVoice {
         rate: f64,
         crossfade_step: f32,
         kill_step: f32,
+        streams: Option<&mut StreamRt>,
     ) -> bool {
         match self.phase {
             SamplePhase::Held | SamplePhase::Tail => {}
@@ -627,12 +719,16 @@ impl SampledVoice {
                 // the START of every splice — an audible tick on exposed
                 // releases. Keep full quality; the pallet stagger
                 // already spreads the crossfade CPU spike.
-                let (tail_l, tail_r) = if ctx.lite {
-                    tail_sample.read(self.cursor.release_position)
-                } else {
-                    let position = self.cursor.release_position;
-                    tables.read(self.cursor.kernel, tail_sample, position, None)
-                };
+                let position = self.cursor.release_position;
+                let (tail_l, tail_r) = self.read_source(
+                    tail_sample,
+                    tables,
+                    ctx,
+                    position,
+                    ctx.tail_resident_limit,
+                    None,
+                    streams,
+                );
                 // Raised-cosine-shaped blend (smoothstep ≈ it, no trig):
                 // linear fades dip audibly on the uncorrelated noise
                 // floor (Appleton 2019).
@@ -960,6 +1056,26 @@ impl SampledVoice {
         } else {
             1.0
         }
+    }
+}
+
+/// How far a voice may read into `sample`, and from where its reads
+/// must come off the disk. A streamed sample the voice has no slot for
+/// simply ends at its resident head: the EOF guard fades the last 46 ms
+/// of it, so slot exhaustion costs a shortened tail, never a click.
+fn readable(sample: &Sample, has_slot: bool) -> (f64, f64) {
+    match sample.stream() {
+        Some(_) if has_slot => (
+            (sample.frames() - 1) as f64,
+            sample
+                .resident_frames()
+                .saturating_sub(crate::stream::CROSSOVER_FRAMES) as f64,
+        ),
+        Some(_) => (
+            sample.resident_frames().saturating_sub(1) as f64,
+            f64::INFINITY,
+        ),
+        None => ((sample.frames() - 1) as f64, f64::INFINITY),
     }
 }
 

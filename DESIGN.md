@@ -151,8 +151,8 @@ audible impact:
 │  control plane: HTTP/JSON on localhost today (`--http-port`, 9669) — console, browser,  │
 │  scripting; a richer IPC (unix socket / TCP, OSC, tablet remote) is M5                  │
 │        ┌──────────────── aristide-engine (RT core, lib) ────────────────┐               │
-│        │ lock-free command queue → voice allocator → voices (in RAM     │               │
-│        │ today, 16-bit by default; disk streamer is M4) → node graph    │               │
+│        │ lock-free command queue → voice allocator → voices (attacks    │               │
+│        │ and loops in RAM, 16-bit; tails stream) → node graph           │               │
 │        │ (delays, conv reverb, wind taps) → N-channel routing, SIMD mix │               │
 │        └────────────────────────────┬────────────────────────────────────┘              │
 │                 aristide-model (lib): organ model — divisions, stops, ranks, pipes,     │
@@ -164,9 +164,11 @@ audible impact:
 ```
 
 - The **audio thread never allocates, locks, or touches disk**. Control → RT communication
-  is lock-free SPSC queues. Samples are fully RAM-resident today (16-bit by default, see
-  docs/progress/2026-08-26-memory-wall.md); the planned disk streamer keeps attacks
-  pre-cached in RAM (Hauptwerk's proven trick) and fills ring buffers from streamer threads.
+  is lock-free SPSC queues. Attacks and sustain loops are RAM-resident (16-bit by default,
+  see docs/progress/2026-08-26-memory-wall.md) — a held note never waits for a disk; the
+  release tails behind them stream (2026-09-02), keeping a resident head of each tail
+  (Hauptwerk's proven trick, inverted) and filling ring buffers from streamer threads. See
+  docs/progress/2026-09-02-disk-streaming.md.
 - Polyphony target: **≥2000 streaming voices** on a mid-range desktop; latency target
   sub-10 ms end-to-end at 48 kHz.
 - The engine is a pure library (buffers in/out) — the server owns devices. This is what
@@ -451,7 +453,7 @@ main thread; a failed load reports and leaves the running organ untouched.
   into the model; validate against GrandOrgue's docs. ✅
 - **M3 — sampled voices**: attack-cache + disk-streaming playback with loops and basic
   releases. First real organ sound. ✅ (RAM-resident; disk streaming moved to M4 and
-  still open there)
+  landed there 2026-09-02)
 - **M4 — engine quality pass**: phase-aligned multi-releases, sinc resampling, voicing,
   tremulants, wind model. The "better than Hauptwerk" milestone; A/B against GO.
   Shipped: sinc resampling + phase-aligned releases (2026-08-08), wind supply model
@@ -459,12 +461,12 @@ main thread; a failed load reports and leaves the running organ untouched.
   and attack selection, sounding tremulants (2026-08-26; wind-valve physics
   2026-08-27), voicing trims + generals with a setter, 16-bit residency + load cache
   (2026-08-26), closed-box pressure rise + nested (multi-box) windchests
-  (2026-09-02), stereo release alignment (2026-09-02), a recorded A/B against
-  GrandOrgue (2026-09-02, headless rig + analysis in `tools/ab/`, see
-  docs/progress/2026-09-02-ab-grandorgue.md). Still open: disk streaming for
-  sets beyond RAM; wave-trem switch on held notes; pipe-scope voicing, a
-  brightness/EQ leg and live voicing edits; divisionals, stepper, crescendo and
-  a piston rail.
+  (2026-09-02), stereo release alignment (2026-09-02), disk streaming of
+  release tails (2026-09-02), a recorded A/B against GrandOrgue (2026-09-02,
+  headless rig + analysis in `tools/ab/`, see
+  docs/progress/2026-09-02-ab-grandorgue.md). Still open: wave-trem switch on
+  held notes; pipe-scope voicing, a brightness/EQ leg and live voicing edits;
+  divisionals, stepper, crescendo and a piston rail.
 - **M5 — headless split + GUI**: IPC protocol, native GUI console, multi-window. The
   console shipped 2026-08-13 as a Tauri 2 shell over the web console (replacing the
   egui GUI) and edits the organ in place (see "The console edits the instrument"

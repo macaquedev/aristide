@@ -111,11 +111,122 @@ pub struct LoadedBank {
 /// RAM) or anything else = f32. Quantization happens after each file's
 /// analysis so periods, phase maps and tail measurements keep the full
 /// decode precision.
+/// A fully-resident build — what every test that has no opinion about
+/// streaming wants. The server itself always goes through
+/// [`build_with`] with the sidecar's policy.
+#[cfg(test)]
 pub fn build(
     organ: &Organ,
     device_rate: f32,
     sample_bits: u32,
     cache_path: Option<&std::path::Path>,
+) -> Result<LoadedBank> {
+    build_with(
+        organ,
+        device_rate,
+        sample_bits,
+        cache_path,
+        StreamingPolicy::OFF,
+    )
+}
+
+/// What a load may do with the release material that dominates a set's
+/// bytes (see `aristide_engine::stream`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamingMode {
+    /// Everything resident, as before streaming existed.
+    Off,
+    /// Stream every tail worth a slot, however small the set — the
+    /// mode the tests and the demo set use.
+    On,
+    /// Stream only when the fully-resident bank would not fit the
+    /// budget.
+    Auto,
+}
+
+/// The sidecar's `[samples] streaming` / `ram_budget_mb`, resolved
+/// against this machine.
+#[derive(Debug, Clone, Copy)]
+pub struct StreamingPolicy {
+    pub mode: StreamingMode,
+    pub ram_budget_mb: Option<u64>,
+}
+
+impl StreamingPolicy {
+    /// The two ends of the policy, for tests: the server itself always
+    /// builds one from the sidecar.
+    #[cfg(test)]
+    pub const OFF: StreamingPolicy = StreamingPolicy {
+        mode: StreamingMode::Off,
+        ram_budget_mb: None,
+    };
+
+    #[cfg(test)]
+    pub const ON: StreamingPolicy = StreamingPolicy {
+        mode: StreamingMode::On,
+        ram_budget_mb: None,
+    };
+
+    /// Decide before a single file is decoded — by then it is too late,
+    /// the RAM is already spent. The only measure available that early
+    /// is what the source files weigh on disk, so the estimate is
+    /// deliberately crude and deliberately pessimistic: WavPack holds
+    /// organ samples at roughly 55 % of 16-bit PCM (so ~1.8× on decode
+    /// to 16-bit residency), while 24-bit PCM shrinks to 0.67×. 1.5×
+    /// sits between them, biased toward the compressed case — which is
+    /// what the sets big enough to matter tend to be. Being wrong
+    /// upward costs a stream pool and some disk reads; being wrong
+    /// downward costs the process. `ram_budget_mb` overrides the guess
+    /// for anyone near the line.
+    fn resolve(&self, source_bytes: u64, quantize: bool) -> bool {
+        match self.mode {
+            StreamingMode::Off => false,
+            StreamingMode::On => true,
+            StreamingMode::Auto => {
+                let estimate = source_bytes as f64 * if quantize { 1.5 } else { 3.0 };
+                let budget = match self.ram_budget_mb {
+                    Some(mb) => mb * 1024 * 1024,
+                    None => match physical_ram_bytes() {
+                        Some(total) => total / 2,
+                        None => {
+                            tracing::info!(
+                                "samples: physical RAM unknown; streaming stays off \
+                                 (set [samples] ram_budget_mb or streaming = \"on\")"
+                            );
+                            return false;
+                        }
+                    },
+                };
+                let stream = estimate > budget as f64;
+                tracing::info!(
+                    "samples: {:.0} MiB of source files ≈ {:.0} MiB resident against a \
+                     {:.0} MiB budget — streaming {}",
+                    source_bytes as f64 / (1024.0 * 1024.0),
+                    estimate / (1024.0 * 1024.0),
+                    budget as f64 / (1024.0 * 1024.0),
+                    if stream { "on" } else { "off" }
+                );
+                stream
+            }
+        }
+    }
+}
+
+/// This machine's physical memory. Linux only (`/proc/meminfo`);
+/// elsewhere `auto` declines to guess and leaves streaming off.
+fn physical_ram_bytes() -> Option<u64> {
+    let text = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let line = text.lines().find(|line| line.starts_with("MemTotal:"))?;
+    let kb: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+    Some(kb * 1024)
+}
+
+pub fn build_with(
+    organ: &Organ,
+    device_rate: f32,
+    sample_bits: u32,
+    cache_path: Option<&std::path::Path>,
+    policy: StreamingPolicy,
 ) -> Result<LoadedBank> {
     let quantize = sample_bits == 16;
     let mut bank = SampleBank::default();
@@ -125,10 +236,60 @@ pub fn build(
     let chest_enclosures = resolve_chest_enclosures(organ, &mut skipped);
 
     let jobs = collect_decode_jobs(organ);
-    let plan = plan_cache(organ, cache_path, quantize, jobs);
-    let outcomes = decode_misses(organ, quantize, plan.misses);
+    let source_bytes: u64 = jobs
+        .iter()
+        .filter_map(|job| crate::cache::stamp(&organ.base_path.join(job.path())))
+        .map(|(_, size)| size)
+        .sum();
+    let streaming = policy.resolve(source_bytes, quantize);
+
+    // The stores the bank's streamed regions point into: the cache's
+    // tail file for anything that came back hot, and this load's spool
+    // for anything freshly decoded.
+    let mut stores = aristide_engine::stream::StreamStores::new();
+    let tails_path = cache_path.map(tails_path_for);
+    let mut tails = tails_path
+        .as_deref()
+        .and_then(|path| crate::cache::Tails::open(path).ok());
+    if streaming && let Some(open) = tails.as_mut() {
+        match open.take_file() {
+            Ok(file) => open.store = Some(stores.push(file)),
+            Err(err) => tracing::warn!("sample cache tails unusable ({err}); re-decoding"),
+        }
+    }
+
+    let plan = plan_cache(organ, cache_path, tails.as_ref(), quantize, jobs);
+    // Fresh decodes need somewhere to put their tails as they finish —
+    // holding them until the cache is written would be the very RAM
+    // spike streaming exists to avoid.
+    let spool = if streaming && plan.any_misses {
+        match crate::spool::Spool::create(cache_path.and_then(|p| p.parent())) {
+            Ok(spool) => Some(spool),
+            Err(err) => {
+                tracing::warn!("no stream spool ({err}); this load stays resident");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let spool_store = match spool.as_ref() {
+        Some(spool) => match spool.reader() {
+            Ok(file) => Some(stores.push(file)),
+            Err(err) => {
+                tracing::warn!("stream spool unreadable ({err}); this load stays resident");
+                None
+            }
+        },
+        None => None,
+    };
+    let sink = spool.as_ref().zip(spool_store);
+
+    let outcomes = decode_misses(organ, quantize, plan.misses, sink);
     let mut maps = finish_decode(
         cache_path,
+        tails_path.as_deref(),
+        (streaming || tails.is_some()).then_some(&stores),
         plan.hits,
         plan.miss_stamps,
         plan.total_jobs,
@@ -179,6 +340,9 @@ pub fn build(
         &mut skipped,
     );
     assign_borrowed_pipe_specs(organ, &mut specs, &mut attack_options, &mut skipped);
+    if bank.streamed_samples() > 0 {
+        bank.set_stores(std::sync::Arc::new(stores));
+    }
 
     Ok(LoadedBank {
         bank,
@@ -188,6 +352,11 @@ pub fn build(
         home,
         rank_anchors: rank_anchor,
     })
+}
+
+/// The cache's companion tail file: `<hash>.samples` → `<hash>.tails`.
+fn tails_path_for(cache_path: &std::path::Path) -> PathBuf {
+    cache_path.with_extension("tails")
 }
 
 /// Windchest number → the enclosure engine indices its pipes sit in.
@@ -250,6 +419,15 @@ enum Job<'a> {
         path: &'a PathBuf,
         release: &'a aristide_model::ReleaseSample,
     },
+}
+
+impl Job<'_> {
+    fn path(&self) -> &PathBuf {
+        match self {
+            Job::Attack { path, .. } => path,
+            Job::Release { path, .. } => path,
+        }
+    }
 }
 
 /// A decoded [`Job`], still keyed by its path for the caller to file
@@ -322,11 +500,12 @@ struct CachePlan<'a> {
 fn plan_cache<'a>(
     organ: &Organ,
     cache_path: Option<&std::path::Path>,
+    tails: Option<&crate::cache::Tails>,
     quantize: bool,
     jobs: Vec<Job<'a>>,
 ) -> CachePlan<'a> {
     let mut stored: HashMap<PathBuf, crate::cache::Entry> = match cache_path {
-        Some(path) => match crate::cache::read(path) {
+        Some(path) => match crate::cache::read(path, tails) {
             Ok(entries) => entries,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
             Err(err) => {
@@ -395,7 +574,12 @@ fn plan_cache<'a>(
 }
 
 /// Decode every cache-miss job on a worker pool sized to the machine.
-fn decode_misses(organ: &Organ, quantize: bool, misses: Vec<Job<'_>>) -> Vec<(PathBuf, Outcome)> {
+fn decode_misses(
+    organ: &Organ,
+    quantize: bool,
+    misses: Vec<Job<'_>>,
+    sink: Option<(&crate::spool::Spool, u16)>,
+) -> Vec<(PathBuf, Outcome)> {
     let queue = std::sync::Mutex::new(misses);
     let results = std::sync::Mutex::new(Vec::new());
     let workers = std::thread::available_parallelism()
@@ -420,6 +604,9 @@ fn decode_misses(organ: &Organ, quantize: bool, misses: Vec<Job<'_>>) -> Vec<(Pa
                             if quantize {
                                 sample.quantize_i16();
                             }
+                            // Every analysis pass above ran on the whole
+                            // recording; only now does the tail leave RAM.
+                            offload(&mut sample, sink, &absolute);
                             (sample, info)
                         });
                         (path.clone(), Outcome::Attack(result))
@@ -433,6 +620,7 @@ fn decode_misses(organ: &Organ, quantize: bool, misses: Vec<Job<'_>>) -> Vec<(Pa
                             if quantize {
                                 sample.quantize_i16();
                             }
+                            offload(&mut sample, sink, &absolute);
                             sample
                         });
                         (path.clone(), Outcome::Release(result))
@@ -443,6 +631,23 @@ fn decode_misses(organ: &Organ, quantize: bool, misses: Vec<Job<'_>>) -> Vec<(Pa
         }
     });
     results.into_inner().expect("results")
+}
+
+/// Move one freshly decoded sample's tail to the spool. A spool that
+/// cannot be written (a full disk) is a warning, not a failure: the
+/// sample simply stays whole, exactly as a non-streaming load leaves it.
+fn offload(
+    sample: &mut Sample,
+    sink: Option<(&crate::spool::Spool, u16)>,
+    path: &std::path::Path,
+) {
+    let Some((spool, store)) = sink else {
+        return;
+    };
+    let mut sink = spool;
+    if let Err(err) = sample.offload_tail(store, &mut sink) {
+        tracing::warn!("{}: tail stays in RAM ({err})", path.display());
+    }
 }
 
 /// Every unique file, decoded and keyed by path, awaiting assembly.
@@ -456,8 +661,11 @@ struct DecodedMaps {
 /// decoded files, and rewrite the cache with the union — surviving
 /// hits plus fresh successes, all borrowed in place: no sample is ever
 /// cloned to be cached.
+#[allow(clippy::too_many_arguments)]
 fn finish_decode(
     cache_path: Option<&std::path::Path>,
+    tails_path: Option<&std::path::Path>,
+    stores: Option<&aristide_engine::stream::StreamStores>,
     hits: Vec<(PathBuf, crate::cache::Entry)>,
     miss_stamps: HashMap<PathBuf, (u64, u64, u64)>,
     total_jobs: usize,
@@ -532,7 +740,10 @@ fn finish_decode(
             }
         }
         let count = refs.len();
-        match crate::cache::write(path, refs.into_iter(), count) {
+        let tails = tails_path
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| tails_path_for(path));
+        match crate::cache::write(path, &tails, stores, refs.into_iter(), count) {
             Ok(()) => tracing::info!(
                 "sample cache written: {count} entries in {:.1?}",
                 started.elapsed()
@@ -2048,6 +2259,222 @@ mod tests {
             })
             .collect();
         assert_eq!(hautbois, vec![0, 2]);
+    }
+
+    /// Streaming the demo set: the same audio out of the engine, with
+    /// the tails on disk instead of in RAM. Renders a held note and its
+    /// release through both banks, pumping the streamer by hand so the
+    /// comparison is deterministic (no threads, no sleeping).
+    #[test]
+    fn streaming_the_demo_set_renders_identically() {
+        let Some(path) = demo_organ() else { return };
+        let organ = aristide_formats::grandorgue::load(&path).expect("loads").organ;
+        let device_rate = 44_100.0f32;
+        let resident = build(&organ, device_rate, 16, None).expect("resident build");
+        let streamed =
+            build_with(&organ, device_rate, 16, None, StreamingPolicy::ON).expect("streamed build");
+
+        assert_eq!(resident.bank.len(), streamed.bank.len(), "same samples");
+        assert!(
+            streamed.bank.streamed_samples() > 0,
+            "nothing streamed at all"
+        );
+        assert!(
+            streamed.bank.resident_bytes() < resident.bank.resident_bytes(),
+            "streaming freed no RAM: {} vs {}",
+            streamed.bank.resident_bytes(),
+            resident.bank.resident_bytes()
+        );
+        println!(
+            "demo set: {:.1} MiB resident, streamed: {:.1} MiB resident + {:.1} MiB on disk \
+             ({} of {} samples)",
+            resident.bank.resident_bytes() as f64 / (1024.0 * 1024.0),
+            streamed.bank.resident_bytes() as f64 / (1024.0 * 1024.0),
+            streamed.bank.streamed_bytes() as f64 / (1024.0 * 1024.0),
+            streamed.bank.streamed_samples(),
+            streamed.bank.len()
+        );
+
+        // A pipe with a tail worth streaming, played the same way twice.
+        let spec = *resident
+            .specs
+            .values()
+            .find(|spec| {
+                resident
+                    .bank
+                    .get(spec.sample)
+                    .is_some_and(|sample| sample.release_start().is_some())
+                    && streamed
+                        .bank
+                        .get(spec.sample)
+                        .is_some_and(|sample| sample.stream().is_some())
+            })
+            .expect("a streamed pipe with a tail");
+        let start = |handle: &mut aristide_engine::EngineHandle| {
+            handle.send(aristide_engine::Command::StartVoice {
+                handle: 1,
+                sample: spec.sample,
+                rate: spec.rate,
+                gain: spec.gain,
+                group: spec.group,
+                wind_weight: 0.0,
+                brightness: 0.0,
+                enclosures: [aristide_engine::enclosure::ENCLOSURE_NONE;
+                    aristide_engine::enclosure::MAX_VOICE_ENCLOSURES],
+                bus: 0,
+                delay_frames: 0,
+                nominal_hz: spec.nominal_hz,
+            });
+        };
+        let blocks = 400usize;
+        let block = 512usize;
+
+        let mut expected = vec![0.0f32; blocks * block * 2];
+        {
+            let (mut engine, mut handle) = aristide_engine::Engine::new(
+                device_rate,
+                std::sync::Arc::new(resident.bank.clone()),
+            );
+            engine.set_release_stagger(0.0);
+            start(&mut handle);
+            for index in 0..blocks {
+                if index == 40 {
+                    handle.send(aristide_engine::Command::StopVoice { handle: 1 });
+                }
+                engine.process(
+                    &mut expected[index * block * 2..(index + 1) * block * 2],
+                    2,
+                );
+            }
+        }
+
+        let mut actual = vec![0.0f32; blocks * block * 2];
+        {
+            let bank = std::sync::Arc::new(streamed.bank);
+            let (mut engine, mut handle) =
+                aristide_engine::Engine::new(device_rate, std::sync::Arc::clone(&bank));
+            engine.set_release_stagger(0.0);
+            let (rt, mut workers) = aristide_engine::stream::attach(
+                &bank,
+                16,
+                1,
+                aristide_engine::stream::StreamCounters::default(),
+            )
+            .expect("the streamed bank gets a pool");
+            engine.set_streams(rt);
+            start(&mut handle);
+            for index in 0..blocks {
+                if index == 40 {
+                    handle.send(aristide_engine::Command::StopVoice { handle: 1 });
+                }
+                for _ in 0..8 {
+                    for worker in workers.iter_mut() {
+                        worker.poll_once();
+                    }
+                }
+                engine.process(&mut actual[index * block * 2..(index + 1) * block * 2], 2);
+            }
+        }
+
+        let worst = expected
+            .iter()
+            .zip(&actual)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        let energy: f32 = expected[60 * block * 2..].iter().map(|v| v.abs()).sum();
+        assert!(energy > 1.0, "no release tail was rendered ({energy:e})");
+        assert_eq!(worst, 0.0, "streamed demo render differs by {worst:e}");
+    }
+
+    /// The load cache is always split — head in `.samples`, tail in
+    /// `.tails` — so one cache serves both residencies: written by a
+    /// streaming load, read back by a fully-resident one and vice
+    /// versa, with identical audio either way.
+    #[test]
+    fn the_split_cache_serves_both_residencies() {
+        let Some(path) = demo_organ() else { return };
+        let organ = aristide_formats::grandorgue::load(&path).expect("loads").organ;
+        let dir = std::env::temp_dir().join("aristide-stream-cache-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("cache dir");
+        let cache = dir.join("demo.samples");
+
+        // Cold, streaming: tails go to the spool, then into the cache's
+        // tail file when it is written.
+        let cold = build_with(&organ, 44_100.0, 16, Some(&cache), StreamingPolicy::ON)
+            .expect("cold streaming build");
+        assert!(cold.bank.streamed_samples() > 0);
+        let listing: Vec<String> = std::fs::read_dir(&dir)
+            .expect("dir")
+            .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
+            .collect();
+        assert!(
+            cache.is_file() && dir.join("demo.tails").is_file(),
+            "both files: {listing:?}"
+        );
+
+        // Warm, streaming: nothing decodes, and the tails are read
+        // straight out of the cache's tail file.
+        let warm = build_with(&organ, 44_100.0, 16, Some(&cache), StreamingPolicy::ON)
+            .expect("warm streaming build");
+        assert_eq!(
+            warm.bank.streamed_samples(),
+            cold.bank.streamed_samples(),
+            "the warm load streams the same samples"
+        );
+
+        // Warm, fully resident: the same cache, with the tails read
+        // back into RAM — byte for byte the audio a cold resident load
+        // would have decoded.
+        let fresh = build(&organ, 44_100.0, 16, None).expect("fresh resident build");
+        let absorbed = build(&organ, 44_100.0, 16, Some(&cache)).expect("resident from cache");
+        assert_eq!(absorbed.bank.streamed_samples(), 0, "tails came back to RAM");
+        assert_eq!(
+            absorbed.bank.resident_bytes(),
+            fresh.bank.resident_bytes(),
+            "the absorbed bank is the whole recording again"
+        );
+        assert_eq!(
+            absorbed.bank.pre_fault(),
+            fresh.bank.pre_fault(),
+            "identical audio"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Manual measurement, not an assertion: what streaming buys on a
+    /// real Hauptwerk set (AVO Solignac, gitignored — see CLAUDE.md).
+    /// `resident + streamed` is what a fully-resident load would hold,
+    /// so one streaming load reports both numbers without ever having
+    /// the whole set in RAM.
+    ///
+    /// `cargo test -p aristide-server --bin aristide-server \
+    ///   measure_solignac -- --ignored --nocapture`
+    #[test]
+    #[ignore = "loads the 2 GB Hauptwerk fixture"]
+    fn measure_solignac_streaming() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testsets/avo-solignac/OrganDefinitions/Solignac orig.Organ_Hauptwerk_xml");
+        if !path.is_file() {
+            eprintln!("skipping: Solignac fixture not present");
+            return;
+        }
+        let organ = aristide_formats::hauptwerk::load(&path).expect("loads").organ;
+        let started = Instant::now();
+        let loaded =
+            build_with(&organ, 48_000.0, 16, None, StreamingPolicy::ON).expect("builds");
+        let mib = |bytes: usize| bytes as f64 / (1024.0 * 1024.0);
+        println!(
+            "Solignac: {} samples in {:.1?}; resident {:.0} MiB + streamed {:.0} MiB \
+             = {:.0} MiB fully resident ({} of {} samples stream)",
+            loaded.bank.len(),
+            started.elapsed(),
+            mib(loaded.bank.resident_bytes()),
+            mib(loaded.bank.streamed_bytes()),
+            mib(loaded.bank.resident_bytes() + loaded.bank.streamed_bytes()),
+            loaded.bank.streamed_samples(),
+            loaded.bank.len()
+        );
     }
 
     /// Render swell-box listening takes on the Récit reeds/strings

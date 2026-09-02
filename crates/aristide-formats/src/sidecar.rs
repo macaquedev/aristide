@@ -817,10 +817,24 @@ pub struct SamplesConfig {
     /// the size of the resident bank.
     #[serde(default = "default_true")]
     pub cache: bool,
+    /// Play release tails off the disk instead of holding them in RAM:
+    /// `"auto"` (stream only when the set would not fit — see
+    /// `ram_budget_mb`), `"on"`, or `"off"`. Attacks and sustain loops
+    /// are always resident, so a held note never waits for a disk.
+    #[serde(default = "default_streaming")]
+    pub streaming: String,
+    /// RAM the resident bank may use before `streaming = "auto"` starts
+    /// streaming. Default: half of this machine's physical memory.
+    #[serde(default)]
+    pub ram_budget_mb: Option<u64>,
 }
 
 fn default_sample_bits() -> u32 {
     16
+}
+
+fn default_streaming() -> String {
+    "auto".to_string()
 }
 
 impl Default for SamplesConfig {
@@ -828,6 +842,8 @@ impl Default for SamplesConfig {
         SamplesConfig {
             bits: default_sample_bits(),
             cache: true,
+            streaming: default_streaming(),
+            ram_budget_mb: None,
         }
     }
 }
