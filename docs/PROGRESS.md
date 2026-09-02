@@ -3,6 +3,7 @@
 Newest first. One entry per work session; keep entries factual and short.
 Milestones refer to DESIGN.md.
 
+- [2026-09-02 — a wave tremulant reaches the notes already held](progress/2026-09-02-wave-trem-held-notes.md)
 - [2026-09-02 — the release splice serves both channels](progress/2026-09-02-stereo-release-alignment.md)
 - [2026-09-02 — the swell box pushes back, and boxes nest](progress/2026-09-02-box-pressure-and-nested-boxes.md)
 - [2026-09-02 — Hauptwerk sets load (M7 opens)](progress/2026-09-02-hauptwerk-loader.md)

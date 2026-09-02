@@ -26,9 +26,9 @@ Related repo research (don't duplicate, extend): `docs/research/release-modeling
 Suggested overall priority (2026-08-26 revision, updated through the day):
 §2+§4, §8+§9, §3's core (16-bit residency, load cache, parallel decode) and
 §7's core (voicing trims, generals + setter) have all landed. **Next**: the
-residues by musical value — divisionals/sequencer (§7), mid-hold wave-trem
-switch (§2), streaming (§3) — plus §5/§12 residues and the HW-only fidelity
-gaps (§10/§11).
+residues by musical value — divisionals/sequencer (§7) and streaming (§3);
+the mid-hold wave-trem switch (§2) landed 2026-09-02 — plus §5/§12 residues
+and the HW-only fidelity gaps (§10/§11).
 
 ---
 
@@ -123,13 +123,21 @@ per tremulant. Sets may alternatively ship real tremmed ranks that play directly
   `/api/trem?idx=`, `"trems"` in the state JSON. A hand-written sidecar
   `[tremulant]` (now `Option`) replaces the set's own; the default-tremulant
   fallback remains for trem-less sets.
+- **Wave trems reach the notes already sounding** (2026-09-02, our answer to
+  GO's `SwitchToAnotherAttack`): a held voice crossfades from its sustain
+  loop into the other recording's loop and carries on there, taking its
+  loops, releases and rate. Phase-aligned by a loop→loop map built at load
+  (the release phase map with the tail replaced by a loop, measured on the
+  source's period since a tremmed take's own pitch wobbles), level-matched
+  against the voice's envelope follower, faded over ~9 fundamental periods.
+  The console — which already runs `GetAttack` — re-runs only the tremulant
+  dimension of the selection and sends `Command::SwitchVoiceSample`; the RT
+  path never re-derives which recording is wanted. A toggle back
+  mid-crossfade reverses exactly; a key-off mid-crossfade waits for the fade
+  to land rather than dropping a half-blended leg. See
+  `docs/progress/2026-09-02-wave-trem-held-notes.md`.
 
 **Remaining gaps:**
-- **Mid-hold wave-trem attack switch** (GO `SwitchToAnotherAttack`, 184 ms
-  key-scaled phase-aligned crossfade): engaging a wave trem doesn't make
-  already-held notes undulate until re-pressed. Needs an engine
-  crossfade-into-another-sample's-loop path (the release-splice machinery
-  pointed at a loop instead of a tail). Synth-trem sets are unaffected.
 - Console UI still renders one knob (toggles all); a per-tremulant panel is
   screenshot-harness work.
 - HW's measured per-pipe trem waveforms remain §11.

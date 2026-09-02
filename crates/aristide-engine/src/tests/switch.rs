@@ -16,7 +16,7 @@ const CHANNEL_PHASE: f64 = 0.13;
 /// Amplitude depth of the tremmed take and how many undulation cycles
 /// fit in its loop. An integer count is what makes the tremmed loop
 /// seamless in its envelope as well as its waveform.
-const TREM_DEPTH: f64 = 0.25;
+const TREM_DEPTH: f64 = 0.15;
 const TREM_CYCLES: f64 = 2.0;
 
 const LOOP_START: usize = PERIOD * 4;
@@ -229,17 +229,16 @@ fn engaging_mid_hold_crosses_into_the_tremmed_take_without_a_step() {
             start += PERIOD / 4;
         }
         assert!(
-            worst_dip > 0.7,
+            worst_dip > 0.78,
             "channel {channel}: the crossfade dipped to {worst_dip:.2} of the held level"
         );
         // The undulation is audible where it wasn't before.
+        let flat = undulation(&span[..keep * 2], channel);
+        let waving = undulation(settled, channel);
+        assert!(flat < 1.05, "channel {channel}: the plain take waves {flat:.2}:1");
         assert!(
-            undulation(&span[..keep * 2], channel) < 1.05,
-            "channel {channel}: the plain take should be steady"
-        );
-        assert!(
-            undulation(settled, channel) > 1.4,
-            "channel {channel}: the tremmed take should undulate"
+            waving > 1.25,
+            "channel {channel}: the tremmed take only waves {waving:.2}:1"
         );
     }
 }
