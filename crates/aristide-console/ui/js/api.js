@@ -203,6 +203,14 @@ export const commands = {
   // every override. A mixture 400s on footage — it speaks several at
   // once, so there's none to give it.
   organStopVoice: (id, fields) => `/api/organ/stop/voice?${new URLSearchParams({ stop: id, ...fields })}`,
+  // Voicing part of a stop, live — the same no-rebuild contract as
+  // organStopVoice, but narrowed: `fields.key` ("F#3") or `fields.keys`
+  // ("C2..B3", or raw key numbers on a microtonal manual) picks the
+  // pipes, `fields.rank` one rank of a mixture. `gain`/`cents`/
+  // `brightness` are numbers; an EMPTY string unsays a field, and those
+  // pipes go back to following the stop. `fields.clear: 1` drops the
+  // whole rule. With no key/keys/rank this is the stop's own rule.
+  organVoicing: (id, fields) => `/api/organ/voicing?${new URLSearchParams({ stop: id, ...fields })}`,
   // Retargets a stop's source: structural, the same rebuild contract as
   // the manual/pull family above — the file rewrites and the organ
   // rebuilds. `sourceManual`/`sourceStop` name the source's own division

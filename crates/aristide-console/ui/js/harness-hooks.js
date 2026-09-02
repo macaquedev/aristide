@@ -268,6 +268,19 @@ export function applyHarnessHooks({ prefs, editor }) {
           document.getElementById("editor-stop-src-change")?.click();
         }, 200);
       }
+      // Or the key-voicing subview, as right-clicking that key of the
+      // stop's own keyboard opens it (`keyVoicing=60`, or `60..72` for
+      // the shift-click span).
+      const span = params.get("keyVoicing");
+      if (span != null) {
+        setTimeout(() => {
+          const [low, high] = span.split("..").map(Number);
+          const id = Number(knob.dataset.key.slice("stop-".length));
+          const at = document.querySelector(`.key[data-midi="${low}"]`);
+          const box = at ? at.getBoundingClientRect() : rect;
+          editor.openKeyVoicing(id, [low, high ?? low], box.left, box.top - 240);
+        }, 200);
+      }
     }, 400);
   }
 

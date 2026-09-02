@@ -106,6 +106,18 @@ try {
     `stop editor lists its ${mixture.ranks.length} ranks`);
   await quiet("stop editor", "#editor-stop");
 
+  // The key-voicing popover is a SUBVIEW of the stop editor: opened by
+  // right-clicking a key of the stop's own keyboard, and it must leave
+  // the editor that says which stop standing.
+  await contextMenu(`.keyboard[data-manual="${mixture.midx}"] .key[data-midi="60"]`);
+  await sleep(400);
+  check(await visible("#editor-key-voicing"), "right-click a key: the key-voicing popover opens");
+  check(await visible("#editor-stop"), "…and its stop editor stays open");
+  await quiet("key-voicing popover", "#editor-key-voicing");
+  await drive.eval(`document.getElementById("editor-key-voicing-close").click()`);
+  await sleep(250);
+  check(!(await visible("#editor-key-voicing")), "…and closes on its own button");
+
   // 2. PRESSED — rank Edit… (a rebuilt-per-poll button before the fix)
   await press("#editor-stop-ranks .stop-rank-row button");
   check(await visible("#editor-tuning") && !(await visible("#editor-stop")),

@@ -90,6 +90,14 @@ import {
   closeTremForm,
   syncTremForm,
 } from "./editor/trem-popover.js";
+import {
+  wireKeyVoicing,
+  wireKeyVoicingForm,
+  openKeyVoicing,
+  closeKeyVoicing,
+  syncKeyVoicing,
+  syncStopVoicedPipes,
+} from "./editor/key-voicing.js";
 import { PITCH_ACTIONS, emptyNote } from "./wiring.js";
 
 /// The keyboard context menu's "Change type" radio group, in the order
@@ -130,6 +138,10 @@ export class Editor {
     this.tuningResolved = null; // the tuning object the fields currently show (see syncTuningForm)
     this.hexManual = null; // manual idx the hex-layout popover is open for, or null
     this.tremOpen = null; // trem idx the shape popover is open for, or null
+    // {stop, span: [low, high], rank}: the pipes the key-voicing
+    // popover is open on, or null. Lives alongside the stop editor —
+    // it is a subview of it, opened by right-clicking a key.
+    this.keyVoicing = null;
     this.stopOpen = null; // stop id the stop-editor popover is open for, or null
     this.stopSrcOpen = false; // the stop popover's own source-picker subview is showing
     this.stopLabelSync = null; // {id, base, relabel}: the pending rename-offer's answer
@@ -257,6 +269,18 @@ export class Editor {
       tuningBrowseError: root.getElementById("editor-tuning-browse-error"),
       tuningBrowseList: root.getElementById("editor-tuning-browse-list"),
       tuningBrowseCancel: root.getElementById("editor-tuning-browse-cancel"),
+      keyVoicing: root.getElementById("editor-key-voicing"),
+      keyVoicingForm: root.getElementById("editor-key-voicing-form"),
+      keyVoicingTitle: root.getElementById("editor-key-voicing-title"),
+      keyVoicingScope: root.getElementById("editor-key-voicing-scope"),
+      keyVoicingRankRow: root.getElementById("editor-key-voicing-rank-row"),
+      keyVoicingRank: root.getElementById("editor-key-voicing-rank"),
+      keyVoicingGain: root.getElementById("editor-key-voicing-gain"),
+      keyVoicingCents: root.getElementById("editor-key-voicing-cents"),
+      keyVoicingBrightness: root.getElementById("editor-key-voicing-brightness"),
+      keyVoicingClear: root.getElementById("editor-key-voicing-clear"),
+      keyVoicingError: root.getElementById("editor-key-voicing-error"),
+      keyVoicingClose: root.getElementById("editor-key-voicing-close"),
       trem: root.getElementById("editor-trem"),
       tremTitle: root.getElementById("editor-trem-title"),
       tremRate: root.getElementById("editor-trem-rate"),
@@ -273,6 +297,9 @@ export class Editor {
       stopFootage: root.getElementById("editor-stop-footage"),
       stopCents: root.getElementById("editor-stop-cents"),
       stopGain: root.getElementById("editor-stop-gain"),
+      stopBrightness: root.getElementById("editor-stop-brightness"),
+      stopVoicedRow: root.getElementById("editor-stop-voiced-row"),
+      stopVoiced: root.getElementById("editor-stop-voiced"),
       stopSrc: root.getElementById("editor-stop-src"),
       stopSrcChange: root.getElementById("editor-stop-src-change"),
       stopError: root.getElementById("editor-stop-error"),
@@ -375,6 +402,7 @@ export class Editor {
     this.wireTuningForm();
     this.wireHexForm();
     this.wireTremForm();
+    this.wireKeyVoicingForm();
     this.wireStopForm();
     this.wireCouplerForm();
     this.wireMidiForm();
@@ -535,6 +563,7 @@ export class Editor {
     if (this.tuningScope != null) this.syncTuningForm();
     if (this.hexManual != null) this.syncHexForm();
     if (this.tremOpen != null) this.syncTremForm();
+    if (this.keyVoicing != null) this.syncKeyVoicing();
     if (this.stopOpen != null) this.syncStopForm();
     if (this.couplerOpen != null) this.syncCouplerForm();
     if (!this.el.couplersMenu.classList.contains("hidden")) this.syncCouplersMenu();
@@ -609,6 +638,7 @@ export class Editor {
     this.wireTremKnob();
     this.wireCheekRename();
     this.wireKeyboardContextMenu();
+    this.wireKeyVoicing();
     this.wireCouplerContextMenus();
     this.wireCouplerDrags();
     this.wireCouplersPanel();
@@ -1563,6 +1593,33 @@ export class Editor {
 
   syncTremForm() {
     syncTremForm(this);
+  }
+
+  // ---- the key-voicing popover: right-click a key with a stop open ----
+  // See editor/key-voicing.js.
+
+  wireKeyVoicing() {
+    wireKeyVoicing(this);
+  }
+
+  wireKeyVoicingForm() {
+    wireKeyVoicingForm(this);
+  }
+
+  openKeyVoicing(stop, span, x, y) {
+    openKeyVoicing(this, stop, span, x, y);
+  }
+
+  closeKeyVoicing() {
+    closeKeyVoicing(this);
+  }
+
+  syncKeyVoicing() {
+    syncKeyVoicing(this);
+  }
+
+  syncStopVoicedPipes(stop) {
+    syncStopVoicedPipes(this, stop);
   }
 
   // ---- the stop-editor popover: right-click any drawknob ------------------

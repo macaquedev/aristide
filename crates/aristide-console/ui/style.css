@@ -2859,6 +2859,22 @@ body.editing .shoe-label:active {
 }
 .piston-none { font-size: 10.5px; color: var(--text-dim); }
 
+/* The stop editor's "Voiced pipes" row: one chip per key span this
+   stop is voiced apart on, so a rule set on one pipe stays findable
+   without remembering which pipe it was. Key names are values, not
+   labels — mono, and never shouted in small-caps. */
+#editor-stop-voiced { flex-wrap: wrap; justify-content: flex-end; gap: 4px; }
+#editor-stop-voiced button {
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: none;
+  letter-spacing: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* Couplers taken off the console, restorable from the add form. */
 .editor-add-coupler-restore { display: flex; flex-direction: column; gap: 4px; }
 .editor-add-coupler-restore:empty { display: none; }

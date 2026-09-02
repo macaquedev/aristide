@@ -13,19 +13,27 @@
 /// midi, compass, room, bindings, save) never touches trem or the stop
 /// editor; trem closes only tuning/hex/coupler; hex closes only
 /// tuning/coupler; the stop and coupler editors close everything else.
+/// keyVoicing is the one exception to the symmetry: it is a SUBVIEW of
+/// the stop editor (right-click a key while a stop's editor is open),
+/// so it closes everything the stop editor does except the stop editor
+/// itself, and opening a stop editor closes it.
 /// The save-as dialog is a modal, not here — it only ever closes the
 /// plain save form (openSaveAsForm does that itself) and nothing
 /// closes it back from this table.
 export const POPOVER_CLOSES = {
-  tuning: ["hex", "coupler", "midi", "compass", "room", "bindings", "save"],
-  midi: ["tuning", "hex", "coupler", "compass", "room", "bindings", "save"],
-  compass: ["tuning", "hex", "coupler", "midi", "room", "bindings", "save"],
-  room: ["tuning", "hex", "coupler", "midi", "compass", "bindings", "save"],
-  bindings: ["tuning", "hex", "coupler", "midi", "compass", "room", "save"],
-  save: ["tuning", "hex", "coupler", "midi", "compass", "room", "bindings"],
+  tuning: ["hex", "coupler", "midi", "compass", "room", "bindings", "save", "keyVoicing"],
+  midi: ["tuning", "hex", "coupler", "compass", "room", "bindings", "save", "keyVoicing"],
+  compass: ["tuning", "hex", "coupler", "midi", "room", "bindings", "save", "keyVoicing"],
+  room: ["tuning", "hex", "coupler", "midi", "compass", "bindings", "save", "keyVoicing"],
+  bindings: ["tuning", "hex", "coupler", "midi", "compass", "room", "save", "keyVoicing"],
+  save: ["tuning", "hex", "coupler", "midi", "compass", "room", "bindings", "keyVoicing"],
   trem: ["tuning", "hex", "coupler"],
-  stop: ["tuning", "hex", "coupler", "trem", "midi", "compass", "room", "bindings", "save"],
-  coupler: ["tuning", "hex", "trem", "stop", "midi", "compass", "room", "bindings", "save"],
+  stop: ["tuning", "hex", "coupler", "trem", "midi", "compass", "room", "bindings", "save", "keyVoicing"],
+  // The key-voicing popover is a subview of the stop editor: it closes
+  // the others but NOT the editor it belongs to, and nothing but a
+  // close-everything closes it back.
+  keyVoicing: ["tuning", "hex", "coupler", "trem", "midi", "compass", "room", "bindings", "save"],
+  coupler: ["tuning", "hex", "trem", "stop", "midi", "compass", "room", "bindings", "save", "keyVoicing"],
   hex: ["tuning", "coupler"],
 };
 
@@ -38,6 +46,7 @@ export function popovers(editor) {
     bindings: { el: editor.el.bindings, close: () => editor.closeBindingsForm() },
     save: { el: editor.el.save, close: () => editor.closeSaveForm() },
     trem: { el: editor.el.trem, close: () => editor.closeTremForm() },
+    keyVoicing: { el: editor.el.keyVoicing, close: () => editor.closeKeyVoicing() },
     stop: { el: editor.el.stop, close: () => editor.closeStopForm() },
     coupler: { el: editor.el.coupler, close: () => editor.closeCouplerForm() },
     hex: { el: editor.el.hex, close: () => editor.closeHexForm() },

@@ -1265,6 +1265,9 @@ mod tests {
         assert_eq!(refused.status_code().0, 409, "so is renaming the set's own organ");
         let refused = respond(&state, &Method::Post, "/api/trem/params?rate=5");
         assert_eq!(refused.status_code().0, 409, "and reshaping its tremulant");
+        let refused =
+            respond(&state, &Method::Post, "/api/organ/voicing?stop=16&keys=C2..B2&gain=-4");
+        assert_eq!(refused.status_code().0, 409, "voicing a pipe is voicing the set");
         assert_eq!(state_json(&state), json_before, "nothing changed live");
         assert_eq!(std::fs::read_to_string(&file).expect("reads"), before, "nor on disk");
         assert!(state.lock().expect("state").pending_load.is_none(), "no rebuild queued");
@@ -1401,6 +1404,102 @@ mod tests {
             "the unpulled stop is offered again: {body}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Voicing at pipe scope, through the API a voicer (or a curl
+    /// line) actually uses: a key span and a single key get rules of
+    /// their own, they land live on the pipes already speaking, and
+    /// each is one `[[voicing.adjust]]` line under the stop's console
+    /// name — separate from the stop's own rule and from each other.
+    #[test]
+    fn voicing_narrows_to_keys_live_and_in_the_file() {
+        let Some(state) = demo_state() else { return };
+        let demo = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testsets/grandorgue-demo/demo.organ");
+        let dir = std::env::temp_dir().join("aristide-pipe-voicing-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let organ = aristide_formats::grandorgue::load(&demo).expect("demo parses").organ;
+        let canonical = demo.canonicalize().expect("canonicalizes");
+        let file = crate::config::create_wrapper_organ(&dir, "Voicing", &canonical, &organ, None)
+            .expect("inventory written");
+        state.lock().expect("state").composite_path = Some(file.clone());
+
+        // Hold C3 and C4 on the Montre's manual, then voice C3's
+        // octave down and C4 alone up.
+        assert_eq!(
+            respond(&state, &Method::Post, "/api/stop?id=16&on=1").status_code().0,
+            200
+        );
+        for key in [48, 60] {
+            assert_eq!(
+                respond(&state, &Method::Post, &format!("/api/note?manual=0&key={key}&on=1"))
+                    .status_code()
+                    .0,
+                200
+            );
+        }
+
+        let ok = respond(
+            &state,
+            &Method::Post,
+            "/api/organ/voicing?stop=16&keys=C3..B3&gain=-6&brightness=-2",
+        );
+        assert_eq!(ok.status_code().0, 200, "the octave takes a rule");
+        assert!(
+            state.lock().expect("state").pending_load.is_none(),
+            "voicing pipes is live — nothing rebuilds"
+        );
+        let ok = respond(&state, &Method::Post, "/api/organ/voicing?stop=16&key=C4&gain=3");
+        assert_eq!(ok.status_code().0, 200, "and so does one key");
+        let ok = respond(&state, &Method::Post, "/api/organ/voicing?stop=16&gain=-1");
+        assert_eq!(ok.status_code().0, 200, "no narrowing = the stop's own rule");
+
+        // The snapshot carries all three, the narrowed ones spelled
+        // the way the file writes them.
+        let value: serde_json::Value =
+            serde_json::from_str(&state_json(&state)).expect("valid JSON");
+        let montre = value["stops"]
+            .as_array()
+            .expect("stops")
+            .iter()
+            .find(|stop| stop["id"] == 16)
+            .expect("stop 16")
+            .clone();
+        assert_eq!(montre["pitch"]["gain"], -1.0, "the stop's own");
+        let rules = montre["voicing"].as_array().expect("narrowed rules");
+        assert_eq!(rules.len(), 2, "{rules:?}");
+        let octave = rules.iter().find(|r| r["label"] == "C3..B3").expect("the octave");
+        assert_eq!(octave["gain"], -6.0);
+        assert_eq!(octave["brightness"], -2.0);
+        assert!(octave["cents"].is_null(), "unsaid, so it follows the stop");
+        let one = rules.iter().find(|r| r["label"] == "C4").expect("the key");
+        assert_eq!(one["gain"], 3.0);
+
+        let text = std::fs::read_to_string(&file).expect("reads");
+        assert_eq!(text.matches("[[voicing.adjust]]").count(), 3, "{text}");
+        assert!(text.contains("keys = \"C3..B3\""), "{text}");
+        assert!(text.contains("key = \"C4\""), "{text}");
+        assert!(text.contains("brightness_db = -2.0"), "{text}");
+
+        // Clearing one leaves the others alone, and a bad span is a
+        // 400 with the spelling spelled out.
+        assert_eq!(
+            respond(&state, &Method::Post, "/api/organ/voicing?stop=16&key=C4&clear=1")
+                .status_code()
+                .0,
+            200
+        );
+        let text = std::fs::read_to_string(&file).expect("reads");
+        assert_eq!(text.matches("[[voicing.adjust]]").count(), 2, "{text}");
+        assert!(text.contains("keys = \"C3..B3\""), "the octave survives: {text}");
+        let bad = respond(&state, &Method::Post, "/api/organ/voicing?stop=16&keys=H2..Q9");
+        assert_eq!(bad.status_code().0, 400);
+        let bad = respond(
+            &state,
+            &Method::Post,
+            "/api/organ/voicing?stop=16&keys=C3..B3&rank=Nonexistent",
+        );
+        assert_eq!(bad.status_code().0, 400, "a rank the stop hasn't got");
     }
 
     /// The per-stop editors: rename and voicing land live (no rebuild

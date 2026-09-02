@@ -63,6 +63,13 @@ export function wireStopForm(editor) {
     stopCommand(editor, commands.organStopVoice(editor.stopOpen, { gain }));
   });
 
+  editor.el.stopBrightness.addEventListener("change", () => {
+    if (editor.stopOpen == null) return;
+    const brightness = Number(editor.el.stopBrightness.value);
+    if (!Number.isFinite(brightness)) return;
+    stopCommand(editor, commands.organStopVoice(editor.stopOpen, { brightness }));
+  });
+
   editor.el.stopReset.addEventListener("click", async () => {
     if (editor.stopOpen == null) return;
     const stop = editor.lastSnapshot?.stops.find((s) => s.id === editor.stopOpen);
@@ -137,6 +144,9 @@ export function openStopForm(editor, id, x, y) {
 }
 
 export function closeStopForm(editor) {
+  // The key-voicing popover addresses pipes OF this stop — it cannot
+  // outlive the editor that says which stop.
+  editor.closeKeyVoicing();
   editor.stopOpen = null;
   editor.el.stop.classList.add("hidden");
   hideStopError(editor);
@@ -175,6 +185,10 @@ export function syncStopForm(editor) {
 
   if (editor.root.activeElement !== editor.el.stopCents) editor.el.stopCents.value = pitch.cents ?? 0;
   if (editor.root.activeElement !== editor.el.stopGain) editor.el.stopGain.value = pitch.gain ?? 0;
+  if (editor.root.activeElement !== editor.el.stopBrightness) {
+    editor.el.stopBrightness.value = pitch.brightness ?? 0;
+  }
+  editor.syncStopVoicedPipes(stop);
 
   // label absent = auto, "" = hidden, anything else = that exact text.
   const labelMode = stop.label == null ? "auto" : stop.label === "" ? "none" : "custom";
