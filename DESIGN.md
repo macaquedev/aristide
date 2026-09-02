@@ -458,8 +458,8 @@ main thread; a failed load reports and leaves the running organ untouched.
   (2026-08-09), convolution reverb, enclosures (2026-08-12), multi-loop/multi-release
   and attack selection, sounding tremulants (2026-08-26; wind-valve physics
   2026-08-27), voicing trims + generals with a setter, 16-bit residency + load cache
-  (2026-08-26). Still open: disk streaming for sets beyond RAM; stereo release
-  alignment (R-channel splice kinks); closed-box pressure rise and multi-box
+  (2026-08-26), stereo release alignment (2026-09-02). Still open: disk
+  streaming for sets beyond RAM; closed-box pressure rise and multi-box
   windchests; wave-trem switch on held notes; pipe-scope voicing, a brightness/EQ
   leg and live voicing edits; divisionals, stepper, crescendo and a piston rail; a
   recorded A/B against GrandOrgue.

@@ -378,6 +378,15 @@ unchanged since 2026-08-12:
   an explicit `CuePoint` outranks the wav cue chunk (junk inside the loop
   falls back); `ReleaseEnd` trims the attack's embedded tail; separate
   releases are cut to their `CuePoint..ReleaseEnd` window at decode.
+- ~~Splice alignment measured one channel only.~~ ✅ (2026-09-02): the phase
+  map was built from channel 0, so on a stereo pipe whose loop-to-tail
+  inter-channel phase shifts (demo set: median 0.013 turns, worst 0.47) the
+  right channel spliced up to half a period out. Both alignment paths now
+  target the amplitude-weighted circular mean of the channels' requirements,
+  minimizing total cancelled crossfade power; mono is bit-identical and
+  `ReleaseAlignment::target` is unchanged. Neither GO nor HW documents any
+  per-channel splice alignment. See
+  `docs/progress/2026-09-02-stereo-release-alignment.md`.
 - **No release truncation** — ⚠ still open. HW: load-time truncation with
   frequency-shaped decays for the "wet set → short tails → convolution" dry
   workflow, plus real-time truncation; GO: per-pipe `ReleaseTail` ms voicing.
