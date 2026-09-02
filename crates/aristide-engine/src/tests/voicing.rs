@@ -14,9 +14,11 @@ fn tilted_level(brightness_db: f32) -> f32 {
     engine.set_release_stagger(0.0);
     // No wind modulation: the tilt under test must be the only thing
     // moving the treble.
-    let mut params = wind::WindParams::default();
-    params.sag_depth = 0.0;
-    params.flow_noise = 0.0;
+    let params = wind::WindParams {
+        sag_depth: 0.0,
+        flow_noise: 0.0,
+        ..wind::WindParams::default()
+    };
     for group in 0..wind::MAX_WIND_GROUPS as u8 {
         handle.send(Command::SetWind { group, params });
     }
@@ -65,9 +67,11 @@ fn a_flat_tilt_bypasses_the_filter_bit_for_bit() {
     let render_one = |brightness: f32, tilt: f32| -> Vec<u32> {
         let (mut engine, mut handle) = Engine::new(48000.0, sine_pipe_bank(48, true));
         engine.set_release_stagger(0.0);
-        let mut params = wind::WindParams::default();
-        params.sag_depth = 0.0;
-        params.flow_noise = 0.0;
+        let params = wind::WindParams {
+            sag_depth: 0.0,
+            flow_noise: 0.0,
+            ..wind::WindParams::default()
+        };
         for group in 0..wind::MAX_WIND_GROUPS as u8 {
             handle.send(Command::SetWind { group, params });
         }
@@ -111,9 +115,11 @@ fn a_live_trim_moves_a_held_voice_without_a_step() {
     // else's.
     let run = |trim: Option<f32>| -> Vec<f32> {
         let (mut engine, mut handle) = Engine::new(48000.0, ramp_bank(48000));
-        let mut params = wind::WindParams::default();
-        params.sag_depth = 0.0;
-        params.flow_noise = 0.0;
+        let params = wind::WindParams {
+            sag_depth: 0.0,
+            flow_noise: 0.0,
+            ..wind::WindParams::default()
+        };
         for group in 0..wind::MAX_WIND_GROUPS as u8 {
             handle.send(Command::SetWind { group, params });
         }

@@ -1097,18 +1097,21 @@ impl Console {
             if !rule.covers(rank, key) {
                 continue;
             }
-            let rank = (rule.specificity(), index);
-            if rule.gain.is_some() && best_gain.is_none_or(|best| best <= rank) {
-                best_gain = Some(rank);
-                trim.gain = rule.gain.expect("just checked");
+            // Later lines tie-break, hence `<=`: the player's own edit
+            // is appended after the rules it means to override.
+            let at = (rule.specificity(), index);
+            let wins = |best: &Option<((u32, u8), usize)>| best.is_none_or(|best| best <= at);
+            if let Some(gain) = rule.gain.filter(|_| wins(&best_gain)) {
+                best_gain = Some(at);
+                trim.gain = gain;
             }
-            if rule.cents.is_some() && best_cents.is_none_or(|best| best <= rank) {
-                best_cents = Some(rank);
-                trim.cents = rule.cents.expect("just checked");
+            if let Some(cents) = rule.cents.filter(|_| wins(&best_cents)) {
+                best_cents = Some(at);
+                trim.cents = cents;
             }
-            if rule.tilt.is_some() && best_tilt.is_none_or(|best| best <= rank) {
-                best_tilt = Some(rank);
-                trim.tilt = rule.tilt.expect("just checked");
+            if let Some(tilt) = rule.tilt.filter(|_| wins(&best_tilt)) {
+                best_tilt = Some(at);
+                trim.tilt = tilt;
             }
         }
         trim
