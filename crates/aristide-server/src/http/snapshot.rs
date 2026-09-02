@@ -177,6 +177,10 @@ struct StopView {
     own_pipes: Option<bool>,
     tuning: StopScopeView,
     ranks: Vec<RankView>,
+    /// The stop's own narrowed voicing rules, most general first.
+    /// Empty for the overwhelming majority of stops.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    voicing: Vec<PipeVoicingView>,
 }
 
 #[derive(Serialize)]
@@ -195,7 +199,58 @@ struct PitchView {
     footage: Option<F64>,
     cents: F64,
     gain: F64,
+    brightness: F64,
     own: bool,
+}
+
+/// One voicing rule of the console's own that narrows to part of a
+/// stop — what the key-voicing popover lists and edits. `keys` is the
+/// inclusive key span as numbers (what the keyboard panel matches
+/// against), `label` the same span spelled the way the file writes it.
+#[derive(Serialize)]
+struct PipeVoicingView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    keys: Option<[i32; 2]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rank: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gain: Option<F64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cents: Option<F64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    brightness: Option<F64>,
+}
+
+/// One stop's narrowed voicing rules, ordered the way they resolve
+/// (most general first, so the console lists them top-down the way a
+/// voicer reads them).
+fn pipe_voicing_views(
+    state: &crate::State,
+    stop: aristide_model::StopId,
+    named: bool,
+) -> Vec<PipeVoicingView> {
+    let mut rules: Vec<(&crate::load::VoicingScope, &crate::load::PipeVoicing)> = state
+        .pipe_voicing
+        .iter()
+        .filter(|((at, _), _)| *at == stop)
+        .map(|((_, scope), voicing)| (scope, voicing))
+        .collect();
+    rules.sort_by(|(a, _), (b, _)| (a.keys, &a.rank).cmp(&(b.keys, &b.rank)));
+    rules
+        .into_iter()
+        .map(|(scope, voicing)| PipeVoicingView {
+            keys: scope.keys.map(|(low, high)| [low, high]),
+            label: scope
+                .keys
+                .map(|span| aristide_formats::sidecar::format_key_span(span, named)),
+            rank: scope.rank.clone(),
+            gain: voicing.gain_db.map(F64),
+            cents: voicing.cents.map(F64),
+            brightness: voicing.brightness_db.map(F64),
+        })
+        .collect()
 }
 
 /// What the stop's tuning resolves to (`scope`: organ | source |
@@ -695,6 +750,7 @@ fn snapshot(state: &State) -> Snapshot {
                         footage: feet(voicing.feet),
                         cents: F64(voicing.cents),
                         gain: F64(voicing.gain_db),
+                        brightness: F64(voicing.brightness_db),
                         own: state.stop_voicing.contains_key(&id),
                     },
                     label: state.stop_labels.get(&id).cloned(),
@@ -716,6 +772,7 @@ fn snapshot(state: &State) -> Snapshot {
                             own: console.rank_tuning(id, *rank).is_some(),
                         })
                         .collect(),
+                    voicing: pipe_voicing_views(state, id, console.stop_has_note_names(id)),
                 }
             })
             .collect()

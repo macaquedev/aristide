@@ -14,7 +14,7 @@ use aristide_formats::instrument;
 use aristide_model::units::{cents_between, cents_to_ratio};
 use aristide_model::{Organ, StopId};
 
-use crate::console::Console;
+use crate::console::{Console, TrimRule};
 use crate::{bank, tuning, Setup};
 
 /// Everything a load produces: the playable console, the samples it
@@ -36,19 +36,57 @@ pub struct TremulantSetup {
 
 /// One stop's own `[[voicing.adjust]]` rule — the file fields the
 /// console editor shows and writes back (a rule whose `stops` is
-/// exactly that one stop's name). Pattern rules still apply to the
-/// sound; they just aren't editable per stop.
+/// exactly that one stop's name, narrowed to nothing). Pattern rules
+/// still apply to the sound; they just aren't editable per stop.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct StopVoicing {
     /// Target footage, absent = the stop's native pitch.
     pub feet: Option<f64>,
     pub cents: f64,
     pub gain_db: f64,
+    /// Treble tilt in dB on the pipe's own shelf (see
+    /// [`aristide_formats::sidecar::VoicingAdjustDef::brightness_db`]).
+    pub brightness_db: f64,
 }
 
 impl StopVoicing {
     pub fn is_neutral(&self) -> bool {
         *self == StopVoicing::default()
+    }
+}
+
+/// Which pipes of one stop an editable voicing rule addresses — the
+/// coordinate the console edits at and the file writer finds a rule
+/// by. All-`None` is the stop itself, which lives in [`StopVoicing`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct VoicingScope {
+    /// Inclusive key span, absolute key numbers.
+    pub keys: Option<(i32, i32)>,
+    /// One rank inside the stop, by name.
+    pub rank: Option<String>,
+}
+
+impl VoicingScope {
+    pub fn is_stop_wide(&self) -> bool {
+        self.keys.is_none() && self.rank.is_none()
+    }
+}
+
+/// One narrowed rule of the console's own: a `[[voicing.adjust]]`
+/// naming exactly this stop and narrowing to keys and/or a rank. No
+/// footage — that is a whole stop's business. A field left `None`
+/// says nothing and falls through to the stop-wide rule, which is why
+/// these are Options where [`StopVoicing`]'s are not.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PipeVoicing {
+    pub cents: Option<f64>,
+    pub gain_db: Option<f64>,
+    pub brightness_db: Option<f64>,
+}
+
+impl PipeVoicing {
+    pub fn is_neutral(&self) -> bool {
+        *self == PipeVoicing::default()
     }
 }
 
@@ -80,6 +118,9 @@ pub struct PreparedInstrument {
     pub provenance: std::collections::HashMap<StopId, instrument::StopProvenance>,
     /// Per stop: its own editable `[[voicing.adjust]]` rule, if any.
     pub stop_voicing: std::collections::HashMap<StopId, StopVoicing>,
+    /// Per stop, the narrowed rules of the console's own: what the
+    /// per-key voicing popover shows and writes back.
+    pub pipe_voicing: std::collections::HashMap<(StopId, VoicingScope), PipeVoicing>,
     /// Per stop: its declared knob engraving (`""` = engrave nothing).
     /// Stops absent here engrave the footage they actually speak at.
     pub stop_labels: std::collections::HashMap<StopId, String>,
@@ -1391,7 +1432,10 @@ fn configure_voicing_adjust(
     console: &mut Console,
     sidecar: &aristide_formats::sidecar::Sidecar,
     load_warnings: &mut Vec<String>,
-) -> std::collections::HashMap<StopId, StopVoicing> {
+) -> (
+    std::collections::HashMap<StopId, StopVoicing>,
+    std::collections::HashMap<(StopId, VoicingScope), PipeVoicing>,
+) {
     let stop_ids: Vec<(aristide_model::StopId, String, usize)> = console
         .stop_states()
         .iter()
@@ -1400,13 +1444,32 @@ fn configure_voicing_adjust(
     let stop_names: Vec<&str> = stop_ids.iter().map(|(_, name, _)| name.as_str()).collect();
     let mut stop_voicing: std::collections::HashMap<StopId, StopVoicing> =
         std::collections::HashMap::new();
-    let mut adjust: std::collections::HashMap<aristide_model::StopId, (f32, f64)> =
+    let mut pipe_voicing: std::collections::HashMap<(StopId, VoicingScope), PipeVoicing> =
+        std::collections::HashMap::new();
+    let mut adjust: std::collections::HashMap<aristide_model::StopId, Vec<TrimRule>> =
         std::collections::HashMap::new();
     for rule in &sidecar.voicing.adjusts {
-        let gain = 10f32.powf((rule.gain_db.clamp(-40.0, 20.0) as f32) / 20.0);
-        let cents = rule.cents.clamp(-2400.0, 2400.0);
+        let keys = match rule.key_span() {
+            None => None,
+            Some(Ok(span)) => Some(span),
+            Some(Err(why)) => {
+                load_warnings.push(format!("voicing.adjust: {why}"));
+                continue;
+            }
+        };
+        // A footage is a fact about the whole stop — which rank of
+        // pipes each key draws on — so a narrowed rule carrying one is
+        // a misunderstanding, said out loud rather than half-applied.
         let feet = match &rule.pitch {
             None => None,
+            Some(_) if rule.is_narrowed() => {
+                load_warnings.push(
+                    "voicing.adjust: pitch belongs to a whole stop, not to keys or a \
+                     rank — ignored on this rule"
+                        .to_string(),
+                );
+                None
+            }
             Some(spec) => match spec.feet() {
                 Some(feet) => Some(feet),
                 None => {
@@ -1416,15 +1479,39 @@ fn configure_voicing_adjust(
                 }
             },
         };
+        let gain = rule
+            .gain_db
+            .map(|db| 10f32.powf((db.clamp(-40.0, 20.0) as f32) / 20.0));
+        let tilt = rule
+            .brightness_db
+            .map(|db| 10f32.powf((db.clamp(-12.0, 12.0) as f32) / 20.0));
         for pattern in &rule.stops {
             let matched = aristide_formats::sidecar::match_names(&stop_names, pattern);
             if matched.is_empty() {
                 load_warnings.push(format!("voicing.adjust: {pattern:?} matches nothing"));
             }
             for at in matched {
+                let stop = stop_ids[at].0;
+                let rank = match &rule.rank {
+                    None => None,
+                    Some(name) => match console
+                        .stop_ranks(stop)
+                        .into_iter()
+                        .find(|(_, rank)| rank.eq_ignore_ascii_case(name))
+                    {
+                        Some((rank, _)) => Some(rank),
+                        None => {
+                            load_warnings.push(format!(
+                                "voicing.adjust: {:?} has no rank {name:?}",
+                                stop_names[at]
+                            ));
+                            continue;
+                        }
+                    },
+                };
                 let footage_cents = match feet {
                     None => 0.0,
-                    Some(feet) => match console.stop_native_footage(stop_ids[at].0) {
+                    Some(feet) => match console.stop_native_footage(stop) {
                         Some(native) => cents_between(feet, native),
                         None => {
                             load_warnings.push(format!(
@@ -1436,34 +1523,72 @@ fn configure_voicing_adjust(
                         }
                     },
                 };
-                let entry = adjust.entry(stop_ids[at].0).or_insert((1.0, 0.0));
-                entry.0 *= gain;
-                entry.1 += cents + footage_cents;
+                // The footage shift is a pitch statement, so it joins
+                // `cents` in the one field the pricing fold reads —
+                // and makes the rule say something about pitch even
+                // when `cents` itself was left out.
+                let cents = match (rule.cents, footage_cents) {
+                    (None, 0.0) => None,
+                    (cents, shift) => Some(cents.unwrap_or(0.0).clamp(-2400.0, 2400.0) + shift),
+                };
+                // Owned only when the rule names this one stop
+                // exactly; a pattern rule belongs to whoever wrote it,
+                // and a live edit must leave it standing.
+                let owned = rule.stops.len() == 1
+                    && stop_names[at].eq_ignore_ascii_case(&rule.stops[0]);
+                adjust.entry(stop).or_default().push(TrimRule {
+                    keys,
+                    rank,
+                    gain,
+                    cents,
+                    tilt,
+                    owned,
+                });
             }
         }
-        // A rule naming exactly one stop, exactly, is that stop's own
-        // — the one the console editor shows and edits. The last such
-        // rule wins the mirror (the sound still gets every rule).
+        // A rule naming exactly one stop, exactly, is one the console
+        // editor owns: it shows it and writes it back. The last such
+        // rule for a coordinate wins the mirror (the sound still gets
+        // every rule, mirrored or not).
         if let [pattern] = rule.stops.as_slice()
             && let [at] = aristide_formats::sidecar::match_names(&stop_names, pattern)
                 .as_slice()
             && stop_names[*at].eq_ignore_ascii_case(pattern)
         {
-            stop_voicing.insert(
-                stop_ids[*at].0,
-                StopVoicing {
-                    feet,
-                    cents: rule.cents,
-                    gain_db: rule.gain_db,
-                },
-            );
+            let stop = stop_ids[*at].0;
+            if rule.is_narrowed() {
+                pipe_voicing.insert(
+                    (
+                        stop,
+                        VoicingScope {
+                            keys,
+                            rank: rule.rank.clone(),
+                        },
+                    ),
+                    PipeVoicing {
+                        cents: rule.cents,
+                        gain_db: rule.gain_db,
+                        brightness_db: rule.brightness_db,
+                    },
+                );
+            } else {
+                stop_voicing.insert(
+                    stop,
+                    StopVoicing {
+                        feet,
+                        cents: rule.cents.unwrap_or(0.0),
+                        gain_db: rule.gain_db.unwrap_or(0.0),
+                        brightness_db: rule.brightness_db.unwrap_or(0.0),
+                    },
+                );
+            }
         }
     }
     if !adjust.is_empty() {
         tracing::info!("voicing: {} stop(s) trimmed", adjust.len());
         console.set_stop_adjust(adjust);
     }
-    stop_voicing
+    (stop_voicing, pipe_voicing)
 }
 
 /// Assemble `paths` (sample sets and composite definitions; several are
@@ -1562,7 +1687,8 @@ pub fn prepare(
     );
     configure_couplers_and_noises(&mut console, &sidecar, &mut load_warnings);
     let buses = configure_buses(&mut console, &sidecar, sample_rate, &mut load_warnings);
-    let stop_voicing = configure_voicing_adjust(&mut console, &sidecar, &mut load_warnings);
+    let (stop_voicing, pipe_voicing) =
+        configure_voicing_adjust(&mut console, &sidecar, &mut load_warnings);
     tracing::info!(
         "tuning: {} @ {}={} Hz, transpose {:+}",
         live_tuning.temperament.name(),
@@ -1584,6 +1710,7 @@ pub fn prepare(
         setup,
         provenance: single_provenance,
         stop_voicing,
+        pipe_voicing,
         stop_labels,
         stop_order: console_order,
         layout: console_layout,

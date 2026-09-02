@@ -159,6 +159,7 @@ fn main() -> anyhow::Result<()> {
                 group: 0,
                 wind_weight: 0.0,
                 brightness: 0.0,
+                voicing_tilt: 1.0,
                 enclosures: [ENCLOSURE_NONE; MAX_VOICE_ENCLOSURES],
                 bus: 0,
                 delay_frames: 0,

@@ -151,7 +151,118 @@ pub(super) fn voice(state: &Mutex<State>, query: &str) -> Reply {
             _ => return bad_request("gain must be a number of dB"),
         }
     }
+    if let Some(brightness) = param(query, "brightness") {
+        match brightness.parse::<f64>() {
+            Ok(db) if db.is_finite() => voicing.brightness_db = db.clamp(-12.0, 12.0),
+            _ => return bad_request("brightness must be a number of dB"),
+        }
+    }
     match state.set_stop_voicing(stop, voicing) {
+        Ok(()) => json(state_json_locked(&state)),
+        Err(err) => bad_request(&err),
+    }
+}
+
+// Voicing at any scope inside a stop: `stop=<id>` plus, to narrow it,
+// `keys=C2..B3` (or `key=F#3`, or raw key numbers on a microtonal
+// manual) and/or `rank=<name>`. `gain`/`cents`/`brightness` set a
+// field, an empty value unsays it (the pipes then follow the broader
+// rule), and `clear=1` removes the whole rule. With no `keys`/`key`/
+// `rank` this IS the stop's own rule and behaves exactly like
+// /api/organ/stop/voice.
+//
+// Live: level and tone slide under held keys, pitch glides — a rebuild
+// only if a pitch trim re-anchors keys onto other pipes.
+pub(super) fn voicing(state: &Mutex<State>, query: &str) -> Reply {
+    let mut state = state.lock().expect("state poisoned");
+    if state.is_loading() {
+        return bad_request("an organ is already loading");
+    }
+    let Some(stop) = param(query, "stop").and_then(|v| v.parse::<u32>().ok()) else {
+        return bad_request("missing stop");
+    };
+    let stop = aristide_model::StopId(stop);
+    let clear = param(query, "clear").is_some_and(|v| v != "0");
+    let span = match (param(query, "key").map(unescape), param(query, "keys").map(unescape)) {
+        (None, None) => None,
+        (Some(_), Some(_)) => return bad_request("key and keys name the same thing"),
+        (Some(text), None) | (None, Some(text)) => {
+            match aristide_formats::sidecar::parse_key_span(&text) {
+                Some(span) => Some(span),
+                None => {
+                    return bad_request(&format!(
+                        "{text:?} is not a key or a key span (\"C2..B3\", \"F#3\", \"48..59\")"
+                    ))
+                }
+            }
+        }
+    };
+    let rank = param(query, "rank").map(unescape).filter(|r| !r.trim().is_empty());
+    // No narrowing: this is the stop's own rule, so it goes through the
+    // stop editor's own path and keeps its footage.
+    if span.is_none() && rank.is_none() {
+        let mut voicing = if clear {
+            crate::load::StopVoicing::default()
+        } else {
+            state.stop_voicing.get(&stop).copied().unwrap_or_default()
+        };
+        for (name, field, floor, ceiling) in [
+            ("cents", 0u8, -2400.0, 2400.0),
+            ("gain", 1, -40.0, 20.0),
+            ("brightness", 2, -12.0, 12.0),
+        ] {
+            let Some(text) = param(query, name) else { continue };
+            let value = match text.parse::<f64>() {
+                Ok(value) if value.is_finite() => value.clamp(floor, ceiling),
+                // An empty value at stop scope is "no trim" — there is
+                // nothing broader for it to fall through to.
+                _ if text.is_empty() => 0.0,
+                _ => return bad_request(&format!("{name} must be a number")),
+            };
+            match field {
+                0 => voicing.cents = value,
+                1 => voicing.gain_db = value,
+                _ => voicing.brightness_db = value,
+            }
+        }
+        return match state.set_stop_voicing(stop, voicing) {
+            Ok(()) => json(state_json_locked(&state)),
+            Err(err) => bad_request(&err),
+        };
+    }
+    let scope = crate::load::VoicingScope { keys: span, rank };
+    let mut voicing = if clear {
+        crate::load::PipeVoicing::default()
+    } else {
+        state
+            .pipe_voicing
+            .get(&(stop, scope.clone()))
+            .copied()
+            .unwrap_or_default()
+    };
+    for (name, field, floor, ceiling) in [
+        ("cents", 0u8, -2400.0, 2400.0),
+        ("gain", 1, -40.0, 20.0),
+        ("brightness", 2, -12.0, 12.0),
+    ] {
+        let Some(text) = param(query, name) else { continue };
+        // Empty unsays the field: these pipes go back to following the
+        // stop's own rule for it, which is not the same as pinning 0.
+        let value = if text.is_empty() {
+            None
+        } else {
+            match text.parse::<f64>() {
+                Ok(value) if value.is_finite() => Some(value.clamp(floor, ceiling)),
+                _ => return bad_request(&format!("{name} must be a number")),
+            }
+        };
+        match field {
+            0 => voicing.cents = value,
+            1 => voicing.gain_db = value,
+            _ => voicing.brightness_db = value,
+        }
+    }
+    match state.set_pipe_voicing(stop, scope, voicing) {
         Ok(()) => json(state_json_locked(&state)),
         Err(err) => bad_request(&err),
     }

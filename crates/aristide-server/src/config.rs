@@ -2184,15 +2184,40 @@ pub fn write_composite_stop_own_pipes(
     Ok(true)
 }
 
-/// Write (or with everything neutral, remove) a stop's own
-/// `[[voicing.adjust]]` rule — the one whose `stops` is exactly this
-/// stop's console name. Pattern rules are never touched.
-pub fn write_composite_stop_voicing(
+/// The key span a `[[voicing.adjust]]` table narrows to, whichever of
+/// `key`/`keys` it spells it with.
+fn table_key_span(table: &toml_edit::Table) -> Option<(i32, i32)> {
+    if let Some(key) = table.get("key") {
+        return match key.as_integer() {
+            Some(number) => i32::try_from(number).ok().map(|key| (key, key)),
+            None => key.as_str().and_then(aristide_formats::sidecar::parse_key_span),
+        };
+    }
+    table
+        .get("keys")
+        .and_then(|item| item.as_str())
+        .and_then(aristide_formats::sidecar::parse_key_span)
+}
+
+/// Write (or with everything neutral, remove) one `[[voicing.adjust]]`
+/// rule of the console's own — a rule whose `stops` is exactly this
+/// stop's console name, narrowed to `scope`. Pattern rules, and rules
+/// at other scopes on the same stop, are never touched.
+///
+/// `named` spells the key span with note names (a hand keyboard) or
+/// raw numbers (a microtonal one); matching an existing rule always
+/// goes through the parsed span, so a hand-written spelling is found
+/// and rewritten in place whichever way it was typed.
+#[allow(clippy::too_many_arguments)]
+pub fn write_composite_voicing(
     path: &Path,
     stop_name: &str,
+    scope: &crate::load::VoicingScope,
+    named: bool,
     feet: Option<f64>,
-    cents: f64,
-    gain_db: f64,
+    cents: Option<f64>,
+    gain_db: Option<f64>,
+    brightness_db: Option<f64>,
 ) -> Result<(), String> {
     let mut doc = composite_doc(path)?;
     let own = |table: &toml_edit::Table| {
@@ -2207,8 +2232,17 @@ pub fn write_composite_stop_voicing(
                         .and_then(|value| value.as_str())
                         .is_some_and(|name| name.eq_ignore_ascii_case(stop_name))
             })
+            && table_key_span(table) == scope.keys
+            && match (table.get("rank").and_then(|item| item.as_str()), &scope.rank) {
+                (None, None) => true,
+                (Some(rank), Some(wanted)) => rank.eq_ignore_ascii_case(wanted),
+                _ => false,
+            }
     };
-    let neutral = feet.is_none() && cents == 0.0 && gain_db == 0.0;
+    let neutral = feet.is_none()
+        && cents.is_none_or(|c| c == 0.0)
+        && gain_db.is_none_or(|g| g == 0.0)
+        && brightness_db.is_none_or(|b| b == 0.0);
     if neutral {
         if let Some(adjusts) = voicing_adjusts_mut(&mut doc) {
             adjusts.retain(|table| !own(table));
@@ -2249,6 +2283,21 @@ pub fn write_composite_stop_voicing(
             adjusts.get_mut(last).expect("rule just pushed")
         }
     };
+    // The narrowing is the rule's identity, so it is written before
+    // anything else and never left half-spelled: one key goes in as
+    // `key`, a span as `keys`.
+    table.remove("key");
+    table.remove("keys");
+    if let Some(span) = scope.keys {
+        let spelled = aristide_formats::sidecar::format_key_span(span, named);
+        table[if span.0 == span.1 { "key" } else { "keys" }] = toml_edit::value(spelled);
+    }
+    match &scope.rank {
+        Some(rank) => set_string_preserving(table, "rank", rank),
+        None => {
+            table.remove("rank");
+        }
+    }
     match feet {
         // Whole feet stay a plain number; a mutation's fraction is
         // written the way it's engraved ("2 2/3").
@@ -2262,15 +2311,19 @@ pub fn write_composite_stop_voicing(
             table.remove("pitch");
         }
     }
-    if cents == 0.0 {
-        table.remove("cents");
-    } else {
-        table["cents"] = toml_edit::value(cents);
-    }
-    if gain_db == 0.0 {
-        table.remove("gain_db");
-    } else {
-        table["gain_db"] = toml_edit::value(gain_db);
+    // A field left unsaid is removed, not written as zero: absence is
+    // how a narrow rule leaves a field to the broader one.
+    for (key, value) in [
+        ("cents", cents),
+        ("gain_db", gain_db),
+        ("brightness_db", brightness_db),
+    ] {
+        match value {
+            Some(value) if value != 0.0 => table[key] = toml_edit::value(value),
+            _ => {
+                table.remove(key);
+            }
+        }
     }
     write_atomically(path, doc.to_string())
 }
@@ -4025,19 +4078,62 @@ stops = ["Montre 8"]
 
         // A voicing rule is created exact-name, updated in place, and
         // removed again when everything is neutral.
-        write_composite_stop_voicing(&path, "Tromba", Some(16.0 / 3.0), 0.0, -2.0)
-            .expect("voices");
+        let whole_stop = crate::load::VoicingScope::default();
+        let voice = |scope: &crate::load::VoicingScope, feet, cents, gain, brightness| {
+            write_composite_voicing(&path, "Tromba", scope, true, feet, cents, gain, brightness)
+        };
+        voice(&whole_stop, Some(16.0 / 3.0), None, Some(-2.0), None).expect("voices");
         let parsed = def(&path);
         assert_eq!(parsed.voicing.adjusts.len(), 1);
         assert_eq!(parsed.voicing.adjusts[0].stops, ["Tromba"]);
         assert_eq!(parsed.voicing.adjusts[0].pitch.as_ref().and_then(|p| p.feet()), Some(16.0 / 3.0));
-        assert_eq!(parsed.voicing.adjusts[0].gain_db, -2.0);
-        write_composite_stop_voicing(&path, "Tromba", None, 3.5, 0.0).expect("revoices");
+        assert_eq!(parsed.voicing.adjusts[0].gain_db, Some(-2.0));
+        voice(&whole_stop, None, Some(3.5), None, Some(-1.5)).expect("revoices");
         let parsed = def(&path);
         assert_eq!(parsed.voicing.adjusts.len(), 1, "updated, not duplicated");
         assert!(parsed.voicing.adjusts[0].pitch.is_none());
-        assert_eq!(parsed.voicing.adjusts[0].cents, 3.5);
-        write_composite_stop_voicing(&path, "Tromba", None, 0.0, 0.0).expect("neutral");
+        assert_eq!(parsed.voicing.adjusts[0].cents, Some(3.5));
+        assert_eq!(parsed.voicing.adjusts[0].brightness_db, Some(-1.5));
+
+        // A narrowed rule is a rule of its own: it neither replaces the
+        // stop's own nor is replaced by it, and its key span round-trips
+        // through the spelling the writer chose.
+        let bass = crate::load::VoicingScope {
+            keys: Some((36, 47)),
+            rank: None,
+        };
+        voice(&bass, None, None, Some(-4.0), None).expect("voices the bass octave");
+        let parsed = def(&path);
+        assert_eq!(parsed.voicing.adjusts.len(), 2, "a scope of its own");
+        let bass_rule = parsed
+            .voicing
+            .adjusts
+            .iter()
+            .find(|rule| rule.keys.is_some())
+            .expect("the narrowed rule");
+        assert_eq!(bass_rule.keys.as_deref(), Some("C2..B2"));
+        assert_eq!(bass_rule.gain_db, Some(-4.0));
+        assert_eq!(bass_rule.cents, None, "unsaid stays unsaid");
+        let one_pipe = crate::load::VoicingScope {
+            keys: Some((54, 54)),
+            rank: Some("Tierce".into()),
+        };
+        voice(&one_pipe, None, Some(-3.0), None, None).expect("voices one pipe");
+        let parsed = def(&path);
+        assert_eq!(parsed.voicing.adjusts.len(), 3);
+        let pipe_rule = parsed
+            .voicing
+            .adjusts
+            .iter()
+            .find(|rule| rule.rank.is_some())
+            .expect("the pipe rule");
+        assert_eq!(pipe_rule.key_span(), Some(Ok((54, 54))));
+        assert_eq!(pipe_rule.rank.as_deref(), Some("Tierce"));
+        voice(&one_pipe, None, None, None, None).expect("clears the pipe");
+        voice(&bass, None, None, None, None).expect("clears the bass");
+        assert_eq!(def(&path).voicing.adjusts.len(), 1, "the stop's own survives");
+
+        voice(&whole_stop, None, None, None, None).expect("neutral");
         assert!(def(&path).voicing.adjusts.is_empty(), "neutral removes the rule");
         assert!(
             !std::fs::read_to_string(&path).expect("reads").contains("[voicing"),

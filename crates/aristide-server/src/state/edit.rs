@@ -12,6 +12,12 @@ use aristide_model::StopId;
 use super::{Control, CouplerRouteEdit, RankItem, State};
 use crate::{config, load};
 
+/// How long a live voicing edit takes to reach a held pipe's pitch.
+/// Short enough to feel immediate under the hand, long enough that
+/// dragging a cents field is a slide rather than a series of jumps —
+/// the same reasoning as the tuning seam's own glide.
+const VOICING_GLIDE_MS: f32 = 30.0;
+
 impl State {
     /// Declare (or with `None` retract) a manual's compass, live and —
     /// when the organ lives in a file that declares the manual — in
@@ -423,58 +429,60 @@ impl State {
         Ok(())
     }
 
-    /// A stop's own voicing — footage, cents, gain — live and in the
-    /// file. Live means now: held keys re-speak the stop at its new
-    /// pitch; nothing rebuilds.
+    /// A stop's own voicing — footage, cents, gain, brightness — live
+    /// and in the file. Live means now: level and tone slide under the
+    /// held keys, and pitch glides unless it re-anchors onto other
+    /// pipes; nothing rebuilds.
     pub fn set_stop_voicing(
         &mut self,
         stop: StopId,
         voicing: load::StopVoicing,
     ) -> Result<(), String> {
         let (name, _, _) = self.stop_coordinates(stop)?;
-        let Control::Organ(console) = &mut self.control else {
-            return Err("no organ is loaded".into());
-        };
-        let footage_cents = match voicing.feet {
-            None => 0.0,
-            Some(feet) => {
-                if !(feet > 0.0 && feet.is_finite()) {
-                    return Err("footage must be a positive number of feet".into());
-                }
-                let Some(native) = console.stop_native_footage(stop) else {
-                    return Err(format!(
-                        "{name:?} speaks no single footage (a mixture) — \
-                         tune it in cents instead"
-                    ));
-                };
-                cents_between(feet, native)
+        if let Some(feet) = voicing.feet {
+            if !(feet > 0.0 && feet.is_finite()) {
+                return Err("footage must be a positive number of feet".into());
             }
-        };
-        let gain = 10f32.powf((voicing.gain_db.clamp(-40.0, 20.0) as f32) / 20.0);
-        let cents = voicing.cents.clamp(-2400.0, 2400.0) + footage_cents;
-        console.set_stop_adjust_one(stop, gain, cents);
-        let (stopped, starts) = console.reprice_stop(stop);
-        for handle in stopped {
-            self.engine.send(Command::StopVoice { handle });
+            let Control::Organ(console) = &self.control else {
+                return Err("no organ is loaded".into());
+            };
+            if console.stop_native_footage(stop).is_none() {
+                return Err(format!(
+                    "{name:?} speaks no single footage (a mixture) — \
+                     tune it in cents instead"
+                ));
+            }
         }
-        for start in starts {
-            self.engine.send(start.command());
-        }
+        let previous = self.stop_voicing.get(&stop).copied();
         if voicing.is_neutral() {
             self.stop_voicing.remove(&stop);
         } else {
             self.stop_voicing.insert(stop, voicing);
         }
+        if let Err(why) = self.revoice(stop) {
+            match previous {
+                Some(previous) => {
+                    self.stop_voicing.insert(stop, previous);
+                }
+                None => {
+                    self.stop_voicing.remove(&stop);
+                }
+            }
+            return Err(why);
+        }
         // The file write is best-effort like the tuning contract: an
         // organ without a file still voices live, with a warning that
         // it won't stick.
         if let Some(path) = self.composite_path.clone() {
-            config::write_composite_stop_voicing(
+            config::write_composite_voicing(
                 &path,
                 &name,
+                &load::VoicingScope::default(),
+                true,
                 voicing.feet,
-                voicing.cents,
-                voicing.gain_db,
+                Some(voicing.cents).filter(|&c| c != 0.0),
+                Some(voicing.gain_db).filter(|&g| g != 0.0),
+                Some(voicing.brightness_db).filter(|&b| b != 0.0),
             )?;
         } else {
             tracing::warn!(
@@ -482,6 +490,186 @@ impl State {
             );
         }
         Ok(())
+    }
+
+    /// The voicing of PART of a stop — a key or key span, one rank, or
+    /// both — live and in the file. Same contract as the stop's own:
+    /// no rebuild, held pipes follow. A neutral value removes the rule
+    /// and the pipes fall back to whatever the stop says.
+    pub fn set_pipe_voicing(
+        &mut self,
+        stop: StopId,
+        scope: load::VoicingScope,
+        voicing: load::PipeVoicing,
+    ) -> Result<(), String> {
+        if scope.is_stop_wide() {
+            return Err("a voicing rule about the whole stop is the stop's own".into());
+        }
+        let (name, _, _) = self.stop_coordinates(stop)?;
+        let named = {
+            let Control::Organ(console) = &self.control else {
+                return Err("no organ is loaded".into());
+            };
+            if let Some(rank) = &scope.rank
+                && !console
+                    .stop_ranks(stop)
+                    .iter()
+                    .any(|(_, known)| known.eq_ignore_ascii_case(rank))
+            {
+                return Err(format!("{name:?} has no rank {rank:?}"));
+            }
+            console.stop_has_note_names(stop)
+        };
+        let at = (stop, scope.clone());
+        let previous = self.pipe_voicing.get(&at).copied();
+        if voicing.is_neutral() {
+            self.pipe_voicing.remove(&at);
+        } else {
+            self.pipe_voicing.insert(at.clone(), voicing);
+        }
+        if let Err(why) = self.revoice(stop) {
+            match previous {
+                Some(previous) => {
+                    self.pipe_voicing.insert(at, previous);
+                }
+                None => {
+                    self.pipe_voicing.remove(&at);
+                }
+            }
+            return Err(why);
+        }
+        if let Some(path) = self.composite_path.clone() {
+            config::write_composite_voicing(
+                &path,
+                &name,
+                &scope,
+                named,
+                None,
+                voicing.cents,
+                voicing.gain_db,
+                voicing.brightness_db,
+            )?;
+        } else {
+            tracing::warn!("voicing for {name:?} not saved: this organ has no file yet");
+        }
+        Ok(())
+    }
+
+    /// Rebuild one stop's voicing rules from what the console owns and
+    /// land the change on the pipes already speaking.
+    ///
+    /// Rules that came from a name PATTERN survive: they are the set
+    /// author's or the sidecar's, not the player's to overwrite by
+    /// dragging a knob. The console's own rules are appended after
+    /// them, so where two rules are equally specific the player's
+    /// edit is the one that wins.
+    fn revoice(&mut self, stop: StopId) -> Result<(), String> {
+        let owned = self.owned_voicing_rules(stop)?;
+        let Control::Organ(console) = &mut self.control else {
+            return Err("no organ is loaded".into());
+        };
+        let mut rules: Vec<crate::console::TrimRule> = console
+            .stop_adjust_rules(stop)
+            .iter()
+            .filter(|rule| !rule.owned)
+            .copied()
+            .collect();
+        rules.extend(owned);
+        console.set_stop_adjust_rules(stop, rules);
+        let update = console.revoice_stop(stop);
+        if update.reprice {
+            let (stopped, starts) = console.reprice_stop(stop);
+            for handle in stopped {
+                self.engine.send(Command::StopVoice { handle });
+            }
+            for start in starts {
+                self.engine.send(start.command());
+            }
+            return Ok(());
+        }
+        for (handle, rate) in update.rates {
+            self.engine.send(Command::SetVoiceRate {
+                handle,
+                rate,
+                glide_ms: VOICING_GLIDE_MS,
+            });
+        }
+        for (handle, gain, tilt) in update.trims {
+            self.engine.send(Command::SetVoiceTrim { handle, gain, tilt });
+        }
+        Ok(())
+    }
+
+    /// The console's own `[[voicing.adjust]]` rules for one stop, in
+    /// the order they must be resolved: the stop-wide rule first, then
+    /// the narrowed ones (specificity decides between them anyway, but
+    /// file order is the tie-break and the file is written this way).
+    fn owned_voicing_rules(
+        &self,
+        stop: StopId,
+    ) -> Result<Vec<crate::console::TrimRule>, String> {
+        let Control::Organ(console) = &self.control else {
+            return Err("no organ is loaded".into());
+        };
+        let db_to_linear = |db: f64, floor: f64, ceiling: f64| {
+            10f32.powf((db.clamp(floor, ceiling) as f32) / 20.0)
+        };
+        let mut rules = Vec::new();
+        if let Some(voicing) = self.stop_voicing.get(&stop) {
+            let footage_cents = match voicing.feet {
+                None => 0.0,
+                Some(feet) => match console.stop_native_footage(stop) {
+                    Some(native) => cents_between(feet, native),
+                    None => return Err("this stop speaks no single footage".into()),
+                },
+            };
+            rules.push(crate::console::TrimRule {
+                keys: None,
+                rank: None,
+                gain: Some(db_to_linear(voicing.gain_db, -40.0, 20.0)),
+                cents: Some(voicing.cents.clamp(-2400.0, 2400.0) + footage_cents),
+                tilt: Some(db_to_linear(voicing.brightness_db, -12.0, 12.0)),
+                owned: true,
+            });
+        }
+        // Narrowed rules in a stable order: by span, then by rank name,
+        // so the file (and the resolution's tie-break) doesn't shuffle
+        // between edits.
+        let mut narrowed: Vec<(&load::VoicingScope, &load::PipeVoicing)> = self
+            .pipe_voicing
+            .iter()
+            .filter(|((at, _), _)| *at == stop)
+            .map(|((_, scope), voicing)| (scope, voicing))
+            .collect();
+        narrowed.sort_by(|(a, _), (b, _)| (a.keys, &a.rank).cmp(&(b.keys, &b.rank)));
+        for (scope, voicing) in narrowed {
+            let rank = match &scope.rank {
+                None => None,
+                Some(name) => match console
+                    .stop_ranks(stop)
+                    .into_iter()
+                    .find(|(_, known)| known.eq_ignore_ascii_case(name))
+                {
+                    Some((rank, _)) => Some(rank),
+                    // A rank the organ no longer has warns and skips,
+                    // the same rule every gesture-recorded reference
+                    // follows — a stale rule never bricks the voicing.
+                    None => {
+                        tracing::warn!("voicing: no rank {name:?} on this stop — rule skipped");
+                        continue;
+                    }
+                },
+            };
+            rules.push(crate::console::TrimRule {
+                keys: scope.keys,
+                rank,
+                gain: voicing.gain_db.map(|db| db_to_linear(db, -40.0, 20.0)),
+                cents: voicing.cents.map(|c| c.clamp(-2400.0, 2400.0)),
+                tilt: voicing.brightness_db.map(|db| db_to_linear(db, -12.0, 12.0)),
+                owned: true,
+            });
+        }
+        Ok(rules)
     }
 
     /// A stop's knob engraving — the footage line on the drawknob

@@ -58,6 +58,93 @@ impl VoiceStart {
     }
 }
 
+/// One `[[voicing.adjust]]` rule, resolved against a loaded organ:
+/// which pipes of one stop it speaks about, and what it says about
+/// them. A field left `None` says nothing — that is what lets a
+/// narrow rule leave the rest of the voicing to a broader one.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TrimRule {
+    /// Inclusive key span on the stop's own keyboard (absolute key
+    /// numbers, the same space `[[manual]] hex` anchors live in);
+    /// `None` = every key the stop answers to.
+    pub keys: Option<(i32, i32)>,
+    /// One rank inside the stop; `None` = all of them.
+    pub rank: Option<RankId>,
+    /// Linear gain.
+    pub gain: Option<f32>,
+    /// Pitch trim in cents, with any footage change already folded in.
+    pub cents: Option<f64>,
+    /// Treble tilt as a linear factor on the pipe's shelf.
+    pub tilt: Option<f32>,
+    /// Whether this rule is the console's own for its scope — a
+    /// `[[voicing.adjust]]` naming exactly this stop, which the stop
+    /// editor and the key-voicing popover show and rewrite. Rules that
+    /// came from a name PATTERN are nobody's to edit: a live edit
+    /// leaves them standing, and they keep contributing to the sound.
+    pub owned: bool,
+}
+
+impl TrimRule {
+    /// How specific this rule is — bigger wins. The measure is how
+    /// FEW pipes it speaks about: a narrower key span first (a rule
+    /// about one pipe is a statement about that pipe), then whether
+    /// it names a rank. Two rules that address the same pipes are
+    /// settled by file order at the call site.
+    fn specificity(&self) -> (u32, u8) {
+        let span = self
+            .keys
+            .map(|(low, high)| (high - low).unsigned_abs().saturating_add(1))
+            .unwrap_or(u32::MAX);
+        (u32::MAX - span, self.rank.is_some() as u8)
+    }
+
+    fn covers(&self, rank: RankId, key: i32) -> bool {
+        self.keys.is_none_or(|(low, high)| (low..=high).contains(&key))
+            && self.rank.is_none_or(|only| only == rank)
+    }
+}
+
+/// What one pipe is priced with once the rules have been resolved.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VoiceTrim {
+    pub gain: f32,
+    pub cents: f64,
+    pub tilt: f32,
+}
+
+impl Default for VoiceTrim {
+    fn default() -> Self {
+        VoiceTrim {
+            gain: 1.0,
+            cents: 0.0,
+            tilt: 1.0,
+        }
+    }
+}
+
+/// What a live voicing edit does to the pipes already speaking.
+#[derive(Debug, Clone, Default)]
+pub struct Revoicing {
+    /// `(handle, gain multiplier against note-on, tilt)` — the engine
+    /// ramps the gain and swaps the tilt in place.
+    pub trims: Vec<(u64, f32, f32)>,
+    /// `(handle, rate)` — a pitch trim that stayed on the same pipe
+    /// rides the ordinary glide.
+    pub rates: Vec<(u64, f32)>,
+    /// The pitch trim moved a key onto a different pipe: nothing can
+    /// be glided, and the caller re-prices the stop instead.
+    pub reprice: bool,
+}
+
+impl Revoicing {
+    fn reprice() -> Revoicing {
+        Revoicing {
+            reprice: true,
+            ..Revoicing::default()
+        }
+    }
+}
+
 /// One place a played key lands after coupling: the manual and key
 /// that should sound, and the policies the route it travelled grants.
 struct Landing {
@@ -207,13 +294,13 @@ pub struct Console {
     /// sidecar's `[routing]`/`[voicing]` — stamped onto each voice's
     /// spec as it is priced. Stops not named route to bus 0, delay 0.
     stop_routing: HashMap<StopId, (u8, u32)>,
-    /// Per stop: (linear gain, pitch shift in cents) from the
-    /// sidecar's `[[voicing.adjust]]` — the user's own level/tuning
-    /// trim. The cents ride the same pricing fold as tuning: whole
-    /// semitones re-anchor keys to neighbouring pipes (a footage
-    /// change is a unit-organ extension, not a tape-speed trick), the
-    /// remainder bends.
-    stop_adjust: HashMap<StopId, (f32, f64)>,
+    /// Per stop: its `[[voicing.adjust]]` rules in file order — the
+    /// user's own level/tone/tuning trims, each narrowed to the pipes
+    /// it speaks about. The cents ride the same pricing fold as
+    /// tuning: whole semitones re-anchor keys to neighbouring pipes (a
+    /// footage change is a unit-organ extension, not a tape-speed
+    /// trick), the remainder bends.
+    stop_adjust: HashMap<StopId, Vec<TrimRule>>,
     /// Per manual: the inclusive MIDI note range that manual answers to.
     /// Starts as the sample set's own compass and is widened to the
     /// player's keyboard (see `set_compass`) — a key outside it is
@@ -274,6 +361,17 @@ struct Speaking {
     ladder_key: i16,
     stop: StopId,
     rank: RankId,
+    /// The voicing trim this voice was priced with, and the gain part
+    /// of it as it stood at note-on. A live re-voicing sends the
+    /// engine the ratio against the latter, so the press's velocity
+    /// and the pipe's own recorded level survive untouched however
+    /// many times the voicer moves the knob.
+    trim: VoiceTrim,
+    start_gain: f32,
+    /// The whole-semitone re-anchoring the pitch trim caused. A live
+    /// cents edit that leaves it alone is a glide; one that moves it
+    /// picks a different pipe, and the stop has to re-speak.
+    shift: i16,
 }
 
 impl Speaking {
@@ -297,6 +395,8 @@ struct KeyVoice {
     home: f64,
     model: f64,
     ladder_key: i16,
+    trim: VoiceTrim,
+    shift: i16,
     spec: VoiceSpec,
 }
 
@@ -788,6 +888,19 @@ impl Console {
         all
     }
 
+    /// Does this stop's keyboard have note names? Hand manuals and
+    /// pedalboards do; a microtonal board's keys are numbers and
+    /// nothing else, so writers spell its key spans as numbers (the
+    /// declared kind decides, never a guess — see `ManualKind`).
+    pub fn stop_has_note_names(&self, stop: StopId) -> bool {
+        self.organ
+            .stops
+            .iter()
+            .find(|s| s.id == stop)
+            .and_then(|s| self.organ.manuals.iter().find(|m| m.id == s.manual))
+            .is_none_or(|manual| manual.kind != aristide_model::ManualKind::Microtonal)
+    }
+
     /// The distinct ranks a stop sounds, in range order, with their
     /// names — the units a mixture can be tuned by.
     pub fn stop_ranks(&self, stop: StopId) -> Vec<(RankId, &str)> {
@@ -884,26 +997,65 @@ impl Console {
         self.stop_routing = routing;
     }
 
-    /// Install the sidecar's per-stop voicing trims (linear gain,
-    /// pitch shift in cents).
-    pub fn set_stop_adjust(&mut self, adjust: HashMap<StopId, (f32, f64)>) {
+    /// Install the sidecar's voicing rules, resolved per stop.
+    pub fn set_stop_adjust(&mut self, adjust: HashMap<StopId, Vec<TrimRule>>) {
         self.stop_adjust = adjust;
     }
 
-    /// One stop's trim, live — the console editor's seam. Neutral
-    /// values drop the entry. Applies from the next voice priced; the
-    /// caller re-prices the stop if it should land under held keys.
-    pub fn set_stop_adjust_one(&mut self, stop: StopId, gain: f32, cents: f64) {
-        if gain == 1.0 && cents == 0.0 {
+    /// One stop's rules, live — the console editor's seam. An empty
+    /// list drops the entry. Applies from the next voice priced; the
+    /// caller re-voices held keys if the change should land under
+    /// them.
+    pub fn set_stop_adjust_rules(&mut self, stop: StopId, rules: Vec<TrimRule>) {
+        if rules.is_empty() {
             self.stop_adjust.remove(&stop);
         } else {
-            self.stop_adjust.insert(stop, (gain, cents));
+            self.stop_adjust.insert(stop, rules);
         }
     }
 
-    /// A stop's current trim (linear gain, cents), neutral if none.
-    pub fn stop_adjust(&self, stop: StopId) -> (f32, f64) {
-        self.stop_adjust.get(&stop).copied().unwrap_or((1.0, 0.0))
+    /// A stop's rules, in file order.
+    pub fn stop_adjust_rules(&self, stop: StopId) -> &[TrimRule] {
+        self.stop_adjust.get(&stop).map_or(&[], |rules| rules)
+    }
+
+    /// What one pipe of one stop is voiced at: the rule for each field
+    /// separately, taken from the most specific rule that says
+    /// anything about it.
+    ///
+    /// Rules do NOT stack. A voicer setting a pipe's level is stating
+    /// what that pipe should do, not adding an offset to what someone
+    /// else said — so a `keys = "C2..B2"` rule that gives a gain
+    /// replaces the stop-wide gain over those keys and leaves the
+    /// stop-wide cents and tilt exactly as they were. "Most specific"
+    /// is measured as "speaks about the fewest keys", then "names a
+    /// rank", then "comes later in the file" — see
+    /// [`TrimRule::specificity`].
+    pub fn trim_for(&self, stop: StopId, rank: RankId, key: i32) -> VoiceTrim {
+        let Some(rules) = self.stop_adjust.get(&stop) else {
+            return VoiceTrim::default();
+        };
+        let mut trim = VoiceTrim::default();
+        let (mut best_gain, mut best_cents, mut best_tilt) = (None, None, None);
+        for (index, rule) in rules.iter().enumerate() {
+            if !rule.covers(rank, key) {
+                continue;
+            }
+            let rank = (rule.specificity(), index);
+            if rule.gain.is_some() && best_gain.is_none_or(|best| best <= rank) {
+                best_gain = Some(rank);
+                trim.gain = rule.gain.expect("just checked");
+            }
+            if rule.cents.is_some() && best_cents.is_none_or(|best| best <= rank) {
+                best_cents = Some(rank);
+                trim.cents = rule.cents.expect("just checked");
+            }
+            if rule.tilt.is_some() && best_tilt.is_none_or(|best| best <= rank) {
+                best_tilt = Some(rank);
+                trim.tilt = rule.tilt.expect("just checked");
+            }
+        }
+        trim
     }
 
     /// Rename a coupler on the live console — a rocker's engraving,
@@ -1024,6 +1176,66 @@ impl Console {
     /// key re-anchored to another pipe is a different recording, so a
     /// mid-speech glide can't cover every case): the caller sends the
     /// stops, then the starts.
+    /// Land a voicing change on the pipes that are already speaking.
+    ///
+    /// Level and tone move in place: the engine ramps them under the
+    /// held key, so a knob drag is a fade and no pipe re-attacks. A
+    /// pitch trim glides the same way — unless it crossed a semitone,
+    /// which re-anchors the key onto a DIFFERENT pipe (a footage
+    /// change is a unit-organ extension, not a tape-speed trick); then
+    /// nothing can be glided and the caller re-prices the stop.
+    pub fn revoice_stop(&mut self, stop: StopId) -> Revoicing {
+        let voices: Vec<(PipeKey, i16, RankId, VoiceTrim, f32, i16)> = self
+            .speaking
+            .iter()
+            .filter(|(_, voice)| voice.stop == stop)
+            .map(|(&at, voice)| {
+                (at, voice.ladder_key, voice.rank, voice.trim, voice.start_gain, voice.shift)
+            })
+            .collect();
+        // Read everything first: whether a re-price is needed is a
+        // property of the whole stop, and half-glided voices under a
+        // stop that then re-speaks would be a mess.
+        let mut settled = Vec::new();
+        for (at, ladder_key, rank, was, start_gain, shift) in voices {
+            let now = self.trim_for(stop, rank, ladder_key as i32);
+            let (tuning, _) = self.voice_tuning(stop, rank);
+            let Some(deviation) = tuning.deviation_cents(ladder_key.max(0) as u16) else {
+                return Revoicing::reprice();
+            };
+            // The same anchoring `voices_for_key` does, asked again
+            // with the new trim.
+            let anchored_on = if tuning.corrects_pipes() {
+                deviation + now.cents
+            } else {
+                now.cents
+            };
+            if (anchored_on / 100.0).round() as i16 != shift {
+                return Revoicing::reprice();
+            }
+            settled.push((at, was, now, start_gain));
+        }
+        let mut out = Revoicing::default();
+        for (at, was, now, start_gain) in settled {
+            let Some(voice) = self.speaking.get_mut(&at) else {
+                continue;
+            };
+            if (now.cents - was.cents).abs() > 1e-6 {
+                voice.rate *= cents_to_ratio(now.cents - was.cents) as f32;
+                out.rates.push((voice.handle, voice.bent_rate()));
+            }
+            if now.gain != was.gain || now.tilt != was.tilt {
+                // Against the gain the voice STARTED at, not the last
+                // edit's: the engine's trim is absolute, so a dropped
+                // command can never compound into the wrong level.
+                out.trims
+                    .push((voice.handle, now.gain / start_gain.max(1e-6), now.tilt));
+            }
+            voice.trim = now;
+        }
+        out
+    }
+
     pub fn reprice_stop(&mut self, stop: StopId) -> (Vec<u64>, Vec<VoiceStart>) {
         if !self.is_drawn(stop) {
             return (Vec::new(), Vec::new());
@@ -1480,14 +1692,6 @@ impl Console {
                 {
                     continue;
                 }
-                // The stop's own pitch trim (a footage override, a
-                // fine-tune) folds into the same deviation the tuning
-                // asked for, so a repitched stop re-anchors to the
-                // pipes that really sound there — the octave of an 8'
-                // drawn at 4' comes from the pipes an octave up, not
-                // from doubling the tape speed.
-                let adjust = self.stop_adjust.get(&stop.id).copied();
-                let adjust_cents = adjust.map_or(0.0, |(_, cents)| cents);
                 for range in &stop.ranks {
                     // Coverage is judged at the played key — a divided
                     // register is a decision about the keyboard, not
@@ -1505,6 +1709,19 @@ impl Console {
                     else {
                         continue;
                     };
+                    // The voicer's trim for THIS pipe: level, tone and
+                    // pitch, resolved from the stop's rules at the key
+                    // that sounds it on the stop's own keyboard (a
+                    // coupled press is voiced where it lands, since it
+                    // is that pipe that speaks). The pitch trim (a
+                    // footage override, a fine-tune) folds into the
+                    // same deviation the tuning asked for, so a
+                    // repitched stop re-anchors to the pipes that
+                    // really sound there — the octave of an 8' drawn
+                    // at 4' comes from the pipes an octave up, not
+                    // from doubling the tape speed.
+                    let trim = self.trim_for(stop.id, range.rank, midi_key as i32);
+                    let adjust_cents = trim.cents;
                     // A target tuning bends each pipe from where it
                     // was measured to sound (or from the organ's model
                     // of it, when it keeps its drift), not from the
@@ -1538,11 +1755,10 @@ impl Console {
                         spec.bus = bus;
                         spec.delay_frames = delay_frames;
                     }
-                    // The user's voicing trim: level directly (the
-                    // cents were folded into `priced` above).
-                    if let Some((gain, _)) = adjust {
-                        spec.gain *= gain;
-                    }
+                    // The user's voicing trim: level and tone directly
+                    // (the cents were folded into `priced` above).
+                    spec.gain *= trim.gain;
+                    spec.voicing_tilt = trim.tilt;
                     // Identity at cent resolution on the PHYSICAL pipe:
                     // two keys anchored to the same pipe but bent apart
                     // are two virtual pipes; the same pipe at the same
@@ -1569,6 +1785,8 @@ impl Console {
                         home: spec.home_cents as f64,
                         model: spec.model_cents as f64,
                         ladder_key: midi_key,
+                        trim,
+                        shift,
                         spec: self.voiced(spec, ratio * bend_ratio),
                     });
                 }
@@ -1800,6 +2018,9 @@ impl Console {
                         ladder_key: voice.ladder_key,
                         stop: voice.stop,
                         rank: voice.rank,
+                        trim: voice.trim,
+                        start_gain: voice.trim.gain,
+                        shift: voice.shift,
                     },
                 );
                 if let Some(previous) = self.last_pipe_voice.insert(at, handle) {
@@ -2532,6 +2753,23 @@ mod tests {
     use super::*;
     use aristide_model::{Manual, ManualId, Pipe, PipeSource, Rank, RankRange, Stop};
 
+    fn trim_rule(
+        keys: Option<(i32, i32)>,
+        rank: Option<RankId>,
+        gain: Option<f32>,
+        cents: Option<f64>,
+        tilt: Option<f32>,
+    ) -> TrimRule {
+        TrimRule {
+            keys,
+            rank,
+            gain,
+            cents,
+            tilt,
+            owned: true,
+        }
+    }
+
     fn test_console() -> Console {
         let organ = Organ {
             name: "T".into(),
@@ -2769,7 +3007,7 @@ mod tests {
         let mut console = test_console();
         console.set_drawn(StopId(2), false);
         let mut adjust = HashMap::new();
-        adjust.insert(StopId(1), (1.0f32, 1200.0));
+        adjust.insert(StopId(1), vec![trim_rule(None, None, None, Some(1200.0), None)]);
         console.set_stop_adjust(adjust);
         let (starts, _) = console.note_on_manual(0, 60, 64);
         assert_eq!(starts.len(), 1);
@@ -2830,7 +3068,10 @@ mod tests {
         let mut adjust = HashMap::new();
         // 1200·log2(1.01) cents — under half a semitone, so the pipe
         // stays its own and the whole trim lands as bend.
-        adjust.insert(StopId(1), (0.5f32, 1200.0 * 1.01f64.log2()));
+        adjust.insert(
+            StopId(1),
+            vec![trim_rule(None, None, Some(0.5), Some(1200.0 * 1.01f64.log2()), None)],
+        );
         console.set_stop_adjust(adjust);
         let (starts, _) = console.note_on_manual(0, 60, 127);
         assert_eq!(starts.len(), 1);
@@ -2844,6 +3085,121 @@ mod tests {
             "pitch trim: {}",
             starts[0].spec.rate
         );
+    }
+
+    /// Voicing rules do not stack: per field, the rule that speaks
+    /// about the fewest pipes wins, and a field it leaves unsaid falls
+    /// through to the broader rule. The table is the whole contract.
+    #[test]
+    fn narrower_voicing_rules_win_per_field_and_never_stack() {
+        let mut console = test_console();
+        let rank = console.stop_ranks(StopId(1))[0].0;
+        let other = RankId(999);
+        let mut adjust = HashMap::new();
+        adjust.insert(
+            StopId(1),
+            vec![
+                // The stop: −6 dB, +10 cents, a touch dark.
+                trim_rule(None, None, Some(0.5), Some(10.0), Some(0.8)),
+                // Its bass octave: quieter still, and nothing about
+                // pitch or tone.
+                trim_rule(Some((36, 47)), None, Some(0.25), None, None),
+                // One pipe of it: bright, and nothing about level.
+                trim_rule(Some((40, 40)), None, None, None, Some(2.0)),
+                // One rank across the whole compass: its own pitch.
+                trim_rule(None, Some(rank), None, Some(-4.0), None),
+            ],
+        );
+        console.set_stop_adjust(adjust);
+
+        // Above the bass octave, on the named rank: the stop's level
+        // and tone, the rank's pitch.
+        let mid = console.trim_for(StopId(1), rank, 60);
+        assert_eq!((mid.gain, mid.cents, mid.tilt), (0.5, -4.0, 0.8));
+        // The same key on a rank nobody named: the stop's pitch.
+        let mid_other = console.trim_for(StopId(1), other, 60);
+        assert_eq!((mid_other.gain, mid_other.cents, mid_other.tilt), (0.5, 10.0, 0.8));
+        // In the bass: the octave rule's level REPLACES the stop's
+        // (0.25, not 0.5 × 0.25), and pitch/tone still fall through.
+        let bass = console.trim_for(StopId(1), rank, 36);
+        assert_eq!((bass.gain, bass.cents, bass.tilt), (0.25, -4.0, 0.8));
+        // The single pipe: its own tone, the octave's level, the
+        // rank's pitch — three rules, one pipe, no addition anywhere.
+        let pipe = console.trim_for(StopId(1), rank, 40);
+        assert_eq!((pipe.gain, pipe.cents, pipe.tilt), (0.25, -4.0, 2.0));
+        // A stop nobody voiced is untouched.
+        assert_eq!(console.trim_for(StopId(2), rank, 60), VoiceTrim::default());
+    }
+
+    /// The trim is stamped where the pipe is priced, so a key inside a
+    /// narrowed rule speaks at its own level and tone and its
+    /// neighbours do not.
+    #[test]
+    fn pricing_stamps_the_trim_of_the_key_that_sounds() {
+        let mut console = test_console();
+        console.set_drawn(StopId(2), false);
+        let mut adjust = HashMap::new();
+        adjust.insert(
+            StopId(1),
+            vec![
+                trim_rule(None, None, Some(0.5), None, None),
+                trim_rule(Some((60, 60)), None, Some(0.125), None, Some(2.0)),
+            ],
+        );
+        console.set_stop_adjust(adjust);
+        let (voiced, _) = console.note_on_manual(0, 60, 127);
+        assert_eq!(voiced.len(), 1);
+        assert!((voiced[0].spec.gain - 0.125).abs() < 1e-6, "{}", voiced[0].spec.gain);
+        assert!((voiced[0].spec.voicing_tilt - 2.0).abs() < 1e-6);
+        let (neighbour, _) = console.note_on_manual(0, 61, 127);
+        assert_eq!(neighbour.len(), 1);
+        assert!((neighbour[0].spec.gain - 0.5).abs() < 1e-6, "{}", neighbour[0].spec.gain);
+        assert!((neighbour[0].spec.voicing_tilt - 1.0).abs() < 1e-6, "untouched");
+    }
+
+    /// A live level/tone edit reaches the pipe already speaking as a
+    /// trim, not as a re-attack; a pitch edit big enough to re-anchor
+    /// the key onto another pipe asks for a re-price instead.
+    #[test]
+    fn revoicing_trims_held_pipes_and_reprices_only_when_the_pipe_changes() {
+        let mut console = test_console();
+        console.set_drawn(StopId(2), false);
+        let (started, _) = console.note_on_manual(0, 60, 127);
+        assert_eq!(started.len(), 1);
+        let handle = started[0].handle;
+
+        let mut adjust = HashMap::new();
+        adjust.insert(StopId(1), vec![trim_rule(None, None, Some(0.5), None, Some(2.0))]);
+        console.set_stop_adjust(adjust);
+        let update = console.revoice_stop(StopId(1));
+        assert!(!update.reprice, "a level change re-speaks nothing");
+        assert!(update.rates.is_empty(), "and moves no pitch");
+        assert_eq!(update.trims.len(), 1);
+        assert_eq!(update.trims[0].0, handle);
+        assert!((update.trims[0].1 - 0.5).abs() < 1e-6, "gain against note-on");
+        assert!((update.trims[0].2 - 2.0).abs() < 1e-6);
+
+        // A second edit is still measured against the note-on gain, so
+        // repeated drags can never compound.
+        let mut adjust = HashMap::new();
+        adjust.insert(StopId(1), vec![trim_rule(None, None, Some(0.25), None, Some(1.0))]);
+        console.set_stop_adjust(adjust);
+        let update = console.revoice_stop(StopId(1));
+        assert!((update.trims[0].1 - 0.25).abs() < 1e-6);
+
+        // A few cents glides; a whole octave re-anchors the key onto
+        // the real pipe an octave up, which nothing can glide to.
+        let mut adjust = HashMap::new();
+        adjust.insert(StopId(1), vec![trim_rule(None, None, None, Some(12.0), None)]);
+        console.set_stop_adjust(adjust);
+        let update = console.revoice_stop(StopId(1));
+        assert!(!update.reprice);
+        assert_eq!(update.rates.len(), 1, "the held pipe glides");
+
+        let mut adjust = HashMap::new();
+        adjust.insert(StopId(1), vec![trim_rule(None, None, None, Some(1200.0), None)]);
+        console.set_stop_adjust(adjust);
+        assert!(console.revoice_stop(StopId(1)).reprice, "another pipe now");
     }
 
     /// The fixture manual is MIDI 36..96. Widening it to a keyboard

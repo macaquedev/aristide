@@ -177,6 +177,11 @@ pub struct State {
     /// gain), mirrored here so the console editor can show and edit
     /// exactly what the file says.
     pub stop_voicing: std::collections::HashMap<StopId, load::StopVoicing>,
+    /// The narrowed voicing rules of the console's own, keyed by the
+    /// stop and the pipes they address — what the per-key voicing
+    /// popover shows and writes back.
+    pub pipe_voicing:
+        std::collections::HashMap<(StopId, load::VoicingScope), load::PipeVoicing>,
     /// Per stop: its declared knob engraving (`""` = engrave nothing);
     /// stops absent here engrave the footage they actually speak at.
     pub stop_labels: std::collections::HashMap<StopId, String>,
@@ -311,6 +316,8 @@ pub struct Installed {
     pub setup: Setup,
     pub provenance: std::collections::HashMap<StopId, instrument::StopProvenance>,
     pub stop_voicing: std::collections::HashMap<StopId, load::StopVoicing>,
+    pub pipe_voicing:
+        std::collections::HashMap<(StopId, load::VoicingScope), load::PipeVoicing>,
     pub stop_labels: std::collections::HashMap<StopId, String>,
     pub stop_order: std::collections::BTreeMap<String, Vec<String>>,
     pub layout: std::collections::BTreeMap<String, instrument::PanelPos>,
@@ -357,6 +364,7 @@ impl State {
             setup: Setup::default(),
             provenance: Default::default(),
             stop_voicing: Default::default(),
+            pipe_voicing: Default::default(),
             stop_labels: Default::default(),
             stop_order: Default::default(),
             compass_overrides: Vec::new(),
@@ -405,6 +413,7 @@ impl State {
         self.setup = loaded.setup;
         self.provenance = loaded.provenance;
         self.stop_voicing = loaded.stop_voicing;
+        self.pipe_voicing = loaded.pipe_voicing;
         self.stop_labels = loaded.stop_labels;
         self.stop_order = loaded.stop_order;
         self.compass_overrides = Vec::new();

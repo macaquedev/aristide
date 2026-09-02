@@ -927,6 +927,7 @@ mod tests {
             setup: Default::default(),
             provenance: Default::default(),
             stop_voicing: Default::default(),
+        pipe_voicing: Default::default(),
             stop_labels: Default::default(),
             stop_order: Default::default(),
             compass_overrides: Vec::new(),
