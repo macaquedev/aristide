@@ -13,7 +13,7 @@ MIDI/audio routing. Free forever, GPLv3.
 |---|---|---|
 | Language | Rust | RT-safe concurrency without GC, SIMD, modern tooling |
 | Shape | Headless engine + clients | Console PCs, tablet remotes, future CLAP wrapper |
-| GUI | Native Rust (wgpu-based; iced/egui TBD) | Fast, light, no webview |
+| GUI | Tauri 2 shell over a zero-build HTML/CSS/JS console (revised 2026-08-13; the egui GUI was removed) | One UI for the desktop shell and any browser; the server stays headless |
 | License | GPLv3 | Nobody takes it proprietary; ecosystem norm |
 | Formats | GO `.organ` + unencrypted Hauptwerk read **directly**; Aristide features live in **sidecar files** | Sound quality is engine-side; sidecars add superpowers to every existing free set with no conversion |
 | Native standalone format | Deferred | Only needed for future multi-mic/spatial recordings |
@@ -148,23 +148,25 @@ audible impact:
 ```
 ┌───────────────────────────── aristide-server (daemon, bin) ─────────────────────────────┐
 │  device I/O: audio (cpal→PipeWire/JACK/WASAPI/CoreAudio), MIDI (midir; MIDI 2.0 later)  │
-│  control plane: IPC (unix socket / TCP) — GUI, tablet remote, OSC, scripting            │
+│  control plane: HTTP/JSON on localhost today (`--http-port`, 9669) — console, browser,  │
+│  scripting; a richer IPC (unix socket / TCP, OSC, tablet remote) is M5                  │
 │        ┌──────────────── aristide-engine (RT core, lib) ────────────────┐               │
-│        │ lock-free command queue → voice allocator → streaming voices    │               │
-│        │ (RAM attack cache + disk streamer) → node graph (delays, conv   │               │
-│        │ reverb, wind model taps) → N-channel output routing, SIMD mix   │               │
+│        │ lock-free command queue → voice allocator → voices (in RAM     │               │
+│        │ today, 16-bit by default; disk streamer is M4) → node graph    │               │
+│        │ (delays, conv reverb, wind taps) → N-channel routing, SIMD mix │               │
 │        └────────────────────────────┬────────────────────────────────────┘              │
 │                 aristide-model (lib): organ model — divisions, stops, ranks, pipes,     │
 │                 couplers, tuning/temperament (Scala), key mappings (MPE/MIDI2/Lumatone) │
 │                 aristide-formats (lib): GO loader, HW(unenc) loader, sidecar read/write │
 └─────────────────────────────────────────────────────────────────────────────────────────┘
-                                   ▲ IPC
+                                   ▲ HTTP
                 aristide-console (bin): Tauri console UI (HTTP to server)
 ```
 
 - The **audio thread never allocates, locks, or touches disk**. Control → RT communication
-  is lock-free SPSC queues; disk streaming happens on dedicated streamer threads filling
-  ring buffers; sample attacks are pre-cached in RAM (Hauptwerk's proven trick).
+  is lock-free SPSC queues. Samples are fully RAM-resident today (16-bit by default, see
+  docs/progress/2026-08-26-memory-wall.md); the planned disk streamer keeps attacks
+  pre-cached in RAM (Hauptwerk's proven trick) and fills ring buffers from streamer threads.
 - Polyphony target: **≥2000 streaming voices** on a mid-range desktop; latency target
   sub-10 ms end-to-end at 48 kHz.
 - The engine is a pure library (buffers in/out) — the server owns devices. This is what
@@ -443,16 +445,29 @@ main thread; a failed load reports and leaves the running organ untouched.
 
 - **M0** — repo, workspace, this document. ✅
 - **M1 — first sound**: server opens audio+MIDI devices, sine-per-note through the RT
-  command path. Proves device layer + lock-free plumbing. ✅ (QWERTY fallback deferred;
-  see docs/PROGRESS.md)
+  command path. Proves device layer + lock-free plumbing. ✅ (QWERTY fallback landed
+  2026-08-18 as the `Computer keyboard` input; hex manuals 2026-08-27)
 - **M2 — organ model + GO loader**: parse `.organ` sets (test: Grabowski Friesach demo)
   into the model; validate against GrandOrgue's docs. ✅
 - **M3 — sampled voices**: attack-cache + disk-streaming playback with loops and basic
-  releases. First real organ sound. ✅ code-complete (RAM-resident; disk streaming
-  moved to M4 with the rest of the engine quality pass — see docs/PROGRESS.md)
+  releases. First real organ sound. ✅ (RAM-resident; disk streaming moved to M4 and
+  still open there)
 - **M4 — engine quality pass**: phase-aligned multi-releases, sinc resampling, voicing,
   tremulants, wind model. The "better than Hauptwerk" milestone; A/B against GO.
-- **M5 — headless split + GUI**: IPC protocol, native GUI console, multi-window.
+  Shipped: sinc resampling + phase-aligned releases (2026-08-08), wind supply model
+  (2026-08-09), convolution reverb, enclosures (2026-08-12), multi-loop/multi-release
+  and attack selection, sounding tremulants (2026-08-26; wind-valve physics
+  2026-08-27), voicing trims + generals with a setter, 16-bit residency + load cache
+  (2026-08-26). Still open: disk streaming for sets beyond RAM; stereo release
+  alignment (R-channel splice kinks); closed-box pressure rise and multi-box
+  windchests; wave-trem switch on held notes; pipe-scope voicing, a brightness/EQ
+  leg and live voicing edits; divisionals, stepper, crescendo and a piston rail; a
+  recorded A/B against GrandOrgue.
+- **M5 — headless split + GUI**: IPC protocol, native GUI console, multi-window. The
+  console shipped 2026-08-13 as a Tauri 2 shell over the web console (replacing the
+  egui GUI) and edits the organ in place (see "The console edits the instrument"
+  above). Still open: a control-plane protocol beyond the localhost HTTP API (tablet
+  remote, OSC, scripting), multi-window.
 - **M6 — contemporary layer**: Scala/MPE/MIDI2/Lumatone input, effects graph public,
   multichannel routing, per-pipe delays. ✅ core complete 2026-08-24 (opened ahead of
   M4/M5 by decision the same day): Scala per-division tuning with nearest-pipe
@@ -470,9 +485,11 @@ main thread; a failed load reports and leaves the running organ untouched.
   `docs/hw-odf-notes.md`, test set AVO Solignac); `load_set` dispatches on extension
   and everything downstream stays single-`Organ`. Deferred inside it: noise ranks,
   second-layer tremmed samples, temperament files, the wind-physics tables. See
-  docs/progress/2026-09-02-hauptwerk-loader.md.
+  docs/progress/2026-09-02-hauptwerk-loader.md. Still open: the CLAP wrapper and
+  Windows/macOS CI (the repo has no CI at all yet).
 
 ## Test rig
 
-User's console sends MIDI over USB/DIN; one speaker (stereo MVP is fine). Free GO sets
-(Grabowski, Palo) are the test corpus.
+User's console sends MIDI over USB/DIN; one speaker (stereo MVP is fine). Test corpus:
+GrandOrgue's bundled Friesach demo (`testsets/grandorgue-demo/`) and the free AVO
+Solignac Hauptwerk set (`testsets/avo-solignac/`); see CLAUDE.md for how to fetch both.
