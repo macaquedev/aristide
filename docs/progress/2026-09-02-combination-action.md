@@ -102,6 +102,13 @@ Generals and divisionals capture what is *sounding*, crescendo included
 — GO's `FillWithCurrent` reads a drawstop's engaged state the same way,
 and it is what the player means by pressing Set: this, please, again.
 
+Every store is refused while the organ is loading. A store snapshots
+the live console's *names* and writes them to the file, which is
+exactly the class of edit that bricked an organ in the field on
+2026-08-21: mid-rebuild the console's names are stale against the file
+being rewritten. A console being rebuilt has no registration worth
+capturing anyway.
+
 ## The console
 
 A `Combinations` panel on the panel canvas (layout in the organ file's
@@ -121,6 +128,15 @@ through the lock) opens a one-row popover holding the existing
 quick-bind row — so the player's own MIDI piston ends up doing exactly
 what the button on screen does, through the same machinery the stop and
 coupler editors use.
+
+The flat Bindings list learned the new verbs too. It had a latent bug:
+its action select offered `general:` as a stem but only knew how to
+complete a *name*, so choosing it sent a bare `general:` the server
+cannot parse. Stems now come in three kinds — a name (stop, coupler,
+enclosure), a number (`general:`, `crescendo:`, `stepper:goto:`) and a
+manual-plus-number (`divisional:`) — and a stem is matched by its
+longest prefix so `stepper:goto:5` is a goto rather than a mangled
+`stepper:`.
 
 A crescendo-held stop the hand hasn't drawn renders **lit but not
 drawn**: the dark face of an undrawn knob, ringed and lettered in the

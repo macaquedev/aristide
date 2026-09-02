@@ -652,6 +652,9 @@ export class Console {
       return stage;
     };
     track.addEventListener("pointerdown", (event) => {
+      // The primary button only: a right-click on the pedal is the
+      // gesture that binds it (editor.js), and must not also move it.
+      if (event.button !== 0) return;
       event.preventDefault();
       this.dragging.add(key);
       track.setPointerCapture(event.pointerId);
@@ -661,6 +664,7 @@ export class Console {
       if (this.dragging.has(key)) set(event);
     });
     track.addEventListener("pointerup", (event) => {
+      if (!this.dragging.has(key)) return;
       this.dragging.delete(key);
       this.send(commands.crescendo(set(event)));
     });
@@ -694,8 +698,11 @@ export class Console {
   }
 
   cancel() {
+    // Optimistic — but never on a stop the crescendo is holding: Cancel
+    // is a thumb on the jamb and cannot move a foot, so those stay lit
+    // and blanking them would be a lie the next poll corrects.
     for (const control of this.root.querySelectorAll(
-      '.knob.on:not([data-key="trem"]), .rocker.on'
+      '.knob.on:not([data-key="trem"]):not(.crescendo-held), .rocker.on'
     )) {
       control.classList.remove("on"); // optimistic
     }

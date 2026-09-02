@@ -761,10 +761,29 @@ impl State {
         std::mem::take(&mut self.setter_armed)
     }
 
+    /// Whether a store may go ahead. A store snapshots the live
+    /// console's *names* and writes them to the organ file, so it is
+    /// exactly the class of edit that must never fire mid-rebuild: the
+    /// names are stale against the file being rewritten, and the
+    /// result would be a combination naming stops this organ no longer
+    /// has (see docs/progress/2026-08-21 and `write_composite_midi`'s
+    /// contract). A console being rebuilt has no registration worth
+    /// capturing anyway.
+    fn may_store(&self) -> bool {
+        if self.loading.is_some() || self.pending_load.is_some() {
+            tracing::warn!("combination not stored: the organ is still loading");
+            return false;
+        }
+        true
+    }
+
     /// Capture the console as it stands into a general, by name — the
     /// text vocabulary bindings use, so the file stays honest across
     /// renames — and persist it with the organ's other per-organ state.
     pub fn store_general(&mut self, slot: u8) {
+        if !self.may_store() {
+            return;
+        }
         let Some(registration) = self.capture(Scope::Whole) else {
             return;
         };
@@ -818,6 +837,9 @@ impl State {
     }
 
     pub fn store_divisional(&mut self, manual: usize, slot: u8) {
+        if !self.may_store() {
+            return;
+        }
         let Some(name) = self.manual_names().get(manual).cloned() else {
             return;
         };
@@ -924,6 +946,9 @@ impl State {
     /// armed setter would overwrite a frame every time a player armed
     /// Set and then reached for the next registration.
     pub fn stepper_store(&mut self) {
+        if !self.may_store() {
+            return;
+        }
         let Some(registration) = self.capture(Scope::Whole) else {
             return;
         };
@@ -950,6 +975,9 @@ impl State {
     /// into it and land there — how a sequence is built forwards, one
     /// registration at a time, without renumbering anything by hand.
     pub fn stepper_insert(&mut self) {
+        if !self.may_store() {
+            return;
+        }
         let Some(registration) = self.capture(Scope::Whole) else {
             return;
         };
@@ -1070,8 +1098,16 @@ impl State {
     /// learn — and deliberately *not* the pedal itself: a foot sweeping
     /// through the stages must never write anything.
     pub fn store_crescendo(&mut self, stage: u8) {
+        if !self.may_store() {
+            return;
+        }
+        // Stage 0 is the heel — a position, not a stage, so there is
+        // nothing there to store into.
         if stage == 0 || stage > crate::state::CRESCENDO_STAGES {
-            tracing::warn!("crescendo: stage {stage} is not one of 1..{}", crate::state::CRESCENDO_STAGES);
+            tracing::warn!(
+                "crescendo: stage {stage} is not one of 1..{}",
+                crate::state::CRESCENDO_STAGES
+            );
             return;
         }
         let Control::Organ(console) = &self.control else {
