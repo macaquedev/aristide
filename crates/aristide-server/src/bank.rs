@@ -149,7 +149,7 @@ pub enum StreamingMode {
     Auto,
 }
 
-/// The sidecar's `[samples] streaming` / `ram_budget_mb`, resolved
+/// The user config's `[samples] streaming` / `ram_budget_mb`, resolved
 /// against this machine.
 #[derive(Debug, Clone, Copy)]
 pub struct StreamingPolicy {
@@ -159,7 +159,7 @@ pub struct StreamingPolicy {
 
 impl StreamingPolicy {
     /// The two ends of the policy, for tests: the server itself always
-    /// builds one from the sidecar.
+    /// builds one from the user config.
     #[cfg(test)]
     pub const OFF: StreamingPolicy = StreamingPolicy {
         mode: StreamingMode::Off,
@@ -196,7 +196,7 @@ impl StreamingPolicy {
                         None => {
                             tracing::info!(
                                 "samples: physical RAM unknown; streaming stays off \
-                                 (set [samples] ram_budget_mb or streaming = \"on\")"
+                                 (set a RAM budget or streaming = on in Preferences)"
                             );
                             return false;
                         }
@@ -218,12 +218,16 @@ impl StreamingPolicy {
 }
 
 /// This machine's physical memory. Linux only (`/proc/meminfo`);
-/// elsewhere `auto` declines to guess and leaves streaming off.
-fn physical_ram_bytes() -> Option<u64> {
-    let text = std::fs::read_to_string("/proc/meminfo").ok()?;
-    let line = text.lines().find(|line| line.starts_with("MemTotal:"))?;
-    let kb: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
-    Some(kb * 1024)
+/// elsewhere `auto` declines to guess and leaves streaming off. Read
+/// once: the console polls it into every snapshot.
+pub fn physical_ram_bytes() -> Option<u64> {
+    static TOTAL: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    *TOTAL.get_or_init(|| {
+        let text = std::fs::read_to_string("/proc/meminfo").ok()?;
+        let line = text.lines().find(|line| line.starts_with("MemTotal:"))?;
+        let kb: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+        Some(kb * 1024)
+    })
 }
 
 pub fn build_with(

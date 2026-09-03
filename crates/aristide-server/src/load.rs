@@ -15,7 +15,7 @@ use aristide_model::units::{cents_between, cents_to_ratio};
 use aristide_model::{Organ, StopId};
 
 use crate::console::{Console, TrimRule};
-use crate::{bank, tuning, Setup};
+use crate::{bank, config, tuning, Setup};
 
 /// Everything a load produces: the playable console, the samples it
 /// plays, and the engine-wide settings the caller sends once the new
@@ -632,29 +632,26 @@ fn assemble_organ(
     })
 }
 
-/// Decode `organ`'s samples for the engine, honoring the sidecar's bit
-/// depth and on-disk cache. `progress` reports the current phase for a
-/// UI watching the load.
+/// Decode `organ`'s samples for the engine, honoring the player's
+/// residency, cache and streaming preferences. `progress` reports the
+/// current phase for a UI watching the load.
 fn decode_samples(
     organ: &Organ,
-    sidecar: &aristide_formats::sidecar::Sidecar,
+    prefs: &config::SamplePrefs,
     paths: &[PathBuf],
     sample_rate: f32,
     progress: &dyn Fn(String),
 ) -> Result<bank::LoadedBank> {
     progress(format!("decoding samples for {}…", organ.name));
     let started = Instant::now();
-    let sample_bits = match sidecar.samples.bits {
-        16 | 32 => sidecar.samples.bits,
-        other => {
-            tracing::warn!("[samples] bits = {other} is not 16 or 32; using 16");
-            16
-        }
-    };
+    let sample_bits = prefs.resident_bits();
+    if sample_bits != prefs.bits {
+        tracing::warn!("[samples] bits = {} is not 16 or 32; using 16", prefs.bits);
+    }
     // One cache file per (source paths, residency) combination, under
     // the user config; no config dir (or `[samples] cache = false`)
     // means no cache and nothing else changes.
-    let cache_path = if sidecar.samples.cache {
+    let cache_path = if prefs.cache {
         crate::config::cache_dir().map(|dir| {
             use std::hash::{Hash, Hasher};
             let mut hasher = std::hash::DefaultHasher::new();
@@ -678,18 +675,12 @@ fn decode_samples(
     // Streaming policy: attacks and sustain loops always stay in RAM;
     // this decides whether the release tails behind them do.
     let policy = bank::StreamingPolicy {
-        mode: match sidecar.samples.streaming.to_ascii_lowercase().as_str() {
-            "on" | "true" => bank::StreamingMode::On,
-            "off" | "false" => bank::StreamingMode::Off,
-            "auto" => bank::StreamingMode::Auto,
-            other => {
-                tracing::warn!(
-                    "[samples] streaming = {other:?} is not auto/on/off; using auto"
-                );
-                bank::StreamingMode::Auto
-            }
+        mode: match prefs.streaming {
+            config::Streaming::On => bank::StreamingMode::On,
+            config::Streaming::Off => bank::StreamingMode::Off,
+            config::Streaming::Auto => bank::StreamingMode::Auto,
         },
-        ram_budget_mb: sidecar.samples.ram_budget_mb,
+        ram_budget_mb: prefs.ram_budget_mb,
     };
     let loaded = bank::build_with(
         organ,
@@ -1630,11 +1621,26 @@ fn configure_voicing_adjust(
 /// combined into one implicit composite), decode the samples, and build
 /// the console. `stops` are CLI registration patterns; empty means each
 /// source's sidecar default. `progress` is told what is happening, for
-/// a UI that is watching the load.
+/// a UI that is watching the load. Tests load under the default
+/// preferences; the server itself always passes the player's.
+#[cfg(test)]
 pub fn prepare(
     paths: &[PathBuf],
     stops: &[String],
     sample_rate: f32,
+    progress: &dyn Fn(String),
+) -> Result<PreparedInstrument> {
+    prepare_with(paths, stops, sample_rate, &config::SamplePrefs::default(), progress)
+}
+
+/// [`prepare`] with the player's sample-memory preferences (residency,
+/// cache, streaming) — the user config's `[samples]`, never the organ
+/// file's: where a set's bytes live is the loading machine's business.
+pub fn prepare_with(
+    paths: &[PathBuf],
+    stops: &[String],
+    sample_rate: f32,
+    prefs: &config::SamplePrefs,
     progress: &dyn Fn(String),
 ) -> Result<PreparedInstrument> {
     anyhow::ensure!(!paths.is_empty(), "no sample set given");
@@ -1682,7 +1688,17 @@ pub fn prepare(
         &mut load_warnings,
     )?;
 
-    let loaded = decode_samples(&organ, &sidecar, paths, sample_rate, progress)?;
+    if let Some(legacy) = &sidecar.samples {
+        let keys = legacy.keys();
+        if !keys.is_empty() {
+            load_warnings.push(format!(
+                "[samples] {} in the organ file is ignored: sample memory (residency, \
+                 streaming, the load cache) is set per machine in Preferences",
+                keys.join(", ")
+            ));
+        }
+    }
+    let loaded = decode_samples(&organ, prefs, paths, sample_rate, progress)?;
     let bank::LoadedBank {
         bank,
         specs,
@@ -1953,6 +1969,61 @@ mod tests {
         assert_eq!(prepared.console.organ_name(), "Église Fictive");
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// `[samples]` in an organ file is deprecated: the load names the
+    /// keys in a warning and the player's own preferences decide.
+    #[test]
+    #[cfg(unix)]
+    fn an_organ_files_samples_section_is_warned_about_and_ignored() {
+        let demo_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testsets/grandorgue-demo");
+        if !demo_dir.join("demo.organ").is_file() {
+            eprintln!("skipping: demo set not present");
+            return;
+        }
+        let dir = std::env::temp_dir().join("aristide-legacy-samples-load-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        for entry in std::fs::read_dir(&demo_dir).expect("demo listable").flatten() {
+            if entry.file_name() == "demo.organ.aristide.toml" {
+                continue;
+            }
+            std::os::unix::fs::symlink(entry.path(), dir.join(entry.file_name()))
+                .expect("symlink");
+        }
+        std::fs::write(
+            dir.join("demo.organ.aristide.toml"),
+            "[samples]\nstreaming = \"on\"\nbits = 32\n",
+        )
+        .expect("sidecar writes");
+        let prefs = config::SamplePrefs {
+            cache: false,
+            ..Default::default()
+        };
+        let prepared = prepare_with(&[dir.join("demo.organ")], &[], 48_000.0, &prefs, &|_| {})
+            .expect("a set with a legacy section prepares");
+        assert!(
+            prepared.warnings.iter().any(|w| w.contains("[samples] bits, streaming")),
+            "the warning names the keys: {:?}",
+            prepared.warnings
+        );
+        // Under the player's preferences (auto, a demo-sized set)
+        // nothing streams: the file's `on` changed nothing.
+        assert_eq!(prepared.bank.streamed_bytes(), 0);
+
+        // The same set under a streaming preference does stream — the
+        // preference is what decides.
+        let streaming = config::SamplePrefs {
+            streaming: config::Streaming::On,
+            cache: false,
+            ..Default::default()
+        };
+        let prepared = prepare_with(&[dir.join("demo.organ")], &[], 48_000.0, &streaming, &|_| {})
+            .expect("prepares streaming");
+        assert!(prepared.bank.streamed_bytes() > 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
 
     /// A set tuned apart in its `[sources]` entry, a stop pinned past
     /// it, a stop with a tuning of its own, and a rank tuned apart

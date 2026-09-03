@@ -159,6 +159,52 @@ struct Snapshot {
     /// preferences edit compasses, and saving writes it all to a file.
     #[serde(skip_serializing_if = "Option::is_none")]
     setup: Option<SetupView>,
+    /// The player's own settings (the user config), for Preferences.
+    prefs: PrefsView,
+    /// What the last load did with the set's bytes, and under which
+    /// preferences — Preferences compares it with `prefs` to say when
+    /// an edit is waiting on a reload.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    memory: Option<MemoryView>,
+}
+
+#[derive(Serialize)]
+struct PrefsView {
+    samples: SamplePrefsView,
+    /// This machine's RAM in MiB, for the budget's "half of" default;
+    /// absent where it cannot be read (then `auto` never streams).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    physical_ram_mb: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct SamplePrefsView {
+    bits: u32,
+    cache: bool,
+    streaming: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ram_budget_mb: Option<u64>,
+}
+
+impl SamplePrefsView {
+    fn from(prefs: &crate::config::SamplePrefs) -> SamplePrefsView {
+        SamplePrefsView {
+            bits: prefs.resident_bits(),
+            cache: prefs.cache,
+            streaming: prefs.streaming.as_str(),
+            ram_budget_mb: prefs.ram_budget_mb,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct MemoryView {
+    /// The preferences the bank was built under.
+    built_with: SamplePrefsView,
+    samples: usize,
+    resident_mb: u64,
+    streamed_mb: u64,
+    streamed_samples: usize,
 }
 
 /// The combination action's live state, for the piston rail.
@@ -1244,6 +1290,17 @@ fn snapshot(state: &State) -> Snapshot {
                     }
                 })
                 .collect(),
+        }),
+        prefs: PrefsView {
+            samples: SamplePrefsView::from(&state.midi_config.samples),
+            physical_ram_mb: crate::bank::physical_ram_bytes().map(|bytes| bytes >> 20),
+        },
+        memory: state.memory.as_ref().map(|report| MemoryView {
+            built_with: SamplePrefsView::from(&report.prefs),
+            samples: report.samples,
+            resident_mb: report.resident_bytes >> 20,
+            streamed_mb: report.streamed_bytes >> 20,
+            streamed_samples: report.streamed_samples,
         }),
     }
 }

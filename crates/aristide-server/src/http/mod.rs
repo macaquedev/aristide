@@ -33,6 +33,7 @@ mod couplers;
 mod midi;
 mod organ;
 mod play;
+mod prefs;
 mod room;
 mod snapshot;
 mod stops;
@@ -138,6 +139,7 @@ fn respond(
         (Method::Post, "/api/organ/new") => organ::create(state, query),
         (Method::Post, "/api/organ/rename") => organ::rename(state, query),
         (Method::Post, "/api/library/forget") => organ::library_forget(state, query),
+        (Method::Post, "/api/prefs/samples") => prefs::samples(state, query),
         (Method::Get, "/api/browse") => organ::browse(state, query),
         (Method::Post, "/api/organ/save") => organ::save(state, query),
         (Method::Post, "/api/organ/save_as") => organ::save_as(state, query),
@@ -439,6 +441,7 @@ mod tests {
             layout: Default::default(),
             coupled_keys: true,
             coupler_key_modes: Default::default(),
+            memory: None,
         }));
         // As the server does once before it opens any device: routing,
         // bindings and the computer keyboard all come from this.
@@ -2487,6 +2490,7 @@ mod tests {
             layout: Default::default(),
             coupled_keys: true,
             coupler_key_modes: Default::default(),
+            memory: None,
         }))
     }
 
@@ -2551,6 +2555,55 @@ mod tests {
         assert_eq!(missing.status_code().0, 400, "a name is required");
         let blank = respond(&state, &Method::Post, "/api/organ/new?name=%20%20");
         assert_eq!(blank.status_code().0, 400, "whitespace is not a name");
+    }
+
+    /// Sample memory is the player's: it reads from and writes to the
+    /// user config through /api/prefs, refuses nonsense, and never
+    /// touches the organ.
+    #[test]
+    fn sample_memory_prefs_are_the_players_own() {
+        use crate::config::Streaming;
+        let state = tone_state();
+        let body = state_json(&state);
+        assert!(
+            body.contains("\"prefs\":{\"samples\":{\"bits\":16,\"cache\":true,\"streaming\":\"auto\"}"),
+            "defaults in the snapshot: {body}"
+        );
+        assert!(!body.contains("\"memory\""), "no organ, no memory report: {body}");
+
+        for bad in [
+            "/api/prefs/samples?streaming=sometimes",
+            "/api/prefs/samples?bits=24",
+            "/api/prefs/samples?ram_budget_mb=lots",
+            "/api/prefs/samples?cache=maybe",
+        ] {
+            assert_eq!(respond(&state, &Method::Post, bad).status_code().0, 400, "{bad}");
+        }
+        let ok = respond(
+            &state,
+            &Method::Post,
+            "/api/prefs/samples?streaming=on&ram_budget_mb=4096&bits=32&cache=0",
+        );
+        assert_eq!(ok.status_code().0, 200);
+        {
+            let prefs = &state.lock().expect("state poisoned").midi_config.samples;
+            assert_eq!(prefs.streaming, Streaming::On);
+            assert_eq!(prefs.ram_budget_mb, Some(4096));
+            assert_eq!(prefs.bits, 32);
+            assert!(!prefs.cache);
+        }
+        let body = state_json(&state);
+        assert!(
+            body.contains("\"samples\":{\"bits\":32,\"cache\":false,\"streaming\":\"on\",\"ram_budget_mb\":4096}"),
+            "{body}"
+        );
+        // An empty budget returns to the default; untouched fields stay.
+        let ok = respond(&state, &Method::Post, "/api/prefs/samples?ram_budget_mb=");
+        assert_eq!(ok.status_code().0, 200);
+        let prefs = state.lock().expect("state poisoned").midi_config.samples.clone();
+        assert_eq!(prefs.ram_budget_mb, None);
+        assert_eq!(prefs.streaming, Streaming::On);
+        assert_eq!(prefs.bits, 32);
     }
 
     /// The whole blank-organ story at the file level: a fresh blank

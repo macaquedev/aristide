@@ -206,8 +206,20 @@ export const commands = {
   // edited (never moved), and the wiring and library follow. 400s with
   // a reason when the organ has no file to keep a name in.
   organRename: (name) => `/api/organ/rename?name=${encodeURIComponent(name)}`,
+  // Loads several sources as one implicit organ — what a reload of a
+  // CLI-combined instrument has to send, having no file to name.
+  organReload: (paths) =>
+    `/api/organ/load?${paths.map((p) => `path=${encodeURIComponent(p)}`).join("&")}`,
   // Drops one entry from the library without touching the file itself.
   libraryForget: (path) => `/api/library/forget?path=${encodeURIComponent(path)}`,
+  // The player's sample-memory preferences — the user config's
+  // [samples], never an organ file. Every field is optional; an empty
+  // ram_budget_mb returns the budget to half of physical RAM. Saved at
+  // once, applied on the next load.
+  prefsSamples: (fields) =>
+    `/api/prefs/samples?${Object.entries(fields)
+      .map(([key, value]) => `${key}=${encodeURIComponent(value ?? "")}`)
+      .join("&")}`,
   // Resolves a parked MIDI bind that would give a device or message a
   // second job: keep both, replace the existing one, or drop the new bind.
   conflict: (choice) => `/api/conflict?choice=${choice}`,

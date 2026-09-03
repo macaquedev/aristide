@@ -240,6 +240,20 @@ pub struct State {
     /// Per-coupler `"never"` / `"always"` overrides of `coupled_keys`,
     /// by console name — the file's `[console.coupler_keys]`.
     pub coupler_key_modes: std::collections::BTreeMap<String, String>,
+    /// How the loaded organ's bank was built: what lives in RAM, what
+    /// streams, and under which preferences — so Preferences can say
+    /// whether an edit is waiting on a reload.
+    pub memory: Option<MemoryReport>,
+}
+
+/// What the last load did with the set's bytes.
+#[derive(Debug, Clone)]
+pub struct MemoryReport {
+    pub prefs: config::SamplePrefs,
+    pub samples: usize,
+    pub resident_bytes: u64,
+    pub streamed_bytes: u64,
+    pub streamed_samples: usize,
 }
 
 /// One request to load an instrument, from the picker or the CLI.
@@ -396,6 +410,16 @@ impl State {
             layout: Default::default(),
             coupled_keys: true,
             coupler_key_modes: Default::default(),
+            memory: None,
+        }
+    }
+
+    /// Change how this machine holds sample audio and save it. Applies
+    /// on the next load: the engine's bank is fixed at construction.
+    pub fn set_sample_prefs(&mut self, prefs: config::SamplePrefs) {
+        if self.midi_config.samples != prefs {
+            self.midi_config.samples = prefs;
+            self.persist();
         }
     }
 

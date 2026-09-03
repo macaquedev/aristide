@@ -23,7 +23,7 @@ window.addEventListener("contextmenu", (event) => {
 const base = await resolveBase();
 let send;
 let snapshot = {}; // the latest state, for menus that ask what is true now
-const prefs = new Preferences(document);
+const prefs = new Preferences(document, (query) => send(query));
 const picker = new Picker(document, base, (query) => send(query));
 const editor = new Editor(document, base, (query) => send(query));
 // The bar's tuning readout opens the whole-instrument tuning popover —
@@ -209,6 +209,7 @@ send = connect(
     picker.update(snapshot);
     conflict.update(snapshot);
     editor.update(snapshot);
+    prefs.update(snapshot);
   },
   (message) => view.offline(message),
   // A refused command (a 4xx and its reason) lands in the editor's

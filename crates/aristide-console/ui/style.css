@@ -3160,6 +3160,14 @@ body.editing .kb-tuning-chip { top: -17px; border-radius: 3px 3px 0 0; }
 /* The user-only Preferences card: one small pane, so it fits its
    content — the fixed height existed for the old tabbed dialog. */
 .prefs-card { width: min(580px, 100%); height: auto; }
+/* the dialog's two panes stack; the second grows no scrollbar of its own */
+.prefs-card .modal-body { display: flex; flex-direction: column; }
+.prefs-card .pane { flex: 0 0 auto; overflow: visible; }
+.prefs-card .pane + .pane { border-top: 1px solid var(--border); }
+.budget-field { display: inline-flex; align-items: center; gap: 6px; }
+.budget-field input { width: 7em; text-align: right; }
+.budget-unit { font-size: 10.5px; color: var(--text-dim); }
+.memory-stale { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 
 /* The bindings popover's trigger cell must never squeeze to nothing
    between the two selects — it's the half the player just played. */

@@ -14,8 +14,10 @@
 //   1. MENUS — the Aristide menu is the player's (Preferences, About),
 //      the Organ menu carries the organ-settings popovers, View lost
 //      Appearance, Help is gone.
-//   2. PREFERENCES IS USER-ONLY — the dialog holds only appearance
-//      controls, and using them sends not one API command.
+//   2. PREFERENCES IS USER-ONLY — the dialog holds the skin and this
+//      machine's sample memory; the skin sends no API command at all,
+//      and memory edits reach only /api/prefs — they land in the user
+//      config, never in the organ's file.
 //   3. TUNING — the bar's readout opens the whole-instrument popover;
 //      a pitch commit changes the live tuning AND writes [tuning] into
 //      the organ's file.
@@ -36,7 +38,7 @@ const SERVER_PORT = 9886;
 const UI_PORT = 9887;
 const CDP_PORT = 9233;
 const h = launchHarness({ name: "prefs-audit", serverPort: SERVER_PORT, uiPort: UI_PORT, cdpPort: CDP_PORT });
-const { REPO, S, demo, check, sleep, state, settled, post, waitForServer, done } = h;
+const { REPO, S, demo, scratch, check, sleep, state, settled, post, waitForServer, done } = h;
 const OUT = join(REPO, "target", "prefs-split-audit");
 const skip = (what) => console.log(`SKIP  ${what}`);
 
@@ -90,10 +92,10 @@ try {
 
   // ---- 2. Preferences is user-only ----------------------------------
 
-  await drive.eval(`window.__apiPosts = 0;
+  await drive.eval(`window.__apiPosts = [];
     const realFetch = window.fetch;
     window.fetch = (url, opts) => {
-      if (String(url).includes("/api/") && opts?.method === "POST") window.__apiPosts++;
+      if (String(url).includes("/api/") && opts?.method === "POST") window.__apiPosts.push(String(url));
       return realFetch(url, opts);
     }; true`);
   await drive.eval(`document.getElementById("app-menu").click()`);
@@ -105,8 +107,11 @@ try {
     await drive.eval(`!document.getElementById("prefs").classList.contains("hidden")`),
     "Preferences opens from the Aristide menu"
   );
-  const foreign = await drive.eval(`[...document.querySelectorAll("#prefs select, #prefs input")].length`);
-  check(foreign === 0, "the dialog holds no selects or inputs — appearance buttons only");
+  const panes = await drive.eval(`[...document.querySelectorAll("#prefs .pane")].map((p) => p.dataset.pane)`);
+  check(panes.join(",") === "appearance,memory", `the dialog holds the skin and sample memory (${panes})`);
+  const foreign = await drive.eval(`[...document.querySelectorAll("#prefs select, #prefs input")]
+    .map((el) => el.id).filter((id) => id !== "ram-budget").length`);
+  check(foreign === 0, "no field in the dialog but the RAM budget");
   await drive.shot(join(OUT, "prefs-user-only.png"));
   // The size row: six zoom steps with the native one lit. In a browser
   // the host zooms for itself, so the row is shown but not live.
@@ -124,8 +129,54 @@ try {
     document.querySelectorAll("#density-segment button")[0]?.click();
     document.querySelectorAll("#scale-segment button")[10]?.click(); true`);
   await sleep(200);
-  const posts = await drive.eval(`window.__apiPosts`);
+  const posts = await drive.eval(`window.__apiPosts.length`);
   check(posts === 0, `appearance edits sent ${posts} API commands (want 0)`);
+
+  // Sample memory: the chips reflect the user config, editing them
+  // posts to /api/prefs only, the config file takes the change and the
+  // organ's file does not — and the pane says a reload is due.
+  const streamingChips = await drive.eval(`[...document.querySelectorAll("#streaming-segment button")]
+    .map((b) => b.textContent + (b.classList.contains("on") ? "*" : ""))`);
+  check(
+    streamingChips.join(" ") === "Auto* Stream In RAM",
+    `release tails offer auto/stream/in-RAM with auto lit (${streamingChips.join(" ")})`
+  );
+  const status = await drive.eval(`document.getElementById("memory-status").textContent`);
+  check(/^This organ: .* resident/.test(status), `the pane reports the loaded organ's memory (${status})`);
+  check(
+    await drive.eval(`document.getElementById("memory-stale").classList.contains("hidden")`),
+    "nothing is waiting on a reload before an edit"
+  );
+  await drive.eval(`document.querySelectorAll("#streaming-segment button")[1].click(); true`);
+  await sleep(300);
+  await drive.eval(`{ const b = document.getElementById("ram-budget"); b.value = "3072";
+    b.dispatchEvent(new Event("change", { bubbles: true })); } true`);
+  await sleep(300);
+  const memoryPosts = await drive.eval(`window.__apiPosts`);
+  check(
+    memoryPosts.length === 2 && memoryPosts.every((u) => u.includes("/api/prefs/samples?")),
+    `memory edits reached only /api/prefs (${memoryPosts.join(" ")})`
+  );
+  snap = await state();
+  check(
+    snap.prefs?.samples?.streaming === "on" && snap.prefs?.samples?.ram_budget_mb === 3072,
+    `the snapshot carries the new preferences (${JSON.stringify(snap.prefs?.samples)})`
+  );
+  const userConfig = readFileSync(join(scratch, "config", "aristide", "midi.toml"), "utf8");
+  check(
+    /\[samples\][\s\S]*streaming = "on"/.test(userConfig) && userConfig.includes("ram_budget_mb = 3072"),
+    "the user config took [samples]"
+  );
+  check(!/^\s*\[samples\]/m.test(fileText()), "the organ's file has no [samples] table");
+  check(
+    !(await drive.eval(`document.getElementById("memory-stale").classList.contains("hidden")`)),
+    "the pane says the change waits for a reload"
+  );
+  await drive.shot(join(OUT, "prefs-memory.png"));
+  await drive.eval(`document.querySelectorAll("#streaming-segment button")[0].click(); true`);
+  await drive.eval(`{ const b = document.getElementById("ram-budget"); b.value = "";
+    b.dispatchEvent(new Event("change", { bubbles: true })); } true`);
+  await sleep(300);
   await escape();
 
   // ---- 3. whole-instrument tuning -----------------------------------

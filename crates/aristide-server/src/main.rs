@@ -468,6 +468,7 @@ fn perform_load(
     };
     progress("loading…".to_string());
     let request = adopt_set(state, request, &progress);
+    let sample_prefs = state.lock().expect("state poisoned").midi_config.samples.clone();
     let load::PreparedInstrument {
         console,
         bank,
@@ -489,7 +490,13 @@ fn perform_load(
         coupler_key_modes,
         buses,
         warnings,
-    } = load::prepare(&request.paths, &request.stops, audio.sample_rate, &progress)?;
+    } = load::prepare_with(
+        &request.paths,
+        &request.stops,
+        audio.sample_rate,
+        &sample_prefs,
+        &progress,
+    )?;
 
     // Routed buses may want interface channels past the stereo pair;
     // try to reopen the device wide enough BEFORE the stream starts.
@@ -636,7 +643,15 @@ fn perform_load(
         });
     }
 
+    let memory = state::MemoryReport {
+        prefs: sample_prefs,
+        samples: bank.len(),
+        resident_bytes: bank.resident_bytes() as u64,
+        streamed_bytes: bank.streamed_bytes() as u64,
+        streamed_samples: bank.streamed_samples(),
+    };
     let mut state = state.lock().expect("state poisoned");
+    state.memory = Some(memory);
     state.install(state::Installed {
         engine: handle,
         console,

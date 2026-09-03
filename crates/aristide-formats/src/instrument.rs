@@ -124,8 +124,9 @@ pub struct Definition {
     pub wind: sidecar::Wind,
     #[serde(default)]
     pub tremulant: Option<sidecar::Tremulant>,
-    #[serde(default)]
-    pub samples: sidecar::SamplesConfig,
+    /// Deprecated: see [`sidecar::Sidecar::samples`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub samples: Option<sidecar::SamplesConfig>,
     #[serde(default)]
     pub tuning: sidecar::TuningConfig,
     #[serde(default)]

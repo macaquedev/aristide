@@ -40,8 +40,12 @@ pub struct Sidecar {
     /// replaces them with this single instrument-wide one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tremulant: Option<Tremulant>,
-    #[serde(default)]
-    pub samples: SamplesConfig,
+    /// Deprecated (2026-09-03): residency, streaming and the load cache
+    /// are facts about the machine, kept in the user config and edited
+    /// in Preferences. A file that still carries the section is loaded
+    /// with a warning and the section ignored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub samples: Option<SamplesConfig>,
     #[serde(default)]
     pub tuning: TuningConfig,
     #[serde(default)]
@@ -922,49 +926,40 @@ impl Default for TuningConfig {
 }
 
 /// How decoded audio stays resident in RAM.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// The former `[samples]` section, kept only so an older organ file
+/// still parses. Every field moved to the user config's `[samples]`
+/// (`aristide-server::config::SamplePrefs`): where a set's bytes live
+/// depends on the machine loading it, and an organ file travels.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SamplesConfig {
-    /// Resident sample resolution: 16 (default — half the RAM of f32,
-    /// −96 dB floor, below organ recordings' own room noise and what
-    /// GO/HW effectively play from) or 32 (bit-exact f32, for A/B).
-    /// Analysis (loop periods, phase maps, tail measurement) always
-    /// runs at full decode precision before quantization.
-    #[serde(default = "default_sample_bits")]
-    pub bits: u32,
-    /// Persist decoded samples + analysis next to the user config so
-    /// unchanged files skip decode on the next load. Costs disk about
-    /// the size of the resident bank.
-    #[serde(default = "default_true")]
-    pub cache: bool,
-    /// Play release tails off the disk instead of holding them in RAM:
-    /// `"auto"` (stream only when the set would not fit — see
-    /// `ram_budget_mb`), `"on"`, or `"off"`. Attacks and sustain loops
-    /// are always resident, so a held note never waits for a disk.
-    #[serde(default = "default_streaming")]
-    pub streaming: String,
-    /// RAM the resident bank may use before `streaming = "auto"` starts
-    /// streaming. Default: half of this machine's physical memory.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bits: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub streaming: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ram_budget_mb: Option<u64>,
 }
 
-fn default_sample_bits() -> u32 {
-    16
-}
-
-fn default_streaming() -> String {
-    "auto".to_string()
-}
-
-impl Default for SamplesConfig {
-    fn default() -> Self {
-        SamplesConfig {
-            bits: default_sample_bits(),
-            cache: true,
-            streaming: default_streaming(),
-            ram_budget_mb: None,
+impl SamplesConfig {
+    /// The keys the file set, for the warning that names them.
+    pub fn keys(&self) -> Vec<&'static str> {
+        let mut keys = Vec::new();
+        if self.bits.is_some() {
+            keys.push("bits");
         }
+        if self.cache.is_some() {
+            keys.push("cache");
+        }
+        if self.streaming.is_some() {
+            keys.push("streaming");
+        }
+        if self.ram_budget_mb.is_some() {
+            keys.push("ram_budget_mb");
+        }
+        keys
     }
 }
 
@@ -1140,6 +1135,18 @@ pub fn match_names(names: &[&str], pattern: &str) -> Vec<usize> {
 
 #[cfg(test)]
 mod tests {
+    /// The deprecated `[samples]` still parses — an older organ file
+    /// must not refuse to load — and reports which keys it carried.
+    #[test]
+    fn a_legacy_samples_section_parses_and_names_its_keys() {
+        let sidecar: super::Sidecar =
+            toml::from_str("[samples]\nbits = 32\nstreaming = \"on\"\n").expect("parses");
+        let legacy = sidecar.samples.as_ref().expect("section kept");
+        assert_eq!(legacy.keys(), vec!["bits", "streaming"]);
+        let empty: super::Sidecar = toml::from_str("").expect("parses");
+        assert!(empty.samples.is_none());
+    }
+
     use super::*;
 
     #[test]

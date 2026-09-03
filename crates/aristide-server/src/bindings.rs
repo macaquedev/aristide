@@ -1297,6 +1297,7 @@ mod tests {
             layout: Default::default(),
             coupled_keys: true,
             coupler_key_modes: Default::default(),
+            memory: None,
         }));
         // Everything downstream reads the resolved tables, exactly as
         // the server does once before it opens any device.

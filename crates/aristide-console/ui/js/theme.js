@@ -102,8 +102,9 @@ export function stepScale(direction) {
 }
 
 /// A row of exclusive chips: `render(value)` names each, `onPick`
-/// hears the choice, and the chip for `current` starts lit.
-function segmented(segment, values, current, render, onPick) {
+/// hears the choice, and the chip for `current` starts lit. Returns a
+/// setter that lights the chip for a value chosen elsewhere.
+export function segmented(segment, values, current, render, onPick) {
   for (const value of values) {
     const chip = document.createElement("button");
     chip.textContent = render(value);

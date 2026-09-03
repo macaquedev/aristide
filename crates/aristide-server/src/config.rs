@@ -83,6 +83,21 @@ const HEADER: &str = "\
 # one only removes it from that list; the organ's file and its
 # assignments below are kept.
 #
+# [samples] is how this machine holds a set's audio — a fact about the
+# box, not the organ, which is why it lives here and not in an organ
+# file (Preferences → Sample memory edits it):
+#
+#   streaming     auto | on | off. Release tails play from the disk
+#                 (on), stay in RAM (off), or stream only when the set
+#                 would not fit the budget (auto). Attacks and sustain
+#                 loops are always resident.
+#   ram_budget_mb what auto measures against; omit it for half of this
+#                 machine's physical memory
+#   bits          resident resolution, 16 (default) or 32
+#   cache         keep decoded samples on disk so a set reloads fast
+#
+# Changes apply the next time an organ loads.
+#
 # Aristide rewrites this file whenever you change an assignment in
 # Preferences → MIDI or load an organ. Hand edits are read back on the
 # next start.
@@ -91,6 +106,11 @@ const HEADER: &str = "\
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct MidiConfig {
+    /// How this machine holds sample audio: residency, streaming, the
+    /// load cache. Per machine because whether a set fits is a fact
+    /// about the box's RAM, not about the set.
+    #[serde(default)]
+    pub samples: SamplePrefs,
     /// Organs this machine has loaded, most recent first — what the
     /// console's picker offers when the server starts with nothing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -98,6 +118,83 @@ pub struct MidiConfig {
     /// Organ name (as the loaded set reports it) → its assignments.
     #[serde(default)]
     pub organs: BTreeMap<String, OrganConfig>,
+}
+
+/// Whether release tails play from the disk. Attacks and sustain loops
+/// never do — a held note must never wait on a disk — so this only
+/// decides where the bytes behind the last loop live.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Streaming {
+    /// Stream every tail worth a slot, however small the set.
+    On,
+    /// Everything resident.
+    Off,
+    /// Stream only when the fully-resident set would not fit the
+    /// budget. Also what an unknown word in a hand-edited file means.
+    #[default]
+    #[serde(other)]
+    Auto,
+}
+
+impl Streaming {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Streaming::Auto => "auto",
+            Streaming::On => "on",
+            Streaming::Off => "off",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Streaming> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(Streaming::Auto),
+            "on" | "true" => Some(Streaming::On),
+            "off" | "false" => Some(Streaming::Off),
+            _ => None,
+        }
+    }
+}
+
+/// The user config's `[samples]`: how this machine holds a set's audio.
+/// Read once per load; a change waits for the next one, because the
+/// engine's bank is fixed at construction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SamplePrefs {
+    /// Resident sample resolution: 16 (half the RAM of f32, a −96 dB
+    /// floor below organ recordings' own room noise) or 32 (bit-exact
+    /// f32, for A/B). Analysis always runs at full decode precision
+    /// before quantization.
+    pub bits: u32,
+    /// Persist decoded samples + analysis under the config directory so
+    /// unchanged files skip decode on the next load. Costs disk about
+    /// the size of the resident bank.
+    pub cache: bool,
+    pub streaming: Streaming,
+    /// RAM the resident bank may use before `auto` streams. `None` is
+    /// half of this machine's physical memory.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ram_budget_mb: Option<u64>,
+}
+
+impl Default for SamplePrefs {
+    fn default() -> Self {
+        SamplePrefs {
+            bits: 16,
+            cache: true,
+            streaming: Streaming::Auto,
+            ram_budget_mb: None,
+        }
+    }
+}
+
+impl SamplePrefs {
+    /// The resolution the loader will actually use: anything but 16 or
+    /// 32 in a hand-edited file falls back to 16.
+    pub fn resident_bits(&self) -> u32 {
+        if self.bits == 32 { 32 } else { 16 }
+    }
 }
 
 /// One organ the picker can load again: its name and the path that
@@ -633,9 +730,12 @@ fn carry_over_sidecar(doc: &mut toml_edit::DocumentMut, set: &Path) {
                     // A sidecar rename became this file's own name
                     // above; the structural keys are this file's own —
                     // a sidecar has no business declaring them anyway.
+                    // `[samples]` was the machine's business all
+                    // along (residency, streaming) and lives in the
+                    // user config now, so a wrapper never inherits it.
                     if !matches!(
                         key,
-                        "name" | "sources" | "manual" | "division" | "stop" | "move"
+                        "name" | "sources" | "manual" | "division" | "stop" | "move" | "samples"
                     ) {
                         doc.insert(key, item.clone());
                     }
@@ -3385,6 +3485,38 @@ fn write_atomically(path: &Path, body: String) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sample_prefs_round_trip_and_tolerate_hand_edits() {
+        use super::*;
+        let mut config = MidiConfig::default();
+        assert_eq!(config.samples, SamplePrefs::default());
+        config.samples.streaming = Streaming::On;
+        config.samples.ram_budget_mb = Some(4096);
+        config.samples.bits = 32;
+        config.samples.cache = false;
+        config.remember("Demo", Path::new("/tmp/demo.organ"));
+        let text = toml::to_string_pretty(&config).expect("serializes");
+        assert!(text.contains("[samples]"), "{text}");
+        assert!(text.contains("streaming = \"on\""), "{text}");
+        let back: MidiConfig = toml::from_str(&text).expect("parses");
+        assert_eq!(back.samples, config.samples);
+        assert_eq!(back.library.len(), 1);
+
+        // A file from before [samples] existed reads as the defaults.
+        let old: MidiConfig = toml::from_str("[[library]]\nname = \"x\"\npath = \"/x\"\n")
+            .expect("parses");
+        assert_eq!(old.samples, SamplePrefs::default());
+        // A typo in a hand edit must not cost the player their wiring:
+        // an unknown mode reads as auto and an odd bit depth as 16.
+        let typo: MidiConfig =
+            toml::from_str("[samples]\nstreaming = \"sometimes\"\nbits = 24\n").expect("parses");
+        assert_eq!(typo.samples.streaming, Streaming::Auto);
+        assert_eq!(typo.samples.resident_bits(), 16);
+        assert_eq!(Streaming::parse("OFF"), Some(Streaming::Off));
+        assert_eq!(Streaming::parse("true"), Some(Streaming::On));
+        assert_eq!(Streaming::parse("maybe"), None);
+    }
+
     use super::*;
 
     fn input(device: &str, channel: Option<u8>) -> Input {

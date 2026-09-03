@@ -38,9 +38,10 @@
   </header>
   <aside id="keys-legend" class="keys-legend hidden" aria-label="Computer keyboard mapping"></aside>
 
-  <!-- Preferences is the player's, never the organ's: everything in it
-       is local to this console (localStorage), and nothing in it sends
-       an organ command. Organ facts — wiring, tuning, room, structure —
+  <!-- Preferences is the player's, never the organ's: the skin is local
+       to this console (localStorage), sample memory is this machine's
+       (the user config, via /api/prefs), and nothing in it sends an
+       organ command. Organ facts — wiring, tuning, room, structure —
        live on the console surface and in the organ's own file. -->
   <div id="prefs" class="modal hidden" role="dialog" aria-modal="true"
     aria-labelledby="prefs-title">
@@ -66,12 +67,47 @@
             <span class="segment" id="scale-segment"></span>
           </div>
           <p class="pane-note settings-hint" id="scale-note"></p>
+        </section>
+        <section class="pane" data-pane="memory">
+          <h2>Sample memory</h2>
+          <div class="settings-row" id="streaming-row">
+            <span class="rail-label">Release tails</span>
+            <span class="segment" id="streaming-segment"></span>
+          </div>
+          <p class="pane-note settings-hint" id="streaming-note"></p>
+          <div class="settings-row" id="budget-row">
+            <span class="rail-label">RAM budget</span>
+            <span class="budget-field">
+              <input id="ram-budget" type="number" min="256" step="256"
+                inputmode="numeric" aria-label="RAM budget in MiB" />
+              <span class="budget-unit">MiB</span>
+            </span>
+          </div>
+          <p class="pane-note settings-hint" id="budget-note"></p>
+          <div class="settings-row" id="bits-row">
+            <span class="rail-label">Resolution</span>
+            <span class="segment" id="bits-segment"></span>
+          </div>
+          <div class="settings-row" id="cache-row">
+            <span class="rail-label">Load cache</span>
+            <span class="segment" id="cache-segment"></span>
+          </div>
+          <p class="pane-status" id="memory-status"></p>
+          <div class="pane-warn memory-stale hidden" id="memory-stale">
+            <span>Changes apply when an organ loads.</span>
+            <button class="picker-action" id="memory-reload">Reload organ</button>
+          </div>
           <p class="pane-note">
-            These settings belong to you, not to the organ: they are saved
-            on this device only and never travel with an organ file.
+            Attacks and sustain loops always stay in RAM, so a held note
+            never waits for a disk; only the release tails behind them
+            can stream. Sample memory is a fact about this machine, saved
+            in its own config: the same organ file streams on a laptop
+            and sits in RAM on a desktop.
+          </p>
+          <p class="pane-note">
             Everything about the instrument itself — keyboards, tuning,
             wiring, the room — is edited on the console and saved in the
-            organ's own file.
+            organ's own file; nothing here ever travels with one.
           </p>
         </section>
       </div>

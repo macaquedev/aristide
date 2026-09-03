@@ -33,12 +33,9 @@ transpose = 0
 # ir = "synthetic"        # or a path to an IR wav next to the set
 # wet = 0.2
 
-# Sample residency (defaults shown): 16-bit halves RAM against f32
-# with a floor below the recordings' own room noise; the cache keeps
-# decoded samples next to the user config for near-instant reloads.
-# [samples]
-# bits = 16               # or 32 for bit-exact f32 (A/B)
-# cache = true
+# Sample memory — residency, disk streaming, the load cache — is a
+# fact about the machine loading the set, not about the set: it lives
+# in the user config (Preferences → Sample memory), never here.
 
 # The set's own [Tremulant001] ("Tremblant", 196 ms ≈ 5.1 Hz on the
 # Récit chest) is read from the ODF and needs nothing here. Writing a
