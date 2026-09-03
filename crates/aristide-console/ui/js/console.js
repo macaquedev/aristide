@@ -806,6 +806,10 @@ export class Console {
       this.send(commands.note(manual, midi, false));
     };
     key.addEventListener("pointerdown", (event) => {
+      // Only the primary button plays: a right-click is a context
+      // menu or, with a stop's editor open, a voicing gesture, and
+      // neither should pluck the pipe on the way.
+      if (event.button !== 0) return;
       event.preventDefault();
       key.classList.add("pressed", "held"); // optimistic
       this.send(commands.note(manual, midi, true));
