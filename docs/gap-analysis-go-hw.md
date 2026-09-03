@@ -162,14 +162,15 @@ at load, rank enable/disable. (UG5 p76; DS5 p14.)
 
 **Aristide now (2026-08-26):**
 - **(a) 16-bit residency is the default** (`SampleData::{F32,I16}`;
-  sidecar `[samples] bits = 16|32`, 32 = bit-exact f32 for A/B). Analysis
+  Preferences → Sample memory / user config `[samples] bits = 16|32`, 32 =
+  bit-exact f32 for A/B; was an organ-file key until 2026-09-03). Analysis
   (periods, phase maps, tail measurement) always runs at full decode
   precision, then quantizes. Dedicated i16 SIMD sinc kernels (SSE2 + AVX2,
   sign-extend in-register, dequant scale folded into the final sum) hold the
   read cost to ≈ +8% for −50% RAM and halved memory traffic; the equivalence
   test pins i16 reads within quantization noise of f32.
-- **(b) GO-style load cache** (`server/cache.rs`; `[samples] cache = false`
-  opts out): decoded samples + all analysis persist under
+- **(b) GO-style load cache** (`server/cache.rs`; the user config's
+  `[samples] cache = false` opts out): decoded samples + all analysis persist under
   `~/.config/aristide/cache/`, validity **per entry** (source mtime+size and a
   hash of the exact decode inputs — the ODF attack/release record, aligning
   pitch, residency), so an ODF edit invalidates only what it touched. Atomic
@@ -187,9 +188,12 @@ at load, rank enable/disable. (UG5 p76; DS5 p14.)
   both residencies and a warm streaming load copies no audio at all. Failures
   are fades, never clicks — an underrun freezes on the last frame it has and
   takes the 15 ms kill ramp; a release that finds no free slot plays its
-  resident head and the EOF guard fades it. Sidecar `[samples] streaming =
-  auto|on|off` + `ram_budget_mb`. Demo set: 85.8 → 55.1 MiB resident.
-  See docs/progress/2026-09-02-disk-streaming.md.
+  resident head and the EOF guard fades it. Policy is the player's, per
+  machine: Preferences → Sample memory / user config `[samples] streaming =
+  auto|on|off` + `ram_budget_mb` (moved out of the organ file 2026-09-03).
+  Demo set: 85.8 → 55.1 MiB resident. See
+  docs/progress/2026-09-02-disk-streaming.md and
+  docs/progress/2026-09-03-sample-memory-prefs.md.
 
 **Remaining (the true residue):**
 - (d) per-rank load options (mono downmix, first-loop/first-release-only,

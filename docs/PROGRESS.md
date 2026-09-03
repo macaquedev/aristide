@@ -3,6 +3,7 @@
 Newest first. One entry per work session; keep entries factual and short.
 Milestones refer to DESIGN.md.
 
+- [2026-09-03 — sample memory is the player's: `[samples]` moves to Preferences](progress/2026-09-03-sample-memory-prefs.md)
 - [2026-09-02 — voicing reaches the pipe](progress/2026-09-02-pipe-voicing.md)
 - [2026-09-02 — a wave tremulant reaches the notes already held](progress/2026-09-02-wave-trem-held-notes.md)
 - [2026-09-02 — the combination action, whole: divisionals, stepper, crescendo, piston rail](progress/2026-09-02-combination-action.md)

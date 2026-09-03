@@ -420,8 +420,12 @@ that just follows.
 
 **Two scopes, two surfaces (locked 2026-08-28):** user preferences and organ
 settings never share a surface. The Preferences dialog (Aristide menu, Ctrl+,)
-is the *player's* — appearance today, per-machine audio settings tomorrow —
-local to the installation and sending no organ command, ever. Every organ fact
+is the *player's* — the console skin, and this machine's sample memory
+(residency, streaming, the load cache: the user config's `[samples]`, moved
+out of the organ file 2026-09-03 because whether a set fits is a fact about
+the box's RAM, not about the set; a change applies on the next load, and
+the pane offers the reload) — local to the installation and sending no
+organ command, ever. Every organ fact
 is edited on the console and lands in the organ's file: panel-anchored facts by
 right-click on their panel (a keyboard's MIDI input, compass, kind, tuning, hex
 layout; a stop's or coupler's editor, each with a quick piston row), organ-wide

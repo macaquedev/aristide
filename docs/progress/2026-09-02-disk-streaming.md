@@ -109,6 +109,10 @@ resident one, not merely close.
 
 ## Policy
 
+*(2026-09-03: the section moved from the organ file to the user config
+and Preferences — see 2026-09-03-sample-memory-prefs.md. The policy
+itself is unchanged.)*
+
 Sidecar `[samples] streaming = "auto" | "on" | "off"` (default auto)
 and `[samples] ram_budget_mb`. `auto` must decide *before* the first
 file is decoded — by then the RAM is spent — so the only measure
