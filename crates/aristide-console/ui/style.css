@@ -1348,6 +1348,9 @@ input[type="range"]:hover::-webkit-slider-thumb { filter: brightness(1.15); }
 
 /* A small centered prompt, not a full sheet: the server holds a parked
    bind, so this is the whole interface until the player answers. */
+/* above the popovers (z 48): the conflict almost always comes from a
+   Listen inside a keyboard's MIDI popover, and must open over it */
+#conflict { z-index: 60; }
 .conflict-card { width: min(26rem, 100%); height: auto; }
 .conflict-body { display: block; padding: 18px 20px 20px; }
 .conflict-body .pane-note { margin: 0 0 8px; color: var(--text); }
