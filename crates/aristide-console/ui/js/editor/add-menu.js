@@ -43,19 +43,35 @@ export function wireCanvas(editor) {
       addGesture(event);
     });
   }
-  // Popovers close on a click anywhere outside themselves.
-  for (const el of [
-    editor.el.add,
-    editor.el.divisionMenu,
-    editor.el.keyboardMenu,
-    editor.el.couplersMenu,
-    ...Object.entries(editor.popovers)
-      .filter(([kind]) => kind !== "saveAs")
-      .map(([, entry]) => entry.el),
-  ]) {
-    el.addEventListener("click", (event) => event.stopPropagation());
-  }
-  window.addEventListener("click", () => editor.closeAllPopovers());
+  // Popovers dismiss on a PRESS outside every one of them — the
+  // press, not the click, so a gesture that starts inside (selecting
+  // a field's text, riding a slider) and ends outside never shuts the
+  // popover under it. Closing commits whatever was being typed first
+  // (see closeAllPopovers), which matters here in particular: a press
+  // on a key or a panel cancels the browser's own focus move, so the
+  // field's change would otherwise arrive after the popover had
+  // forgotten what it was editing. The click that follows is then
+  // free to do its own work — pull a knob, start a panel drag. Only
+  // the primary button: a right-press belongs to the contextmenu that
+  // follows it, which opens what it opens and closes by the table.
+  // The menu bar and the modals keep their own dismissal.
+  window.addEventListener(
+    "pointerdown",
+    (event) => {
+      if (event.button !== 0) return;
+      if (event.target.closest(".menubar, .modal")) return;
+      const inside = [
+        editor.el.add,
+        editor.el.divisionMenu,
+        editor.el.keyboardMenu,
+        editor.el.couplersMenu,
+        ...Object.values(editor.popovers).map((entry) => entry.el),
+      ];
+      if (inside.some((el) => el.contains(event.target))) return;
+      editor.closeAllPopovers();
+    },
+    true
+  );
   window.addEventListener("keydown", (event) => {
     if (event.key !== "Escape") return;
     // The dialog is modal: Escape means it, and nothing under it.

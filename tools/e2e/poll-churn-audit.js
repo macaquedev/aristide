@@ -96,7 +96,8 @@ try {
   await press("#tuning");
   check(await visible("#editor-tuning"), "readout: a 300 ms press on its text opens the tuning popover");
   await quiet("whole-instrument tuning popover", "#editor-tuning");
-  await drive.eval(`document.body.click()`);
+  // Popovers dismiss on a press outside them, not a click.
+  await drive.eval(`document.body.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0 }))`);
   await sleep(200);
 
   await contextMenu(`.knob[data-key="stop-${mixture.id}"]`);

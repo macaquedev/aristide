@@ -199,12 +199,7 @@ export class Console {
     const open = document.createElement("button");
     open.type = "button";
     open.textContent = "Start building";
-    // stopPropagation: the click must not reach the window listener
-    // that closes popovers, or it would shut the add menu it opens.
-    open.addEventListener("click", (event) => {
-      event.stopPropagation();
-      this.enterEditMode(event.clientX, event.clientY);
-    });
+    open.addEventListener("click", (event) => this.enterEditMode(event.clientX, event.clientY));
     this.el.emptyCard.append(title, note, open);
   }
 
@@ -1162,10 +1157,7 @@ export class Console {
     });
 
     this.el.panic.addEventListener("click", () => this.panic());
-    this.el.tuning.addEventListener("click", (event) => {
-      // The same click must not travel on to the window's close-all
-      // listener and shut the popover it just opened.
-      event.stopPropagation();
+    this.el.tuning.addEventListener("click", () => {
       const rect = this.el.tuning.getBoundingClientRect();
       this.openTuning(rect.left, rect.bottom + 6);
     });

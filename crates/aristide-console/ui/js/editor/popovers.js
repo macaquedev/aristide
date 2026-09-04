@@ -71,6 +71,7 @@ export function closeQuickMenus(editor) {
 /// this kind has always closed, in place of the openXForm functions
 /// each hand-listing their own subset of closeYForm() calls.
 export function openingPopover(editor, kind) {
+  commitFocusedField(editor);
   closeQuickMenus(editor);
   const registry = popovers(editor);
   for (const other of POPOVER_CLOSES[kind] ?? []) registry[other].close();
@@ -80,10 +81,23 @@ export function openingPopover(editor, kind) {
 /// of them, or Escape. Never the save-as dialog: it's a modal, closed
 /// only by its own Escape/Cancel/backdrop handling.
 export function closeAllPopovers(editor) {
+  commitFocusedField(editor);
   closeQuickMenus(editor);
   editor.closeCouplersMenu();
   const registry = popovers(editor);
   for (const kind of Object.keys(registry)) {
     if (kind !== "saveAs") registry[kind].close();
   }
+}
+
+/// Whatever is being typed in a popover commits before the popover
+/// goes: blurring the field fires its change while the popover still
+/// knows what it edits. Every field posts on change, so this is the
+/// same commit a Tab would make — a close never throws an edit away.
+export function commitFocusedField(editor) {
+  const active = editor.root.activeElement;
+  if (!active?.matches?.("input, select, textarea")) return;
+  const registry = popovers(editor);
+  if (!Object.values(registry).some(({ el }) => el.contains(active))) return;
+  active.blur();
 }
