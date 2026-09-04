@@ -41,6 +41,8 @@ try {
 
   const drive = await connect(CDP_PORT);
   await drive.navigate(`http://127.0.0.1:${UI_PORT}/?server=${encodeURIComponent(S)}`);
+  await sleep(400);
+  await drive.eval(`[...document.querySelectorAll('.keyboard-toggle')].forEach(b=>b.click())`);
   await sleep(1500);
 
   const mouse = (type, x, y) =>

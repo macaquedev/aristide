@@ -77,10 +77,10 @@ try {
   await escape();
 
   const organItems = await menuLabels(`${titleButton("Organ")}.click()`);
-  for (const wanted of ["Tuning…", "Room & noises…", "Buttons & shortcuts…"]) {
+  for (const wanted of ["Preferences…"]) {
     check(organItems.includes(wanted), `Organ menu offers ${wanted}`);
   }
-  check(!organItems.some((l) => l.startsWith("Preferences")), "Organ menu has no Preferences");
+  check(!organItems.includes("Tuning…"), "Organ menu omits the duplicate tuning entry");
   await escape();
 
   const viewItems = await menuLabels(`${titleButton("View")}.click()`);
@@ -208,7 +208,9 @@ try {
   await drive.eval(`${titleButton("Organ")}.click()`);
   await sleep(120);
   await drive.eval(`[...document.querySelectorAll(".menu-list:not(.hidden) .menu-item")]
-    .find((b) => b.textContent.includes("Room")).click()`);
+    .find((b) => b.textContent.includes("Preferences")).click()`);
+  await sleep(150);
+  await drive.eval(`document.querySelector('[data-category="general"]').click();[...document.querySelectorAll("#organ-prefs .organ-pref-action")].find(b=>b.textContent.startsWith("Room")).click()`);
   await sleep(200);
   check(
     await drive.eval(`!document.getElementById("editor-room").classList.contains("hidden")`),
@@ -231,10 +233,10 @@ try {
 
   // ---- 5. the silent badge and the MIDI popover ---------------------
 
-  const badge = await drive.eval(`document.querySelector(".keyboard[data-manual] .kb-silent")?.textContent ?? null`);
+  const badge = await drive.eval(`document.querySelector(".keyboard-connect")?.textContent ?? null`);
   check(badge != null, `an unwired keyboard wears the silent badge ("${badge}")`);
   await drive.shot(join(OUT, "silent-badges.png"));
-  await drive.eval(`document.querySelector(".keyboard[data-manual] .kb-silent").click()`);
+  await drive.eval(`document.querySelector(".keyboard-connect").click()`);
   await sleep(250);
   check(
     await drive.eval(`!document.getElementById("editor-midi").classList.contains("hidden")`),
@@ -245,8 +247,7 @@ try {
     const device = document.querySelector("#editor-midi-inputs .input-device");
     device.value = "Computer keyboard";
     device.dispatchEvent(new Event("change", {bubbles: true}));
-    return Number(document.querySelector(".keyboard[data-manual] .kb-silent")
-      ?.closest(".keyboard").dataset.manual);
+    return Number(document.querySelector(".keyboard-connect").dataset.manual);
   })()`);
   await sleep(600);
   snap = await state();
@@ -257,8 +258,7 @@ try {
     "…and the wiring landed in the file's [[midi.input]]"
   );
   check(
-    await drive.eval(`document.querySelector(
-      ".keyboard[data-manual='" + ${boundManual} + "'] .kb-silent") == null`),
+    await drive.eval(`document.querySelector('.keyboard-connect[data-manual="${boundManual}"]').textContent === "Input settings"`),
     "…and its badge is gone"
   );
   await escape();
@@ -268,7 +268,9 @@ try {
   await drive.eval(`${titleButton("Organ")}.click()`);
   await sleep(120);
   await drive.eval(`[...document.querySelectorAll(".menu-list:not(.hidden) .menu-item")]
-    .find((b) => b.textContent.includes("Buttons & shortcuts")).click()`);
+    .find((b) => b.textContent.includes("Preferences")).click()`);
+  await sleep(150);
+  await drive.eval(`document.querySelector('[data-category="general"]').click();[...document.querySelectorAll("#organ-prefs .organ-pref-action")].find(b=>b.textContent.startsWith("Buttons & shortcuts")).click()`);
   await sleep(200);
   check(
     await drive.eval(`!document.getElementById("editor-bindings").classList.contains("hidden")`),

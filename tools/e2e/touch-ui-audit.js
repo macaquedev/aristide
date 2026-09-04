@@ -26,6 +26,7 @@ try {
     check(await d.eval(`(() => {const panels=[...document.querySelectorAll('.panel')].filter(p=>p.getClientRects().length).map(p=>p.getBoundingClientRect()); return panels.every((a,i)=>panels.slice(i+1).every(b=>a.right<=b.left+1 || b.right<=a.left+1 || a.bottom<=b.top+1 || b.bottom<=a.top+1));})()`), `${width}px: panels do not overlap`);
   }
   await d.shot('/tmp/aristide-tablet.png');
+  await d.eval(`[...document.querySelectorAll('.keyboard-toggle')].filter(b=>b.getAttribute('aria-expanded')==='false').forEach(b=>b.click())`);
   const manual = snapshot.manuals.find(m=>!m.pedal && m.key_count>20) ?? snapshot.manuals[0];
   const key1 = `.keyboard[data-manual="${manual.idx}"] .key.natural[data-midi="${manual.first_key}"]`;
   const key2 = `.keyboard[data-manual="${manual.idx}"] .key.natural[data-midi="${manual.first_key+4}"]`;
@@ -52,13 +53,16 @@ try {
   const knob=`.knob[data-key="stop-${stop.id}"]`;
   const before=(await state()).stops.find(s=>s.id===stop.id).on;
   await tap('#editor-inspect');
+  await d.eval(`[...document.querySelectorAll('#organ-prefs .organ-pref-action')].find(b=>b.textContent.startsWith('Choose a control on the console')).click()`);
   await tap(knob);
   check(await visible('#editor-stop'), 'Control settings opens a stop editor without right-click');
   check((await state()).stops.find(s=>s.id===stop.id).on===before, 'opening settings does not toggle the stop');
   await tap('#editor-inspect');
-  const stopManual = snapshot.manuals.find(m=>m.idx===stop.midx);
-  await tap(`.keyboard[data-manual="${stop.midx}"] .key[data-midi="${stopManual.first_key}"]`);
-  check(await visible('#editor-key-voicing'), 'pipe voicing is reachable by touch from a stop editor');
+  await tap('[data-category="stops"]');
+  await tap('#organ-prefs-index details summary');
+  await d.eval(`document.querySelector('#organ-prefs-index details select').value=${stop.id}; document.querySelector('#organ-prefs-index details select').dispatchEvent(new Event('change'))`);
+  await d.eval(`[...document.querySelectorAll('#organ-prefs .organ-pref-action')].find(b=>b.textContent==='Edit selected pipes').click()`);
+  check(await visible('#editor-key-voicing'), 'pipe voicing is reachable by touch from Preferences');
   check(!(await state()).manuals.find(m=>m.idx===stop.midx).held.length, 'choosing a pipe to edit does not play its note');
   await d.send('Input.dispatchKeyEvent',{type:'keyDown',key:'Escape',code:'Escape'});
   const ranks = JSON.stringify((await state()).manuals.map(m=>m.rank));

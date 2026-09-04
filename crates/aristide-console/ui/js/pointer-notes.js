@@ -45,6 +45,10 @@ export class PointerNotes {
     if (!this.hasNote(note.manual, note.midi)) this.send(note.manual, note.midi, false);
   }
 
+  releaseManual(manual) {
+    for (const [id, note] of this.pointers) if (note.manual === manual) this.release(id);
+  }
+
   releaseAll() {
     for (const id of this.pointers.keys()) this.release(id);
   }

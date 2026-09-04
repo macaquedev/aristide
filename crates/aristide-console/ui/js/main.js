@@ -1,3 +1,4 @@
+import { OrganPreferences } from "./organ-prefs.js";
 import { wireDialogFocus } from "./dialog-focus.js";
 import { resolveBase, connect, commands } from "./api.js";
 import { ConflictDialog } from "./conflict.js";
@@ -28,6 +29,8 @@ let snapshot = {}; // the latest state, for menus that ask what is true now
 const prefs = new Preferences(document, (query) => send(query));
 const picker = new Picker(document, base, (query, options) => send(query, options));
 const editor = new Editor(document, base, (query) => send(query));
+const organPrefs = new OrganPreferences(document, editor);
+editor.openPreferences = () => organPrefs.open();
 // The bar's tuning readout opens the whole-instrument tuning popover —
 // an organ fact, edited where organ facts are edited, on the console.
 const view = new Console(
@@ -36,6 +39,7 @@ const view = new Console(
   (x, y) => editor.openTuningForm("organ", x, y),
   (x, y) => editor.beginBuild(x, y)
 );
+view.onKeyboardSettings = (idx) => { organPrefs.open(); organPrefs.select("keyboards"); organPrefs.edit(() => editor.openMidiForm(idx,20,80)); };
 view.decorate = (snapshot) => editor.decorateConsole(snapshot);
 const keys = new PianoKeys(document, (query) => send(query));
 const conflict = new ConflictDialog(document, (query) => send(query));
@@ -101,7 +105,7 @@ renameInput.addEventListener("keydown", (event) => {
 // the player (About, Preferences — nothing in it touches the organ);
 // the organ's own name is its file (pick, rename, save); the Organ
 // menu is the instrument — performance actions plus the organ-wide
-// settings popovers, every one an organ fact written to its file.
+// preferences window; each setting keeps its existing storage scope.
 // An ad-hoc combination has no file to keep a name in, so renaming
 // waits until it is saved as one.
 new MenuBar(document, document.getElementById("menus"), [
@@ -157,21 +161,7 @@ new MenuBar(document, document.getElementById("menus"), [
       { label: "Clear stops & couplers", run: () => view.cancel() },
       { label: "Silence everything", accel: "Panic", run: () => view.panic() },
       "-",
-      {
-        label: "Tuning…",
-        disabled: !snapshot.tuning,
-        run: (at) => editor.openTuningForm("organ", at?.x ?? 120, at?.y ?? 40),
-      },
-      {
-        label: "Room & noises…",
-        disabled: snapshot.reverb == null && !snapshot.noises,
-        run: (at) => editor.openRoomForm(at?.x ?? 120, at?.y ?? 40),
-      },
-      {
-        label: "Buttons & shortcuts…",
-        disabled: !snapshot.organ,
-        run: (at) => editor.openBindingsForm(at?.x ?? 120, at?.y ?? 40),
-      },
+      { label: "Preferences…", disabled: !snapshot.organ, run: () => organPrefs.open() },
     ],
   },
   {
@@ -196,7 +186,8 @@ window.addEventListener("keydown", (event) => {
   if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
   if (event.key === ",") {
     event.preventDefault();
-    prefs.isOpen ? prefs.close() : prefs.open();
+    if (organPrefs.isOpen) organPrefs.select("appearance");
+    else prefs.isOpen ? prefs.close() : prefs.open();
   } else if (event.key in ZOOM_KEYS && stepScale(ZOOM_KEYS[event.key])) {
     event.preventDefault();
   }
@@ -212,6 +203,7 @@ send = connect(
     conflict.update(snapshot);
     editor.update(snapshot);
     prefs.update(snapshot);
+    organPrefs.update(snapshot);
   },
   (message) => view.offline(message),
   // A refused command (a 4xx and its reason) lands in the editor's

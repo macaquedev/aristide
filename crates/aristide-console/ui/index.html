@@ -29,7 +29,7 @@
     <div class="rail-controls">
       <label class="slider-group" id="gain-group">
         <span class="rail-label">Volume</span>
-        <input id="gain" type="range" min="0" max="1" step="0.01" />
+        <input id="gain" aria-label="Volume" type="range" min="0" max="1" step="0.01" />
       </label>
       <button class="tuning" id="tuning" data-tip="Tuning &amp; temperament"
         aria-label="Tuning"></button>
@@ -38,11 +38,25 @@
   </header>
   <aside id="keys-legend" class="keys-legend hidden" aria-label="Computer keyboard mapping"></aside>
 
-  <!-- Preferences is the player's, never the organ's: the skin is local
-       to this console (localStorage), sample memory is this machine's
-       (the user config, via /api/prefs), and nothing in it sends an
-       organ command. Organ facts — wiring, tuning, room, structure —
-       live on the console surface and in the organ's own file. -->
+  <!-- Organ preferences hosts the live instrument editors and offers
+       appearance/loading controls too. Each keeps its existing storage scope. -->
+  <div id="organ-prefs" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="organ-prefs-title">
+    <div class="modal-backdrop" data-organ-prefs-close></div>
+    <div class="modal-card organ-prefs-card">
+      <header class="modal-head"><h1 id="organ-prefs-title">Organ preferences</h1><button class="modal-close" data-organ-prefs-close aria-label="Close organ preferences">×</button></header>
+      <div class="organ-prefs-layout">
+        <nav id="organ-prefs-nav" aria-label="Settings categories"></nav>
+        <div class="organ-prefs-content">
+          <p id="organ-prefs-context" class="pane-note"></p>
+          <button id="organ-prefs-back" class="ghost hidden">← Back to settings</button>
+          <div id="organ-prefs-index"></div>
+          <div id="organ-prefs-editors"></div>
+          <div id="organ-prefs-errors"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div id="prefs" class="modal hidden" role="dialog" aria-modal="true"
     aria-labelledby="prefs-title">
     <div class="modal-backdrop" data-close></div>
@@ -202,12 +216,12 @@
       <span class="editor-lock-glyph" id="editor-lock-glyph" aria-hidden="true">&#128274;</span><span id="editor-lock-label">Edit console</span>
     </button>
     <button id="editor-add-button" class="ghost editor-tool">+ Add</button>
-    <button id="editor-inspect" class="ghost editor-tool" aria-pressed="false">Control settings</button>
+    <button id="editor-inspect" class="ghost editor-tool" aria-pressed="false">Settings</button>
     </div>
   </div>
 
   <p id="editor-hint" class="editor-hint hidden">
-    Add keyboards and stops, or choose Control settings and tap a control to edit it.
+    Add keyboards and stops, or open Settings to edit the organ in one place.
   </p>
 
   <p id="editor-status" class="editor-status hidden">
@@ -295,7 +309,7 @@
       <input id="editor-add-coupler-name" type="text" placeholder="Name" autocomplete="off" spellcheck="false" />
       <p class="pane-note">&ldquo;Swell to Great&rdquo;: the Swell's stops speak
         while you play the Great. Finer routes &mdash; ranges, bass/melody,
-        unison off &mdash; are in Control settings: choose it, then tap the new coupler.</p>
+        unison off &mdash; are in Organ → Preferences → Couplers.</p>
       <!-- Couplers taken off the console (a set's own can't be deleted,
            only hidden) come back from here rather than being re-invented. -->
       <div id="editor-add-coupler-restore" class="editor-add-coupler-restore"></div>
@@ -644,7 +658,7 @@
 
   <!-- Right-click the Couplers panel (edit mode) for this organ's own
        coupler-wide settings. Organ facts live on the console, in the
-       organ's file — never in the Preferences dialog, which is the
+       organ's file. Appearance and memory settings remain the
        player's. -->
   <div class="editor-add hidden" id="editor-couplers-menu">
     <form class="editor-add-form" id="editor-couplers-menu-form">

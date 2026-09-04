@@ -3279,7 +3279,7 @@ body.inspecting .knob, body.inspecting .cheek { touch-action: manipulation; }
   .division { align-items: stretch; }
   .division-knobs { justify-content: flex-start; gap: 12px; }
   .division-head { justify-content: space-between; }
-  .panel-keyboard { overflow-x: auto; padding-bottom: 6px; --kb-scale: 1 !important; }
+  .panel-keyboard { overflow-x: auto; padding-bottom: 6px; }
   .panel-keyboard .panel-body { width: max-content; min-width: 100%; }
   .panel-keyboard .keyboard { min-width: max-content; }
   .piston-rail, .piston-bank, .piston-stepper, .coupler-rail { flex-wrap: wrap; }
@@ -3383,3 +3383,113 @@ body.editing .editor-add { max-height: calc(100dvh - 90px); }
   .picker-row-kind { display: none; }
   .picker-open { padding: 10px; }
 }
+
+/* A compact keyboard card is useful even when playing from physical keys. */
+.keyboard-card-head { display:flex; align-items:center; gap:8px; padding:10px; border-radius:10px; background:var(--surface); }
+.keyboard-card-head strong { flex:1; min-width:0; font-size:13px; overflow-wrap:anywhere; }
+.keyboard-card-head .ghost { flex-shrink:0; min-height:44px; }
+.keyboard.keys-collapsed { display:none; }
+.panel-keyboard { min-width:340px; }
+.panel-keyboard .divisional-rail { padding:6px 10px; gap:6px; }
+.keyboard .kb-silent { display:none; }
+.editor-lock-dock { left:50%; transform:translateX(-50%); bottom:max(18px, env(safe-area-inset-bottom)); max-width:calc(100vw - 24px); }
+.editor-toolbar { gap:10px; padding:8px; }
+.editor-toolbar button { min-height:56px; min-width:90px; padding:10px 18px; font-size:15px; font-weight:600; }
+body.editing .editor-tool { display:block; }
+.editor-hint { display:none; }
+#editor-add-button { background:var(--accent); color:var(--accent-ink); }
+body.editing .editor-add { max-height:calc(100dvh - 112px); }
+
+/* One settings window, with the same live controls as the console shortcuts. */
+.organ-prefs-card { width:min(1000px,calc(100vw - 32px)); height:min(780px,calc(100dvh - 40px)); display:flex; flex-direction:column; }
+.organ-prefs-layout { display:flex; flex:1; min-height:0; }
+#organ-prefs-nav { flex:0 0 210px; padding:12px; border-right:1px solid var(--border-strong); overflow:auto; }
+.organ-prefs-content { flex:1; min-width:0; overflow:auto; padding:20px; overscroll-behavior:contain; }
+.organ-pref-action { display:flex; flex-direction:column; justify-content:center; gap:4px; width:100%; min-height:56px; padding:12px 14px; margin:0 0 8px; text-align:left; color:var(--text); background:var(--surface-2); border:1px solid #ffffff18; border-radius:10px; font-size:14px; cursor:pointer; }
+.organ-pref-action small { color:var(--text-dim); font-size:12px; line-height:1.5; }
+#organ-prefs-nav .organ-pref-action { background:transparent; border-color:transparent; }
+#organ-prefs-nav [aria-current="true"] { background:var(--accent-soft); border-color:var(--accent); }
+#organ-prefs-index h2 { margin:4px 0 16px; font-size:18px; }
+#organ-prefs input, #organ-prefs select { min-height:48px; max-width:100%; font-size:16px; }
+#organ-prefs input[type=search] { width:100%; margin-bottom:12px; padding:10px; }
+#organ-prefs button { touch-action:manipulation; }
+#organ-prefs .ghost, #organ-prefs .menu-item, #organ-prefs .segment button { min-height:48px; }
+#organ-prefs .editor-add, #organ-prefs .organ-remove-confirm { position:static !important; transform:none !important; width:100% !important; max-width:100%; max-height:none; overflow:visible; margin:12px 0; visibility:visible; }
+#organ-prefs .editor-add-form, #organ-prefs .editor-add-menu { width:100%; max-width:100%; box-sizing:border-box; box-shadow:none; }
+#organ-prefs .editor-add-form { padding:16px; }
+#organ-prefs .editor-add-form .rail-label { font-size:13px; }
+#organ-prefs .editor-add-form-actions { gap:10px; }
+#organ-prefs-errors #editor-error { position:static; transform:none; max-width:100%; }
+.organ-pref-group { margin-bottom:10px; border:1px solid var(--border-strong); border-radius:10px; padding:10px; }
+.organ-pref-group summary { cursor:pointer; min-height:48px; padding:12px 4px; font-size:15px; }
+.organ-pref-group label { display:block; margin:10px 0; }
+.organ-pref-group label input { display:block; width:100%; }
+.organ-pref-group select { width:100%; margin-bottom:10px; }
+.organ-pref-rename { display:flex; gap:8px; margin-bottom:16px; }
+.organ-pref-rename input { width:100%; min-width:0; padding:8px; }
+#organ-prefs-context { margin:0 0 16px; }
+#organ-prefs .pane-note { overflow-wrap:anywhere; }
+
+@media (max-width:1100px), (pointer:coarse) and (max-width:1600px) {
+  .console-canvas { gap:10px; padding:12px 12px 110px; }
+  .console-canvas .panel-jamb { flex:1 1 240px; align-self:stretch; }
+  .panel-jamb .panel-body { height:100%; padding:12px; }
+  .division-knobs { gap:8px; }
+  .panel-keyboard { overflow:visible; padding-bottom:0; }
+  .panel-keyboard .panel-body { width:100%; min-width:0; }
+  .panel-keyboard .keyboard { width:100%; min-width:0; overflow:hidden; }
+  .panel-keyboard .keyboard .keys { flex-shrink:0; }
+  .keyboard.manual { --kb-h:max(64px,calc(96px * var(--kb-scale,1))); }
+  .keyboard.pedal { --kb-h:max(56px,calc(84px * var(--kb-scale,1))); }
+  .keyboard-card-head { padding:8px 10px; }
+  .divisional-rail { flex-wrap:wrap; }
+}
+@media (max-width:680px) {
+  .organ-prefs-card { width:100%; height:calc(100dvh - 16px); }
+  .organ-prefs-layout { flex-direction:column; }
+  #organ-prefs-nav { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); flex:0 0 auto; padding:8px; gap:6px; border-right:0; border-bottom:1px solid var(--border-strong); }
+  #organ-prefs-nav .organ-pref-action { margin:0; padding:8px; min-height:56px; font-size:12px; }
+  .organ-prefs-content { padding:12px; }
+  .editor-toolbar { gap:8px; width:100%; }
+  .editor-toolbar button { min-width:0; padding:10px 12px; flex:1; font-size:14px; }
+  body.editing .editor-lock-dock { width:calc(100vw - 24px); }
+  .console-canvas .panel-jamb { flex-basis:100%; }
+  .division-knobs { display:grid; grid-template-columns:repeat(auto-fit,minmax(64px,1fr)); }
+  .division-knobs .knob { width:100%; min-width:0; min-height:56px; }
+  .keyboard-card-head { gap:6px; flex-wrap:wrap; }
+  .keyboard-card-head strong { flex-basis:100%; }
+  .keyboard-card-head .ghost { flex:1; }
+}
+#organ-prefs input:not([type=range]), #organ-prefs select { color:var(--text); background:var(--well); border:1px solid var(--border-strong); border-radius:7px; }
+@media (max-width:1100px), (pointer:coarse) and (max-width:1600px) {
+  .console-canvas .panel-keyboard { flex:1 1 320px; width:auto !important; }
+  .console-canvas .panel-keyboard:has(.keyboard:not(.keys-collapsed)) { flex-basis:100%; }
+  .console-canvas .panel-shoes { flex:0 1 auto; width:auto !important; }
+}
+@media (max-width:680px) {
+  .keyboard-card-head { flex-wrap:nowrap; }
+  .keyboard-card-head strong { flex:1; font-size:12px; }
+  .keyboard-card-head .ghost { flex:0 0 auto; padding:6px 8px; font-size:11px; }
+}
+@media (min-width:681px) and (max-width:1000px) {
+  :root { --bar-h:112px; }
+  .menubar { flex-wrap:wrap; align-content:center; height:var(--bar-h); gap:4px 12px; padding:6px 16px; }
+  .menus { margin-left:auto; }
+  .rail-controls { flex:1 0 100%; justify-content:space-between; }
+  #tuning { white-space:nowrap; min-width:190px; }
+  .console-canvas .panel-keyboard:not(:has(.keyboard:not(.keys-collapsed))) { flex:0 1 calc(50% - 5px); }
+}
+.editor-add-menu .menu-item { min-height:56px; padding:12px; }
+#organ-prefs input[type=checkbox] { min-height:24px; width:24px; height:24px; accent-color:var(--accent); }
+#organ-prefs .editor-add-form label { min-height:48px; }
+#organ-prefs .editor-wiring-form, #organ-prefs .editor-bindings-form { max-height:none; overflow:visible; }
+@media (max-width:680px) {
+  .keyboard:has(.kb-silent) { padding-top:10px; }
+}
+@media (max-width:380px) {
+  #gain-group { min-width:0; }
+  #gain-group .rail-label { display:none; }
+  #gain { width:100%; min-width:40px; }
+}
+.editor-lock-dock { width:max-content; }
+#editor-lock-label { white-space:nowrap; }

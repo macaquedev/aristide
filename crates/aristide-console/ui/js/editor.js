@@ -444,7 +444,7 @@ export class Editor {
       const rect = add.getBoundingClientRect();
       this.openAddMenu(rect.left, rect.top);
     });
-    inspect.addEventListener("click", () => this.setInspect(!this.inspect));
+    inspect.addEventListener("click", () => this.inspect ? this.setInspect(false) : this.openPreferences?.());
     // Explicit alternative to right-click, usable with one finger.
     this.el.canvas.addEventListener("pointerdown", (event) => {
       if (this.inspect) event.stopImmediatePropagation();
@@ -476,7 +476,7 @@ export class Editor {
     this.root.body.classList.toggle("inspecting", this.inspect);
     const button = this.root.getElementById("editor-inspect");
     button.setAttribute("aria-pressed", String(this.inspect));
-    button.textContent = this.inspect ? "Tap a control…" : "Control settings";
+    button.textContent = this.inspect ? "Cancel selection" : "Settings";
   }
 
   togglePadlock() {
@@ -516,7 +516,7 @@ export class Editor {
     this.el.lock.setAttribute("aria-pressed", "true");
     this.el.lock.setAttribute("aria-label", "Lock editing");
     this.el.lock.dataset.tip = "Lock editing (Ctrl+E)";
-    this.root.getElementById("editor-lock-label").textContent = "Done editing";
+    this.root.getElementById("editor-lock-label").textContent = "Done";
     this.el.lockGlyph.innerHTML = "&#128275;"; // open padlock
     this.el.hint.classList.remove("hidden");
     this.el.drawerTab.classList.remove("hidden");
@@ -727,6 +727,11 @@ export class Editor {
       const idx = Number(board.dataset.manual);
       const entry = midiManuals.find((m) => m.idx === idx);
       const silent = !!entry && !entry.inputs.length;
+      const connect = board.closest(".panel")?.querySelector(".keyboard-connect");
+      if (connect) {
+        setText(connect, silent ? "Connect" : "Input settings");
+        connect.title = silent ? "No keyboard connected" : entry?.inputs.map(input => input.device).join(", ") ?? "Keyboard input settings";
+      }
       let badge = board.querySelector(".kb-silent");
       if (!silent) {
         badge?.remove();
@@ -946,7 +951,7 @@ export class Editor {
 
   /// The coupler rail's own chrome: a + that adds a coupler right
   /// there, and a right-click for this organ's coupler-wide settings
-  /// (organ facts live on the console, never in Preferences).
+  /// (also available in Organ preferences).
   wireCouplersPanel() {
     const panel = this.el.canvas.querySelector('.panel[data-panel="couplers"]');
     const rail = panel?.querySelector(".coupler-rail");
@@ -2024,9 +2029,10 @@ export class Editor {
   }
 
   keepPopoverVisible(el) {
+    if (el.closest("#organ-prefs")) return;
     if (!el.getClientRects().length) return;
     const { width, height } = el.getBoundingClientRect();
-    const bottom = this.unlocked ? 84 : 8;
+    const bottom = this.unlocked ? 112 : 8;
     const left = parseFloat(el.style.left) || 8;
     const top = parseFloat(el.style.top) || 8;
     el.style.left = `${Math.max(8, Math.min(left, window.innerWidth - width - 8))}px`;
@@ -2034,11 +2040,12 @@ export class Editor {
   }
 
   positionPopover(el, x, y) {
+    if (el.closest("#organ-prefs")) return;
     el.style.left = "0px";
     el.style.top = "0px";
     const { width, height } = el.getBoundingClientRect();
     el.style.left = `${Math.max(8, Math.min(x, window.innerWidth - width - 8))}px`;
-    el.style.top = `${Math.max(8, Math.min(y, window.innerHeight - height - (this.unlocked ? 84 : 8)))}px`;
+    el.style.top = `${Math.max(8, Math.min(y, window.innerHeight - height - (this.unlocked ? 112 : 8)))}px`;
   }
 
   closeAdd() {

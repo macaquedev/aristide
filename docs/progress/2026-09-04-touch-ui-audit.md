@@ -1,5 +1,7 @@
 # Touch interface and workflow audit — 2026-09-04
 
+This records the first pass. The later [compact console and unified preferences](2026-09-04-organ-preferences.md) update replaces the editing toolbar workflow and scrolling keyboards described below.
+
 The console now has a responsive layout for phones and tablets, larger touch
 controls, clearer editing entry points, and less prominent advanced settings.
 The desktop canvas keeps its existing layout files and placement behavior.

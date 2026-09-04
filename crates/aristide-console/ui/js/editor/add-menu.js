@@ -202,7 +202,7 @@ export function wireAdd(editor) {
 /// The new manual's panels should land where the add menu was opened,
 /// not wherever the default layout would seat them.
 function rememberPlacement(editor, name) {
-  if (usesFlowLayout() || !editor.addAnchor) return;
+  if (usesFlowLayout() || editor.el.add.closest("#organ-prefs") || !editor.addAnchor) return;
   const rect = editor.el.canvas.getBoundingClientRect();
   editor.pendingPlace = {
     name,

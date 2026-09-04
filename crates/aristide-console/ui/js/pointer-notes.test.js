@@ -70,3 +70,12 @@ test('touch drift holds the key while mouse leave releases it', () => {
   emit(k,'pointerleave',1,{pointerType:'mouse'});
   expect(calls.at(-1)).toEqual([0,60,false]);
 });
+
+test('hiding a keyboard releases only that keyboard’s on-screen notes', () => {
+  const {calls, notes, key, emit} = rig();
+  emit(key(0,60), 'pointerdown', 1);
+  emit(key(1,64), 'pointerdown', 2);
+  notes.releaseManual(0);
+  expect(calls).toEqual([[0,60,true], [1,64,true], [0,60,false]]);
+  expect(notes.hasNote(1,64)).toBe(true);
+});

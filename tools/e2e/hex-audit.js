@@ -63,6 +63,8 @@ try {
     width: 1500, height: 950, deviceScaleFactor: 1, mobile: false,
   });
   await d.navigate(`http://127.0.0.1:${UI_PORT}/index.html?server=${S}`);
+  await sleep(500);
+  await d.eval(`[...document.querySelectorAll(".keyboard-toggle")].forEach(b=>b.click())`);
   await d.sleep(2000);
 
   const audit = await d.eval(`(() => {
@@ -110,6 +112,8 @@ try {
 
   // ---- live edits ----------------------------------------------------
   await d.navigate(`http://127.0.0.1:${UI_PORT}/index.html?server=${S}&kbdHexForm=Hex`);
+  await sleep(500);
+  await d.eval(`[...document.querySelectorAll(".keyboard-toggle")].forEach(b=>b.click())`);
   await d.sleep(2200);
   await d.click('[data-preset="wicki-hayden"]');
   await d.sleep(120);
@@ -139,6 +143,8 @@ try {
   // ---- computer keyboard as a hex surface ----------------------------
   await post(`/api/midi/bind?manual=0&slot=0&device=${encodeURIComponent("Computer keyboard")}`);
   await d.navigate(`http://127.0.0.1:${UI_PORT}/index.html?server=${S}`);
+  await sleep(500);
+  await d.eval(`[...document.querySelectorAll(".keyboard-toggle")].forEach(b=>b.click())`);
   await d.sleep(2000);
   snap = await state();
   const hx = snap.manuals[0].hex;

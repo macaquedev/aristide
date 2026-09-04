@@ -79,7 +79,7 @@ function stopFace(stop) {
 export class Console {
   /// `openTuning(x, y)` is how the bar's tuning readout opens the
   /// whole-instrument tuning popover right under itself — tuning is an
-  /// organ fact and is edited on the console, never in Preferences.
+  /// organ fact, editable through the console shortcut or Organ preferences.
   /// `enterEditMode(x, y)` is what an empty organ's card offers
   /// instead: editing unlocked and the add menu open at the click — an
   /// empty organ is already auto-unlocked, so unlocking alone would
@@ -108,6 +108,9 @@ export class Console {
       emptyCard: root.getElementById("organ-empty-card"),
     };
     this.wireRail();
+    window.matchMedia("(pointer: coarse)").addEventListener("change", () => {
+      if (this.snapshot) this.layoutPanels(this.snapshot);
+    });
     window.addEventListener("resize", () => {
       if (!this.snapshot) return;
       this.layoutPanels(this.snapshot);
@@ -294,6 +297,8 @@ export class Console {
   }
 
   buildPanels(snapshot) {
+    this.visibleKeyboards ??= new Set();
+    if (this.keyboardOrgan !== snapshot.setup?.file) { this.visibleKeyboards.clear(); this.keyboardOrgan = snapshot.setup?.file; }
     this.panels.clear();
     this.el.canvas.replaceChildren();
 
@@ -399,7 +404,25 @@ export class Console {
     for (const manual of snapshot.manuals) {
       const kind = kindOf(manual);
       const body = this.panel(`keyboard:${manual.name}`, `keyboard panel-${kind}`, `${manual.name} · keyboard`);
-      body.append(this.keyboard(manual, kind));
+      const board = this.keyboard(manual, kind);
+      const header = document.createElement("div"); header.className = "keyboard-card-head";
+      const name = document.createElement("strong"); name.textContent = manual.name;
+      const connect = document.createElement("button"); connect.className = "ghost keyboard-connect"; connect.dataset.manual = manual.idx;
+      connect.textContent = "Connect";
+      connect.addEventListener("click", () => this.onKeyboardSettings?.(manual.idx));
+      const toggle = document.createElement("button"); toggle.className = "ghost keyboard-toggle";
+      board.id = `keyboard-field-${manual.idx}`; toggle.setAttribute("aria-controls",board.id);
+      const expanded = this.visibleKeyboards.has(manual.name);
+      board.classList.toggle("keys-collapsed", !expanded);
+      toggle.textContent = expanded ? "Hide keys" : "Show keys"; toggle.setAttribute("aria-expanded",String(expanded));
+      toggle.addEventListener("click", () => {
+        const open = board.classList.contains("keys-collapsed");
+        if (open) this.visibleKeyboards.add(manual.name); else {this.visibleKeyboards.delete(manual.name); this.notes.releaseManual(manual.idx);}
+        board.classList.toggle("keys-collapsed", !open);
+        toggle.textContent = open ? "Hide keys" : "Show keys"; toggle.setAttribute("aria-expanded",String(open));
+        this.layoutPanels(this.snapshot); this.fitCheeks();
+      });
+      header.append(name,connect,toggle); body.append(header,board);
       body.append(this.divisionalRail(manual, snapshot));
     }
 
@@ -932,7 +955,18 @@ export class Console {
   /// mid-drag on is left alone — its position is the pointer's.
   layoutPanels(snapshot) {
     // Narrow screens use a flowing layout; never rewrite the saved desktop placement.
-    if (usesFlowLayout()) return;
+    if (usesFlowLayout()) {
+      for (const [id, panel] of this.panels) {
+        if (!id.startsWith("keyboard:")) continue;
+        panel.style.setProperty("--kb-scale", "1");
+        const board = panel.querySelector(".keyboard"), keys = board?.querySelector(".keys");
+        if (!keys?.offsetWidth) continue;
+        const cheek = board.querySelector(".cheek");
+        const scale = Math.min(1, (panel.clientWidth - 42) / (keys.offsetWidth + (cheek?.offsetWidth ?? 0)));
+        panel.style.setProperty("--kb-scale", String(Math.max(.01, scale)));
+      }
+      return;
+    }
     const W = this.el.canvas.clientWidth;
     const H = this.el.canvas.clientHeight;
     if (!W || !H || !this.panels.size) return;
@@ -949,7 +983,7 @@ export class Console {
       // the panel keeps hugging the (scaled) content, so keys are
       // never clipped or orphaned in space.
       if (id.startsWith("keyboard:")) {
-        this.scaleKeyboard(el, sized ? placed[id].w * W : null);
+        this.scaleKeyboard(el, sized ? placed[id].w * W : Math.min(W * .52, 800));
         continue;
       }
       // A player-sized panel: the dragged width is what wraps a
@@ -1018,14 +1052,14 @@ export class Console {
     let x = PAD;
     for (const id of leftJambs) {
       const s = size(id);
-      pos.set(id, { x, y: Math.max(PAD, (H - s.h) / 2) });
+      pos.set(id, { x, y: PAD });
       x += s.w + 14;
     }
     x = W - PAD;
     for (const id of rightJambs.slice().reverse()) {
       const s = size(id);
       x -= s.w;
-      pos.set(id, { x, y: Math.max(PAD, (H - s.h) / 2) });
+      pos.set(id, { x, y: PAD });
       x -= 14;
     }
 
@@ -1043,14 +1077,13 @@ export class Console {
     const innerRight = W - PAD - groupWidth(rightJambs) - (rightJambs.length ? GAP : 0);
     const stackW = Math.max(0, ...stack.map((id) => size(id)?.w ?? 0));
     const cx = innerLeft + Math.max(0, (innerRight - innerLeft - stackW) / 2);
-    const totalH = stack.reduce((sum, id) => sum + (size(id)?.h ?? 0), 0)
-      + GAP * Math.max(0, stack.length - 1);
-    let y = Math.max(PAD, (H - totalH) / 2);
+    let y = PAD;
     for (const id of stack) {
       const s = size(id);
       if (!s) continue;
       pos.set(id, { x: cx + Math.max(0, (stackW - s.w) / 2), y });
-      y += s.h + GAP;
+      const shoesHeight = pedal && id === `keyboard:${pedal.name}` ? (size("shoes")?.h ?? 0) : 0;
+      y += Math.max(s.h, shoesHeight) + GAP;
     }
 
     // Shoes go beside the pedalboard, tops level with it: the manuals
