@@ -33,7 +33,10 @@ export function closeDrawer(editor) {
 }
 
 export async function fetchOfferings(editor, render = true) {
+  const request = editor.offeringsRequest = (editor.offeringsRequest ?? 0) + 1;
+  const file = editor.lastSnapshot?.setup?.file;
   const { ok, data } = await localFetch(editor.base, commands.organOfferings(), { json: true });
+  if (request !== editor.offeringsRequest || file !== editor.lastSnapshot?.setup?.file) return;
   editor.offerings = ok ? (data.sources ?? []) : null;
   if (render) buildOfferings(editor, editor.offerings);
 }
@@ -47,7 +50,7 @@ function buildOfferings(editor, sources) {
   }
   if (!sources.length) {
     container.append(
-      emptyNote("No sources yet — double-click the console to add a sample set.")
+      emptyNote("No sample sets yet. Choose + Add, then Sample set.")
     );
     return;
   }

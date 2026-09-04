@@ -12,7 +12,8 @@
 // structural rebuild (see console.js's `decorate` hook); `update(snapshot)`
 // is called on every poll, the same as the other panels.
 
-import { keyboardScale, measureKeyboard } from "./kb-scale.js";
+import { trackPointer } from "./pointer-gesture.js";
+import { keyboardScale, measureKeyboard, usesFlowLayout } from "./kb-scale.js";
 import { commands, localFetch } from "./api.js";
 import { setText } from "./dom.js";
 import { menuItem } from "./menu.js";
@@ -418,18 +419,64 @@ export class Editor {
     this.wireSaveForm();
     this.wireSaveAsForm();
     this.wireCanvas();
+    // Forms can grow after opening (a submenu, validation or source list).
+    // Keep their actions above the toolbar even when the original anchor
+    // was at the bottom of the screen.
+    this.popoverBounds = new ResizeObserver((entries) => {
+      for (const { target } of entries) this.keepPopoverVisible(target);
+    });
+    for (const popover of root.querySelectorAll(".editor-add")) this.popoverBounds.observe(popover);
+    window.addEventListener("resize", () => {
+      for (const popover of root.querySelectorAll(".editor-add:not(.hidden)")) this.keepPopoverVisible(popover);
+    });
   }
 
   // ---- the padlock ---------------------------------------------------------
 
   wireLock() {
     this.el.lock.addEventListener("click", () => this.togglePadlock());
+    const add = this.root.getElementById("editor-add-button");
+    const inspect = this.root.getElementById("editor-inspect");
+    add.addEventListener("click", (event) => {
+      event.stopPropagation();
+      this.setInspect(false);
+      this.closeAllPopovers();
+      const rect = add.getBoundingClientRect();
+      this.openAddMenu(rect.left, rect.top);
+    });
+    inspect.addEventListener("click", () => this.setInspect(!this.inspect));
+    // Explicit alternative to right-click, usable with one finger.
+    this.el.canvas.addEventListener("pointerdown", (event) => {
+      if (this.inspect) event.stopImmediatePropagation();
+    }, true);
+    this.el.canvas.addEventListener("click", (event) => {
+      if (!this.inspect) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      const control = event.target.closest('.key[data-midi], .knob, [data-key^="coupler-"], [data-action], .keyboard, .panel-couplers');
+      if (!control) return;
+      this.setInspect(false);
+      control.dispatchEvent(new MouseEvent("contextmenu", {
+        bubbles: true, cancelable: true, clientX: event.clientX, clientY: event.clientY,
+      }));
+    }, true);
+    window.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") this.setInspect(false);
+    });
     window.addEventListener("keydown", (event) => {
       if (event.key.toLowerCase() !== "e" || !(event.ctrlKey || event.metaKey)) return;
       if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) return;
       event.preventDefault();
       this.togglePadlock();
     });
+  }
+
+  setInspect(on) {
+    this.inspect = !!on && this.unlocked;
+    this.root.body.classList.toggle("inspecting", this.inspect);
+    const button = this.root.getElementById("editor-inspect");
+    button.setAttribute("aria-pressed", String(this.inspect));
+    button.textContent = this.inspect ? "Tap a control…" : "Control settings";
   }
 
   togglePadlock() {
@@ -469,6 +516,7 @@ export class Editor {
     this.el.lock.setAttribute("aria-pressed", "true");
     this.el.lock.setAttribute("aria-label", "Lock editing");
     this.el.lock.dataset.tip = "Lock editing (Ctrl+E)";
+    this.root.getElementById("editor-lock-label").textContent = "Done editing";
     this.el.lockGlyph.innerHTML = "&#128275;"; // open padlock
     this.el.hint.classList.remove("hidden");
     this.el.drawerTab.classList.remove("hidden");
@@ -476,11 +524,13 @@ export class Editor {
 
   lock() {
     this.unlocked = false;
+    this.setInspect(false);
     this.root.body.classList.remove("editing");
     this.el.lock.classList.remove("on");
     this.el.lock.setAttribute("aria-pressed", "false");
     this.el.lock.setAttribute("aria-label", "Unlock editing");
     this.el.lock.dataset.tip = "Unlock editing (Ctrl+E)";
+    this.root.getElementById("editor-lock-label").textContent = "Edit console";
     this.el.lockGlyph.innerHTML = "&#128274;"; // closed padlock
     this.el.hint.classList.add("hidden");
     this.el.drawerTab.classList.add("hidden");
@@ -603,7 +653,7 @@ export class Editor {
   /// learn was cancelled or stolen by another Listen.
   pumpQuickBind(snapshot) {
     const quick = this.quickBind;
-    if (!quick) return;
+    if (!quick || quick.awaiting) return;
     const learning = snapshot.control_learning ?? null;
     if (learning === quick.slot) return; // still waiting for the press
     const landed = (snapshot.controls ?? []).find(
@@ -625,8 +675,13 @@ export class Editor {
       return;
     }
     const slot = (this.lastSnapshot?.controls ?? []).length;
-    this.quickBind = { action, manual: manual ?? null, slot };
-    this.send(commands.controlLearn(slot));
+    const quick = this.quickBind = { action, manual: manual ?? null, slot, awaiting: true };
+    this.send(commands.controlLearn(slot)).then((result) => {
+      if (this.quickBind !== quick) return;
+      if (!result.ok) { this.quickBind = null; return; }
+      quick.awaiting = false;
+      this.pumpQuickBind(this.lastSnapshot);
+    });
   }
 
   /// Called by Console right after every structural rebuild (see its
@@ -680,7 +735,7 @@ export class Editor {
       if (!badge) {
         badge = document.createElement("button");
         badge.className = "kb-silent";
-        badge.textContent = "silent — no input";
+        badge.textContent = "Connect keyboard";
         badge.title = "This keyboard has no MIDI input yet — click to give it one";
         badge.addEventListener("click", (event) => {
           event.stopPropagation();
@@ -1031,6 +1086,8 @@ export class Editor {
   }
 
   startPanelDrag(panel, event) {
+    if (this.panelDrag) return;
+    if (usesFlowLayout()) return;
     event.preventDefault();
     const rect = panel.getBoundingClientRect();
     const canvasRect = this.el.canvas.getBoundingClientRect();
@@ -1041,13 +1098,15 @@ export class Editor {
       canvasRect,
       moved: false,
     };
-    const move = (e) => this.panelDragMove(e);
-    const up = (e) => {
-      window.removeEventListener("pointermove", move);
-      this.endPanelDrag(e);
-    };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up, { once: true });
+    const originalStyle = panel.style.cssText;
+    trackPointer(event, (e) => this.panelDragMove(e), (e, cancelled) => {
+      if (cancelled) {
+        this.panelDrag = null;
+        delete panel.dataset.dragging;
+        panel.classList.remove("dragging");
+        panel.style.cssText = originalStyle;
+      } else this.endPanelDrag(e);
+    });
   }
 
   panelDragMove(event) {
@@ -1115,15 +1174,21 @@ export class Editor {
   startKeyboardResize(panel, event) {
     const measured = measureKeyboard(panel);
     if (!measured) return;
+    const originalStyle = panel.style.cssText;
+    const wasSized = panel.classList.contains("sized");
     const start = { x: event.clientX, w: panel.offsetWidth, ...measured };
     panel.dataset.dragging = "1"; // layoutPanels leaves a mid-gesture panel alone
     const move = (e) => {
       const target = start.w + e.clientX - start.x;
       panel.style.setProperty("--kb-scale", keyboardScale(start, target));
     };
-    const up = () => {
-      window.removeEventListener("pointermove", move);
+    const up = (_event, cancelled) => {
       delete panel.dataset.dragging;
+      if (cancelled) {
+        panel.style.cssText = originalStyle;
+        panel.classList.toggle("sized", wasSized);
+        return;
+      }
       const canvas = this.el.canvas.getBoundingClientRect();
       if (!canvas.width || !canvas.height) return;
       this.organCommand(
@@ -1138,11 +1203,12 @@ export class Editor {
         )
       );
     };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up, { once: true });
+    trackPointer(event, move, up);
   }
 
   startPanelResize(panel, event) {
+    const originalStyle = panel.style.cssText;
+    const wasSized = panel.classList.contains("sized");
     const start = { x: event.clientX, w: panel.offsetWidth };
     // Never narrower than one knob and the body's padding — a rank
     // can wrap, but a knob must not be clipped.
@@ -1152,9 +1218,13 @@ export class Editor {
     const move = (e) => {
       panel.style.width = `${Math.max(floor, start.w + e.clientX - start.x)}px`;
     };
-    const up = () => {
-      window.removeEventListener("pointermove", move);
+    const up = (_event, cancelled) => {
       delete panel.dataset.dragging;
+      if (cancelled) {
+        panel.style.cssText = originalStyle;
+        panel.classList.toggle("sized", wasSized);
+        return;
+      }
       const canvas = this.el.canvas.getBoundingClientRect();
       if (!canvas.width || !canvas.height) return;
       this.organCommand(
@@ -1169,8 +1239,7 @@ export class Editor {
         )
       );
     };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up, { once: true });
+    trackPointer(event, move, up);
   }
 
   // ---- the per-division "+" ------------------------------------------------
@@ -1196,6 +1265,7 @@ export class Editor {
   }
 
   openDivisionMenu(idx, anchor) {
+    this.divisionMenuRequest = (this.divisionMenuRequest ?? 0) + 1;
     this.closeCouplerForm();
     const menu = this.el.divisionMenu;
     menu.replaceChildren();
@@ -1241,8 +1311,11 @@ export class Editor {
   /// sources still offer; clicking one pulls it onto this manual. The
   /// list stays open so a division can be registered in one visit.
   async showDivisionStops(menu, manual) {
+    const request = this.divisionMenuRequest;
+    const file = this.lastSnapshot?.setup?.file;
     menu.replaceChildren(emptyNote("Reading the sources…"));
     if (!this.offerings) await this.fetchOfferings(false);
+    if (request !== this.divisionMenuRequest || menu.classList.contains("hidden") || file !== this.lastSnapshot?.setup?.file) return;
     menu.replaceChildren();
     const sources = this.offerings;
     if (sources == null) {
@@ -1267,7 +1340,7 @@ export class Editor {
               row.disabled = true; // optimistic: pulled now
               this.organCommand(
                 commands.organPull(source.alias, srcManual.name, manual.name, stop.name)
-              );
+              ).then((ok) => { if (!ok) row.disabled = false; });
             },
           });
           group.append(row);
@@ -1283,6 +1356,7 @@ export class Editor {
   }
 
   closeDivisionMenu() {
+    this.divisionMenuRequest = (this.divisionMenuRequest ?? 0) + 1;
     this.el.divisionMenu.classList.add("hidden");
     this.el.divisionMenu.replaceChildren();
   }
@@ -1330,6 +1404,12 @@ export class Editor {
     }
 
     menu.append(document.createElement("hr"));
+    menu.append(menuItem("Rename keyboard…", {
+      onClick: () => {
+        this.closeKeyboardMenu();
+        this.startManualRename(idx);
+      },
+    }));
 
     // The bin gesture as a menu item — same confirm, same command.
     menu.append(
@@ -1873,6 +1953,7 @@ export class Editor {
     // stale now whether or not the drawer is up to show it. The
     // division menu reads this cache, so a kept stale [] would keep
     // insisting there are no sources right after one was added.
+    this.offeringsRequest = (this.offeringsRequest ?? 0) + 1;
     this.offerings = null;
     if (this.drawerOpen) this.fetchOfferings();
     return { ok: true, error: null };
@@ -1942,12 +2023,22 @@ export class Editor {
     openAddMenu(this, x, y);
   }
 
+  keepPopoverVisible(el) {
+    if (!el.getClientRects().length) return;
+    const { width, height } = el.getBoundingClientRect();
+    const bottom = this.unlocked ? 84 : 8;
+    const left = parseFloat(el.style.left) || 8;
+    const top = parseFloat(el.style.top) || 8;
+    el.style.left = `${Math.max(8, Math.min(left, window.innerWidth - width - 8))}px`;
+    el.style.top = `${Math.max(8, Math.min(top, window.innerHeight - height - bottom))}px`;
+  }
+
   positionPopover(el, x, y) {
     el.style.left = "0px";
     el.style.top = "0px";
     const { width, height } = el.getBoundingClientRect();
     el.style.left = `${Math.max(8, Math.min(x, window.innerWidth - width - 8))}px`;
-    el.style.top = `${Math.max(8, Math.min(y, window.innerHeight - height - 8))}px`;
+    el.style.top = `${Math.max(8, Math.min(y, window.innerHeight - height - (this.unlocked ? 84 : 8)))}px`;
   }
 
   closeAdd() {

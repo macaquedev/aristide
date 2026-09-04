@@ -36,6 +36,12 @@ export class ConflictDialog {
   constructor(root, send) {
     this.root = root;
     this.send = send;
+    root.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape" || this.el.modal.classList.contains("hidden") || this.el.modal.inert) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      this.choose("cancel");
+    });
     this.signature = null; // rebuild only when the conflict itself changes
     this.el = {
       modal: root.getElementById("conflict"),

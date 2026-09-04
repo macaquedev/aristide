@@ -77,7 +77,7 @@ try {
   await escape();
 
   const organItems = await menuLabels(`${titleButton("Organ")}.click()`);
-  for (const wanted of ["Tuning…", "Room & noises…", "Bindings…"]) {
+  for (const wanted of ["Tuning…", "Room & noises…", "Buttons & shortcuts…"]) {
     check(organItems.includes(wanted), `Organ menu offers ${wanted}`);
   }
   check(!organItems.some((l) => l.startsWith("Preferences")), "Organ menu has no Preferences");
@@ -268,7 +268,7 @@ try {
   await drive.eval(`${titleButton("Organ")}.click()`);
   await sleep(120);
   await drive.eval(`[...document.querySelectorAll(".menu-list:not(.hidden) .menu-item")]
-    .find((b) => b.textContent.includes("Bindings")).click()`);
+    .find((b) => b.textContent.includes("Buttons & shortcuts")).click()`);
   await sleep(200);
   check(
     await drive.eval(`!document.getElementById("editor-bindings").classList.contains("hidden")`),

@@ -330,12 +330,16 @@ export async function localFetch(base, path, opts = {}) {
 /// refusal is the organ talking, not a dead connection, and must never
 /// dress up as one. Returns `send(query)`,
 /// which POSTs one command and feeds its response back through `onState`.
+/// Its promise resolves to the same result shape as localFetch. A caller
+/// displaying an error in its own dialog can use `{ reportErrors: false }`.
 export function connect(base, onState, onError, onRefused) {
   let pollTimer = null;
+  let pendingCommands = 0;
+  let disconnected = false;
   let issued = 0; // requests dispatched, in order
   let applied = 0; // the newest request whose snapshot has been applied
 
-  async function request(method, query) {
+  async function request(method, query, { reportErrors = true } = {}) {
     // Responses come back out of order: a slow poll dispatched before a
     // command can resolve after it, and repainting the UI with that
     // older snapshot undoes what the command just showed — a flicker on
@@ -349,16 +353,18 @@ export function connect(base, onState, onError, onRefused) {
         const reason =
           (await response.text().catch(() => "")) ||
           `${response.status} ${response.statusText}`;
-        (onRefused ?? onError)(reason, response.status, query);
-        return;
+        if (reportErrors && !disconnected) (onRefused ?? onError)(reason, response.status, query);
+        return { ok: false, status: response.status, data: null, error: reason };
       }
       const snapshot = await response.json();
-      if (id > applied) {
+      if (id > applied && !disconnected) {
         applied = id;
         onState(snapshot);
       }
+      return { ok: true, status: response.status, data: snapshot, error: null };
     } catch (err) {
-      onError(String(err));
+      if (reportErrors && !disconnected) onError(String(err));
+      return { ok: false, status: null, data: null, error: String(err) };
     }
   }
 
@@ -368,6 +374,7 @@ export function connect(base, onState, onError, onRefused) {
   // rate, forever).
   function schedule() {
     clearTimeout(pollTimer);
+    if (disconnected || pendingCommands) return;
     pollTimer = setTimeout(async () => {
       await request("GET", "/api/state");
       schedule();
@@ -376,8 +383,19 @@ export function connect(base, onState, onError, onRefused) {
 
   request("GET", "/api/state").then(schedule);
 
-  return function send(query) {
-    // A command interrupts the cadence; its response is the poll.
-    request("POST", query).then(schedule);
+  function send(query, options) {
+    // No new polls between dispatch and acknowledgement: they could read
+    // the old instrument while its load command is still on the wire.
+    clearTimeout(pollTimer);
+    pendingCommands++;
+    return request("POST", query, options).finally(() => {
+      pendingCommands--;
+      schedule();
+    });
+  }
+  send.disconnect = () => {
+    disconnected = true;
+    clearTimeout(pollTimer);
   };
+  return send;
 }

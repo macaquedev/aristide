@@ -200,7 +200,7 @@ export class PianoKeys {
 
   wire() {
     window.addEventListener("keydown", (event) => {
-      if (event.repeat || event.ctrlKey || event.metaKey || event.altKey) return;
+      if (event.defaultPrevented || event.target.closest?.(".menu-list") || event.repeat || event.ctrlKey || event.metaKey || event.altKey) return;
       // Text entry always wins. A dialog otherwise silences the keys,
       // except while it is listening for the one to bind.
       if (typing(event.target) || (this.busy && !this.learning)) return;
@@ -307,10 +307,10 @@ export class PianoKeys {
       : "plays nothing";
     const spoken = shiftWords(this.keyboard?.transpose ?? 0);
     this.el.octave.textContent = this.keyboard
-      ? [spoken && `sounding ${spoken}`, "octave keys are bindings — Organ → Bindings…"]
+      ? [spoken && `sounding ${spoken}`, "octave keys are bindings — Organ → Buttons & shortcuts…"]
           .filter(Boolean)
           .join(" · ")
-      : "assign it a manual: right-click a keyboard → MIDI input…";
+      : "choose Connect keyboard on a manual to start playing";
   }
 
   paintCap(code, on) {

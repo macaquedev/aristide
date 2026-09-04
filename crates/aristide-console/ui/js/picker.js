@@ -1,9 +1,9 @@
 // The organ loader: how the player gets from a bare console to a
 // sounding instrument. The server starts organ-less, so this modal
 // auto-opens with nothing behind it to interact with, and stays up
-// (unclosable) until a load finishes; it also pops up over the console
-// while any load is in flight, so progress and errors have somewhere
-// to show. The organ-name menu's load items land here too.
+// (unclosable) until a load finishes. Loads chosen by the player show
+// progress and errors here; background structural rebuilds leave the
+// editor usable. The organ-name menu's load items land here too.
 //
 // Three ways in: a new blank organ (a name becomes a composite file,
 // via organNew), a sample set picked in the native file dialog (Tauri;
@@ -16,6 +16,7 @@
 // and loading its set finds it again.
 
 import { commands, localFetch } from "./api.js";
+import { setText } from "./dom.js";
 
 // What the native open dialog offers: everything the server can load,
 // or is meant to — GrandOrgue sets, unencrypted Hauptwerk definitions,
@@ -45,7 +46,11 @@ export class Picker {
     this.openedWithOrgan = undefined; // snapshot.organ at the moment this opened
     this.pickedHere = false; // a load was started from this open picker
     this.library = []; // mirrors snapshot.library — the Load menu reads it too
-    this.signature = null;
+    this.snapshot = null;
+    this.pickPending = false;
+    this.requestError = null;
+    this.search = "";
+    this.librarySignature = null;
     // Browse state lives outside the snapshot — it's this client's own
     // directory listing, fetched directly rather than polled.
     this.dir = null;
@@ -65,6 +70,8 @@ export class Picker {
       nameForm: root.getElementById("picker-name-form"),
       name: root.getElementById("picker-name"),
       library: root.getElementById("picker-library"),
+      search: root.getElementById("picker-search"),
+      browseStatus: root.getElementById("picker-browse-status"),
       browsePane: root.getElementById("picker-browse"),
       up: root.getElementById("picker-up"),
       organs: root.getElementById("picker-organs"),
@@ -91,6 +98,7 @@ export class Picker {
   open() {
     this.openedWithOrgan = this.lastOrgan;
     this.pickedHere = false;
+    this.requestError = null;
     this.show();
   }
 
@@ -117,10 +125,12 @@ export class Picker {
     this.el.modal.classList.remove("hidden");
     this.el.close.classList.toggle("hidden", !this.closable);
     this.root.body.classList.add("modal-open");
+    this.paintStatus();
+    this.buildLibrary(this.library);
   }
 
   close() {
-    if (!this.closable) return;
+    if (!this.closable || this.pickPending) return;
     this.el.modal.classList.add("hidden");
     this.root.body.classList.remove("modal-open");
     // Next open starts at home again: name field blank, browser shut.
@@ -132,14 +142,21 @@ export class Picker {
     this.browseOrgans = null;
     this.browseEntries = null;
     this.browseError = null;
+    this.browseRequest = (this.browseRequest ?? 0) + 1;
+    this.browseBusy = false;
+    this.search = "";
+    this.el.search.value = "";
+    this.requestError = null;
   }
 
   showNameForm() {
+    this.el.browsePane.classList.add("hidden");
     this.el.nameForm.classList.remove("hidden");
     this.el.name.focus();
   }
 
   showBrowse() {
+    this.el.nameForm.classList.add("hidden");
     this.el.browsePane.classList.remove("hidden");
     if (this.dir === null) this.browse();
   }
@@ -156,7 +173,12 @@ export class Picker {
           directory: false,
         },
       })
-      .catch(() => null);
+      .catch((error) => {
+        if (!this.isOpen) this.open();
+        this.requestError = `Could not open the file chooser: ${error}`;
+        this.paintStatus();
+        return null;
+      });
     const path = Array.isArray(picked) ? picked[0] : picked;
     if (typeof path === "string" && path) this.load(path);
   }
@@ -171,14 +193,15 @@ export class Picker {
         this.close();
       }
     });
+    this.el.search.addEventListener("input", () => {
+      this.search = this.el.search.value.trim().toLocaleLowerCase();
+      this.buildLibrary(this.library);
+    });
     this.el.newBlank.addEventListener("click", () => this.showNameForm());
     this.el.nameForm.addEventListener("submit", (event) => {
       event.preventDefault();
       const name = this.el.name.value.trim();
-      if (name) {
-        this.pickedHere = true;
-        this.send(commands.organNew(name));
-      }
+      if (name) this.startPick(commands.organNew(name));
     });
     this.el.newSet.addEventListener("click", () => {
       window.__TAURI__ ? this.pickSampleSet() : this.showBrowse();
@@ -197,6 +220,7 @@ export class Picker {
   // ---- snapshot ------------------------------------------------------
 
   update(snapshot) {
+    this.snapshot = snapshot;
     const hasOrgan = !!snapshot.organ;
     const loading = snapshot.loading ?? null;
     const error = snapshot.load_error ?? null;
@@ -224,31 +248,59 @@ export class Picker {
     // another still on the way stays up until the last one lands.
     const landed =
       snapshot.organ !== this.openedWithOrgan || (this.pickedHere && !error);
-    if (this.isOpen && hasOrgan && !loading && landed) {
+    if (this.isOpen && hasOrgan && !loading && landed && !this.pickPending && !this.requestError) {
       this.close();
     }
 
     if (!this.isOpen) return;
 
-    this.el.close.classList.toggle("hidden", !this.closable);
-
-    const signature = JSON.stringify([loading, error, library]);
-    if (signature === this.signature) return;
-    this.signature = signature;
-
-    this.el.loading.classList.toggle("hidden", !loading);
-    this.el.loadingText.textContent = loading ?? "";
-    this.el.sections.classList.toggle("dim", !!loading);
-
-    this.el.error.classList.toggle("hidden", !error);
-    this.el.error.textContent = error ?? "";
-
+    this.paintStatus();
     this.buildLibrary(library);
+  }
+
+  paintStatus() {
+    const loading = this.pickPending ? "Starting the organ…" : this.snapshot?.loading;
+    const error = this.requestError ?? this.snapshot?.load_error;
+    this.el.close.classList.toggle("hidden", !this.closable);
+    this.el.close.disabled = this.pickPending;
+    this.el.loading.classList.toggle("hidden", !loading);
+    setText(this.el.loadingText, loading ?? "");
+    // While the request is being sent, a second Enter must not create
+    // a second file. Once acknowledged, another selection can replace
+    // a queued load — the server's existing last-choice-wins behavior.
+    this.el.sections.inert = this.pickPending;
+    this.el.sections.classList.toggle("dim", this.pickPending);
+    this.el.error.classList.toggle("hidden", !error);
+    setText(this.el.error, error ?? "");
+  }
+
+  async startPick(query) {
+    if (this.pickPending) return;
+    if (!this.isOpen) this.open();
+    const initiatingControl = this.root.activeElement;
+    this.pickPending = true;
+    this.pickedHere = false;
+    this.requestError = null;
+    this.paintStatus();
+    const result = await this.send(query, { reportErrors: false });
+    this.pickPending = false;
+    this.pickedHere = result.ok;
+    this.requestError = result.error;
+    // connect delivers the acknowledged state before resolving. Only
+    // now may a successful load close the picker; an older poll while
+    // the request was in flight could not do so.
+    if (this.snapshot) this.update(this.snapshot);
+    else this.paintStatus();
+    if (!result.ok && initiatingControl?.isConnected && this.isOpen) initiatingControl.focus();
   }
 
   // ---- library ---------------------------------------------------------
 
   buildLibrary(library) {
+    const signature = JSON.stringify([library, this.search]);
+    if (signature === this.librarySignature) return;
+    this.librarySignature = signature;
+    this.el.search.classList.toggle("hidden", !library.length);
     this.el.library.replaceChildren();
     if (!library.length) {
       this.el.library.append(
@@ -256,26 +308,23 @@ export class Picker {
       );
       return;
     }
-    for (const entry of library) this.el.library.append(this.libraryRow(entry));
+    const matches = library.filter((entry) =>
+      `${entry.name} ${entry.path}`.toLocaleLowerCase().includes(this.search)
+    );
+    if (!matches.length) this.el.library.append(this.emptyNote("No matching organs. Try another name."));
+    for (const entry of matches) this.el.library.append(this.libraryRow(entry));
   }
 
-  /// A `<button>` can't nest the forget button (interactive content
-  /// can't nest interactive content), so the row is a div playing
-  /// button — click and Enter/Space both fire the load, same as a
-  /// native one would.
+  /// Loading and removing are separate native buttons: activating the
+  /// remove button with Enter or Space must never bubble into a load.
   libraryRow(entry) {
     const row = document.createElement("div");
-    row.className = "picker-row";
-    row.setAttribute("role", "button");
-    row.tabIndex = 0;
-    row.title = entry.path;
-    row.addEventListener("click", () => this.load(entry.path));
-    row.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" || event.key === " ") {
-        event.preventDefault();
-        this.load(entry.path);
-      }
-    });
+    row.className = "picker-row picker-recent-row";
+    const open = document.createElement("button");
+    open.type = "button";
+    open.className = "picker-open";
+    open.title = entry.path;
+    open.addEventListener("click", () => this.load(entry.path));
 
     const text = document.createElement("span");
     text.className = "picker-row-text";
@@ -284,9 +333,9 @@ export class Picker {
     name.textContent = entry.name;
     const path = document.createElement("span");
     path.className = "picker-row-path";
-    path.textContent = entry.path;
+    path.textContent = entry.path.split(/[\\/]/).pop();
     text.append(name, path);
-    row.append(text);
+    open.append(text);
 
     // The format, ledger-style in its own right-hand column.
     const kind = formatOf(entry.path);
@@ -294,7 +343,7 @@ export class Picker {
       const tag = document.createElement("span");
       tag.className = "picker-row-kind";
       tag.textContent = kind;
-      row.append(tag);
+      open.append(tag);
     }
 
     const forget = document.createElement("button");
@@ -305,16 +354,23 @@ export class Picker {
     forget.setAttribute("aria-label", `Remove ${entry.name} from Recent`);
     forget.addEventListener("click", (event) => {
       event.stopPropagation(); // don't also trigger the row's own load
-      this.send(commands.libraryForget(entry.path));
+      if (forget.disabled) return;
+      forget.disabled = true;
+      this.send(commands.libraryForget(entry.path), { reportErrors: false }).then((result) => {
+        if (!result.ok) {
+          this.requestError = result.error;
+          this.paintStatus();
+          forget.disabled = false;
+        }
+      });
     });
-    row.append(forget);
+    row.append(open, forget);
 
     return row;
   }
 
   load(path) {
-    this.pickedHere = this.isOpen;
-    this.send(commands.organLoad(path));
+    return this.startPick(commands.organLoad(path));
   }
 
   emptyNote(text) {
@@ -331,8 +387,13 @@ export class Picker {
   // and re-fetched on navigation, never on a poll tick.
 
   async browse(dir) {
+    const request = this.browseRequest = (this.browseRequest ?? 0) + 1;
+    this.browseBusy = true;
+    this.renderBrowse();
     const query = dir ? `/api/browse?dir=${encodeURIComponent(dir)}` : "/api/browse";
     const { ok, data, error } = await localFetch(this.base, query, { json: true });
+    if (request !== this.browseRequest) return;
+    this.browseBusy = false;
     if (!ok) {
       this.browseError = error;
     } else {
@@ -346,6 +407,8 @@ export class Picker {
   }
 
   renderBrowse() {
+    this.el.browseStatus.classList.toggle("hidden", !this.browseBusy);
+    this.el.browseList.setAttribute("aria-busy", String(!!this.browseBusy));
     this.el.dir.textContent = this.dir ?? "";
     this.el.dir.title = this.dir ?? "";
     this.el.up.disabled = !this.browseParent;

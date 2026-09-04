@@ -18,7 +18,8 @@
 export function menuItem(label, { onClick, accel, checked, checkable, radio, disabled } = {}) {
   const button = document.createElement("button");
   button.className = "menu-item";
-  button.setAttribute("role", "menuitem");
+  button.setAttribute("role", radio ? "menuitemradio" : checkable ? "menuitemcheckbox" : "menuitem");
+  if (radio || checkable) button.setAttribute("aria-checked", String(!!checked));
   button.disabled = Boolean(disabled);
   button.classList.toggle("checked", Boolean(checked));
   if (radio) button.classList.add("radio");
@@ -70,7 +71,26 @@ export class MenuBar {
         holder.append(button, list);
         host.append(holder);
       }
+      button.setAttribute("aria-expanded", "false");
       const entry = { menu, button, list };
+      button.addEventListener("keydown", (event) => {
+        if (!["ArrowDown", "ArrowUp"].includes(event.key)) return;
+        event.preventDefault();
+        this.show(entry);
+        const items = [...list.querySelectorAll("button:not(:disabled)")];
+        (event.key === "ArrowUp" ? items.at(-1) : items[0])?.focus();
+      });
+      list.addEventListener("keydown", (event) => {
+        const items = [...list.querySelectorAll("button:not(:disabled)")];
+        const at = items.indexOf(root.activeElement);
+        let next;
+        if (event.key === "ArrowDown") next = (at + 1) % items.length;
+        if (event.key === "ArrowUp") next = (at - 1 + items.length) % items.length;
+        if (event.key === "Home") next = 0;
+        if (event.key === "End") next = items.length - 1;
+        if (next !== undefined) { event.preventDefault(); items[next]?.focus(); }
+        if (event.key === "Tab") this.close();
+      });
 
       button.addEventListener("click", (event) => {
         event.stopPropagation();
@@ -78,7 +98,8 @@ export class MenuBar {
       });
       // Once one menu is down, sliding along the bar opens the next —
       // the behaviour every desktop menu bar has.
-      button.addEventListener("pointerenter", () => {
+      button.addEventListener("pointerenter", (event) => {
+        if (event.pointerType !== "mouse") return;
         if (this.open && this.open !== entry) this.show(entry);
       });
     }
@@ -87,6 +108,7 @@ export class MenuBar {
     root.addEventListener("keydown", (event) => {
       if (event.key === "Escape" && this.open) {
         event.stopPropagation();
+        this.open.button.focus();
         this.close();
       }
     });
@@ -96,6 +118,7 @@ export class MenuBar {
     if (this.open) this.hide(this.open);
     this.open = entry;
     entry.button.classList.add("on");
+    entry.button.setAttribute("aria-expanded", "true");
     entry.list.replaceChildren();
     for (const item of entry.menu.items()) {
       entry.list.append(this.render(item));
@@ -134,6 +157,7 @@ export class MenuBar {
   hide(entry) {
     entry.list.classList.add("hidden");
     entry.button.classList.remove("on");
+    entry.button.setAttribute("aria-expanded", "false");
   }
 
   close() {

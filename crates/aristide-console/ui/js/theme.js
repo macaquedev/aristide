@@ -110,10 +110,12 @@ export function segmented(segment, values, current, render, onPick) {
     chip.textContent = render(value);
     chip.dataset.value = String(value);
     chip.classList.toggle("on", value === current);
+    chip.setAttribute("aria-pressed", String(value === current));
     chip.addEventListener("click", () => {
       onPick(value);
       for (const other of segment.children) {
         other.classList.toggle("on", other === chip);
+        other.setAttribute("aria-pressed", String(other === chip));
       }
     });
     segment.append(chip);
@@ -121,6 +123,7 @@ export function segmented(segment, values, current, render, onPick) {
   return (value) => {
     for (const chip of segment.children) {
       chip.classList.toggle("on", chip.dataset.value === String(value));
+      chip.setAttribute("aria-pressed", String(chip.dataset.value === String(value)));
     }
   };
 }
@@ -141,12 +144,14 @@ export function wireTheme(root) {
     swatch.style.setProperty("--c", colour);
     swatch.setAttribute("aria-label", `${name} accent`);
     swatch.classList.toggle("on", name === accent);
+    swatch.setAttribute("aria-pressed", String(name === accent));
     swatch.addEventListener("click", () => {
       accent = name;
       store.set("accent", name);
       applyAccent(name);
       for (const other of swatches.children) {
         other.classList.toggle("on", other === swatch);
+        other.setAttribute("aria-pressed", String(other === swatch));
       }
     });
     swatches.append(swatch);
@@ -166,6 +171,7 @@ export function wireTheme(root) {
     scaleNote.textContent = "Ctrl + and Ctrl − step through these; Ctrl 0 returns to 100%.";
   } else {
     scales.setAttribute("aria-disabled", "true");
-    scaleNote.textContent = "Not here: in a browser its own zoom (Ctrl +/−) sizes the console and is remembered per site.";
+    for (const chip of scales.children) chip.disabled = true;
+    scaleNote.textContent = "Use your browser’s zoom to change the console size (Ctrl +/−, or pinch to zoom).";
   }
 }

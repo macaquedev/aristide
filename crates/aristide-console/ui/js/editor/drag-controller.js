@@ -96,24 +96,33 @@ export function spliceRank(editor, midx, drag) {
 /// endDrag's call: a release still over the source was a click.
 export function wireDragSource(editor, el, getInfo) {
   el.addEventListener("pointerdown", (event) => {
-    if (event.button !== 0) return;
+    if (event.button !== 0 || editor.drag) return;
     if (!(event.ctrlKey || editor.unlocked)) return;
     event.stopPropagation(); // a control drag is never a panel move
     const startX = event.clientX;
     const startY = event.clientY;
     let moved = false;
     const onMove = (e) => {
-      if (moved) return;
+      if (moved || e.pointerId !== event.pointerId) return;
+      if (editor.drag) { cleanup(); return; }
       if (Math.hypot(e.clientX - startX, e.clientY - startY) < DRAG_THRESHOLD_PX) return;
       moved = true;
-      window.removeEventListener("pointermove", onMove);
+      cleanup();
       const info = getInfo();
       if (!info) return;
       startDrag(editor, e, info.kind, info.payload, info.label, el);
     };
-    const onUp = () => window.removeEventListener("pointermove", onMove);
+    const cleanup = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+      window.removeEventListener("blur", cleanup);
+    };
+    const onUp = (e) => { if (e.pointerId === event.pointerId) cleanup(); };
     window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp, { once: true });
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+    window.addEventListener("blur", cleanup);
   });
 }
 
@@ -125,6 +134,7 @@ export function startDrag(editor, event, kind, payload, label, source) {
   document.body.append(ghost);
   editor.drag = {
     kind,
+    pointerId: event.pointerId,
     payload,
     ghost,
     label,
@@ -135,9 +145,13 @@ export function startDrag(editor, event, kind, payload, label, source) {
   };
   positionGhost(editor, event.clientX, event.clientY);
   if (binAllowed(kind)) editor.el.bin.classList.add("visible");
-  editor._dragMove = (e) => dragMove(editor, e);
+  editor._dragMove = (e) => { if (e.pointerId === editor.drag?.pointerId) dragMove(editor, e); };
+  editor._dragEnd = (e) => { if (e.pointerId === editor.drag?.pointerId) endDrag(editor, e); };
+  editor._dragBlur = () => endDrag(editor, { type: "pointercancel" });
   window.addEventListener("pointermove", editor._dragMove);
-  window.addEventListener("pointerup", (e) => endDrag(editor, e), { once: true });
+  window.addEventListener("pointerup", editor._dragEnd);
+  window.addEventListener("pointercancel", editor._dragEnd);
+  window.addEventListener("blur", editor._dragBlur);
 }
 
 export function positionGhost(editor, x, y) {
@@ -310,6 +324,9 @@ export function applyDropHighlight(editor, hit) {
 
 export function endDrag(editor, event) {
   window.removeEventListener("pointermove", editor._dragMove);
+  window.removeEventListener("pointerup", editor._dragEnd);
+  window.removeEventListener("pointercancel", editor._dragEnd);
+  window.removeEventListener("blur", editor._dragBlur);
   const drag = editor.drag;
   editor.drag = null;
   if (!drag) return;
@@ -321,6 +338,8 @@ export function endDrag(editor, event) {
   )) {
     el.classList.remove("insert-before", "insert-after", "insert-left", "insert-right");
   }
+
+  if (event.type === "pointercancel") return;
 
   // Let go where it was picked up: the pointer never left the
   // control, so nobody meant to drop it anywhere — that was a click

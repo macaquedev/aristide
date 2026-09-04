@@ -134,6 +134,7 @@ try {
     "…and still pulls that stop"
   );
 } catch (e) {
+  check(false, "audit completed without an exception");
   console.error("ERR", e);
 }
 console.log(h.failures ? `\n${h.failures} FAILED` : "\nall green");

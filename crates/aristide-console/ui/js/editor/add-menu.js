@@ -5,6 +5,7 @@
 // you clicked. A manual or pedalboard added this way lands its
 // panels at that spot, via `pendingPlace` once the rebuild settles.
 
+import { usesFlowLayout } from "../kb-scale.js";
 import { commands, localFetch } from "../api.js";
 import { parseKeyName } from "../pitch.js";
 import { emptyNote, option } from "../wiring.js";
@@ -59,7 +60,8 @@ export function wireCanvas(editor) {
     "pointerdown",
     (event) => {
       if (event.button !== 0) return;
-      if (event.target.closest(".menubar, .modal")) return;
+      if (event.target.closest(".menubar, .modal, .editor-toolbar")) return;
+      if (editor.inspect && editor.el.canvas.contains(event.target)) return;
       const inside = [
         editor.el.add,
         editor.el.divisionMenu,
@@ -104,6 +106,7 @@ function closeAddPanels(editor) {
 }
 
 export function closeAdd(editor) {
+  editor.addBrowseRequest = (editor.addBrowseRequest ?? 0) + 1;
   editor.el.add.classList.add("hidden");
   closeAddPanels(editor);
 }
@@ -199,7 +202,7 @@ export function wireAdd(editor) {
 /// The new manual's panels should land where the add menu was opened,
 /// not wherever the default layout would seat them.
 function rememberPlacement(editor, name) {
-  if (!editor.addAnchor) return;
+  if (usesFlowLayout() || !editor.addAnchor) return;
   const rect = editor.el.canvas.getBoundingClientRect();
   editor.pendingPlace = {
     name,
@@ -217,6 +220,7 @@ export function placePending(editor, snapshot) {
   if (!pending) return;
   if (!snapshot.manuals.some((m) => m.name === pending.name)) return;
   editor.pendingPlace = null;
+  if (usesFlowLayout()) return;
   const canvas = editor.el.canvas;
   const W = canvas.clientWidth;
   const H = canvas.clientHeight;
@@ -353,7 +357,7 @@ async function pickSourceNative(editor) {
         directory: false,
       },
     })
-    .catch(() => null);
+    .catch((error) => { editor.showError(`Could not open the file chooser: ${error}`); return null; });
   const path = Array.isArray(picked) ? picked[0] : picked;
   if (typeof path === "string" && path) editor.organCommand(commands.organSourceAdd(path));
 }
@@ -363,8 +367,10 @@ async function pickSourceNative(editor) {
 /// snapshot-driven, and picking a file adds it as a source outright
 /// rather than loading it.
 async function addBrowse(editor, dir) {
+  const request = editor.addBrowseRequest = (editor.addBrowseRequest ?? 0) + 1;
   const query = dir ? `/api/browse?dir=${encodeURIComponent(dir)}` : "/api/browse";
   const { ok, data, error } = await localFetch(editor.base, query, { json: true });
+  if (request !== editor.addBrowseRequest || editor.el.addSourceForm.classList.contains("hidden")) return;
   if (!ok) {
     editor.addBrowseError = error;
   } else {
@@ -386,7 +392,7 @@ function renderAddBrowse(editor) {
   if (editor.addBrowseError) return;
   // The server also lists Scala tuning files now; this browser means
   // loadable sets and organs.
-  const loadable = /\.(organ|toml|organ_hauptwerk_xml)$/i;
+  const loadable = /\.(organ|organ_hauptwerk_xml)$/i;
   const entries = (editor.addBrowseEntries ?? []).filter(
     (entry) => entry.dir || loadable.test(entry.name)
   );

@@ -7,7 +7,7 @@
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <div id="offline" class="offline hidden">no connection to the organ</div>
+  <div id="offline" class="offline hidden" role="status">Connection lost. Reconnecting to the organ…</div>
   <header id="menubar" class="menubar">
     <!-- The app menu: the player's own scope — About, Preferences.
          Nothing in it touches the organ; the organ's menus follow. -->
@@ -33,7 +33,7 @@
       </label>
       <button class="tuning" id="tuning" data-tip="Tuning &amp; temperament"
         aria-label="Tuning"></button>
-      <button id="panic" class="panic" data-tip="Silence everything">Panic</button>
+      <button id="panic" class="panic" data-tip="Silence everything">Silence</button>
     </div>
   </header>
   <aside id="keys-legend" class="keys-legend hidden" aria-label="Computer keyboard mapping"></aside>
@@ -53,13 +53,13 @@
       </header>
       <div class="modal-body">
         <section class="pane" data-pane="appearance">
-          <h2>Console skin</h2>
+          <h2>Appearance</h2>
           <div class="settings-row" id="accent-row">
             <span class="rail-label">Accent</span>
             <span class="swatches" id="accent-swatches"></span>
           </div>
           <div class="settings-row" id="density-row">
-            <span class="rail-label">Density</span>
+            <span class="rail-label">Spacing</span>
             <span class="segment" id="density-segment"></span>
           </div>
           <div class="settings-row" id="scale-row">
@@ -68,8 +68,8 @@
           </div>
           <p class="pane-note settings-hint" id="scale-note"></p>
         </section>
-        <section class="pane" data-pane="memory">
-          <h2>Sample memory</h2>
+        <details class="pane advanced-settings" data-pane="memory">
+          <summary>Memory &amp; loading <span>Advanced</span></summary>
           <div class="settings-row" id="streaming-row">
             <span class="rail-label">Release tails</span>
             <span class="segment" id="streaming-segment"></span>
@@ -97,19 +97,9 @@
             <span>Changes apply when an organ loads.</span>
             <button class="picker-action" id="memory-reload">Reload organ</button>
           </div>
-          <p class="pane-note">
-            Attacks and sustain loops always stay in RAM, so a held note
-            never waits for a disk; only the release tails behind them
-            can stream. Sample memory is a fact about this machine, saved
-            in its own config: the same organ file streams on a laptop
-            and sits in RAM on a desktop.
-          </p>
-          <p class="pane-note">
-            Everything about the instrument itself — keyboards, tuning,
-            wiring, the room — is edited on the console and saved in the
-            organ's own file; nothing here ever travels with one.
-          </p>
-        </section>
+          <p class="pane-note">Auto balances memory and disk use. Held notes always play from memory.
+            These settings apply to this computer; your instrument settings stay with the organ.</p>
+        </details>
       </div>
     </div>
   </div>
@@ -124,21 +114,21 @@
           aria-label="Close organ loader">&times;</button>
       </header>
       <div class="picker-pane">
-        <p class="picker-error hidden" id="picker-error"></p>
-        <div class="picker-loading hidden" id="picker-loading">
+        <p class="picker-error hidden" id="picker-error" role="alert"></p>
+        <div class="picker-loading hidden" id="picker-loading" role="status">
           <span class="spinner" aria-hidden="true"></span>
           <span id="picker-loading-text"></span>
         </div>
         <div id="picker-sections">
           <section class="picker-section">
-            <div class="picker-rule"><h2>New</h2></div>
+            <div class="picker-rule"><h2>Open or create</h2></div>
             <div class="picker-actions">
               <button class="picker-action" id="picker-new-blank">Blank organ&hellip;</button>
-              <button class="picker-action" id="picker-new-set">From a sample set&hellip;</button>
+              <button class="picker-action" id="picker-new-set">Open organ or sample set&hellip;</button>
               <span class="picker-formats">GrandOrgue &middot; Hauptwerk &middot; Aristide</span>
             </div>
             <form id="picker-name-form" class="picker-name hidden">
-              <input id="picker-name" type="text" placeholder="Name the new organ"
+              <input id="picker-name" type="text" placeholder="Name the new organ" aria-label="New organ name" required
                 autocomplete="off" spellcheck="false" />
               <button class="picker-action" type="submit">Create</button>
             </form>
@@ -146,6 +136,7 @@
 
           <section class="picker-section">
             <div class="picker-rule"><h2>Recent</h2></div>
+            <input id="picker-search" class="picker-search hidden" type="search" placeholder="Find a recent organ" aria-label="Find a recent organ" />
             <div id="picker-library" class="picker-library"></div>
           </section>
 
@@ -157,6 +148,7 @@
               <span id="picker-dir" class="picker-dir"></span>
             </div>
             <p class="picker-error hidden" id="picker-browse-error"></p>
+            <p id="picker-browse-status" class="pane-note hidden" role="status">Loading folder…</p>
             <div id="picker-browse-list" class="picker-browse-list"></div>
           </section>
         </div>
@@ -204,22 +196,25 @@
        See editor.js. -->
   <div id="editor-lock-dock" class="editor-lock-dock">
     <p id="editor-lock-note" class="editor-lock-note hidden"></p>
+    <div class="editor-toolbar" role="toolbar" aria-label="Console editing">
     <button id="editor-lock" class="editor-lock" aria-pressed="false"
       aria-label="Unlock editing" data-tip="Unlock editing (Ctrl+E)">
-      <span class="editor-lock-glyph" id="editor-lock-glyph" aria-hidden="true">&#128274;</span>
+      <span class="editor-lock-glyph" id="editor-lock-glyph" aria-hidden="true">&#128274;</span><span id="editor-lock-label">Edit console</span>
     </button>
+    <button id="editor-add-button" class="ghost editor-tool">+ Add</button>
+    <button id="editor-inspect" class="ghost editor-tool" aria-pressed="false">Control settings</button>
+    </div>
   </div>
 
   <p id="editor-hint" class="editor-hint hidden">
-    double-click empty space to add &middot; drag a panel&rsquo;s title to
-    move it &middot; drag stops between divisions
+    Add keyboards and stops, or choose Control settings and tap a control to edit it.
   </p>
 
   <p id="editor-status" class="editor-status hidden">
     <span class="spinner" aria-hidden="true"></span>
     <span id="editor-status-text"></span>
   </p>
-  <p id="editor-error" class="editor-error hidden"></p>
+  <p id="editor-error" class="editor-error hidden" role="alert"></p>
 
   <button id="editor-drawer-tab" class="editor-drawer-tab hidden" aria-haspopup="true"
     aria-expanded="false" aria-label="Open the library drawer">Library</button>
@@ -229,8 +224,7 @@
       <button id="editor-drawer-close" class="editor-drawer-close" aria-label="Close the library drawer">&times;</button>
     </div>
     <p class="pane-note">
-      Ctrl-drag — or plain-drag, unlocked — a stop, or a whole division,
-      onto a manual to pull it in.
+      Drag a stop or division onto a keyboard to add its sounds. You can also use the + button beside a division on the console.
     </p>
     <div id="editor-offerings" class="organ-offerings"></div>
   </aside>
@@ -253,7 +247,7 @@
        land there too. One child visible at a time. -->
   <div class="editor-add hidden" id="editor-add">
     <div class="editor-add-menu hidden" id="editor-add-menu">
-      <button class="menu-item" id="editor-add-manual"><span>Manual&hellip;</span></button>
+      <button class="menu-item" id="editor-add-manual"><span>Keyboard (manual)&hellip;</span></button>
       <button class="menu-item" id="editor-add-pedal"><span>Pedalboard&hellip;</span></button>
       <button class="menu-item" id="editor-add-microtonal"><span>Microtonal keyboard&hellip;</span></button>
       <button class="menu-item" id="editor-add-enc"><span>Swell box&hellip;</span></button>
@@ -301,7 +295,7 @@
       <input id="editor-add-coupler-name" type="text" placeholder="Name" autocomplete="off" spellcheck="false" />
       <p class="pane-note">&ldquo;Swell to Great&rdquo;: the Swell's stops speak
         while you play the Great. Finer routes &mdash; ranges, bass/melody,
-        unison off &mdash; are a right-click on the new rocker.</p>
+        unison off &mdash; are in Control settings: choose it, then tap the new coupler.</p>
       <!-- Couplers taken off the console (a set's own can't be deleted,
            only hidden) come back from here rather than being re-invented. -->
       <div id="editor-add-coupler-restore" class="editor-add-coupler-restore"></div>
@@ -806,11 +800,7 @@
         <button class="ghost" type="button" id="editor-midi-rescan">Rescan</button>
       </span>
       <p class="pane-note">
-        Press <em>Listen</em>, then play your keyboard's lowest key and its
-        highest: that names the port and channel, and measures how wide the
-        keyboard is. Keys past the sample set's own compass are filled in by
-        repitching the nearest pipe; keys outside the measured range stay
-        silent.
+        Choose <em>Listen</em>, then play the lowest and highest keys on your MIDI keyboard. Aristide will connect it and detect its range automatically.
       </p>
       <div id="editor-midi-inputs" class="manual-inputs"></div>
       <div id="editor-midi-pistons" class="editor-midi-pistons"></div>
@@ -879,7 +869,7 @@
   <div class="editor-add hidden" id="editor-bindings">
     <div class="editor-add-form editor-bindings-form">
       <span class="editor-tuning-head">
-        <span class="rail-label">Bindings &middot; this organ</span>
+        <span class="rail-label">Buttons &amp; shortcuts &middot; this organ</span>
       </span>
       <p class="pane-note">
         Any MIDI message or computer key can be bound to anything the

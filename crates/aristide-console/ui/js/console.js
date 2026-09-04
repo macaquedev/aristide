@@ -14,7 +14,8 @@
 // stacked mid-case, pedalboard below, shoes beside it. Moving panels
 // is the editor's job (editor.js); this file only draws and places.
 
-import { keyboardScale, measureKeyboard } from "./kb-scale.js";
+import { PointerNotes } from "./pointer-notes.js";
+import { keyboardScale, measureKeyboard, usesFlowLayout } from "./kb-scale.js";
 import { commands } from "./api.js";
 import { renderIfChanged, setText } from "./dom.js";
 import { formatFootage, keyName } from "./pitch.js";
@@ -95,6 +96,7 @@ export class Console {
     this.snapshot = null;
     this.layoutSig = null; // JSON of the last snapshot.layout applied
     this.panels = new Map(); // panel id -> its element on the canvas
+    this.notes = new PointerNotes((manual, midi, on) => this.send(commands.note(manual, midi, on)));
     this.dragging = new Set(); // control ids the pointer currently owns
     this.el = {
       offline: root.getElementById("offline"),
@@ -166,6 +168,8 @@ export class Console {
   // ---- structure ----------------------------------------------------
 
   build(snapshot) {
+    this.notes.releaseAll();
+    this.dragging.clear();
     this.el.organName.textContent = snapshot.organ ?? "No organ";
     // A loaded organ with nothing built yet has no panels worth drawing —
     // a card points at the editor instead. The canvas stays live under
@@ -193,7 +197,7 @@ export class Console {
     title.textContent = snapshot.organ ?? "Untitled organ";
     const note = document.createElement("p");
     note.textContent =
-      "An empty organ, ready to edit — double-click anywhere to add " +
+      "An empty organ, ready to build. Choose + Add to add " +
       "manuals and sample sets. Added sets offer their stops in the " +
       "Library drawer, ready to drag onto a manual.";
     const open = document.createElement("button");
@@ -462,7 +466,10 @@ export class Console {
     piston.className = "piston";
     piston.dataset.key = key;
     piston.dataset.action = action;
-    piston.title = `${action} — right-click to bind a piston, pedal or key`;
+    piston.title = action.startsWith("general:")
+      ? `Registration ${label}: recall saved stops. Choose Set, then this button to save.`
+      : `Registration ${label} for this keyboard. Choose Set, then this button to save.`;
+    piston.setAttribute("aria-label", piston.title);
     const face = document.createElement("span");
     face.className = "piston-face";
     face.textContent = label;
@@ -630,7 +637,22 @@ export class Console {
   wireCrescendo(track, snapshot) {
     const stages = snapshot.combinations?.crescendo_stages ?? 32;
     const key = "crescendo";
+    track.tabIndex = 0;
+    track.setAttribute("role", "slider");
+    track.setAttribute("aria-label", "Crescendo stage");
+    track.setAttribute("aria-valuemin", "0");
+    track.setAttribute("aria-valuemax", String(stages));
+    track.addEventListener("keydown", (event) => {
+      const steps = { ArrowUp: 1, ArrowRight: 1, ArrowDown: -1, ArrowLeft: -1 };
+      if (!(event.key in steps) && !["Home", "End"].includes(event.key)) return;
+      event.preventDefault();
+      const current = Number(track.getAttribute("aria-valuenow")) || 0;
+      const next = event.key === "Home" ? 0 : event.key === "End" ? stages : Math.max(0, Math.min(stages, current + steps[event.key]));
+      this.setCrescendo(next, stages);
+      this.send(commands.crescendo(next));
+    });
     let lastSent = 0;
+    let pointer = null;
     const stageAt = (event) => {
       const rect = track.getBoundingClientRect();
       const along = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
@@ -649,20 +671,29 @@ export class Console {
     track.addEventListener("pointerdown", (event) => {
       // The primary button only: a right-click on the pedal is the
       // gesture that binds it (editor.js), and must not also move it.
-      if (event.button !== 0) return;
+      if (event.button !== 0 || pointer !== null) return;
       event.preventDefault();
+      pointer = event.pointerId;
       this.dragging.add(key);
       track.setPointerCapture(event.pointerId);
       set(event);
     });
     track.addEventListener("pointermove", (event) => {
-      if (this.dragging.has(key)) set(event);
+      if (event.pointerId === pointer) set(event);
     });
     track.addEventListener("pointerup", (event) => {
-      if (!this.dragging.has(key)) return;
+      if (event.pointerId !== pointer) return;
+      pointer = null;
       this.dragging.delete(key);
       this.send(commands.crescendo(set(event)));
     });
+    for (const type of ["pointercancel", "lostpointercapture"]) {
+      track.addEventListener(type, (event) => {
+        if (event.pointerId !== pointer) return;
+        pointer = null;
+        this.dragging.delete(key);
+      });
+    }
   }
 
   /// Paint the crescendo's position. Through a CSS variable and
@@ -671,7 +702,10 @@ export class Console {
   /// WebKit (dom.js).
   setCrescendo(stage, stages) {
     const track = this.root.querySelector(".crescendo-track");
-    if (track) track.style.setProperty("--stage", stages ? stage / stages : 0);
+    if (track) {
+      track.style.setProperty("--stage", stages ? stage / stages : 0);
+      if (track.getAttribute("aria-valuenow") !== String(stage)) track.setAttribute("aria-valuenow", String(stage));
+    }
     if (this.el.crescendoStage) {
       setText(this.el.crescendoStage, `${stage} / ${stages}`);
     }
@@ -705,6 +739,7 @@ export class Console {
   }
 
   panic() {
+    this.notes.releaseAll();
     this.send(commands.panic());
   }
 
@@ -795,22 +830,7 @@ export class Console {
   }
 
   wireKey(key, manual, midi) {
-    const off = () => {
-      if (!key.classList.contains("pressed")) return;
-      key.classList.remove("pressed", "held");
-      this.send(commands.note(manual, midi, false));
-    };
-    key.addEventListener("pointerdown", (event) => {
-      // Only the primary button plays: a right-click is a context
-      // menu or, with a stop's editor open, a voicing gesture, and
-      // neither should pluck the pipe on the way.
-      if (event.button !== 0) return;
-      event.preventDefault();
-      key.classList.add("pressed", "held"); // optimistic
-      this.send(commands.note(manual, midi, true));
-      window.addEventListener("pointerup", off, { once: true });
-    });
-    key.addEventListener("pointerleave", off);
+    this.notes.bind(key, manual, midi);
   }
 
   shoes(snapshot) {
@@ -823,6 +843,7 @@ export class Console {
 
       const track = document.createElement("div");
       track.className = "shoe-track";
+      track.setAttribute("aria-label", `${enclosure.name} expression`);
       const fill = document.createElement("div");
       fill.className = "shoe-fill";
       const thumb = document.createElement("div");
@@ -843,7 +864,22 @@ export class Console {
 
   wireShoe(track, idx) {
     const key = `enclosure-${idx}`;
+    track.tabIndex = 0;
+    track.setAttribute("role", "slider");
+    track.setAttribute("aria-orientation", "vertical");
+    track.setAttribute("aria-valuemin", "0");
+    track.setAttribute("aria-valuemax", "100");
+    track.addEventListener("keydown", (event) => {
+      const steps = { ArrowUp: 5, ArrowRight: 5, ArrowDown: -5, ArrowLeft: -5 };
+      if (!(event.key in steps) && !["Home", "End"].includes(event.key)) return;
+      event.preventDefault();
+      const current = Number(track.getAttribute("aria-valuenow")) || 0;
+      const next = event.key === "Home" ? 0 : event.key === "End" ? 100 : Math.max(0, Math.min(100, current + steps[event.key]));
+      this.setShoe(track.parentElement, next / 100);
+      this.send(commands.enclosure(idx, next / 100));
+    });
     let lastSent = 0;
+    let pointer = null;
     const set = (event) => {
       const rect = track.getBoundingClientRect();
       const value = Math.min(1, Math.max(0, (rect.bottom - event.clientY) / rect.height));
@@ -857,22 +893,36 @@ export class Console {
       return value;
     };
     track.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0 || pointer !== null) return;
       event.preventDefault();
+      pointer = event.pointerId;
       this.dragging.add(key);
       track.setPointerCapture(event.pointerId);
       set(event);
     });
     track.addEventListener("pointermove", (event) => {
-      if (this.dragging.has(key)) set(event);
+      if (event.pointerId === pointer) set(event);
     });
     track.addEventListener("pointerup", (event) => {
+      if (event.pointerId !== pointer) return;
+      pointer = null;
       this.dragging.delete(key);
       this.send(commands.enclosure(idx, set(event).toFixed(3)));
     });
+    for (const type of ["pointercancel", "lostpointercapture"]) {
+      track.addEventListener(type, (event) => {
+        if (event.pointerId !== pointer) return;
+        pointer = null;
+        this.dragging.delete(key);
+      });
+    }
   }
 
   setShoe(shoe, value) {
     shoe.style.setProperty("--open", value);
+    const track = shoe.querySelector(".shoe-track");
+    const percent = String(Math.round(value * 100));
+    if (track?.getAttribute("aria-valuenow") !== percent) track?.setAttribute("aria-valuenow", percent);
   }
 
   // ---- placement ----------------------------------------------------
@@ -881,6 +931,8 @@ export class Console {
   /// of the canvas), the rest from defaultLayout. A panel the editor is
   /// mid-drag on is left alone — its position is the pointer's.
   layoutPanels(snapshot) {
+    // Narrow screens use a flowing layout; never rewrite the saved desktop placement.
+    if (usesFlowLayout()) return;
     const W = this.el.canvas.clientWidth;
     const H = this.el.canvas.clientHeight;
     if (!W || !H || !this.panels.size) return;
@@ -1144,6 +1196,9 @@ export class Console {
     const slider = this.el.gain;
     let lastSent = 0;
     slider.addEventListener("pointerdown", () => this.dragging.add("gain"));
+    for (const type of ["pointerup", "pointercancel", "lostpointercapture", "blur"]) {
+      slider.addEventListener(type, () => this.dragging.delete("gain"));
+    }
     slider.addEventListener("input", () => {
       const now = performance.now();
       if (now - lastSent > 33) {

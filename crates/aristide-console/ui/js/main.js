@@ -1,3 +1,4 @@
+import { wireDialogFocus } from "./dialog-focus.js";
 import { resolveBase, connect, commands } from "./api.js";
 import { ConflictDialog } from "./conflict.js";
 import { Console } from "./console.js";
@@ -10,6 +11,7 @@ import { Preferences } from "./prefs.js";
 import { stepScale, wireTheme } from "./theme.js";
 
 wireTheme(document);
+wireDialogFocus(document);
 
 // The webview's own context menu (Stop, Reload…) never belongs on an
 // organ console. Right-clicks that mean something are answered where
@@ -24,7 +26,7 @@ const base = await resolveBase();
 let send;
 let snapshot = {}; // the latest state, for menus that ask what is true now
 const prefs = new Preferences(document, (query) => send(query));
-const picker = new Picker(document, base, (query) => send(query));
+const picker = new Picker(document, base, (query, options) => send(query, options));
 const editor = new Editor(document, base, (query) => send(query));
 // The bar's tuning readout opens the whole-instrument tuning popover —
 // an organ fact, edited where organ facts are edited, on the console.
@@ -152,7 +154,7 @@ new MenuBar(document, document.getElementById("menus"), [
   {
     title: "Organ",
     items: () => [
-      { label: "Cancel registration", run: () => view.cancel() },
+      { label: "Clear stops & couplers", run: () => view.cancel() },
       { label: "Silence everything", accel: "Panic", run: () => view.panic() },
       "-",
       {
@@ -166,7 +168,7 @@ new MenuBar(document, document.getElementById("menus"), [
         run: (at) => editor.openRoomForm(at?.x ?? 120, at?.y ?? 40),
       },
       {
-        label: "Bindings…",
+        label: "Buttons & shortcuts…",
         disabled: !snapshot.organ,
         run: (at) => editor.openBindingsForm(at?.x ?? 120, at?.y ?? 40),
       },

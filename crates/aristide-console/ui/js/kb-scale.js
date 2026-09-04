@@ -26,3 +26,7 @@ export function measureKeyboard(panel) {
 export function keyboardScale({ scaling, fixed }, targetPx) {
   return Math.max(MIN, Math.min(MAX, (targetPx - fixed) / scaling)).toFixed(4);
 }
+
+// Keep this query in step with the responsive canvas rules in style.css.
+export const usesFlowLayout = () =>
+  window.matchMedia("(max-width: 1100px), (pointer: coarse) and (max-width: 1600px)").matches;

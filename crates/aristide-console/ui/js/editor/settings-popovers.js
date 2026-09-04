@@ -273,6 +273,9 @@ export function wireRoomForm(editor) {
 function throttledRoomSlider(editor, slider, key, send) {
   let lastSent = 0;
   slider.addEventListener("pointerdown", () => editor.roomDragging.add(key));
+  for (const type of ["pointerup", "pointercancel", "lostpointercapture", "blur"]) {
+    slider.addEventListener(type, () => editor.roomDragging.delete(key));
+  }
   slider.addEventListener("input", () => {
     const now = performance.now();
     if (now - lastSent > 33) {
@@ -420,6 +423,7 @@ export function syncSaveForm(editor) {
 }
 
 async function saveOrgan(editor) {
+  if (editor.el.saveBtn.disabled) return;
   const path = editor.el.savePath.value.trim();
   if (!path) {
     showSaveError(editor, "Give it a path first.");
@@ -478,6 +482,7 @@ export function wireSaveAsForm(editor) {
 export function openSaveAsForm(editor, pending = null) {
   const snapshot = editor.lastSnapshot;
   if (!snapshot?.setup?.file || !snapshot.organ) return;
+  editor.saveAsSession = (editor.saveAsSession ?? 0) + 1;
   const organ = snapshot.organ;
   const adopted = Boolean(snapshot.setup.adopted);
   // A refused rename IS this dialog: the name goes on the copy, and
@@ -521,6 +526,7 @@ export function openSaveAsForm(editor, pending = null) {
 export function closeSaveAsForm(editor) {
   if (!editor.saveAsOpen) return;
   editor.saveAsOpen = false;
+  editor.saveAsSession = (editor.saveAsSession ?? 0) + 1;
   editor.saveAsPending = null;
   editor.saveAsFor = null;
   editor.el.saveAs.classList.add("hidden");
@@ -532,11 +538,13 @@ export function closeSaveAsForm(editor) {
 /// one it is about has been saved elsewhere already, it no longer
 /// applies.
 export function syncSaveAsForm(editor) {
+  if (editor.savingAs) return;
   const snapshot = editor.lastSnapshot;
   if (!snapshot?.setup?.file || snapshot.organ !== editor.saveAsFor) editor.closeSaveAsForm();
 }
 
 async function saveOrganAs(editor) {
+  if (editor.savingAs) return;
   const name = editor.el.saveAsName.value.trim();
   if (!name) {
     showSaveAsError(editor, "Give it a name first.");
@@ -547,8 +555,17 @@ async function saveOrganAs(editor) {
     return;
   }
   const pending = editor.saveAsPending;
+  const session = editor.saveAsSession;
+  editor.savingAs = true;
   editor.el.saveAsBtn.disabled = true;
+  editor.el.saveAsBtn.textContent = "Saving…";
+  editor.el.saveAsCancel.textContent = "Close";
   const { ok, error } = await localFetch(editor.base, commands.organSaveAs(name), { method: "POST" });
+  editor.savingAs = false;
+  editor.el.saveAsBtn.disabled = false;
+  editor.el.saveAsBtn.textContent = "Save";
+  editor.el.saveAsCancel.textContent = "Cancel";
+  if (session !== editor.saveAsSession) return;
   if (!ok) {
     showSaveAsError(editor, error);
   } else {

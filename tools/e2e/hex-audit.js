@@ -7,7 +7,7 @@
 // Needs: a built server (default target/release/aristide-server, falls
 // back to target/debug), chromium on PATH, and no listener on the
 // ports below. Creates a throwaway organ named "HexAudit" in the
-// user's organ library and removes it again on the way out.
+// isolated organ library and removes it again on the way out.
 //
 // What it proves:
 //   1. GEOMETRY — every hex sits exactly where the layout's two
@@ -27,13 +27,10 @@ import { join } from "node:path";
 const SERVER_PORT = 9876;
 const UI_PORT = 9877;
 const CDP_PORT = 9223;
-// Unlike the other audits, this one means to touch the player's real
-// library (it creates a throwaway organ there and removes it again),
-// needs no demo set, and checks no pixel geometry against a fixed
-// window size.
+// Use an isolated configuration, like the other audits. No player files are touched.
 const h = launchHarness({
   name: "hex-audit", serverPort: SERVER_PORT, uiPort: UI_PORT, cdpPort: CDP_PORT,
-  needsDemo: false, isolateConfig: false, windowSize: false,
+  needsDemo: false, isolateConfig: true, windowSize: false,
 });
 const { S, scratch, check, sleep, state, post, waitForServer } = h;
 
