@@ -4793,6 +4793,71 @@ mod compound_pitch_tests {
             }
             let organ = aristide_formats::hauptwerk::load(&path).unwrap().organ;
             let loaded = build(&organ, 44_100.0, 16, None).unwrap();
+            if definition == "Solignac extend" {
+                use crate::tuning::{PipeRetune, Temperament, Tuning};
+                for (prefix, first, last) in [("2222", 36u16, 89u16), ("2331", 60, 89)] {
+                    let stop = organ
+                        .stops
+                        .iter()
+                        .find(|s| s.name.starts_with(prefix))
+                        .unwrap();
+                    let manual = organ
+                        .manuals
+                        .iter()
+                        .position(|m| m.id == stop.manual)
+                        .unwrap();
+                    for temperament in [Temperament::Original, Temperament::Equal] {
+                        let mut console = crate::console::Console::new(
+                            organ.clone(),
+                            loaded.specs.clone(),
+                            vec![stop.id],
+                            44_100.0,
+                        );
+                        console.set_home(loaded.home.clone().map(std::sync::Arc::new));
+                        console.set_tuning(Tuning {
+                            temperament,
+                            pipes: PipeRetune::Exact,
+                            ..Default::default()
+                        });
+                        for key in first..=last {
+                            let (starts, _) = console.note_on_manual(manual, key, 127);
+                            assert_eq!(
+                                starts.len(),
+                                1,
+                                "{} key {key}: every defined key must speak",
+                                stop.name
+                            );
+                            let range = &stop.ranks[0];
+                            let index = range.first_pipe + key
+                                - organ.manuals[manual].first_midi_note as u16
+                                - range.first_key;
+                            let rank = organ.rank(range.rank).unwrap();
+                            let pipe = &rank.pipes[index as usize];
+                            let spec = &loaded.specs[&(rank.id, index)];
+                            assert_eq!(
+                                starts[0].spec.sample, spec.sample,
+                                "{} key {key}: wrong recording",
+                                stop.name
+                            );
+                            let info = wav::read_info(
+                                &organ.base_path.join(&pipe.samples().unwrap().0[0].path),
+                            )
+                            .unwrap();
+                            let recorded = equal_ladder_hz(
+                                info.midi_unity_note.unwrap() as f64
+                                    + info.pitch_fraction.unwrap_or(0) as f64 / 4294967296.0,
+                            );
+                            let sounding = recorded * starts[0].spec.rate as f64 * 44100.0
+                                / info.sample_rate as f64;
+                            let error = cents_between(pipe.nominal_frequency_hz, sounding);
+                            assert!(error.abs() < 35.0, "{} key {key}: sounding pitch is off by {error:.1} cents under {temperament:?}", stop.name);
+                            console.note_off_manual(manual, key);
+                        }
+                        assert!(console.note_on_manual(manual, first - 1, 127).0.is_empty());
+                        assert!(console.note_on_manual(manual, last + 1, 127).0.is_empty());
+                    }
+                }
+            }
             for rank in &organ.ranks {
                 for (index, pipe) in rank.pipes.iter().enumerate() {
                     let Some((attacks, _)) = pipe.samples() else {

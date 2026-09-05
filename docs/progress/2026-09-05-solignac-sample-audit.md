@@ -73,3 +73,37 @@ audio-device playback has not been verified here.
 The final serial functional run passed all 404 tests plus documentation tests,
 with the same 14 intentional ignores and only the two separately investigated
 timing tests excluded. No test assertions or performance thresholds were relaxed.
+
+## Follow-up: complete keyboard routing and sustained audio
+
+The first audit checked bank rates but did not verify every stop's keyboard
+coverage. An end-to-end chromatic render exposed a separate importer error:
+extended Solignac's Echo Cornet rank has notes 60–89, but its stop only answered
+60–65. An omitted mapping count was replaced by the rank length and then added
+to the manual's starting note (36), incorrectly setting the end at 66. Omitted
+counts now leave the upper bound open to the rank's actual end. Explicit bounds,
+the manual compass, and the lower rank limit are still respected. A synthetic
+treble-rank regression covers both omitted and explicit counts.
+
+The downloaded fixture test now exercises the console's note-on path for every
+Positif Flute 4' key (36–89) and Echo Cornet key (60–89), under both Original and
+Equal tuning at A440. It checks that exactly one expected recording starts and
+that its declared sounding pitch, after the final voice rate, is within 35 cents
+of the requested pipe pitch. It also checks silence outside each stop's compass.
+This passed after the mapping fix. It is stronger than checking bank rates alone.
+
+For the reported Flute octave drop, five-second notes were rendered through the
+console and engine, with spectral checks at the attack and at 4.5 seconds. No
+fundamental octave reversal was reproduced. There is a pronounced harmonic-balance
+change in the original WAVs: MIDI 66 (F-sharp4) has a fundamental near 700 Hz but
+a much stronger third partial near 2097 Hz; MIDI 67 (G4) has its strongest peak
+at the fundamental near 746 Hz. At three seconds in the raw recordings the
+fundamental/third-partial amplitude ratios are approximately 0.27 and 3.57,
+respectively. The rendered audio retains this change. It could explain a
+perceived downward jump, but the user's exact note, running revision and tuning
+mode remain unconfirmed. No equalization or changes to the sample files were
+made to hide this recording characteristic.
+
+Follow-up validation: 405 workspace functional tests and documentation tests
+passed in the debug build; 14 intentional ignores and the two previously
+investigated performance tests were excluded. The raw recordings were only read.

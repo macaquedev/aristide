@@ -196,11 +196,18 @@ Names are whatever the author typed (Solignac's CODM names carry an ID prefix,
 | 21 / 1 | sustaining noise while engaged (blower) |
 
 Mapping columns: `MIDINoteNumOfFirstMappedDivisionInputNode` (absent/0 = the manual's
-first key), `NumberOfMappedDivisionInputNodes` (absent/0 = the rank's whole pipe count),
+first key), `NumberOfMappedDivisionInputNodes` (absent/0 = no explicit upper bound),
 `MIDINoteNumIncrementFromDivisionToRank` (division key + increment = rank note; a 4′
 extension of an 8′ rank is +12). The reader clips the mapped range to both the manual's
 compass and the rank's pipes and emits one `RankRange` per link
-(`read_stops`). Source: OdfEdit `GO_ODF_build_Stop_pipes_attributes` ~line 9220.
+(`read_stops`). Mapping direction and explicit range handling follow OdfEdit
+`GO_ODF_build_Stop_pipes_attributes` ~line 9220. For an omitted count, retain the
+rank's upper note, rather than adding its length to the manual's bass note:
+Solignac extend's `StopRank` 2331 has no mapping bounds, while rank 31 contains
+notes 60–89. Adding 30 to the manual's first note (36) incorrectly truncates the
+Cornet to notes 60–65. This corrects the same arithmetic limitation present in
+the inspected OdfEdit converter; the shipped Solignac definition and complete
+rank provide the regression fixture.
 
 `AlternateRankID` + `SwitchIDToSwitchToAlternateRank`: a second rank of re-recordings
 selected while a switch (normally a tremulant's) is on — Sonus Paradisi's tremmed

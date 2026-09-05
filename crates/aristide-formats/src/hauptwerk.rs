@@ -838,11 +838,18 @@ impl<'a> Builder<'a> {
                 };
                 let (manual_first, manual_keys) = manual;
                 let first_note = link.first_division_note.unwrap_or(manual_first);
-                let count = link.mapped_count.unwrap_or(rank_len);
+                // An omitted count leaves the upper mapping bound open.
+                // The rank may begin above the manual's first key (Cornet
+                // treble compass); adding its length to the manual bass
+                // would incorrectly cut off its upper notes.
+                let mapped_end = link
+                    .mapped_count
+                    .map(|count| first_note + count)
+                    .unwrap_or(rank_first + rank_len - link.shift);
                 let low = first_note
                     .max(manual_first)
                     .max(rank_first - link.shift);
-                let high = (first_note + count)
+                let high = mapped_end
                     .min(manual_first + manual_keys)
                     .min(rank_first + rank_len - link.shift);
                 if high <= low {
@@ -1777,6 +1784,42 @@ mod tests {
         // A stop with no StopRank rows follows its primary-rank hint.
         assert_eq!(organ.stops[2].manual, ManualId(0));
         assert_eq!(organ.stops[2].ranks[0].rank, principal.ranks[0].rank);
+    }
+
+    #[test]
+    fn treble_rank_keeps_its_top_keys_without_a_mapping_count() {
+        let fixture = Fixture::new("treble-range");
+        let definition = DEFINITION
+            .replace("<a>101</a><b>1</b><d>36</d>", "<a>101</a><b>1</b><d>60</d>")
+            .replace("<a>103</a><b>1</b><d>38</d>", "<a>103</a><b>1</b><d>62</d>");
+        let organ = parse(definition.as_bytes(), fixture.root.clone())
+            .unwrap()
+            .organ;
+        let range = &organ
+            .stops
+            .iter()
+            .find(|s| s.name == "Principal 8")
+            .unwrap()
+            .ranks[0];
+        assert_eq!(
+            (range.first_key, range.key_count, range.first_pipe),
+            (24, 3, 0)
+        );
+        // A declared upper bound is still respected, even within the rank.
+        let explicit = definition.replace("<b>P8</b><d>1</d>", "<b>P8</b><h>60</h><i>2</i><d>1</d>");
+        let organ = parse(explicit.as_bytes(), fixture.root.clone())
+            .unwrap()
+            .organ;
+        let range = &organ
+            .stops
+            .iter()
+            .find(|s| s.name == "Principal 8")
+            .unwrap()
+            .ranks[0];
+        assert_eq!(
+            (range.first_key, range.key_count, range.first_pipe),
+            (24, 2, 0)
+        );
     }
 
     #[test]
