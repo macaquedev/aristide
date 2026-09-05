@@ -916,12 +916,17 @@ fn decode_rank_attacks(
                 + pipe.pitch_correction_cents
                 + attack.pitch_offset_cents
         });
+        let declared_cents = sample_key.map(|key| {
+            let recorded_hz = equal_ladder_hz(key as f64 + fraction_cents / 100.0);
+            cents_between(pipe.nominal_frequency_hz, recorded_hz) + original_cents
+        });
         pending.push(PendingPipe {
             pipe_index: pipe_index as u16,
             info,
             path: attack.path.clone(),
             original_cents,
             auto_cents,
+            declared_cents,
             from_smpl,
             unity: from_smpl.then_some(sample_key).flatten(),
         });
@@ -970,6 +975,7 @@ fn stage_rank_pipes(
         ));
     }
 
+    let mut partial_ambiguities = 0;
     for p in pending {
         let pipe = &rank.pipes[p.pipe_index as usize];
         // What the metadata alone would decide — the fallback for
@@ -1001,9 +1007,16 @@ fn stage_rank_pipes(
             }
             _ => None,
         };
-        // The recording's own fundamental, as the engine measured
-        // it for release alignment: the truth every pitch decision
-        // below works from.
+        // A period suitable for release alignment is not necessarily a
+        // mixture's pitch: several pipes can produce a strong period at
+        // another partial. Honest metadata disambiguates those harmonically
+        // related candidates; a plain neighbouring-key mismatch still uses
+        // the waveform, preserving detection of mis-keyed recordings.
+        let declared_cents = p.declared_cents.filter(|value| {
+            value.is_finite()
+                && !(p.from_smpl && distrust_smpl)
+                && p.auto_cents.is_some_and(|auto| auto.abs() <= 1800.0)
+        });
         let measured_cents = bank
             .get(p.info.index)
             .and_then(|sample| sample.measured_period())
@@ -1013,6 +1026,11 @@ fn stage_rank_pipes(
                 cents_between(pipe.nominal_frequency_hz, voiced_hz)
             })
             .filter(|cents| cents.is_finite());
+        let reconciled = reconcile_period_pitch(measured_cents, declared_cents);
+        if reconciled != measured_cents {
+            partial_ambiguities += 1;
+        }
+        let measured_cents = reconciled;
         staged.push(StagedPipe {
             rank: rank.id,
             rank_index,
@@ -1021,10 +1039,48 @@ fn stage_rank_pipes(
             original_cents: p.original_cents,
             metadata_cents: metadata,
             measured_cents,
+            declared_cents,
             enclosures,
         });
     }
+    // Several partial ambiguities across one rank identify compound
+    // recordings rather than isolated bad measurements. Other notes of
+    // that same mixture can have less tidy beat periods, or no stable
+    // period at all. Use its trusted declarations consistently, including
+    // when fitting the rank anchor, so a majority partial cannot drag the
+    // correctly measured notes of the rank to another interval.
+    // Only recordings with a measurable period can supply evidence here.
+    let comparable = staged
+        .iter()
+        .filter(|p| p.declared_cents.is_some() && p.measured_cents.is_some())
+        .count();
+    if partial_ambiguities >= 3 && partial_ambiguities * 4 >= comparable {
+        for pipe in &mut staged {
+            if let Some(pitch) = pipe.declared_cents {
+                pipe.measured_cents = Some(pitch);
+            }
+        }
+    }
     staged
+}
+
+/// Resolve the small-integer partial ambiguities common in compound stops.
+/// A semitone mismatch is not such an ambiguity: measurements still detect
+/// genuinely mis-keyed samples. Ratios are dimensionless, not a tuning scale.
+fn reconcile_period_pitch(measured: Option<f64>, declared: Option<f64>) -> Option<f64> {
+    let (Some(measured), Some(declared)) = (measured, declared) else {
+        return measured;
+    };
+    let distance = (measured - declared).abs();
+    for denominator in 1..=7 {
+        for numerator in (denominator + 1)..=8 {
+            let partial = 1200.0 * (numerator as f64 / denominator as f64).log2();
+            if (distance - partial).abs() <= 12.0 {
+                return Some(declared);
+            }
+        }
+    }
+    Some(measured)
 }
 
 /// A pipe's sounding pitch class against the 440 ladder (0 = A), plus
@@ -1142,9 +1198,20 @@ fn assign_voice_specs(
                 }
             }
             (Some(measured), None) => (p.original_cents, measured),
-            // Unmeasured: the metadata decides as it always did, and
-            // the pipe is assumed to sit where its organ does — or
-            // where the retune declared, when one applied.
+            // Without a stable period, compare trusted declarations with
+            // the organ's own pitch standard before deciding to retune.
+            (None, Some(model)) if p.declared_cents.is_some() => {
+                let declared = p.declared_cents.unwrap();
+                let residual = declared - model;
+                if !pipe.accepts_retuning || residual.abs() <= REANCHOR_TOLERANCE_CENTS {
+                    (p.original_cents, declared)
+                } else {
+                    let entry = retuned.entry(p.rank).or_insert((0, 0.0));
+                    entry.0 += 1;
+                    entry.1 = entry.1.max(residual.abs());
+                    (p.original_cents - residual, model)
+                }
+            }
             (None, model) => match p.metadata_cents {
                 Some(auto) => {
                     let entry = retuned.entry(p.rank).or_insert((0, 0.0));
@@ -1251,6 +1318,8 @@ struct PendingPipe {
     /// the pipe's nominal (GO's auto-tuning formula, PitchCorrection
     /// folded in); `None` when nothing declares a pitch.
     auto_cents: Option<f64>,
+    /// The declared sounding pitch after the set's voicing, relative to nominal.
+    declared_cents: Option<f64>,
     /// Whether the declaration came from the file's smpl chunk rather
     /// than the ODF — only smpl claims fall to the junk guard.
     from_smpl: bool,
@@ -1277,9 +1346,12 @@ struct StagedPipe {
     original_cents: f64,
     /// The offset the metadata path would retune by, when it would.
     metadata_cents: Option<f64>,
-    /// Where the recording really sounds, played as voiced, relative
-    /// to the pipe's nominal — from the engine's period measurement.
+    /// Estimated sounding pitch relative to nominal, including voicing.
+    /// Uses the period measurement, disambiguated by trusted metadata
+    /// when compound recordings make that period misleading.
     measured_cents: Option<f64>,
+    /// Trusted recorded-pitch metadata, including the set's voicing.
+    declared_cents: Option<f64>,
 }
 
 fn nominal_of(organ: &Organ, staged: &StagedPipe) -> f64 {
@@ -4620,5 +4692,135 @@ mod tests {
             bytes.extend_from_slice(&s.to_le_bytes());
         }
         f.write_all(&bytes).expect("wav data");
+    }
+}
+
+#[cfg(test)]
+mod compound_pitch_tests {
+    use super::*;
+
+    #[test]
+    fn partial_periods_do_not_override_declared_pitch() {
+        let declared = -95.0;
+        for ratio in [1.5_f64, 4.0 / 3.0, 1.25, 1.2, 2.0] {
+            let partial = 1200.0 * ratio.log2();
+            for sign in [-1.0, 1.0] {
+                assert_eq!(
+                    reconcile_period_pitch(Some(declared + sign * partial), Some(declared)),
+                    Some(declared)
+                );
+            }
+        }
+        assert_eq!(
+            reconcile_period_pitch(Some(declared - 100.0), Some(declared)),
+            Some(declared - 100.0),
+            "a neighbouring-key recording is still detected"
+        );
+        assert_eq!(reconcile_period_pitch(Some(0.0), None), Some(0.0));
+        assert_eq!(reconcile_period_pitch(None, Some(declared)), None);
+    }
+
+    #[test]
+    fn unmeasured_recordings_keep_the_organs_pitch_standard() {
+        let organ = Organ {
+            ranks: vec![aristide_model::Rank {
+                id: RankId(1),
+                name: "Unmeasured compound stop".into(),
+                windchest: 1,
+                velocity_volume: Default::default(),
+                pipes: vec![Pipe {
+                    nominal_frequency_hz: 440.0,
+                    pitch_tuning_cents: 0.0,
+                    pitch_correction_cents: 0.0,
+                    gain_db: 0.0,
+                    midi_key_number: None,
+                    midi_pitch_fraction_cents: None,
+                    accepts_retuning: true,
+                    source: PipeSource::Silent,
+                }],
+            }],
+            ..Default::default()
+        };
+        let recorded = 1200.0 * (419.0_f64 / 440.0).log2();
+        let home = crate::tuning::HomeTuning::fit([(9, recorded, true)], 1).unwrap();
+        let staged = StagedPipe {
+            rank: RankId(1),
+            rank_index: 0,
+            pipe_index: 0,
+            info: DecodedInfo {
+                index: 0,
+                sample_rate: 44100.0,
+                percussive: false,
+                unity_note: Some(68),
+                unity_fraction_cents: 0.0,
+            },
+            enclosures: [aristide_engine::enclosure::ENCLOSURE_NONE;
+                aristide_engine::enclosure::MAX_VOICE_ENCLOSURES],
+            original_cents: 0.0,
+            metadata_cents: Some(-recorded),
+            measured_cents: None,
+            declared_cents: Some(recorded),
+        };
+        let mut warnings = Vec::new();
+        let specs = assign_voice_specs(
+            &organ,
+            44100.0,
+            Some(&home),
+            &HashMap::new(),
+            vec![staged],
+            &mut warnings,
+        );
+        let spec = specs[&(RankId(1), 0)];
+        assert_eq!(
+            spec.rate, 1.0,
+            "an unmeasured 419 Hz recording must not be pulled to 440 Hz"
+        );
+        assert!((spec.home_cents as f64 - recorded).abs() < 0.001);
+        assert!(warnings.is_empty());
+    }
+
+    /// The optional downloaded fixture exercises compound recordings that a
+    /// synthetic single-pipe tone cannot represent. No sample file is changed.
+    #[test]
+    fn solignac_compound_stops_do_not_jump_to_another_partial() {
+        for definition in ["Solignac orig", "Solignac extend"] {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+                "../../testsets/avo-solignac/OrganDefinitions/{definition}.Organ_Hauptwerk_xml"
+            ));
+            if !path.is_file() {
+                eprintln!("skipping: Solignac fixture not present");
+                return;
+            }
+            let organ = aristide_formats::hauptwerk::load(&path).unwrap().organ;
+            let loaded = build(&organ, 44_100.0, 16, None).unwrap();
+            for rank in &organ.ranks {
+                for (index, pipe) in rank.pipes.iter().enumerate() {
+                    let Some((attacks, _)) = pipe.samples() else {
+                        continue;
+                    };
+                    let spec = loaded
+                        .specs
+                        .get(&(rank.id, index as u16))
+                        .expect("every sampled pipe loaded");
+                    let info = wav::read_info(&organ.base_path.join(&attacks[0].path)).unwrap();
+                    let cents =
+                        1200.0 * (spec.rate as f64 * 44100.0 / info.sample_rate as f64).log2();
+                    assert!(
+                        cents.abs() < 150.0,
+                        "{definition}: {} pipe {index} shifted {cents:.1} cents",
+                        rank.name
+                    );
+                    if attacks[0].path.ends_with("06-Plein-Jeu/077-f.wav")
+                        || attacks[0].path.ends_with("07-Cornet/068-g#.wav")
+                    {
+                        assert!(
+                            cents.abs() < 1.0,
+                            "{} must retain its recorded pitch",
+                            attacks[0].path.display()
+                        );
+                    }
+                }
+            }
+        }
     }
 }

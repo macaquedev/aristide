@@ -94,7 +94,8 @@ impl Temperament {
 }
 
 /// What the samples were recorded in: the organ's *home* tuning, fitted
-/// at load from the measured fundamental of every looped pipe. The
+/// at load from loop-period estimates, with trusted pitch declarations
+/// disambiguating compound recordings. The
 /// truth the tuning layer works from instead of assuming that every
 /// set sits on the 12-EDO/A440 ladder — a Baroque set at a′ = 415 in
 /// meantone is exactly that, and a target of "440 equal" or "452
@@ -123,7 +124,7 @@ pub struct HomeTuning {
     /// absolute residual), cents: tuning drift, or "this instrument
     /// holds two pitch standards" when it is large.
     pub spread_cents: f64,
-    /// Pipes whose fundamental measured, and pipes looked at.
+    /// Pipes with a usable pitch estimate, and pipes looked at.
     pub measured: usize,
     pub pipes: usize,
 }
