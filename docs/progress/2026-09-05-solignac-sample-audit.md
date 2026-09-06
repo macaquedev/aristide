@@ -107,3 +107,32 @@ made to hide this recording characteristic.
 Follow-up validation: 405 workspace functional tests and documentation tests
 passed in the debug build; 14 intentional ignores and the two previously
 investigated performance tests were excluded. The raw recordings were only read.
+
+
+## Exact breakpoint supplied by the player: sounding B-flat5 to B5
+
+This identifies a different issue from the F-sharp/G timbre change above. For a
+4-foot stop it corresponds to played MIDI 70–71. Positif Flute recordings through
+MIDI 70 are first decoded for the lower-pitched pedal rank. The release-alignment
+pitch hint follows that first referencing pipe. The raw period measurements are:
+
+| Played key | Raw period-derived Hz | Offset from Positif nominal | Current bank rate |
+| --- | ---: | ---: | ---: |
+| 69 | 415.889 | −1297.566 cents | 1.0 |
+| 70 (B-flat) | 443.347 | −1286.882 cents | 1.0 |
+| 71 (B) | 930.145 | −104.057 cents | 1.0 |
+| 72 | 994.471 | −88.289 cents | 1.0 |
+
+The raw rank median is −1287.816 cents across 54 measurements. Before pitch
+reconciliation, that octave-low majority supplied the rank anchor; the correctly
+measured B and higher recordings were consequently retuned downward toward it.
+This explains the player's precise breakpoint. The harmonic-balance explanation
+for F-sharp/G does not explain this B-flat/B report.
+
+The current loader reconciles these period estimates against the recorded-pitch
+metadata; the B-flat and B voice specs both retain rate 1.0, with home offsets
+−86.939 and −103.439 cents, respectively. This is handled by `25fbeed` and retained
+in `31ee7bb`. The full-console regression in the latter checks this pair under
+Original and Equal tuning. The prior sustained render at an A440 reference has
+fundamentals near 937 and 983 Hz, respectively, without an octave drop. Whether
+the user has restarted the updated executable is still unconfirmed.
