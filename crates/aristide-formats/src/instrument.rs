@@ -1897,6 +1897,7 @@ mod tests {
             midi_key_number: None,
             midi_pitch_fraction_cents: None,
             accepts_retuning: true,
+            sample_pitch_mode: Default::default(),
             source,
         };
         let sampled = |path: &str| {

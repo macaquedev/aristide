@@ -1117,6 +1117,25 @@ impl Console {
         trim
     }
 
+    /// GO AcceptsRetuning disables per-key temperament changes, not the
+    /// declared recording-to-pipe conversion or the reference pitch.
+    fn pipe_tuning(&self, stop: StopId, rank: RankId, pipe: u16) -> Tuning {
+        let (tuning, _) = self.voice_tuning(stop, rank);
+        let mut tuning = tuning.clone();
+        if tuning.corrects_pipes()
+            && self
+                .organ
+                .rank(rank)
+                .and_then(|r| r.pipes.get(pipe as usize))
+                .is_some_and(|p| !p.accepts_retuning)
+        {
+            tuning.temperament = crate::tuning::Temperament::Equal;
+            tuning.edo = 12;
+            tuning.scale = None;
+        }
+        tuning
+    }
+
     /// Rename a coupler on the live console — a rocker's engraving,
     /// nothing sounding moves. False if the index names no coupler.
     pub fn rename_coupler(&mut self, index: usize, name: &str) -> bool {
@@ -1320,16 +1339,24 @@ impl Console {
     /// was (note-off still finds it); a pipe several keys share
     /// follows the holder that started it.
     pub fn retune_held(&mut self) -> Vec<(u64, f32)> {
-        let voices: Vec<(PipeKey, i16, f64, f64, StopId, RankId)> = self
+        let voices: Vec<(PipeKey, i16, f64, f64, StopId, RankId, u16)> = self
             .speaking
             .iter()
             .map(|(&at, voice)| {
-                (at, voice.ladder_key, voice.home, voice.model, voice.stop, voice.rank)
+                (
+                    at,
+                    voice.ladder_key,
+                    voice.home,
+                    voice.model,
+                    voice.stop,
+                    voice.rank,
+                    voice.pipe,
+                )
             })
             .collect();
         let mut updates = Vec::new();
-        for (at, ladder_key, home, model, stop, rank) in voices {
-            let (tuning, _) = self.voice_tuning(stop, rank);
+        for (at, ladder_key, home, model, stop, rank, pipe) in voices {
+            let tuning = self.pipe_tuning(stop, rank, pipe);
             let Some(deviation) = tuning.deviation_cents(ladder_key.max(0) as u16) else {
                 continue;
             };
@@ -1765,7 +1792,10 @@ impl Console {
                     // deviation from the recorded 12-EDO ladder. A key
                     // the tuning's keyboard mapping leaves unmapped
                     // sounds nothing here.
-                    let (tuning, _) = self.voice_tuning(stop.id, range.rank);
+                    let intended_pipe = (range.first_pipe as i32 + key_index as i32
+                        - range.first_key as i32)
+                        .max(0) as u16;
+                    let tuning = self.pipe_tuning(stop.id, range.rank, intended_pipe);
                     let Some(deviation) = tuning.deviation_cents(midi_key.max(0) as u16)
                     else {
                         continue;
@@ -1805,7 +1835,9 @@ impl Console {
                     let Some(spec) = self.specs.get(&(range.rank, pipe)) else {
                         continue;
                     };
-                    let home = tuning.pipe_offset(spec.home_cents as f64, spec.model_cents as f64);
+                    let target_home = (spec.home_cents - spec.target_correction_cents) as f64;
+                    let target_model = (spec.model_cents - spec.target_correction_cents) as f64;
+                    let home = tuning.pipe_offset(target_home, target_model);
                     let bend_cents = key_bend_cents - home;
                     let bend_ratio = cents_to_ratio(bend_cents) as f32;
                     // Routing is a property of the STOP (its speakers,
@@ -1843,8 +1875,8 @@ impl Console {
                         pipe,
                         key,
                         deviation: deviation - home,
-                        home: spec.home_cents as f64,
-                        model: spec.model_cents as f64,
+                        home: target_home,
+                        model: target_model,
                         ladder_key: midi_key,
                         trim,
                         shift,
@@ -1934,7 +1966,11 @@ impl Console {
                 0
             };
             let chosen = best[pick];
-            let rate_factor = if current.rate_factor > 1e-6 {
+            let tuning = self.pipe_tuning(voice.stop, voice.rank, voice.pipe);
+            let delta_home = chosen.home_delta_cents - current.home_delta_cents;
+            let delta_correction = chosen.correction_delta_cents - current.correction_delta_cents;
+            let pitch_delta = -tuning.pipe_offset(delta_home - delta_correction, -delta_correction);
+            let rate_factor = cents_to_ratio(pitch_delta) as f32 * if current.rate_factor > 1e-6 {
                 chosen.rate_factor / current.rate_factor
             } else {
                 1.0
@@ -1949,6 +1985,9 @@ impl Console {
                 // The base rate carries the recording's file rate, so a
                 // later retune diffs against the right number.
                 speaking.rate *= rate_factor;
+                speaking.home += delta_home - delta_correction;
+                speaking.model -= delta_correction;
+                speaking.deviation += pitch_delta;
             }
         }
         switches
@@ -2017,8 +2056,15 @@ impl Console {
         };
         let Some(chosen) = candidates.get(pick) else { return };
         if chosen.sample != voice.spec.sample {
-            voice.spec.rate *= chosen.rate_factor;
+            let tuning = self.pipe_tuning(voice.stop, voice.rank, voice.pipe);
+            let delta_home = chosen.home_delta_cents - chosen.correction_delta_cents;
+            let delta_model = -chosen.correction_delta_cents;
+            let pitch_delta = -tuning.pipe_offset(delta_home, delta_model);
+            voice.spec.rate *= chosen.rate_factor * cents_to_ratio(pitch_delta) as f32;
             voice.spec.sample = chosen.sample;
+            voice.home += delta_home;
+            voice.model += delta_model;
+            voice.deviation += pitch_delta;
         }
     }
 
@@ -3105,6 +3151,7 @@ mod tests {
                             midi_key_number: None,
                             midi_pitch_fraction_cents: None,
                             accepts_retuning: true,
+                            sample_pitch_mode: Default::default(),
                             source: PipeSource::Silent,
                         })
                         .collect(),
@@ -3133,6 +3180,7 @@ mod tests {
                         voicing_tilt: 1.0,
                         nominal_hz: 440.0,
                         home_cents: 0.0,
+                        target_correction_cents: 0.0,
                         model_cents: 0.0,
                         enclosures: [aristide_engine::enclosure::ENCLOSURE_NONE;
                             aristide_engine::enclosure::MAX_VOICE_ENCLOSURES],
@@ -3178,10 +3226,82 @@ mod tests {
         crate::bank::AttackOption {
             sample,
             rate_factor: 1.0,
+            home_delta_cents: 0.0,
+            correction_delta_cents: 0.0,
             wave_tremulant,
             min_velocity,
             max_since_release_ms,
         }
+    }
+
+    #[test]
+    fn variant_pitch_and_author_correction_survive_held_tuning_changes() {
+        use crate::tuning::{PipeRetune, Temperament};
+        let mut console = test_console();
+        console.set_drawn(StopId(2), false);
+        let mut alternate = attack(12, 0, None, Some(true));
+        alternate.home_delta_cents = 1200.0;
+        console.set_attack_options(HashMap::from([(
+            (RankId(1), 24),
+            vec![attack(0, 0, None, Some(false)), alternate],
+        )]));
+        console.set_tuning(Tuning {
+            temperament: Temperament::Equal,
+            pipes: PipeRetune::Exact,
+            ..Default::default()
+        });
+        let (starts, _) = console.note_on_manual(0, 60, 127);
+        assert_eq!(starts.len(), 1);
+        assert_eq!(starts[0].spec.rate, 1.0);
+        let switches = console.set_wave_tremulant(0, true);
+        assert_eq!(switches.len(), 1);
+        assert!(
+            (switches[0].rate_factor - 0.5).abs() < 1e-6,
+            "octave-high variant is explicitly transposed down"
+        );
+        console.set_tuning(Tuning::default());
+        let updates = console.retune_held();
+        assert_eq!(updates.len(), 1);
+        assert!(
+            (updates[0].1 - 1.0).abs() < 1e-6,
+            "original mode restores the variant's authored speed"
+        );
+        console.note_off_manual(0, 60);
+        console.set_tuning(Tuning {
+            temperament: Temperament::Equal,
+            pipes: PipeRetune::Exact,
+            ..Default::default()
+        });
+        let (starts, _) = console.note_on_manual(0, 60, 127);
+        assert_eq!(starts[0].spec.sample, 12);
+        assert!(
+            (starts[0].spec.rate - 0.5).abs() < 1e-6,
+            "new and held notes use the same pitch relationship"
+        );
+    }
+
+    #[test]
+    fn target_correction_is_distinct_from_original_voicing() {
+        use crate::tuning::{PipeRetune, Temperament};
+        let mut console = test_console();
+        console.set_drawn(StopId(2), false);
+        let spec = console.specs.get_mut(&(RankId(1), 24)).unwrap();
+        spec.rate = cents_to_ratio(25.0) as f32;
+        spec.home_cents = 25.0;
+        spec.model_cents = 25.0;
+        spec.target_correction_cents = -12.0;
+        let (starts, _) = console.note_on_manual(0, 60, 127);
+        assert!((starts[0].spec.rate - cents_to_ratio(25.0) as f32).abs() < 1e-6);
+        console.set_tuning(Tuning {
+            temperament: Temperament::Equal,
+            pipes: PipeRetune::Exact,
+            ..Default::default()
+        });
+        let updates = console.retune_held();
+        assert!((updates[0].1 - cents_to_ratio(-12.0) as f32).abs() < 1e-6);
+        console.note_off_manual(0, 60);
+        let (starts, _) = console.note_on_manual(0, 60, 127);
+        assert!((starts[0].spec.rate - cents_to_ratio(-12.0) as f32).abs() < 1e-6);
     }
 
     /// GO's `GetAttack` semantics: the most specific eligible attack
@@ -3761,6 +3881,7 @@ mod tests {
                         midi_key_number: None,
                         midi_pitch_fraction_cents: None,
                         accepts_retuning: true,
+                        sample_pitch_mode: Default::default(),
                         source: PipeSource::Silent,
                     })
                     .collect(),
@@ -3787,6 +3908,7 @@ mod tests {
                     voicing_tilt: 1.0,
                     nominal_hz: 440.0,
                     home_cents: 0.0,
+                    target_correction_cents: 0.0,
                     model_cents: 0.0,
                     enclosures: [aristide_engine::enclosure::ENCLOSURE_NONE;
                         aristide_engine::enclosure::MAX_VOICE_ENCLOSURES],
@@ -4103,6 +4225,7 @@ mod tests {
                     midi_key_number: None,
                     midi_pitch_fraction_cents: None,
                     accepts_retuning: true,
+                    sample_pitch_mode: Default::default(),
                     source: PipeSource::Silent,
                 })
                 .collect(),
@@ -4143,6 +4266,7 @@ mod tests {
                         voicing_tilt: 1.0,
                         nominal_hz: 440.0,
                         home_cents: 0.0,
+                        target_correction_cents: 0.0,
                         model_cents: 0.0,
                         enclosures: [aristide_engine::enclosure::ENCLOSURE_NONE;
                             aristide_engine::enclosure::MAX_VOICE_ENCLOSURES],
@@ -5069,6 +5193,7 @@ mod tests {
             midi_key_number: None,
             midi_pitch_fraction_cents: None,
             accepts_retuning: true,
+            sample_pitch_mode: Default::default(),
             source,
         };
         let organ = Organ {
@@ -5125,6 +5250,7 @@ mod tests {
                         voicing_tilt: 1.0,
                         nominal_hz: 440.0,
                         home_cents: 0.0,
+                        target_correction_cents: 0.0,
                         model_cents: 0.0,
                         enclosures: [aristide_engine::enclosure::ENCLOSURE_NONE;
                             aristide_engine::enclosure::MAX_VOICE_ENCLOSURES],

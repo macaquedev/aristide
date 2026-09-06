@@ -26,7 +26,7 @@ const HOME_TEMPERAMENT_NAMES = {
 };
 
 /// The pitch a sample set was actually recorded at for MIDI key `key`,
-/// per the snapshot's `home` block: `home.a4_hz` is the measured A4,
+/// per the snapshot's `home` block: `home.a4_hz` is the declared playback A4,
 /// `home.offsets_cents` the other eleven pitch classes' deviation from
 /// equal temperament under that A4 (C = index 0). Used only to decide
 /// whether the "as recorded" reference button has anything to do —
@@ -569,7 +569,7 @@ export function syncTuningForm(editor) {
   if (editor.root.activeElement !== editor.el.tuningRefHz) editor.el.tuningRefHz.value = tuning.reference.hz;
   if (editor.root.activeElement !== editor.el.tuningTranspose) editor.el.tuningTranspose.value = tuning.transpose ?? 0;
 
-  // "Recorded: …" — what the sample set itself sounds, measured at
+  // Instrument pitch describes authored playback from declared metadata at
   // load time. Lives on the snapshot's top level (`home`) for the
   // instrument as a whole; at set scope, `source_home` swaps in that
   // set's own recorded A4 alongside the instrument-wide temperament
@@ -580,13 +580,13 @@ export function syncTuningForm(editor) {
     if (setHome) home = { ...home, a4_hz: setHome.a4_hz };
   }
   if (!home) {
-    setText(editor.el.tuningHome, "Recorded: not measured (assuming A4 = 440 equal)");
+    setText(editor.el.tuningHome, "Instrument pitch: unknown — recording pitch metadata unavailable");
   } else {
     const name = HOME_TEMPERAMENT_NAMES[home.temperament] ?? "unequal (unnamed)";
     const mixed = home.spread_cents > 8 ? " · mixed pitch standards?" : "";
     setText(
       editor.el.tuningHome,
-      `Recorded: A4 = ${home.a4_hz.toFixed(1).replace(/\.0$/, "")} Hz · ${name} · ` +
+      `Instrument pitch: A4 = ${home.a4_hz.toFixed(1).replace(/\.0$/, "")} Hz · ${name} · ` +
         `±${home.spread_cents.toFixed(1).replace(/\.0$/, "")} ¢ · ${home.measured} of ${home.pipes} pipes${mixed}`
     );
   }

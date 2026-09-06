@@ -25,6 +25,15 @@ MIDI/audio routing. Free forever, GPLv3.
 off-limits — no decryption, ever. We read only the open GrandOrgue format and
 unencrypted HW v1/v2-era packages, and we say so clearly in user-facing docs.
 
+**Recording pitch contract (2026-09-06, user-requested rebuild):** recording pitch,
+intended pipe pitch and authored playback transposition are separate control-side
+facts. Source adapters choose explicit authored-speed or declared-destination
+playback. Release-alignment period detection must never retune a recording or
+supply the instrument's tuning fit. Shared recordings have independent pipe
+relationships; changing rank order or cache state must not change their pitch.
+Missing pitch declarations remain unknown, preserving author offsets and issuing
+a diagnostic. See `docs/progress/2026-09-06-recording-pitch-contract.md`.
+
 **Keyboard compass (locked):** a stop sounds only its own manual's accessible keys.
 A manual 8′ speaks from the keyboard's bottom key to its top and nowhere else, and
 that holds after coupling: an octave coupler that lands outside the compass sounds

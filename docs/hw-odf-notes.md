@@ -153,13 +153,15 @@ are plain XML with licensed samples, so the XML sniff alone is not enough.
 | absent/`0` | no pitch stated | `midi_key_number = None`: the file's `smpl` chunk speaks (§9) |
 | `1` | from the sample file's metadata | same |
 | `2`, `5` | tremulant waveform (§6) | n/a |
-| `3` | `Pitch_NormalMIDINoteNumber` on the ladder `Pitch_RankBasePitch64ftHarmonicNum` | key = note + 12·log2(h/8), split into `midi_key_number` (floor) and `midi_pitch_fraction_cents` |
-| `4` | `Pitch_ExactSamplePitch` in Hz | key = 69 + 12·log2(hz/440), split the same way |
+| `3` | `Pitch_NormalMIDINoteNumber` on the ladder `Pitch_RankBasePitch64ftHarmonicNum` | Hz = equal-ladder(note) × h/8, stored on the attack |
+| `4` | `Pitch_ExactSamplePitch` in Hz | exact Hz stored on the attack |
 
 Solignac states nothing for its pipe samples (their `smpl` chunks carry unity note +
 fraction; the organ is at a′ = 419 Hz and the fractions say so) and code 3 for its key
-noises; Skrzatusz states code 1 for pipes and 4 for noises. The engine's "home pitch is
-measured at load" rule makes the metadata a hint either way.
+noises; Skrzatusz states code 1 for pipes and 4 for noises. Recording metadata is now a declared fact, never a waveform-analysis hint. The
+adapter retains per-attack explicit pitch in Hz and requests a declared recording-
+to-pipe mapping; see the [pitch contract](progress/2026-09-06-recording-pitch-contract.md).
+Method-3 and method-4 values no longer round-trip through integer MIDI storage.
 
 **Harmonic ladder.** `Pitch_Tempered_RankBasePitch64ftHarmonicNum` on `Pipe_SoundEngine01`
 is the same 64′ ladder GrandOrgue's `HarmonicNumber` uses: 8 = 8′ (unison), 16 = 4′,

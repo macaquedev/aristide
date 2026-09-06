@@ -94,9 +94,9 @@ impl Temperament {
 }
 
 /// What the samples were recorded in: the organ's *home* tuning, fitted
-/// at load from loop-period estimates, with trusted pitch declarations
-/// disambiguating compound recordings. The
-/// truth the tuning layer works from instead of assuming that every
+/// at load from declared recording pitches and authored playback relationships.
+/// This describes the instrument's playback pitch, not a waveform measurement.
+/// The tuning layer uses these declared facts instead of assuming that every
 /// set sits on the 12-EDO/A440 ladder — a Baroque set at a′ = 415 in
 /// meantone is exactly that, and a target of "440 equal" or "452
 /// Pythagorean" is a per-pipe retune from here, not from a guess.

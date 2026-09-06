@@ -212,9 +212,12 @@ pub struct SampleLoop {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AttackSample {
     pub path: PathBuf,
+    /// Recording-level pitch explicitly declared by the source definition (Hz).
+    /// Independent of the pipe that references this attack; otherwise use file metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorded_pitch_hz: Option<f64>,
     pub loops: Vec<SampleLoop>,
-    /// Recorded pitch in cents relative to the pipe's nominal pitch
-    /// (0 = in tune as recorded).
+    /// Explicit playback trim in cents, independent of the recording's declared pitch.
     pub pitch_offset_cents: f64,
     /// GO `IsTremulant` tri-state: `Some(true)` = candidate only while
     /// a wave tremulant on the pipe's chest is engaged, `Some(false)` =
@@ -319,6 +322,17 @@ pub enum PipeSource {
     Silent,
 }
 
+/// How the source definition places a recording under a pipe.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SamplePitchMode {
+    /// Preserve the recording plus the author's explicit playback offsets (GO original).
+    #[default]
+    AsRecorded,
+    /// Transpose the declared recording pitch to the pipe's nominal plus author offsets.
+    Declared,
+}
+
 /// A single pipe: the atomic sounding unit. Everything in Aristide is
 /// ultimately addressed per-pipe (tuning, voicing, effects, routing).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -327,7 +341,7 @@ pub struct Pipe {
     /// temperament/retuning layers. Loaders fold the rank's harmonic
     /// in: a 4′ rank's pipe under key C4 has a C5 nominal, a 2⅔′
     /// mutation the twelfth — this is the true sounding pitch, and
-    /// wind draw, brightness and release alignment all key off it.
+    /// wind draw and brightness key off it; it is not a recording-pitch measurement.
     pub nominal_frequency_hz: f64,
     /// Set-author tuning correction in cents (already combined across
     /// the organ→windchest→rank→pipe inheritance chain by the loader).
@@ -352,12 +366,13 @@ pub struct Pipe {
     /// silences the file's fraction too (GO's rule).
     #[serde(default)]
     pub midi_pitch_fraction_cents: Option<f64>,
-    /// Whether pitch metadata may retune this pipe away from how it
-    /// was voiced (GO `AcceptsRetuning`, rank default folded in by the
-    /// loader). False = play as recorded, whatever the metadata claims
-    /// — chiffs, percussions and effects opt out this way.
+    /// Whether user-selected per-key temperaments/scales apply (GO AcceptsRetuning).
+    /// The declared recording-to-pipe mapping and reference pitch still apply.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub accepts_retuning: bool,
+    /// Explicit source playback contract, never inferred from waveform analysis.
+    #[serde(default)]
+    pub sample_pitch_mode: SamplePitchMode,
     pub source: PipeSource,
 }
 

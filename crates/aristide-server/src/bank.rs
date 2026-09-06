@@ -12,7 +12,9 @@ use std::time::Instant;
 use anyhow::Result;
 use aristide_engine::bank::{Sample, SampleBank};
 use aristide_formats::wav;
-use aristide_model::units::{cents_between, cents_to_ratio, db_to_linear, equal_ladder_hz};
+#[cfg(test)]
+use aristide_model::units::cents_between;
+use aristide_model::units::{cents_to_ratio, db_to_linear, equal_ladder_hz};
 use aristide_model::{Organ, Pipe, PipeRef, PipeSource, RankId};
 
 /// Playback parameters for one sounding pipe, precomputed against the
@@ -20,19 +22,18 @@ use aristide_model::{Organ, Pipe, PipeRef, PipeSource, RankId};
 #[derive(Debug, Clone, Copy)]
 pub struct VoiceSpec {
     pub sample: u32,
-    /// Source frames per output frame, playing the pipe at its own
-    /// nominal pitch on this device.
+    /// Source frames per output frame at the authored playback pitch,
+    /// including conversion to this device sample rate.
     pub rate: f32,
-    /// The pitch that rate sounds, in Hz. Repitching a pipe onto a key
-    /// it was not recorded for is a ratio against this.
+    /// Intended pipe pitch in Hz, before author offsets or recording drift.
+    /// Keyboard transpositions use a ratio against this.
     pub nominal_hz: f32,
-    /// How far the pipe *really* sounds from `nominal_hz` at `rate`,
-    /// cents, measured from the recording (or the organ's fitted home
-    /// tuning when this pipe could not be measured; 0 when nothing
-    /// could). A target tuning bends the pipe from here, not from the
-    /// nominal — that is what makes "440 equal" exact on a set
-    /// recorded at 415 in meantone.
+    /// Declared sounding pitch relative to nominal at the authored playback rate.
+    /// Zero when unknown; unknown pitches are reported during loading rather than
+    /// invented from audio analysis. A target tuning subtracts this offset.
     pub home_cents: f32,
+    /// Author correction applied only when a target tuning is selected.
+    pub target_correction_cents: f32,
     /// Where the organ's fitted tuning puts this pipe (rank anchor +
     /// class table), cents from `nominal_hz`: `home_cents` less the
     /// pipe's own drift. A target that keeps drift bends from here.
@@ -79,6 +80,9 @@ pub struct AttackOption {
     /// attack replaces it (differing file sample rates; the recording
     /// pitch is assumed shared — variants are the same pipe re-miked).
     pub rate_factor: f32,
+    /// Difference from the primary attack's sounding/target offsets.
+    pub home_delta_cents: f64,
+    pub correction_delta_cents: f64,
     /// GO `IsTremulant` tri-state against the chest's wave-trem state.
     pub wave_tremulant: Option<bool>,
     /// Lowest MIDI velocity this attack answers to.
@@ -98,11 +102,9 @@ pub struct LoadedBank {
     pub attack_options: HashMap<(RankId, u16), Vec<AttackOption>>,
     /// Human-readable notes about anything that didn't load.
     pub skipped: Vec<String>,
-    /// The tuning the samples were recorded in, fitted from every
-    /// pipe that measured; `None` when none did.
+    /// Descriptive tuning from declared sounding pitches; None when unknown.
     pub home: Option<crate::tuning::HomeTuning>,
-    /// Each rank's measured pitch anchor — the median of its pipes'
-    /// deviation from the 440 ladder, cents — for ranks that measured.
+    /// Each rank's declared playback anchor: median deviation from nominal.
     /// A rank comes from one set, so a set's own pitch is the median
     /// of these over its ranks.
     pub rank_anchors: HashMap<RankId, f64>,
@@ -306,7 +308,7 @@ pub fn build_with(
         outcomes,
     );
 
-    // Every sampled pipe, decoded and measured, awaiting the pitch
+    // Every sampled pipe, decoded with its recording facts, awaiting the pitch
     // decisions that need the whole instrument in view.
     let mut cache = DecodeCache {
         decoded: HashMap::new(),
@@ -318,9 +320,7 @@ pub fn build_with(
             [aristide_engine::enclosure::ENCLOSURE_NONE;
                 aristide_engine::enclosure::MAX_VOICE_ENCLOSURES],
         );
-        // Pipes decode first, then pitch decisions settle rank-wide
-        // (the junk-metadata guard below needs the whole rank in view)
-        // before specs are built.
+        // Recording facts are shared; each pipe resolves its own playback relationship.
         let pending = decode_rank_attacks(
             rank,
             &mut bank,
@@ -335,7 +335,6 @@ pub fn build_with(
             enclosures,
             pending,
             &mut skipped,
-            &bank,
         ));
     }
 
@@ -453,6 +452,21 @@ enum Outcome {
 fn collect_decode_jobs(organ: &Organ) -> Vec<Job<'_>> {
     let mut jobs: Vec<Job> = Vec::new();
     let mut seen_attacks = std::collections::HashSet::new();
+    let mut hints: HashMap<&std::path::Path, f64> = HashMap::new();
+    for rank in &organ.ranks {
+        for pipe in &rank.pipes {
+            if let Some((attacks, _)) = pipe.samples() {
+                for attack in attacks {
+                    let hint = pipe.nominal_frequency_hz
+                        * cents_to_ratio(-pipe.pitch_tuning_cents - attack.pitch_offset_cents);
+                    hints
+                        .entry(&attack.path)
+                        .and_modify(|value| *value = value.min(hint))
+                        .or_insert(hint);
+                }
+            }
+        }
+    }
     let mut seen_releases = std::collections::HashSet::new();
     for rank in &organ.ranks {
         for pipe in &rank.pipes {
@@ -464,17 +478,8 @@ fn collect_decode_jobs(organ: &Organ) -> Vec<Job<'_>> {
                     jobs.push(Job::Attack {
                         path: &attack.path,
                         attack,
-                        // Where the recording should sit: the
-                        // pipe's nominal, less what the set's own
-                        // voicing shifts it by (a mixture rank
-                        // repitched a tritone records a tritone
-                        // away). Shared files share the pitch: the
-                        // first referencing pipe measures, exactly
-                        // as the sequential decode did.
-                        nominal_hz: pipe.nominal_frequency_hz
-                            * (-(pipe.pitch_tuning_cents + attack.pitch_offset_cents)
-                                / 1200.0)
-                                .exp2(),
+                        // Deterministic release-alignment fallback only. Never a tuning input.
+                        nominal_hz: hints[attack.path.as_path()],
                     });
                 }
             }
@@ -538,7 +543,7 @@ fn plan_cache<'a>(
             } => (
                 (*path).clone(),
                 format!(
-                    "a|{}|{}|{quantize}",
+                    "a-pitch-v2|{}|{}|{quantize}",
                     serde_json::to_string(attack).unwrap_or_default(),
                     nominal_hz.to_bits()
                 ),
@@ -609,7 +614,8 @@ fn decode_misses(
                         let result = decode(&absolute, attack).map(|(mut sample, info)| {
                             // Phase-align the release splice to the
                             // pipe's fundamental.
-                            sample.align_release(nominal_hz as f32);
+                            let recording_hz = attack.recorded_pitch_hz.or_else(|| info.unity_note.map(|key| equal_ladder_hz(key as f64 + info.unity_fraction_cents / 100.0))).filter(|hz| hz.is_finite() && *hz > 0.0);
+                            sample.align_release(recording_hz.unwrap_or(nominal_hz) as f32);
                             if quantize {
                                 sample.quantize_i16();
                             }
@@ -826,20 +832,14 @@ fn decode_rank_attacks(
                             let release_index = *cache
                                 .release_cache
                                 .entry(release.path.clone())
-                                .or_insert_with(|| {
-                                    match maps.prereleased.remove(&release.path) {
-                                        Some(Ok(release_sample)) => {
-                                            Some(bank.push(release_sample))
-                                        }
-                                        Some(Err(reason)) => {
-                                            skipped.push(format!(
-                                                "{}: {reason}",
-                                                release.path.display()
-                                            ));
-                                            None
-                                        }
-                                        None => None,
+                                .or_insert_with(|| match maps.prereleased.remove(&release.path) {
+                                    Some(Ok(release_sample)) => Some(bank.push(release_sample)),
+                                    Some(Err(reason)) => {
+                                        skipped
+                                            .push(format!("{}: {reason}", release.path.display()));
+                                        None
                                     }
+                                    None => None,
                                 });
                             if let Some(index) = release_index
                                 && let Some(target) = bank.get(index)
@@ -872,14 +872,24 @@ fn decode_rank_attacks(
         };
         let attack = &attacks[primary_index];
         if variants.len() > 1 {
+            let primary_pitch = crate::pitch::resolve(pipe, info, attack);
             let options = variants
                 .iter()
-                .map(|&(index, variant)| AttackOption {
-                    sample: variant.index,
-                    rate_factor: (variant.sample_rate / info.sample_rate) as f32,
-                    wave_tremulant: attacks[index].wave_tremulant,
-                    min_velocity: attacks[index].min_velocity,
-                    max_since_release_ms: attacks[index].max_time_since_last_release_ms,
+                .map(|&(index, variant)| {
+                    let pitch = crate::pitch::resolve(pipe, variant, &attacks[index]);
+                    AttackOption {
+                        sample: variant.index,
+                        rate_factor: (variant.sample_rate / info.sample_rate
+                            * cents_to_ratio(pitch.transpose_cents - primary_pitch.transpose_cents))
+                            as f32,
+                        home_delta_cents: pitch.sounding_cents.unwrap_or(0.0)
+                            - primary_pitch.sounding_cents.unwrap_or(0.0),
+                        correction_delta_cents: pitch.target_correction_cents
+                            - primary_pitch.target_correction_cents,
+                        wave_tremulant: attacks[index].wave_tremulant,
+                        min_velocity: attacks[index].min_velocity,
+                        max_since_release_ms: attacks[index].max_time_since_last_release_ms,
+                    }
                 })
                 .collect();
             attack_options.insert((rank.id, pipe_index as u16), options);
@@ -900,187 +910,50 @@ fn decode_rank_attacks(
             }
         }
 
-        // Where the recording's pitch claim comes from: an explicit
-        // ODF MIDIKeyNumber wins (and silences the file's own
-        // fraction — GO's rule), else the file's smpl chunk.
-        let (sample_key, fraction_cents, from_smpl) =
-            match (pipe.midi_key_number, pipe.midi_pitch_fraction_cents) {
-                (Some(key), fraction) => (Some(key), fraction.unwrap_or(0.0), false),
-                (None, Some(fraction)) => (info.unity_note, fraction, true),
-                (None, None) => (info.unity_note, info.unity_fraction_cents, true),
-            };
-        let original_cents = pipe.pitch_tuning_cents + attack.pitch_offset_cents;
-        let auto_cents = sample_key.map(|key| {
-            let recorded_hz = equal_ladder_hz(key as f64 + fraction_cents / 100.0);
-            cents_between(recorded_hz, pipe.nominal_frequency_hz)
-                + pipe.pitch_correction_cents
-                + attack.pitch_offset_cents
-        });
-        let declared_cents = sample_key.map(|key| {
-            let recorded_hz = equal_ladder_hz(key as f64 + fraction_cents / 100.0);
-            cents_between(pipe.nominal_frequency_hz, recorded_hz) + original_cents
-        });
         pending.push(PendingPipe {
             pipe_index: pipe_index as u16,
             info,
-            path: attack.path.clone(),
-            original_cents,
-            auto_cents,
-            declared_cents,
-            from_smpl,
-            unity: from_smpl.then_some(sample_key).flatten(),
+            pitch: crate::pitch::resolve(pipe, info, attack),
         });
     }
     pending
 }
 
-/// Settle one rank's pitch decisions (the junk-metadata guard needs
-/// the whole rank in view) and stage its pipes for the instrument-wide
-/// tuning fit.
+/// Stage authored playback decisions. Audio analysis is deliberately not an input.
 fn stage_rank_pipes(
     rank: &aristide_model::Rank,
     rank_index: usize,
     enclosures: [u8; aristide_engine::enclosure::MAX_VOICE_ENCLOSURES],
     pending: Vec<PendingPipe>,
     skipped: &mut Vec<String>,
-    bank: &SampleBank,
 ) -> Vec<StagedPipe> {
-    let mut staged = Vec::new();
-    // Junk-metadata guard: several *distinct* files all claiming
-    // the same smpl unity note across a rank whose slots span
-    // different pitches is an editor's default (unity=60 stamped
-    // everywhere), not a measurement — no honest rank records two
-    // different keys at one pitch. Distrust the whole rank's smpl
-    // pitch (explicit ODF MIDIKeyNumber declarations still count).
-    let smpl_claims: HashMap<&PathBuf, u8> = pending
+    let definitions = pending
         .iter()
-        .filter_map(|p| p.unity.map(|unity| (&p.path, unity)))
-        .collect();
-    let one_unity = smpl_claims.len() >= 3
-        && smpl_claims.values().collect::<std::collections::HashSet<_>>().len() == 1;
-    let distrust_smpl = one_unity && {
-        let nominals: Vec<f64> = pending
-            .iter()
-            .filter(|p| p.unity.is_some())
-            .map(|p| rank.pipes[p.pipe_index as usize].nominal_frequency_hz)
-            .collect();
-        nominals.iter().any(|&hz| (hz - nominals[0]).abs() > 1e-6)
-    };
-    if distrust_smpl {
-        skipped.push(format!(
-            "{}: ignoring embedded pitch metadata (distinct files share one \
-             unity note across differing keys — an editor default, not a \
-             measurement)",
-            rank.name
-        ));
+        .filter(|p| {
+            p.pitch
+                .recording
+                .is_some_and(|r| r.source == crate::pitch::PitchSource::Definition)
+        })
+        .count();
+    tracing::debug!(rank = %rank.name, definitions, "resolved recording-pitch provenance");
+    let unknown = pending
+        .iter()
+        .filter(|p| p.pitch.recording.is_none())
+        .count();
+    if unknown > 0 {
+        skipped.push(format!("{}: {unknown} pipe(s) have no usable declared recording pitch; preserving authored playback speed, absolute tuning is unknown", rank.name));
     }
-
-    let mut partial_ambiguities = 0;
-    for p in pending {
-        let pipe = &rank.pipes[p.pipe_index as usize];
-        // What the metadata alone would decide — the fallback for
-        // a pipe whose recording cannot be measured (no loop, or
-        // material that doesn't repeat). The recording plays as
-        // the set voiced it (as recorded + PitchTuning) unless
-        // its own declared pitch says that lands somewhere else
-        // entirely — then the set relies on retuning from
-        // metadata (unit/extended ranks, borrowed top octaves,
-        // HW-style sets). A pipe (or rank) declaring
-        // AcceptsRetuning=N plays as voiced no matter what the
-        // metadata claims.
-        let metadata = match p.auto_cents.filter(|_| pipe.accepts_retuning) {
-            Some(auto) if (auto - p.original_cents).abs() > RETUNE_TOLERANCE_CENTS => {
-                if auto.abs() > 1800.0 {
-                    // GO refuses retunes past 1800 cents; a claim
-                    // that far out is junk metadata, not intent.
-                    skipped.push(format!(
-                        "{} pipe {}: embedded pitch asks for a {auto:.0}-cent \
-                         retune; ignored",
-                        rank.name, p.pipe_index
-                    ));
-                    None
-                } else if p.from_smpl && distrust_smpl {
-                    None
-                } else {
-                    Some(auto)
-                }
-            }
-            _ => None,
-        };
-        // A period suitable for release alignment is not necessarily a
-        // mixture's pitch: several pipes can produce a strong period at
-        // another partial. Honest metadata disambiguates those harmonically
-        // related candidates; a plain neighbouring-key mismatch still uses
-        // the waveform, preserving detection of mis-keyed recordings.
-        let declared_cents = p.declared_cents.filter(|value| {
-            value.is_finite()
-                && !(p.from_smpl && distrust_smpl)
-                && p.auto_cents.is_some_and(|auto| auto.abs() <= 1800.0)
-        });
-        let measured_cents = bank
-            .get(p.info.index)
-            .and_then(|sample| sample.measured_period())
-            .map(|period| {
-                let recorded_hz = p.info.sample_rate / period;
-                let voiced_hz = recorded_hz * cents_to_ratio(p.original_cents);
-                cents_between(pipe.nominal_frequency_hz, voiced_hz)
-            })
-            .filter(|cents| cents.is_finite());
-        let reconciled = reconcile_period_pitch(measured_cents, declared_cents);
-        if reconciled != measured_cents {
-            partial_ambiguities += 1;
-        }
-        let measured_cents = reconciled;
-        staged.push(StagedPipe {
+    pending
+        .into_iter()
+        .map(|p| StagedPipe {
             rank: rank.id,
             rank_index,
             pipe_index: p.pipe_index,
             info: p.info,
-            original_cents: p.original_cents,
-            metadata_cents: metadata,
-            measured_cents,
-            declared_cents,
             enclosures,
-        });
-    }
-    // Several partial ambiguities across one rank identify compound
-    // recordings rather than isolated bad measurements. Other notes of
-    // that same mixture can have less tidy beat periods, or no stable
-    // period at all. Use its trusted declarations consistently, including
-    // when fitting the rank anchor, so a majority partial cannot drag the
-    // correctly measured notes of the rank to another interval.
-    // Only recordings with a measurable period can supply evidence here.
-    let comparable = staged
-        .iter()
-        .filter(|p| p.declared_cents.is_some() && p.measured_cents.is_some())
-        .count();
-    if partial_ambiguities >= 3 && partial_ambiguities * 4 >= comparable {
-        for pipe in &mut staged {
-            if let Some(pitch) = pipe.declared_cents {
-                pipe.measured_cents = Some(pitch);
-            }
-        }
-    }
-    staged
-}
-
-/// Resolve the small-integer partial ambiguities common in compound stops.
-/// A semitone mismatch is not such an ambiguity: measurements still detect
-/// genuinely mis-keyed samples. Ratios are dimensionless, not a tuning scale.
-fn reconcile_period_pitch(measured: Option<f64>, declared: Option<f64>) -> Option<f64> {
-    let (Some(measured), Some(declared)) = (measured, declared) else {
-        return measured;
-    };
-    let distance = (measured - declared).abs();
-    for denominator in 1..=7 {
-        for numerator in (denominator + 1)..=8 {
-            let partial = 1200.0 * (numerator as f64 / denominator as f64).log2();
-            if (distance - partial).abs() <= 12.0 {
-                return Some(declared);
-            }
-        }
-    }
-    Some(measured)
+            pitch: p.pitch,
+        })
+        .collect()
 }
 
 /// A pipe's sounding pitch class against the 440 ladder (0 = A), plus
@@ -1110,8 +983,7 @@ fn model_of(
         + home.offsets_cents[class]
 }
 
-/// The organ's home tuning, from every pipe that measured: what the
-/// samples were recorded in. Each rank anchors on its own median (a
+/// Descriptive home tuning from declared sounding pitches after authored playback. Each rank anchors on its own median (a
 /// composite may hold a 415 Positif beside a 440 Great, and a rank
 /// comes from one set); the class table is instrument-wide.
 fn fit_home_tuning(
@@ -1119,18 +991,23 @@ fn fit_home_tuning(
     staged: &[StagedPipe],
 ) -> (Option<crate::tuning::HomeTuning>, HashMap<RankId, f64>) {
     let total = staged.len();
-    let measured_total = staged.iter().filter(|p| p.measured_cents.is_some()).count();
+    let measured_total = staged
+        .iter()
+        .filter(|p| p.pitch.sounding_cents.is_some())
+        .count();
     let fit = |keep: &dyn Fn(&StagedPipe) -> bool| {
         let home = crate::tuning::HomeTuning::fit(
             staged.iter().filter(|p| keep(p)).filter_map(|p| {
                 let (class, on_ladder) = sounding_class(nominal_of(organ, p));
-                p.measured_cents.map(|cents| (class, cents, on_ladder))
+                p.pitch
+                    .sounding_cents
+                    .map(|cents| (class, cents, on_ladder))
             }),
             total,
         );
         let mut per_rank: HashMap<RankId, Vec<f64>> = HashMap::new();
         for p in staged.iter().filter(|p| keep(p)) {
-            if let Some(cents) = p.measured_cents {
+            if let Some(cents) = p.pitch.sounding_cents {
                 per_rank.entry(p.rank).or_default().push(cents);
             }
         }
@@ -1142,14 +1019,13 @@ fn fit_home_tuning(
             .collect();
         (home, anchors)
     };
-    // Two passes: the first fit finds the pipes sitting at another key
-    // (see REANCHOR_TOLERANCE_CENTS), the second leaves them out so a
-    // mis-keyed file cannot skew the class it lands in.
+    // Trim outliers only from this descriptive fit. Neither pass is allowed
+    // to change the explicit transpose resolved for any recording.
     let (mut home, rank_anchor) = match fit(&|_| true) {
         (Some(first), first_anchors) => fit(&|p| {
-            p.measured_cents.is_none_or(|measured| {
+            p.pitch.sounding_cents.is_none_or(|measured| {
                 (measured - model_of(organ, &first, &first_anchors, p)).abs()
-                    <= REANCHOR_TOLERANCE_CENTS
+                    <= FIT_TRIM_TOLERANCE_CENTS
             })
         }),
         none => none,
@@ -1160,68 +1036,23 @@ fn fit_home_tuning(
     (home, rank_anchor)
 }
 
-/// Turn every staged pipe into its playback spec, moving pipes that
-/// sat at another key onto the organ's tuning by measurement and
-/// retuning unmeasured ones from their embedded metadata when it
-/// applies (see `fit_home_tuning` and `RETUNE_TOLERANCE_CENTS`).
+/// Build voice rates directly from each recording-to-pipe relationship.
+/// The fitted tuning supplies descriptive drift targets only, never playback corrections.
 fn assign_voice_specs(
     organ: &Organ,
     device_rate: f32,
     home: Option<&crate::tuning::HomeTuning>,
     rank_anchor: &HashMap<RankId, f64>,
     staged: Vec<StagedPipe>,
-    skipped: &mut Vec<String>,
+    _skipped: &mut Vec<String>,
 ) -> HashMap<(RankId, u16), VoiceSpec> {
     let mut specs = HashMap::new();
-    let mut reanchored: HashMap<RankId, (usize, f64)> = HashMap::new();
-    let mut retuned: HashMap<RankId, (usize, f64)> = HashMap::new();
     for p in staged {
         let rank = &organ.ranks[p.rank_index];
         let pipe = &rank.pipes[p.pipe_index as usize];
         let model = home.map(|home| model_of(organ, home, rank_anchor, &p));
-        let (cents, home_cents) = match (p.measured_cents, model) {
-            // Within the tolerance the pipe is where the organ's
-            // tuning has it — temperament and drift, kept exactly.
-            // Beyond it the sample sits at another key (a borrowed
-            // neighbour, a mis-keyed file): playing it as voiced would
-            // be a semitone wrong, so it is moved onto the model —
-            // from its measured pitch, no metadata needed.
-            (Some(measured), Some(model)) => {
-                let residual = measured - model;
-                if residual.abs() <= REANCHOR_TOLERANCE_CENTS {
-                    (p.original_cents, measured)
-                } else {
-                    let entry = reanchored.entry(p.rank).or_insert((0, 0.0));
-                    entry.0 += 1;
-                    entry.1 = entry.1.max(residual.abs());
-                    (p.original_cents - residual, model)
-                }
-            }
-            (Some(measured), None) => (p.original_cents, measured),
-            // Without a stable period, compare trusted declarations with
-            // the organ's own pitch standard before deciding to retune.
-            (None, Some(model)) if p.declared_cents.is_some() => {
-                let declared = p.declared_cents.unwrap();
-                let residual = declared - model;
-                if !pipe.accepts_retuning || residual.abs() <= REANCHOR_TOLERANCE_CENTS {
-                    (p.original_cents, declared)
-                } else {
-                    let entry = retuned.entry(p.rank).or_insert((0, 0.0));
-                    entry.0 += 1;
-                    entry.1 = entry.1.max(residual.abs());
-                    (p.original_cents - residual, model)
-                }
-            }
-            (None, model) => match p.metadata_cents {
-                Some(auto) => {
-                    let entry = retuned.entry(p.rank).or_insert((0, 0.0));
-                    entry.0 += 1;
-                    entry.1 = entry.1.max((auto - p.original_cents).abs());
-                    (auto, pipe.pitch_correction_cents)
-                }
-                None => (p.original_cents, model.unwrap_or(0.0)),
-            },
-        };
+        let cents = p.pitch.transpose_cents;
+        let home_cents = p.pitch.sounding_cents.unwrap_or(0.0);
         specs.insert(
             (rank.id, p.pipe_index),
             VoiceSpec {
@@ -1229,7 +1060,12 @@ fn assign_voice_specs(
                 rate: (p.info.sample_rate / device_rate as f64 * cents_to_ratio(cents)) as f32,
                 nominal_hz: pipe.nominal_frequency_hz as f32,
                 home_cents: home_cents as f32,
-                model_cents: model.unwrap_or(home_cents) as f32,
+                target_correction_cents: p.pitch.target_correction_cents as f32,
+                model_cents: if p.pitch.sounding_cents.is_some() {
+                    model.unwrap_or(home_cents) as f32
+                } else {
+                    0.0
+                },
                 gain: db_to_linear(pipe.gain_db) as f32,
                 velocity: rank.velocity_volume,
                 percussive: p.info.percussive,
@@ -1248,22 +1084,6 @@ fn assign_voice_specs(
                 delay_frames: 0,
             },
         );
-    }
-    for rank in &organ.ranks {
-        if let Some(&(count, largest)) = retuned.get(&rank.id) {
-            skipped.push(format!(
-                "{}: {count} pipe(s) retuned to their recorded-pitch metadata \
-                 (largest shift {largest:.0} cents)",
-                rank.name
-            ));
-        }
-        if let Some(&(count, largest)) = reanchored.get(&rank.id) {
-            skipped.push(format!(
-                "{}: {count} pipe(s) sat at another key and were moved onto the \
-                 organ's tuning by measurement (largest shift {largest:.0} cents)",
-                rank.name
-            ));
-        }
     }
     specs
 }
@@ -1298,60 +1118,23 @@ fn assign_borrowed_pipe_specs(
     }
 }
 
-/// How far a recording's declared pitch may sit from where the set's
-/// voicing puts it before we believe the set *relies* on metadata
-/// retuning. Under this, the difference is the organ's own recorded
-/// tuning (temperament, drift — tens of cents) and is kept; over it,
-/// the sample sits at another key entirely (unit/extended ranks reuse
-/// on the semitone grid, ≥100 cents) and playing it as voiced would be
-/// wrong by that much, silently.
-const RETUNE_TOLERANCE_CENTS: f64 = 50.0;
-
-/// One sampled pipe awaiting its rank-wide pitch decision.
+/// Per-pipe playback is resolved before any instrument-wide descriptive fit.
 struct PendingPipe {
     pipe_index: u16,
     info: DecodedInfo,
-    path: PathBuf,
-    /// Playback offset as the set voiced it: PitchTuning et al.
-    original_cents: f64,
-    /// Playback offset that lands the recording's *declared* pitch on
-    /// the pipe's nominal (GO's auto-tuning formula, PitchCorrection
-    /// folded in); `None` when nothing declares a pitch.
-    auto_cents: Option<f64>,
-    /// The declared sounding pitch after the set's voicing, relative to nominal.
-    declared_cents: Option<f64>,
-    /// Whether the declaration came from the file's smpl chunk rather
-    /// than the ODF — only smpl claims fall to the junk guard.
-    from_smpl: bool,
-    /// The smpl unity note backing `auto_cents`, for the junk guard.
-    unity: Option<u8>,
+    pitch: crate::pitch::PlaybackPitch,
 }
 
-/// How far a measured pipe may sit from where the organ's own tuning
-/// puts it before it is taken to be at another key altogether. Real
-/// tuning — the widest temperament offsets, decades of drift — stays
-/// within a quarter-tone of the model; a sample reused from the
-/// neighbouring key sits a semitone off.
-const REANCHOR_TOLERANCE_CENTS: f64 = 50.0;
+/// Descriptive fit tolerance, never used to change a recording's playback rate.
+const FIT_TRIM_TOLERANCE_CENTS: f64 = 50.0;
 
-/// One sampled pipe after decode, awaiting the instrument-wide pitch
-/// decisions (see `REANCHOR_TOLERANCE_CENTS`).
 struct StagedPipe {
     rank: RankId,
     rank_index: usize,
     pipe_index: u16,
     info: DecodedInfo,
     enclosures: [u8; aristide_engine::enclosure::MAX_VOICE_ENCLOSURES],
-    /// Playback offset as the set voiced it: PitchTuning et al.
-    original_cents: f64,
-    /// The offset the metadata path would retune by, when it would.
-    metadata_cents: Option<f64>,
-    /// Estimated sounding pitch relative to nominal, including voicing.
-    /// Uses the period measurement, disambiguated by trusted metadata
-    /// when compound recordings make that period misleading.
-    measured_cents: Option<f64>,
-    /// Trusted recorded-pitch metadata, including the set's voicing.
-    declared_cents: Option<f64>,
+    pitch: crate::pitch::PlaybackPitch,
 }
 
 fn nominal_of(organ: &Organ, staged: &StagedPipe) -> f64 {
@@ -1652,6 +1435,7 @@ mod tests {
                 midi_key_number: odf_key,
                 midi_pitch_fraction_cents: None,
                 accepts_retuning: true,
+                sample_pitch_mode: Default::default(),
                 source: aristide_model::PipeSource::Sampled {
                     attacks: vec![aristide_model::AttackSample {
                         path: PathBuf::from(name),
@@ -1680,8 +1464,9 @@ mod tests {
     /// a real recording is to the measurer.
     fn write_tone_wav(path: &Path, hz: f64) {
         let rate = 44_100u32;
-        let frames = 8192u32;
-        let (loop_start, loop_end) = (512u32, 7680u32);
+        // Integer-Hz test tones repeat exactly after one second.
+        let frames = 44_100u32;
+        let (loop_start, loop_end) = (0u32, frames);
         let mut bytes = Vec::new();
         let mut chunk = |id: &[u8; 4], payload: &[u8]| {
             bytes.extend_from_slice(id);
@@ -1718,101 +1503,31 @@ mod tests {
         std::fs::write(path, riff).expect("write tone");
     }
 
-    /// A set recorded at a′ = 415 in ¼-comma meantone, with no pitch
-    /// metadata at all, loads as exactly that: the home fit names the
-    /// pitch standard and the temperament, every pipe plays as
-    /// recorded (rate = the plain sample-rate ratio) and carries its
-    /// measured offset for a target tuning to bend from. One pipe
-    /// whose file is really the neighbouring key's is caught by
-    /// measurement and moved onto the organ's own tuning.
+    /// A measurable waveform is not an author declaration. Even a clean,
+    /// octave-ambiguous tone must not silently acquire a playback correction.
     #[test]
-    fn measured_home_tuning_of_a_baroque_set() {
-        let dir = std::env::temp_dir().join("aristide-home-tuning-test");
-        std::fs::create_dir_all(&dir).expect("test dir");
-        let table = crate::tuning::Temperament::Meantone4.offsets_cents();
-        let anchor = 1200.0 * (415.0f64 / 440.0).log2();
-        let recorded = |midi: u8| {
-            let class = (midi % 12) as usize;
-            equal_ladder_hz(midi as f64) * ((anchor + table[class] as f64) / 1200.0).exp2()
-        };
-        let mut pipes = Vec::new();
-        for midi in 36u8..=71 {
-            let name = format!("{midi}.wav");
-            // Key 65's file is the recording of key 64: a semitone flat
-            // of where the organ's tuning would have it.
-            let hz = if midi == 65 { recorded(64) } else { recorded(midi) };
-            write_tone_wav(&dir.join(&name), hz);
-            pipes.push(aristide_model::Pipe {
-                nominal_frequency_hz: equal_ladder_hz(midi as f64),
-                pitch_tuning_cents: 0.0,
-                pitch_correction_cents: 0.0,
-                gain_db: 0.0,
-                midi_key_number: None,
-                midi_pitch_fraction_cents: None,
-                accepts_retuning: true,
-                source: aristide_model::PipeSource::Sampled {
-                    attacks: vec![aristide_model::AttackSample {
-                        path: PathBuf::from(name),
-                        ..Default::default()
-                    }],
-                    releases: Vec::new(),
-                },
-            });
-        }
-        let organ = aristide_model::Organ {
-            name: "baroque".into(),
-            base_path: dir,
-            ranks: vec![aristide_model::Rank {
-                id: aristide_model::RankId(1),
-                name: "Principal 8".into(),
-                windchest: 1,
-                velocity_volume: Default::default(),
-                pipes,
-            }],
-            ..Default::default()
-        };
-        let loaded = build(&organ, 48_000.0, 32, None).expect("builds");
-        let home = loaded.home.expect("pipes measured");
-        assert!((home.a4_hz - 415.0).abs() < 0.3, "a′ = {}", home.a4_hz);
-        assert_eq!(
-            home.temperament,
-            Some(crate::tuning::Temperament::Meantone4),
-            "{home:?}"
-        );
-        assert_eq!((home.measured, home.pipes), (36, 36));
-        assert!(home.spread_cents < 1.0, "spread {}", home.spread_cents);
-
-        let ratio = 44_100.0f32 / 48_000.0;
-        for midi in 36u8..=71 {
-            let spec = loaded.specs[&(aristide_model::RankId(1), (midi - 36) as u16)];
-            let class = (midi % 12) as usize;
-            let model = anchor + table[class] as f64;
+    fn missing_pitch_metadata_preserves_authored_speed() {
+        let mut organ = pitch_test_organ("unknown-pitch", &[("a.wav", 0, 69.0, 25.0, None)]);
+        write_tone_wav(&organ.base_path.join("a.wav"), 220.0);
+        for mode in [
+            aristide_model::SamplePitchMode::AsRecorded,
+            aristide_model::SamplePitchMode::Declared,
+        ] {
+            organ.ranks[0].pipes[0].sample_pitch_mode = mode;
+            let loaded = build(&organ, 48_000.0, 32, None).unwrap();
+            let spec = loaded.specs[&(RankId(1), 0)];
+            assert!((spec.rate as f64 / (44100.0 / 48000.0) - cents_to_ratio(25.0)).abs() < 1e-6);
             assert!(
-                (spec.home_cents as f64 - model).abs() < 0.5,
-                "key {midi}: home {} vs model {model}",
-                spec.home_cents
+                loaded.home.is_none(),
+                "no pitch knowledge fabricated from the period"
             );
-            assert!((spec.model_cents as f64 - model).abs() < 0.5, "key {midi}: model");
-            if midi == 65 {
-                // Moved up the semitone its file is short of — E's
-                // recording to F's place, the tempering of each
-                // included — so it sounds where the organ's tuning
-                // puts F.
-                let expected = ratio * ((100.0 + table[5] - table[4]) / 1200.0).exp2();
-                assert!(
-                    (spec.rate / expected - 1.0).abs() < 1e-3,
-                    "mis-keyed pipe re-anchored: {} vs {expected}",
-                    spec.rate
-                );
-            } else {
-                assert!((spec.rate - ratio).abs() < 1e-6, "key {midi} plays as recorded");
-            }
+            assert!(
+                loaded
+                    .skipped
+                    .iter()
+                    .any(|s| s.contains("absolute tuning is unknown"))
+            );
         }
-        assert!(
-            loaded.skipped.iter().any(|s| s.contains("1 pipe(s) sat at another key")),
-            "{:?}",
-            loaded.skipped
-        );
     }
 
     /// Every attack variant decodes into the bank and the selection
@@ -1841,6 +1556,7 @@ mod tests {
                     midi_key_number: None,
                     midi_pitch_fraction_cents: None,
                     accepts_retuning: true,
+                    sample_pitch_mode: Default::default(),
                     source: aristide_model::PipeSource::Sampled {
                         attacks: vec![
                             aristide_model::AttackSample {
@@ -1978,8 +1694,8 @@ mod tests {
     /// ODF `AcceptsRetuning=N`: the pipe plays as voiced no matter how
     /// far its metadata says it sits from the slot.
     #[test]
-    fn accepts_retuning_off_disables_the_auto_retune() {
-        // smpl claims 60, slot wants 57: normally a 3-semitone retune.
+    fn original_mode_keeps_authored_speed_when_retuning_is_disabled() {
+        // Original playback must preserve author speed even with a different declared pitch.
         let mut organ =
             pitch_test_organ("no-retune", &[("borrowed.wav", 60, 57.0, 0.0, None)]);
         organ.ranks[0].pipes[0].accepts_retuning = false;
@@ -2017,6 +1733,7 @@ mod tests {
                     midi_key_number: None,
                     midi_pitch_fraction_cents: None,
                     accepts_retuning: true,
+                    sample_pitch_mode: Default::default(),
                     source: aristide_model::PipeSource::Sampled {
                         attacks: vec![aristide_model::AttackSample {
                             path: PathBuf::from("att.wav"),
@@ -2077,6 +1794,7 @@ mod tests {
                     midi_key_number: None,
                     midi_pitch_fraction_cents: None,
                     accepts_retuning: true,
+                    sample_pitch_mode: Default::default(),
                     source: aristide_model::PipeSource::Sampled {
                         attacks: vec![aristide_model::AttackSample {
                             path: PathBuf::from("looped.wav"),
@@ -2118,72 +1836,161 @@ mod tests {
         1200.0 * (spec.rate as f64).log2()
     }
 
-    /// The §6 bug class: recordings whose declared pitch sits at
-    /// another key entirely retune to their slot; declarations that
-    /// agree with the voicing (within the organ's own tuning) keep the
-    /// recorded character; absurd claims are refused.
     #[test]
-    fn recorded_pitch_metadata_reconciles() {
-        let organ = pitch_test_organ(
-            "reconcile",
+    fn recording_declarations_are_resolved_per_pipe_not_per_rank() {
+        let mut organ = pitch_test_organ(
+            "declarations",
             &[
-                // smpl claims 60, slot wants 57, nothing voiced: the
-                // set relies on retuning — three semitones down.
-                ("borrowed.wav", 60, 57.0, 0.0, None),
-                // smpl agrees with the slot; +30 cents of voiced
-                // PitchTuning is recorded character, kept verbatim.
-                ("voiced.wav", 60, 60.0, 30.0, None),
-                // ODF declares the recording an octave below the slot.
-                ("odf-key.wav", 0, 60.0, 0.0, Some(48)),
-                // smpl claims 8 octaves off: junk, refused.
-                ("junk.wav", 127, 30.0, 0.0, None),
+                ("shared.wav", 60, 57.0, 0.0, None),
+                ("shared.wav", 60, 60.0, 30.0, None),
+                ("other.wav", 60, 60.0, 0.0, Some(48)),
+                ("high.wav", 127, 30.0, 0.0, None),
             ],
         );
-        let loaded = build(&organ, 44_100.0, 16, None).expect("bank builds");
-        assert!((rate_cents(&loaded, 0) - -300.0).abs() < 1.0, "auto retune");
-        assert!((rate_cents(&loaded, 1) - 30.0).abs() < 1.0, "voicing kept");
-        assert!((rate_cents(&loaded, 2) - 1200.0).abs() < 1.0, "ODF key retune");
-        assert!(rate_cents(&loaded, 3).abs() < 1.0, "junk refused");
-        assert!(
-            loaded.skipped.iter().any(|note| note.contains("retuned")),
-            "retunes are reported: {:?}",
-            loaded.skipped
-        );
-        assert!(
-            loaded.skipped.iter().any(|note| note.contains("ignored")),
-            "refusals are reported: {:?}",
-            loaded.skipped
-        );
+        for pipe in &mut organ.ranks[0].pipes {
+            pipe.sample_pitch_mode = aristide_model::SamplePitchMode::Declared;
+        }
+        let loaded = build(&organ, 44_100.0, 16, None).unwrap();
+        for (index, expected) in [-300.0, 30.0, 1200.0, -9700.0].into_iter().enumerate() {
+            assert!((rate_cents(&loaded, index as u16) - expected).abs() < 0.01);
+        }
     }
 
-    /// Distinct files all claiming one unity note across a rank whose
-    /// slots differ is an editor default, not a measurement — the rank
-    /// keeps its voiced tuning and says why.
     #[test]
-    fn junk_unity_notes_are_distrusted_rank_wide() {
-        let organ = pitch_test_organ(
-            "junk-unity",
+    fn shared_recording_pitch_is_independent_of_rank_order_and_cache() {
+        let mut organ = pitch_test_organ("rank-order", &[("shared.wav", 69, 57.0, 0.0, None)]);
+        organ.ranks[0].pipes[0].sample_pitch_mode = aristide_model::SamplePitchMode::Declared;
+        let mut upper = organ.ranks[0].clone();
+        upper.id = RankId(2);
+        upper.pipes[0].nominal_frequency_hz = 440.0;
+        organ.ranks.push(upper);
+        let cache = organ.base_path.join("pitch.samples");
+        let _ = std::fs::remove_file(&cache);
+        for bits in [16, 32] {
+            for _ in 0..2 {
+                let cold = build(&organ, 48_000.0, bits, None).unwrap();
+                let cached = build(&organ, 48_000.0, bits, Some(&cache)).unwrap();
+                let warm = build(&organ, 48_000.0, bits, Some(&cache)).unwrap();
+                for loaded in [&cold, &cached, &warm] {
+                    assert!(
+                        (loaded.specs[&(RankId(1), 0)].rate as f64 - 44100.0 / 48000.0 / 2.0).abs()
+                            < 1e-6
+                    );
+                    assert!(
+                        (loaded.specs[&(RankId(2), 0)].rate as f64 - 44100.0 / 48000.0).abs() < 1e-6
+                    );
+                    assert_eq!(
+                        loaded.specs[&(RankId(1), 0)].sample,
+                        loaded.specs[&(RankId(2), 0)].sample
+                    );
+                    assert_eq!(loaded.specs[&(RankId(1), 0)].home_cents, 0.0);
+                    assert_eq!(loaded.specs[&(RankId(2), 0)].home_cents, 0.0);
+                }
+                organ.ranks.reverse();
+            }
+        }
+    }
+
+    #[test]
+    fn each_attack_uses_its_own_declared_pitch() {
+        let mut organ = pitch_test_organ(
+            "attack-pitch",
             &[
-                ("a.wav", 60, 55.0, 0.0, None),
-                ("b.wav", 60, 60.0, 0.0, None),
-                ("c.wav", 60, 65.0, 0.0, None),
+                ("a.wav", 69, 69.0, 0.0, None),
+                ("b.wav", 69, 69.0, 0.0, None),
             ],
         );
-        let loaded = build(&organ, 44_100.0, 16, None).expect("bank builds");
-        for pipe in 0..3 {
+        let second = organ.ranks[0].pipes[1].samples().unwrap().0[0].clone();
+        let pipe = &mut organ.ranks[0].pipes[0];
+        pipe.sample_pitch_mode = aristide_model::SamplePitchMode::Declared;
+        if let PipeSource::Sampled { attacks, .. } = &mut pipe.source {
+            attacks[0].recorded_pitch_hz = Some(220.0);
+            let mut second = second;
+            second.recorded_pitch_hz = Some(330.0);
+            attacks.push(second);
+        }
+        let loaded = build(&organ, 48000.0, 16, None).unwrap();
+        let primary = loaded.specs[&(RankId(1), 0)];
+        assert!((primary.rate as f64 - 44100.0 / 48000.0 * 2.0).abs() < 1e-6);
+        let options = &loaded.attack_options[&(RankId(1), 0)];
+        assert!(
+            (primary.rate as f64 * options[1].rate_factor as f64 - 44100.0 / 48000.0 * 440.0 / 330.0)
+                .abs()
+                < 1e-6
+        );
+        assert!(options[1].home_delta_cents.abs() < 1e-9);
+    }
+
+    #[test]
+    fn declared_baroque_recording_renders_original_and_target_pitch() {
+        use aristide_model::{Manual, ManualId, RankRange, Stop, StopId};
+        let mut organ = pitch_test_organ("baroque-declared", &[("a.wav", 0, 69.0, 0.0, None)]);
+        write_tone_wav(&organ.base_path.join("a.wav"), 415.0);
+        if let PipeSource::Sampled { attacks, .. } = &mut organ.ranks[0].pipes[0].source {
+            attacks[0].recorded_pitch_hz = Some(415.0);
+        }
+        organ.manuals.push(Manual {
+            id: ManualId(1),
+            name: "Manual".into(),
+            first_midi_note: 69,
+            key_count: 1,
+            kind: Default::default(),
+            hex: None,
+        });
+        organ.stops.push(Stop {
+            id: StopId(1),
+            name: "8 foot".into(),
+            manual: ManualId(1),
+            own_pipes: false,
+            ranks: vec![RankRange {
+                rank: RankId(1),
+                first_key: 0,
+                first_pipe: 0,
+                key_count: 1,
+            }],
+        });
+        let loaded = build(&organ, 44100.0, 32, None).unwrap();
+        let home = loaded.home.unwrap();
+        assert!((home.a4_hz - 415.0).abs() < 1e-6);
+        assert_eq!(loaded.specs[&(RankId(1), 0)].rate, 1.0);
+        let bank = std::sync::Arc::new(loaded.bank);
+        for (temperament, expected) in [
+            (crate::tuning::Temperament::Original, 415.0),
+            (crate::tuning::Temperament::Equal, 440.0),
+        ] {
+            let mut console = crate::console::Console::new(
+                organ.clone(),
+                loaded.specs.clone(),
+                vec![StopId(1)],
+                44100.0,
+            );
+            console.set_home(Some(std::sync::Arc::new(home.clone())));
+            console.set_tuning(crate::tuning::Tuning {
+                temperament,
+                reference: crate::tuning::PitchReference {
+                    key: 69,
+                    hz: expected,
+                },
+                pipes: crate::tuning::PipeRetune::Exact,
+                ..Default::default()
+            });
+            let (mut engine, mut handle) = aristide_engine::Engine::new(44100.0, bank.clone());
+            engine.set_lite(true); // Isolate sample pitch from the wind model.
+            for start in console.note_on_manual(0, 69, 127).0 {
+                handle.send(start.command());
+            }
+            let mut pcm = vec![0.0; 88200 * 2];
+            engine.process(&mut pcm, 2);
+            let mono: Vec<f32> = pcm[(88200 - 16384) * 2..]
+                .chunks_exact(2)
+                .map(|v| (v[0] + v[1]) * 0.5)
+                .collect();
+            let hz = measured_f0(&mono, 44100.0, expected);
             assert!(
-                rate_cents(&loaded, pipe).abs() < 1.0,
-                "pipe {pipe} must play as recorded"
+                cents_between(expected, hz).abs() < 3.0,
+                "{temperament:?}: rendered {hz} Hz instead of {expected}"
             );
         }
-        assert!(
-            loaded
-                .skipped
-                .iter()
-                .any(|note| note.contains("ignoring embedded pitch")),
-            "guard is reported: {:?}",
-            loaded.skipped
-        );
     }
 
     /// The demo set's own metadata agrees with its voicing everywhere
@@ -3419,7 +3226,7 @@ mod tests {
     /// octave (preferring the lowest candidate within a hair of the
     /// best — the standard guard against octave-up errors on
     /// harmonic-rich strings and reeds), then a fine scan settles cents.
-    fn measured_f0(mono: &[f32], rate: f64, expected_hz: f64) -> f64 {
+    pub(super) fn measured_f0(mono: &[f32], rate: f64, expected_hz: f64) -> f64 {
         let n = mono.len();
         let mag = |hz: f64| -> Option<f64> {
             if hz <= 10.0 || hz >= rate * 0.45 {
@@ -4699,90 +4506,10 @@ mod tests {
 mod compound_pitch_tests {
     use super::*;
 
-    #[test]
-    fn partial_periods_do_not_override_declared_pitch() {
-        let declared = -95.0;
-        for ratio in [1.5_f64, 4.0 / 3.0, 1.25, 1.2, 2.0] {
-            let partial = 1200.0 * ratio.log2();
-            for sign in [-1.0, 1.0] {
-                assert_eq!(
-                    reconcile_period_pitch(Some(declared + sign * partial), Some(declared)),
-                    Some(declared)
-                );
-            }
-        }
-        assert_eq!(
-            reconcile_period_pitch(Some(declared - 100.0), Some(declared)),
-            Some(declared - 100.0),
-            "a neighbouring-key recording is still detected"
-        );
-        assert_eq!(reconcile_period_pitch(Some(0.0), None), Some(0.0));
-        assert_eq!(reconcile_period_pitch(None, Some(declared)), None);
-    }
-
-    #[test]
-    fn unmeasured_recordings_keep_the_organs_pitch_standard() {
-        let organ = Organ {
-            ranks: vec![aristide_model::Rank {
-                id: RankId(1),
-                name: "Unmeasured compound stop".into(),
-                windchest: 1,
-                velocity_volume: Default::default(),
-                pipes: vec![Pipe {
-                    nominal_frequency_hz: 440.0,
-                    pitch_tuning_cents: 0.0,
-                    pitch_correction_cents: 0.0,
-                    gain_db: 0.0,
-                    midi_key_number: None,
-                    midi_pitch_fraction_cents: None,
-                    accepts_retuning: true,
-                    source: PipeSource::Silent,
-                }],
-            }],
-            ..Default::default()
-        };
-        let recorded = 1200.0 * (419.0_f64 / 440.0).log2();
-        let home = crate::tuning::HomeTuning::fit([(9, recorded, true)], 1).unwrap();
-        let staged = StagedPipe {
-            rank: RankId(1),
-            rank_index: 0,
-            pipe_index: 0,
-            info: DecodedInfo {
-                index: 0,
-                sample_rate: 44100.0,
-                percussive: false,
-                unity_note: Some(68),
-                unity_fraction_cents: 0.0,
-            },
-            enclosures: [aristide_engine::enclosure::ENCLOSURE_NONE;
-                aristide_engine::enclosure::MAX_VOICE_ENCLOSURES],
-            original_cents: 0.0,
-            metadata_cents: Some(-recorded),
-            measured_cents: None,
-            declared_cents: Some(recorded),
-        };
-        let mut warnings = Vec::new();
-        let specs = assign_voice_specs(
-            &organ,
-            44100.0,
-            Some(&home),
-            &HashMap::new(),
-            vec![staged],
-            &mut warnings,
-        );
-        let spec = specs[&(RankId(1), 0)];
-        assert_eq!(
-            spec.rate, 1.0,
-            "an unmeasured 419 Hz recording must not be pulled to 440 Hz"
-        );
-        assert!((spec.home_cents as f64 - recorded).abs() < 0.001);
-        assert!(warnings.is_empty());
-    }
-
     /// The optional downloaded fixture exercises compound recordings that a
     /// synthetic single-pipe tone cannot represent. No sample file is changed.
     #[test]
-    fn solignac_compound_stops_do_not_jump_to_another_partial() {
+    fn solignac_keys_follow_recording_to_pipe_contract() {
         for definition in ["Solignac orig", "Solignac extend"] {
             let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
                 "../../testsets/avo-solignac/OrganDefinitions/{definition}.Organ_Hauptwerk_xml"
@@ -4850,7 +4577,11 @@ mod compound_pitch_tests {
                             let sounding = recorded * starts[0].spec.rate as f64 * 44100.0
                                 / info.sample_rate as f64;
                             let error = cents_between(pipe.nominal_frequency_hz, sounding);
-                            assert!(error.abs() < 35.0, "{} key {key}: sounding pitch is off by {error:.1} cents under {temperament:?}", stop.name);
+                            assert!(
+                                error.abs() < 35.0,
+                                "{} key {key}: sounding pitch is off by {error:.1} cents under {temperament:?}",
+                                stop.name
+                            );
                             console.note_off_manual(manual, key);
                         }
                         assert!(console.note_on_manual(manual, first - 1, 127).0.is_empty());
@@ -4868,22 +4599,67 @@ mod compound_pitch_tests {
                         .get(&(rank.id, index as u16))
                         .expect("every sampled pipe loaded");
                     let info = wav::read_info(&organ.base_path.join(&attacks[0].path)).unwrap();
-                    let cents =
-                        1200.0 * (spec.rate as f64 * 44100.0 / info.sample_rate as f64).log2();
+                    let cents = 1200.0 * (spec.rate as f64 * 44100.0 / info.sample_rate as f64).log2();
+                    let recorded = equal_ladder_hz(
+                        info.midi_unity_note.unwrap() as f64
+                            + info.pitch_fraction.unwrap_or(0) as f64 / 4294967296.0,
+                    );
+                    let expected = match pipe.sample_pitch_mode {
+                        aristide_model::SamplePitchMode::AsRecorded => {
+                            pipe.pitch_tuning_cents + attacks[0].pitch_offset_cents
+                        }
+                        aristide_model::SamplePitchMode::Declared => {
+                            cents_between(recorded, pipe.nominal_frequency_hz)
+                                + pipe.pitch_tuning_cents
+                                + attacks[0].pitch_offset_cents
+                        }
+                    };
                     assert!(
-                        cents.abs() < 150.0,
-                        "{definition}: {} pipe {index} shifted {cents:.1} cents",
+                        (cents - expected).abs() < 0.01,
+                        "{definition}: {} pipe {index}: {cents} vs {expected}",
                         rank.name
                     );
-                    if attacks[0].path.ends_with("06-Plein-Jeu/077-f.wav")
-                        || attacks[0].path.ends_with("07-Cornet/068-g#.wav")
-                    {
-                        assert!(
-                            cents.abs() < 1.0,
-                            "{} must retain its recorded pitch",
-                            attacks[0].path.display()
-                        );
+                }
+            }
+            if definition == "Solignac extend" {
+                let stop = organ
+                    .stops
+                    .iter()
+                    .find(|s| s.name.starts_with("2222"))
+                    .unwrap();
+                let manual = organ
+                    .manuals
+                    .iter()
+                    .position(|m| m.id == stop.manual)
+                    .unwrap();
+                let mut console = crate::console::Console::new(
+                    organ.clone(),
+                    loaded.specs.clone(),
+                    vec![stop.id],
+                    44_100.0,
+                );
+                console.set_home(loaded.home.clone().map(std::sync::Arc::new));
+                let bank = std::sync::Arc::new(loaded.bank);
+                for key in [70, 71] {
+                    let (mut engine, mut handle) = aristide_engine::Engine::new(44_100.0, bank.clone());
+                    engine.set_lite(true); // Isolate recording pitch from wind modulation.
+                    for start in console.note_on_manual(manual, key, 127).0 {
+                        assert!(handle.send(start.command()));
                     }
+                    let mut pcm = vec![0.0; 220_500 * 2];
+                    engine.process(&mut pcm, 2);
+                    let mono: Vec<f32> = pcm[(220_500 - 16_384) * 2..]
+                        .chunks_exact(2)
+                        .map(|s| (s[0] + s[1]) * 0.5)
+                        .collect();
+                    let expected = equal_ladder_hz(key as f64 + 12.0);
+                    let actual = super::tests::measured_f0(&mono, 44_100.0, expected);
+                    let error = cents_between(expected, actual);
+                    assert!(
+                        error.abs() < 25.0,
+                        "Positif Flute 4 key {key}: rendered {actual:.2} Hz, expected {expected:.2} Hz ({error:.1} cents)"
+                    );
+                    console.note_off_manual(manual, key);
                 }
             }
         }

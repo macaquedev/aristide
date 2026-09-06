@@ -1076,6 +1076,10 @@ impl<'a> Builder<'a> {
             tremulants,
         };
         let mut built = silent_pipe(note, harmonic);
+        // The imported pipe has an explicit destination on its harmonic ladder.
+        // The general "EnablePlayingAtOriginalOrganPitch" flag is a capability,
+        // not a request to bypass this recording-to-pipe relationship.
+        built.sample_pitch_mode = aristide_model::SamplePitchMode::Declared;
         let Some(layer) = self
             .layers_by_pipe
             .get(&pipe_id)
@@ -1088,7 +1092,7 @@ impl<'a> Builder<'a> {
         built.gain_db = self.organ_gain_db + layer.float("AmpLvl_LevelAdjustDecibels").unwrap_or(0.0);
         built.pitch_tuning_cents =
             self.organ_tuning_cents + layer.float("PitchLvl_DetuningPercentSemitones").unwrap_or(0.0);
-        let (attacks, first_sample) = self.read_attacks(layer_id, wave_tremulant.map(|_| false));
+        let (attacks, _first_sample) = self.read_attacks(layer_id, wave_tremulant.map(|_| false));
         if attacks.is_empty() {
             // Release-only layers are key-off noises; anything else
             // without an attack is a hole in the set.
@@ -1096,11 +1100,6 @@ impl<'a> Builder<'a> {
                 self.warn(format!("pipe {pipe_id} (note {note}) has no attack sample; silent"));
             }
             return (built, key);
-        }
-        if let Some(sample) = first_sample {
-            let (key_number, fraction) = recorded_key(sample);
-            built.midi_key_number = key_number;
-            built.midi_pitch_fraction_cents = fraction;
         }
         let releases = self.read_releases(layer_id, wave_tremulant.map(|_| false));
         built.source = PipeSource::Sampled { attacks, releases };
@@ -1148,7 +1147,7 @@ impl<'a> Builder<'a> {
         let first_sample = picked.first().map(|(_, sample, _)| *sample);
         let attacks = picked
             .into_iter()
-            .map(|(row, _, path)| {
+            .map(|(row, sample, path)| {
                 let highest = row.int("AttackSelCriteria_HighestVelocity").unwrap_or(127);
                 let min_velocity = velocities
                     .iter()
@@ -1165,6 +1164,7 @@ impl<'a> Builder<'a> {
                     .min()
                     .map(|above| (above - 1).max(0) as u32);
                 AttackSample {
+                    recorded_pitch_hz: recorded_pitch_hz(sample),
                     path,
                     loops: Vec::new(),
                     pitch_offset_cents: 0.0,
@@ -1538,36 +1538,26 @@ fn silent_pipe(note: i64, harmonic: f64) -> Pipe {
         midi_key_number: None,
         midi_pitch_fraction_cents: None,
         accepts_retuning: true,
+        sample_pitch_mode: Default::default(),
         source: PipeSource::Silent,
     }
 }
 
-/// What a sample claims about its recorded pitch, as the model's key +
-/// fraction. Method 3 states a key on a harmonic ladder, method 4 an
-/// exact frequency; anything else defers to the file's own `smpl`
-/// chunk (notes §4).
-fn recorded_key(sample: &Row) -> (Option<u8>, Option<f64>) {
-    let semitones = match sample.int("Pitch_SpecificationMethodCode").unwrap_or(0) {
-        3 => {
-            let Some(note) = sample.int("Pitch_NormalMIDINoteNumber").filter(|n| *n > 0) else {
-                return (None, None);
-            };
+/// Recording-level declarations stay in Hz; no MIDI rounding or pipe context.
+/// Zero marks an invalid explicit declaration so it cannot silently fall back
+/// to unrelated embedded metadata. The resolver reports it as unknown.
+fn recorded_pitch_hz(sample: &Row) -> Option<f64> {
+    let hz = match sample.int("Pitch_SpecificationMethodCode") {
+        Some(3) => {
+            let note = sample.int("Pitch_NormalMIDINoteNumber").filter(|n| *n > 0);
             let harmonic = harmonic_or_unison(sample.float("Pitch_RankBasePitch64ftHarmonicNum"));
-            note as f64 + 12.0 * (harmonic / 8.0).log2()
+            note.map(|note| equal_ladder_hz(note as f64) * harmonic / 8.0)
+                .unwrap_or(0.0)
         }
-        4 => {
-            let Some(hz) = sample.float("Pitch_ExactSamplePitch").filter(|hz| *hz > 0.0) else {
-                return (None, None);
-            };
-            69.0 + 12.0 * (hz / 440.0).log2()
-        }
-        _ => return (None, None),
+        Some(4) => sample.float("Pitch_ExactSamplePitch").unwrap_or(0.0),
+        _ => return None,
     };
-    let key = semitones.floor();
-    if !(0.0..=127.0).contains(&key) {
-        return (None, None);
-    }
-    (Some(key as u8), Some((semitones - key) * 100.0))
+    Some(if hz.is_finite() && hz > 0.0 { hz } else { 0.0 })
 }
 
 fn rate_percent(value: Option<f64>) -> u32 {
@@ -1871,11 +1861,9 @@ mod tests {
         let by_smpl = &organ.ranks[0].pipes[0];
         assert_eq!(by_smpl.midi_key_number, None, "no declaration: the file's smpl chunk");
         let exact = &organ.ranks[0].pipes[2];
-        assert_eq!(exact.midi_key_number, Some(60));
-        assert!(exact.midi_pitch_fraction_cents.unwrap() < 0.01);
+        assert!((exact.samples().unwrap().0[0].recorded_pitch_hz.unwrap() - equal_ladder_hz(60.0)).abs() < 0.01);
         let on_ladder = &organ.ranks[1].pipes[0];
-        assert_eq!(on_ladder.midi_key_number, Some(48), "note 36 on the 4' ladder");
-        assert!(on_ladder.midi_pitch_fraction_cents.unwrap().abs() < 1e-9);
+        assert!((on_ladder.samples().unwrap().0[0].recorded_pitch_hz.unwrap() - equal_ladder_hz(48.0)).abs() < 1e-9);
     }
 
     #[test]

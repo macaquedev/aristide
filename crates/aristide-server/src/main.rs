@@ -7,6 +7,7 @@ mod console;
 mod control;
 mod http;
 mod load;
+mod pitch;
 mod spool;
 mod state;
 mod tuning;

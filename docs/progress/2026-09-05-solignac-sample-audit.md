@@ -1,5 +1,9 @@
 # Solignac sample and playback audit
 
+Historical audit: the heuristic fixes below have been superseded by the
+[explicit recording-pitch contract](2026-09-06-recording-pitch-contract.md).
+
+
 The local `testsets/avo-solignac` download contains 1,794 WAV files
 (2,123,935,208 bytes). Both supplied organ definitions reference 1,739 distinct
 sample paths; all exist. A RIFF/chunk scan found no truncated chunks or invalid

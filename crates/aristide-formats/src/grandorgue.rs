@@ -889,6 +889,7 @@ impl Builder<'_> {
         };
         let harmonic = read_harmonic(section, &format!("{prefix}HarmonicNumber"), rank_harmonic)?;
         let mut pipe = Pipe {
+            sample_pitch_mode: Default::default(),
             // The true sounding pitch: the key's ladder pitch times the
             // harmonic ratio (8 = unison). GO's expected-pitch formula
             // log2(H/8)·1200 cents, folded into Hz here.
@@ -1009,6 +1010,7 @@ impl Builder<'_> {
         // Empty `loops` means: fall back to the WAV's own smpl chunk at
         // sample-load time.
         Ok(AttackSample {
+            recorded_pitch_hz: None,
             path: normalize_path(path),
             loops,
             pitch_offset_cents: 0.0,
