@@ -21,7 +21,7 @@ try {
           const controls = [...document.querySelectorAll('.menubar button, #gain')].filter(e => e.getClientRects().length).map(e => e.getBoundingClientRect());
           return {
             fits: document.documentElement.scrollWidth <= innerWidth,
-            tiles: tiles.length > 0 && tiles.every(e => e.clientWidth >= 126 && e.clientHeight >= 62),
+            tiles: tiles.length > 0 && tiles.every(e => e.clientWidth >= 90 && e.clientWidth <= 96 && e.clientHeight >= 46 && e.clientHeight <= 72),
             fills: grids.every(e => Math.abs(e.clientWidth - e.parentElement.clientWidth) <= 2),
             controls: controls.every((a,i) => a.left >= 0 && a.right <= innerWidth && controls.slice(i+1).every(b => a.right <= b.left+1 || b.right <= a.left+1 || a.bottom <= b.top+1 || b.bottom <= a.top+1))
           };

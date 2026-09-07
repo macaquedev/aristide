@@ -26,10 +26,10 @@ try {
     check(await d.eval(`(() => {
       return [...document.querySelectorAll('.panel-jamb .knob')].every(k => {
         const r=k.getBoundingClientRect(), label=k.querySelector('.stop-name');
-        return r.width>=128 && r.height>=64 && parseFloat(getComputedStyle(label).fontSize)>=14
+        return r.width>=90 && r.width<=96 && r.height>=48 && parseFloat(getComputedStyle(label).fontSize)>=11.5
           && label.scrollWidth<=label.clientWidth+1;
       });
-    })()`), `${width}px: stop tiles keep readable labels and generous touch targets`);
+    })()`), `${width}px: stop controls stay compact with readable labels and touch targets`);
     check(await d.eval(`(() => {
       const label=document.querySelector('.panel-jamb .stop-name'), original=label.textContent;
       label.textContent='ContraBombardeExtraordinaire 32';
