@@ -32,4 +32,6 @@ milestone plan (M0–M7). Do not re-litigate locked decisions without the user.
   here; anything audible is verified by the user pulling to their desktop and running
   `cargo run --release -p aristide-server`. Never assume an audio device exists.
 - Commit style: conventional commits, atomic, imperative subject ≤50 chars.
-  Push to `main` on green tests unless mid-refactor.
+  Follow `AGENTS.md` for the commit-and-push workflow: after appropriate checks
+  pass, commit directly on `main` and immediately push each atomic commit to
+  `origin/main`, without asking for additional confirmation.
