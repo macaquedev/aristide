@@ -1,7 +1,14 @@
 # Aristide agent instructions
 
-Read `CLAUDE.md` for project context and ground rules, and follow its instruction
-to read `DESIGN.md` before implementation work.
+At the start of every task in this repository, read `CLAUDE.md` in full and
+follow it as shared project instructions, including when working as Codex or
+another agent. Its filename does not limit it to Claude. Read `DESIGN.md` before
+implementation work, as it requires, and consult the referenced format notes
+when working on their respective loaders. Re-read these instructions if they
+change during a task.
+
+Keep shared project context and ground rules in `CLAUDE.md`; this file adds the
+commit-and-push workflow. Keep both files consistent when updating instructions.
 
 ## Commit and push workflow
 
