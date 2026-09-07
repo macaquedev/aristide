@@ -51,6 +51,36 @@ try {
   await tap('#organ-prefs-back');await action('Buttons & shortcuts');check(await visible('#editor-bindings'),'button assignments are reachable inside preferences');
   await tap('[data-category="keyboards"]');await tap('.organ-pref-group summary');
   await action('Connect keyboard / MIDI input');check(await visible('#editor-midi'),'MIDI input editor is reachable from the keyboard list');
+  const midiFits = () => d.eval(`(()=>{
+    const host=document.querySelector('.organ-prefs-content');
+    const r=host.getBoundingClientRect();
+    return host.scrollWidth<=host.clientWidth+1 &&
+      [...document.querySelectorAll('#editor-midi-inputs button, #editor-midi-inputs select, #editor-midi-inputs input')]
+        .filter(el=>el.getClientRects().length).every(el=>{const b=el.getBoundingClientRect();return b.width>=44&&b.left>=r.left&&b.right<=r.right;});
+  })()`);
+  for(const width of [320,390,768,1024,1500]) {
+    await d.send('Emulation.setDeviceMetricsOverride',{width,height:950,deviceScaleFactor:1,mobile:width<1000});
+    await sleep(100);
+    check(await midiFits(),`${width}px: input fields and Listen fit without horizontal scrolling`);
+  }
+  await d.shot('/tmp/aristide-midi-preferences-desktop.png');
+  await d.send('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:true});
+  await tap('#editor-midi-inputs .listen');await sleep(300);
+  check((await state()).midi.learning?.manual===0,'Listen starts learning for the selected keyboard');
+  check(await d.eval(`document.querySelector('#editor-midi-inputs .listen').textContent==='Cancel'&&document.querySelector('#editor-midi-inputs [role=status]').textContent.includes('lowest key')`),'learning shows Cancel and the next step');
+  check(await midiFits(),'learning instructions keep controls inside the phone panel');
+  await tap('#editor-midi-inputs .listen');await sleep(300);
+  check(!(await state()).midi.learning,'Cancel ends keyboard learning');
+  await d.eval(`const device=document.querySelector('#editor-midi-inputs .input-device');device.value='Computer keyboard';device.dispatchEvent(new Event('change',{bubbles:true}))`);await sleep(400);
+  check((await state()).midi.manuals[0].inputs.some(i=>i.device==='Computer keyboard'),'device selection connects the computer keyboard');
+  check(await midiFits(),'assigned input including Remove fits on a phone');
+  await tap('#editor-midi-inputs .add-input');await sleep(300);
+  check((await state()).midi.learning?.slot===1,'Listen for another input starts a second assignment');
+  check(await midiFits(),'a second input and its Cancel action fit on a phone');
+  await tap('#editor-midi-inputs .listening .listen');await sleep(300);
+  await d.shot('/tmp/aristide-midi-preferences-phone.png');
+  await d.eval(`document.querySelectorAll('#editor-midi details').forEach(el=>el.open=true)`);
+  check(await d.eval(`document.querySelector('.organ-prefs-content').scrollWidth<=document.querySelector('.organ-prefs-content').clientWidth+1`),'expanded shortcuts and available devices do not overflow');
   await tap('[data-category="stops"]');await d.eval(`document.querySelector('#organ-prefs-index .organ-pref-action').click()`);await sleep(150);
   check(await visible('#editor-stop'),'stop voicing opens from the stop list');
   await d.shot('/tmp/aristide-stop-preferences-phone.png');

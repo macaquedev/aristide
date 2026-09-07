@@ -811,16 +811,21 @@
     <div class="editor-add-form editor-wiring-form">
       <span class="editor-tuning-head">
         <span class="rail-label" id="editor-midi-title">MIDI input</span>
-        <button class="ghost" type="button" id="editor-midi-rescan">Rescan</button>
       </span>
       <p class="pane-note">
-        Choose <em>Listen</em>, then play the lowest and highest keys on your MIDI keyboard. Aristide will connect it and detect its range automatically.
+        Connect a MIDI keyboard: press <em>Listen</em> below, then play its lowest and highest keys. To use your computer keyboard, choose it from the input device list.
       </p>
       <div id="editor-midi-inputs" class="manual-inputs"></div>
-      <div id="editor-midi-pistons" class="editor-midi-pistons"></div>
-      <p class="pane-note" id="editor-midi-ports-note">Inputs this machine can
-        see — a manual can listen to one that isn't plugged in yet:</p>
-      <div id="editor-midi-ports" class="midi-ports"></div>
+      <details class="advanced-settings">
+        <summary>Octave &amp; transpose shortcuts</summary>
+        <div id="editor-midi-pistons" class="editor-midi-pistons"></div>
+      </details>
+      <details class="advanced-settings">
+        <summary>Available input devices</summary>
+        <p class="pane-note" id="editor-midi-ports-note">Plug in your MIDI keyboard. If it does not appear in the device list, rescan for inputs.</p>
+        <div id="editor-midi-ports" class="midi-ports"></div>
+        <button class="ghost" type="button" id="editor-midi-rescan">Rescan inputs</button>
+      </details>
       <span class="editor-add-form-actions">
         <button class="ghost" type="button" id="editor-midi-close">Close</button>
       </span>

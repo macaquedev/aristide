@@ -3506,3 +3506,24 @@ body.editing .editor-add { max-height:calc(100dvh - 112px); }
 }
 .editor-lock-dock { width:max-content; }
 #editor-lock-label { white-space:nowrap; }
+
+/* Keyboard connection is a vertical flow. The generic editor select rule
+   gives every select 100% width, so a single flex row clips the action. */
+#editor-midi .manual-inputs { flex: none; align-items: stretch; gap: 12px; }
+#editor-midi .manual-input { flex-direction: column; align-items: stretch; gap: 12px; min-width: 0; }
+#editor-midi .input-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: space-between; }
+#editor-midi .input-actions .listen, #editor-midi .add-input {
+  min-height: 48px; background: var(--accent); color: var(--accent-ink); border-color: var(--accent);
+}
+#editor-midi .input-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+#editor-midi .input-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; font-size: 12px; color: var(--text-dim); }
+#editor-midi .input-device-field { grid-column: 1 / -1; }
+#editor-midi .input-field select, #editor-midi .input-field input { width: 100%; min-width: 0; max-width: 100%; box-sizing: border-box; flex: none; }
+#editor-midi .listen-hint { white-space: normal; padding: 10px; background: var(--accent-soft); border-radius: 6px; line-height: 1.5; }
+#editor-midi .input-bend-row { flex-wrap: wrap; }
+#editor-midi .input-bend { width: 110px; }
+#editor-midi .advanced-settings > summary { min-height: 48px; display: list-item; align-content: center; box-sizing: border-box; }
+#editor-midi .midi-ports { margin: 12px 0; }
+#editor-midi .midi-port { white-space: normal; overflow-wrap: anywhere; }
+#editor-midi .settings-row { flex-wrap: wrap; }
+#editor-midi .piston-row { flex-wrap: wrap; }

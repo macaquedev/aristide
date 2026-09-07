@@ -202,7 +202,7 @@ export function buildManualInputs(container, ctx) {
   if (manualEntry.inputs.length && !pending) {
     const add = document.createElement("button");
     add.className = "ghost add-input";
-    add.textContent = "+ add input";
+    add.textContent = "Listen for another input";
     add.title = "A second keyboard playing this same manual";
     add.addEventListener("click", () =>
       ctx.send(commands.midiLearn(manualEntry.idx, manualEntry.inputs.length))
@@ -225,7 +225,7 @@ function inputRow(ctx, manual, slot, input) {
   const device = document.createElement("select");
   device.className = "input-device";
   if (!input) {
-    device.append(option("", "— no input —"));
+    device.append(option("", "Choose a device…"));
   }
   for (const port of midi.ports) {
     device.append(option(port.name, port.name));
@@ -281,29 +281,53 @@ function inputRow(ctx, manual, slot, input) {
   const listen = document.createElement("button");
   listen.className = "ghost listen";
   listen.textContent = listening ? "Cancel" : "Listen";
-  listen.title = "Assign by playing a key on the keyboard you mean";
+  listen.title = "Connect a MIDI keyboard by playing its lowest and highest keys";
   listen.addEventListener("click", () =>
     send(listening ? commands.midiLearn(null) : commands.midiLearn(manual, slot))
   );
 
-  row.append(device, channel, shift, listen);
+  // Keep detection prominent; device selection and adjustments need their
+  // own labeled fields so they cannot push the action outside the panel.
+  const actions = document.createElement("div");
+  actions.className = "input-actions";
+  actions.append(listen);
+  row.append(actions);
+  const field = (label, control, cls) => {
+    const wrapper = document.createElement("label");
+    wrapper.className = `input-field ${cls}`;
+    const caption = document.createElement("span");
+    caption.textContent = label;
+    wrapper.append(caption, control);
+    return wrapper;
+  };
+  const fields = document.createElement("div");
+  fields.className = "input-fields";
+  fields.append(field(input ? "Input device" : "Or choose an input device", device, "input-device-field"));
+  if (input) fields.append(
+    field("MIDI channel", channel, ""),
+    field("Shift (semitones)", shift, ""),
+  );
+  row.append(fields);
   if (input) {
     const remove = document.createElement("button");
     remove.className = "ghost remove-input";
-    remove.textContent = "×";
+    remove.textContent = "Remove";
     remove.setAttribute("aria-label", `Remove ${input.device}`);
     remove.addEventListener("click", () => send(commands.midiUnbind(manual, slot)));
-    row.append(remove);
+    actions.append(remove);
   }
   if (listening) {
     const hint = document.createElement("span");
     hint.className = "listen-hint";
-    hint.textContent =
-      midi.learning.step === "high" ? "now the highest key…" : "play the lowest key…";
-    row.append(hint);
+    hint.setAttribute("role", "status");
+    hint.textContent = midi.learning.step === "high"
+      ? "Now play the highest key to finish connecting."
+      : "Listening… Play the lowest key on your MIDI keyboard.";
+    actions.after(hint);
   }
   const fragment = document.createDocumentFragment();
-  fragment.append(row, bendRow(ctx, manual, slot, input));
+  fragment.append(row);
+  if (input) fragment.append(bendRow(ctx, manual, slot, input));
   return fragment;
 }
 
