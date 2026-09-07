@@ -19,10 +19,23 @@ try {
   const tap = async (sel) => {const p=await center(sel); await touch('touchStart',[{...p,id:1}]); await touch('touchEnd',[]); await sleep(180);};
   const visible = (sel) => d.eval(`!!document.querySelector(${JSON.stringify(sel)})?.getClientRects().length`);
 
-  for (const [width,height] of [[320,740],[390,844],[768,1024],[1024,768]]) {
+  for (const [width,height] of [[320,740],[390,844],[680,900],[768,1024],[1024,768]]) {
     await d.send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:true});
     await sleep(250);
     check(await d.eval(`document.documentElement.scrollWidth <= innerWidth`), `${width}px: no page-wide horizontal overflow`);
+    check(await d.eval(`(() => {
+      return [...document.querySelectorAll('.panel-jamb .knob')].every(k => {
+        const r=k.getBoundingClientRect(), label=k.querySelector('.stop-name');
+        return r.width>=128 && r.height>=64 && parseFloat(getComputedStyle(label).fontSize)>=14
+          && label.scrollWidth<=label.clientWidth+1;
+      });
+    })()`), `${width}px: stop tiles keep readable labels and generous touch targets`);
+    check(await d.eval(`(() => {
+      const label=document.querySelector('.panel-jamb .stop-name'), original=label.textContent;
+      label.textContent='ContraBombardeExtraordinaire 32';
+      const fits=label.scrollWidth<=label.clientWidth+1 && label.getBoundingClientRect().bottom<=label.closest('.knob').getBoundingClientRect().bottom;
+      label.textContent=original; return fits;
+    })()`), `${width}px: long stop names wrap inside their tiles`);
     check(await d.eval(`(() => {const panels=[...document.querySelectorAll('.panel')].filter(p=>p.getClientRects().length).map(p=>p.getBoundingClientRect()); return panels.every((a,i)=>panels.slice(i+1).every(b=>a.right<=b.left+1 || b.right<=a.left+1 || a.bottom<=b.top+1 || b.bottom<=a.top+1));})()`), `${width}px: panels do not overlap`);
   }
   await d.shot('/tmp/aristide-tablet.png');

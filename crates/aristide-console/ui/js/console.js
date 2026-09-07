@@ -109,11 +109,15 @@ export class Console {
     };
     this.wireRail();
     window.matchMedia("(pointer: coarse)").addEventListener("change", () => {
-      if (this.snapshot) this.layoutPanels(this.snapshot);
+      if (this.snapshot) {
+        this.layoutPanels(this.snapshot);
+        this.fitLabels();
+      }
     });
     window.addEventListener("resize", () => {
       if (!this.snapshot) return;
       this.layoutPanels(this.snapshot);
+      this.fitLabels();
       // A zoom leaves every box the same size in CSS pixels but not
       // the type rendered into it, so the field observer below stays
       // quiet and the cheeks are refitted from here.
@@ -216,6 +220,8 @@ export class Console {
   fitLabels() {
     for (const label of this.root.querySelectorAll(".stop-name")) {
       label.style.fontSize = "";
+      // Flow layouts wrap readable labels instead of shrinking the engraving.
+      if (usesFlowLayout()) continue;
       for (let size = 10.5; label.scrollWidth > label.clientWidth && size > 7.5; ) {
         size -= 0.5;
         label.style.fontSize = `${size}px`;
