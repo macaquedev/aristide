@@ -2383,6 +2383,45 @@ pub fn write_composite_stop_pitch_label(
     Ok(true)
 }
 
+pub fn write_composite_stop_compass(
+    path: &Path,
+    prov: &instrument::StopProvenance,
+    on: &str,
+    label: Option<&str>,
+) -> Result<bool, String> {
+    let mut doc = composite_doc(path)?;
+    if prov.via_division {
+        let Some(index) = division_pull_index(&doc, prov, on) else {
+            return Ok(false);
+        };
+        let table = doc["division"]
+            .as_array_of_tables_mut()
+            .and_then(|tables| tables.get_mut(index))
+            .expect("division line just found");
+        division_map_set(table, "compass", &prov.source_stop, label);
+    } else {
+        let Some(index) = doc
+            .get("stop")
+            .and_then(|s| s.as_array_of_tables())
+            .and_then(|stops| stop_pull_index(stops, prov, on))
+        else {
+            return Ok(false);
+        };
+        let table = doc["stop"]
+            .as_array_of_tables_mut()
+            .and_then(|tables| tables.get_mut(index))
+            .expect("stop line just found");
+        match label {
+            Some(label) => set_string_preserving(table, "compass", label),
+            None => {
+                table.remove("compass");
+            }
+        }
+    }
+    write_atomically(path, doc.to_string())?;
+    Ok(true)
+}
+
 /// Set (or with `to == None` drop) one entry of a `[[division]]`
 /// pull's per-stop *boolean* map (`own_pipes`) — the bool twin of
 /// [`division_map_set`].
@@ -2643,6 +2682,8 @@ pub fn retarget_composite_stop(
         // The knob engraving is the drawknob's, not the pull's — it
         // rides onto the fresh line along with the label. So does the
         // pipe-sharing declaration.
+        let compass = division_map_get(table, "compass", &prov.source_stop);
+        division_map_set(table, "compass", &prov.source_stop, None);
         let engraving = division_map_get(table, "pitch_label", &prov.source_stop);
         division_map_set(table, "pitch_label", &prov.source_stop, None);
         let owns = division_map_get_bool(table, "own_pipes", &prov.source_stop);
@@ -2660,6 +2701,9 @@ pub fn retarget_composite_stop(
         table["on"] = toml_edit::value(on);
         if keeps_label {
             table["rename"] = toml_edit::value(console_name);
+        }
+        if let Some(compass) = compass {
+            table["compass"] = toml_edit::value(compass);
         }
         if let Some(engraving) = engraving {
             table["pitch_label"] = toml_edit::value(engraving);
@@ -3695,6 +3739,7 @@ mod tests {
             ],
             stops: vec![
                 Stop {
+                    compass: None,
                     id: StopId(0),
                     name: "Subbass 16".into(),
                     manual: ManualId(0),
@@ -3702,6 +3747,7 @@ mod tests {
                     own_pipes: false,
                 },
                 Stop {
+                    compass: None,
                     id: StopId(1),
                     name: "Montre 8".into(),
                     manual: ManualId(1),
@@ -4396,6 +4442,17 @@ stops = ["Montre 8"]
             source_stop: "Trompette 8".into(),
             via_division: false,
         };
+
+        for prov in [&pulled_stop, &division_stop] {
+            assert!(write_composite_stop_compass(&path, prov, "Great", Some("C3..B4")).unwrap());
+        }
+        assert_eq!(def(&path).stops[0].compass.as_deref(), Some("C3..B4"));
+        assert_eq!(def(&path).divisions[0].compass.get("Montre 8").map(String::as_str), Some("C3..B4"));
+        for prov in [&pulled_stop, &division_stop] {
+            assert!(write_composite_stop_compass(&path, prov, "Great", None).unwrap());
+        }
+        assert!(def(&path).stops[0].compass.is_none());
+        assert!(def(&path).divisions[0].compass.is_empty());
 
         // Rename a division-pulled stop: the map entry appears and the
         // move/enclosure references follow.

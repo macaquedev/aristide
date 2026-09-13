@@ -1938,6 +1938,7 @@ mod tests {
             hex: None,
         });
         organ.stops.push(Stop {
+            compass: None,
             id: StopId(1),
             name: "8 foot".into(),
             manual: ManualId(1),

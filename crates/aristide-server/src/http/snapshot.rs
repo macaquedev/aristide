@@ -225,6 +225,8 @@ struct CombinationsView {
 
 #[derive(Serialize)]
 struct StopView {
+    compass: Option<(i32, i32)>,
+    native_compass: Option<(i32, i32)>,
     id: u32,
     name: String,
     manual: String,
@@ -811,6 +813,8 @@ fn snapshot(state: &State) -> Snapshot {
                 let feet = |feet: Option<f64>| feet.filter(|feet| feet.is_finite()).map(F64);
                 let (_, scope) = console.stop_tuning_resolved(id);
                 StopView {
+                    compass: console.stop_compass(id),
+                    native_compass: console.stop_native_compass(id),
                     id: id.0,
                     name: name.to_string(),
                     manual: manual.to_string(),

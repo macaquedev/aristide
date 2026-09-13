@@ -400,3 +400,26 @@ pub(super) fn order(state: &Mutex<State>, query: &str) -> Reply {
         _ => bad_request("missing manual/items (comma-separated s<id>/c<idx>)"),
     }
 }
+
+/// Set inclusive played-key bounds, or restore the source's compass.
+pub(super) fn compass(state: &Mutex<State>, query: &str) -> Reply {
+    let mut state = state.lock().expect("state poisoned");
+    if state.is_loading() { return bad_request("an organ is already loading"); }
+    let Some(stop) = param(query, "stop").and_then(|v| v.parse::<u32>().ok()) else {
+        return bad_request("missing stop");
+    };
+    let compass = if param(query, "reset") == Some("1") { None } else {
+        let Some(span) = param(query, "keys").map(unescape)
+            .and_then(|s| aristide_formats::sidecar::parse_key_span(&s)) else {
+            return bad_request("compass must be a note range such as C2..B3");
+        };
+        if span.0 < 0 || span.1 > 127 || span.0 > span.1 {
+            return bad_request("compass must run from a lower to a higher key within 0..127");
+        }
+        Some(span)
+    };
+    match state.set_stop_compass(aristide_model::StopId(stop), compass) {
+        Ok(()) => json(state_json_locked(&state)),
+        Err(err) => bad_request(&err),
+    }
+}

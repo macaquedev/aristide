@@ -458,6 +458,10 @@ pub struct RankRange {
 /// A stop: a drawable voice on a manual, sounding one or more ranks.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Stop {
+    /// Inclusive played-key bounds; extending the source range borrows
+    /// and repitches available pipes. Absent follows the source ranges.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compass: Option<(i32, i32)>,
     pub id: StopId,
     pub name: String,
     pub manual: ManualId,

@@ -1205,6 +1205,34 @@ impl Console {
         (stops, starts)
     }
 
+    pub fn set_stop_compass(&mut self, stop: StopId, compass: Option<(i32, i32)>) -> (Vec<u64>, Vec<VoiceStart>) {
+        let Some(entry) = self.organ.stops.iter_mut().find(|s| s.id == stop) else {
+            return (Vec::new(), Vec::new());
+        };
+        if entry.compass == compass {
+            return (Vec::new(), Vec::new());
+        }
+        entry.compass = compass;
+        let mut stops = Vec::new();
+        let mut starts = Vec::new();
+        self.recouple_held_keys(&mut stops, &mut starts);
+        stops.sort_unstable();
+        stops.dedup();
+        (stops, starts)
+    }
+
+    pub fn stop_compass(&self, id: StopId) -> Option<(i32, i32)> {
+        self.organ.stops.iter().find(|s| s.id == id)?.compass
+    }
+
+    pub fn stop_native_compass(&self, id: StopId) -> Option<(i32, i32)> {
+        let stop = self.organ.stops.iter().find(|s| s.id == id)?;
+        let manual = self.organ.manuals.iter().find(|m| m.id == stop.manual)?;
+        let low = stop.ranks.iter().map(|r| r.first_key as i32).min()?;
+        let high = stop.ranks.iter().map(|r| r.first_key as i32 + r.key_count as i32 - 1).max()?;
+        Some((low + manual.first_midi_note as i32, high + manual.first_midi_note as i32))
+    }
+
     /// Rename a stop on the live console — a label, nothing sounding
     /// moves. False if the id names no stop.
     pub fn rename_stop(&mut self, stop: StopId, name: &str) -> bool {
@@ -1775,16 +1803,33 @@ impl Console {
             let key_index = midi_key - self.organ.manuals[target].first_midi_note as i16;
             for stop in &self.organ.stops {
                 if stop.manual != manual_id
+                    || stop.compass.is_some_and(|(low, high)| (midi_key as i32) < low || (midi_key as i32) > high)
                     || !self.drawn.contains(&stop.id)
                     || only.is_some_and(|only| only != stop.id)
                 {
                     continue;
                 }
+                // An explicit compass may extend the stop's outer edges.
+                // Only ranges touching those edges extend: mixture breaks
+                // and partial ranks inside the stop keep their own coverage.
+                let edges = stop.compass.and_then(|_| {
+                    let ranges = || stop.ranks.iter().filter(|r| r.key_count > 0);
+                    Some((
+                        ranges().map(|r| r.first_key as i32).min()?,
+                        ranges().map(|r| r.first_key as i32 + r.key_count as i32 - 1).max()?,
+                    ))
+                });
                 for range in &stop.ranks {
+                    let widened = range.key_count > 0 && edges.is_some_and(|(low, high)| {
+                        let first = range.first_key as i32;
+                        let last = first + range.key_count as i32 - 1;
+                        (i32::from(key_index) < low && first == low)
+                            || (i32::from(key_index) > high && last == high)
+                    });
                     // Coverage is judged at the played key — a divided
                     // register is a decision about the keyboard, not
                     // about where the pitches land on the ladder.
-                    if !self.range_covers(range, key_index, target, fill) {
+                    if !widened && !self.range_covers(range, key_index, target, fill) {
                         continue;
                     }
                     // The pitch this key wants under the tuning this
@@ -1828,7 +1873,7 @@ impl Console {
                     let shift = (anchored_on / 100.0).round() as i16;
                     let key_bend_cents = priced - shift as f64 * 100.0;
                     let Some((pipe, nominal, ratio)) =
-                        self.pipe_for(range, key_index + shift, fill)
+                        self.pipe_for(range, key_index + shift, fill || widened)
                     else {
                         continue;
                     };
@@ -3112,6 +3157,7 @@ mod tests {
             }],
             stops: vec![
                 Stop {
+                    compass: None,
                     id: StopId(1),
                     name: "Principal 8".into(),
                     manual: ManualId(1),
@@ -3124,6 +3170,7 @@ mod tests {
                     own_pipes: false,
                 },
                 Stop {
+                    compass: None,
                     id: StopId(2),
                     name: "Octave 4".into(),
                     manual: ManualId(1),
@@ -3815,6 +3862,53 @@ mod tests {
         );
     }
 
+    #[test]
+    fn widening_a_short_stop_repitches_both_edges_and_resets() {
+        let mut console = test_console();
+        console.set_drawn(StopId(2), false);
+        // Treble-only recording: C4..C6, with no bass samples.
+        console.organ.stops[0].ranks[0].first_key = 24;
+        console.organ.stops[0].ranks[0].key_count = 25;
+        console.organ.ranks[0].pipes.truncate(25);
+        console.specs.retain(|&(rank, pipe), _| rank != RankId(1) || pipe < 25);
+        console.set_compass(0, 36, 100);
+        assert!(console.note_on_manual(0, 48, 127).0.is_empty());
+        let (_, starts) = console.set_stop_compass(StopId(1), Some((48, 88)));
+        assert_eq!(starts.len(), 1, "widening starts the held bass key");
+        assert!((starts[0].spec.rate - 0.5).abs() < 1e-6, "C3 borrows C4 an octave down");
+        console.note_off_manual(0, 48);
+        for (key, rate) in [(60, 1.0), (84, 1.0), (88, 2.0_f32.powf(4.0 / 12.0))] {
+            let (starts, _) = console.note_on_manual(0, key, 127);
+            assert_eq!(starts.len(), 1);
+            assert!((starts[0].spec.rate - rate).abs() < 1e-6, "key {key} has the expected pitch");
+            console.note_off_manual(0, key);
+        }
+        assert!(console.note_on_manual(0, 47, 127).0.is_empty(), "the edited low bound still applies");
+        console.note_off_manual(0, 47);
+        console.note_on_manual(0, 48, 127);
+        let (stopped, started) = console.set_stop_compass(StopId(1), None);
+        assert_eq!(stopped.len(), 1, "reset silences the extended held note");
+        assert!(started.is_empty());
+        console.note_off_manual(0, 48);
+        assert!(console.note_on_manual(0, 48, 127).0.is_empty());
+    }
+
+    #[test]
+    fn widening_preserves_internal_rank_breaks() {
+        let mut console = test_console();
+        console.set_drawn(StopId(2), false);
+        console.organ.stops[0].ranks = vec![
+            RankRange { rank: RankId(1), first_key: 12, key_count: 12, first_pipe: 0 },
+            RankRange { rank: RankId(1), first_key: 24, key_count: 12, first_pipe: 0 },
+        ];
+        console.set_stop_compass(StopId(1), Some((36, 84)));
+        for key in [36, 48, 59, 60, 71, 84] {
+            assert_eq!(console.note_on_manual(0, key, 127).0.len(), 1,
+                "key {key} uses one side of the break, without overlapping extensions");
+            console.note_off_manual(0, key);
+        }
+    }
+
     /// A unit rank drawn at two pitches: Bourdon 16' on the Pedal, the
     /// same pipes again as a Bourdon 8' on the Swell. Each stop sees a
     /// window into one 73-pipe rank — the 16' the bottom 32, the 8'
@@ -3843,6 +3937,7 @@ mod tests {
             ],
             stops: vec![
                 Stop {
+                    compass: None,
                     id: StopId(1),
                     name: "Bourdon 16".into(),
                     manual: ManualId(1),
@@ -3855,6 +3950,7 @@ mod tests {
                     own_pipes: false,
                 },
                 Stop {
+                    compass: None,
                     id: StopId(2),
                     name: "Bourdon 8".into(),
                     manual: ManualId(2),
@@ -4200,6 +4296,7 @@ mod tests {
                     hex: None,
         };
         let stop = |id: u32, manual: u32, rank: u32| Stop {
+            compass: None,
             id: StopId(id),
             name: format!("stop {id}"),
             manual: ManualId(manual),
@@ -5174,6 +5271,7 @@ mod tests {
             hex: None,
         };
         let stop = |id: u32, manual: u32, rank: u32, own_pipes: bool| Stop {
+            compass: None,
             id: StopId(id),
             name: format!("stop {id}"),
             manual: ManualId(manual),
@@ -5321,6 +5419,30 @@ mod tests {
         assert_eq!(second.len(), 1, "the own-pipes stop starts its own voice");
         assert_eq!(console.note_off_manual(0, 60).0.len(), 1);
         assert_eq!(console.note_off_manual(1, 60).0.len(), 1);
+    }
+
+    #[test]
+    fn stop_compass_limits_held_keys_and_resets() {
+        let mut console = borrowed_console(false);
+        assert_eq!(console.note_on_manual(1, 60, 127).0.len(), 1);
+        let (stopped, started) = console.set_stop_compass(StopId(2), Some((61, 72)));
+        assert_eq!(stopped.len(), 1, "a held key outside the new range stops");
+        assert!(started.is_empty());
+        let (_, started) = console.set_stop_compass(StopId(2), None);
+        assert_eq!(started.len(), 1, "reset restores the held key");
+        console.note_off_manual(1, 60);
+        console.set_stop_compass(StopId(2), Some((61, 72)));
+        for key in [60, 73] {
+            assert!(console.note_on_manual(1, key, 127).0.is_empty());
+            console.note_off_manual(1, key);
+        }
+        for key in [61, 72] {
+            assert_eq!(console.note_on_manual(1, key, 127).0.len(), 1);
+            console.note_off_manual(1, key);
+        }
+        console.set_compass(1, 24, 101);
+        assert!(console.note_on_manual(1, 100, 127).0.is_empty(), "repitching respects the stop limit");
+        assert_eq!(console.note_on_manual(0, 60, 127).0.len(), 1, "the donor stop is unaffected");
     }
 
     /// Toggling a stop's pipe sharing lands on held keys at once, like

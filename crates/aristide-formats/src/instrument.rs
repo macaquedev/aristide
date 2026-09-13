@@ -312,6 +312,9 @@ pub struct DivisionPull {
     /// own declaration (almost always shared) stands.
     #[serde(default)]
     pub own_pipes: BTreeMap<String, bool>,
+    #[serde(default)]
+    /// Inclusive played-key limits by source stop name, e.g. "C3..B4".
+    pub compass: BTreeMap<String, String>,
 }
 
 /// Pull one stop (or every stop a pattern matches) onto a manual.
@@ -336,6 +339,8 @@ pub struct StopPull {
     /// other stops already sound instead of sharing them. Absent, the
     /// source's own declaration (almost always shared) stands.
     pub own_pipes: Option<bool>,
+    /// Inclusive played-key limit; absent preserves the source compass.
+    pub compass: Option<String>,
 }
 
 /// A swell box of the composite's own devising: a name and the stops
@@ -766,6 +771,7 @@ struct StopOverrides {
     rename: Option<String>,
     pitch_label: Option<String>,
     own_pipes: Option<bool>,
+    compass: Option<String>,
 }
 
 /// A [[division]] pull's per-stop override maps, keyed by source stop
@@ -774,6 +780,7 @@ struct DivisionOverrides<'a> {
     rename: &'a BTreeMap<String, String>,
     pitch_label: &'a BTreeMap<String, String>,
     own_pipes: &'a BTreeMap<String, bool>,
+    compass: &'a BTreeMap<String, String>,
 }
 
 /// A stop placed but not yet fixed to a compass: its ranges anchor to
@@ -784,6 +791,7 @@ struct PlacedStop {
     manual: usize,
     ranges: Vec<PlacedRange>,
     own_pipes: bool,
+    compass: Option<(i32, i32)>,
 }
 
 struct PlacedRange {
@@ -948,6 +956,7 @@ fn pull_implicit_sources(
             rename: &BTreeMap::new(),
             pitch_label: &BTreeMap::new(),
             own_pipes: &BTreeMap::new(),
+            compass: &BTreeMap::new(),
         };
         for manual_idx in 0..organ.manuals.len() {
             assembly.pull_division(source_idx, manual_idx, None, &[], &none)?;
@@ -1015,6 +1024,7 @@ fn pull_declared_divisions(
                     rename: &pull.rename,
                     pitch_label: &pull.pitch_label,
                     own_pipes: &pull.own_pipes,
+                    compass: &pull.compass,
                 },
             ) {
                 assembly.warnings.push(format!(
@@ -1117,6 +1127,7 @@ fn pull_declared_stops(
                     rename: rename.clone(),
                     pitch_label: pitch_label.clone(),
                     own_pipes: pull.own_pipes,
+                    compass: pull.compass.clone(),
                 },
                 false,
             );
@@ -1544,6 +1555,7 @@ impl Assembly<'_> {
                 rename: overrides.rename.get(name).cloned(),
                 pitch_label: overrides.pitch_label.get(name).cloned(),
                 own_pipes: overrides.own_pipes.get(name).copied(),
+                compass: overrides.compass.get(name).cloned(),
             };
             self.place_stop(source_idx, stop_idx, target, overrides, true);
         }
@@ -1601,11 +1613,22 @@ impl Assembly<'_> {
                 first_pipe: range.first_pipe as i32,
             })
             .collect();
+        let compass = match overrides.compass.as_deref() {
+            None => stop.compass,
+            Some(text) => match crate::sidecar::parse_key_span(text) {
+                Some(span) if span.0 >= 0 && span.1 <= 127 => Some(span),
+                _ => {
+                    self.warnings.push(format!("stop {name:?} has invalid compass {text:?}; using its source range"));
+                    stop.compass
+                }
+            },
+        };
         self.placed.push(PlacedStop {
             name,
             manual: target,
             ranges,
             own_pipes: overrides.own_pipes.unwrap_or(stop.own_pipes),
+            compass,
         });
     }
 
@@ -1854,6 +1877,7 @@ impl Assembly<'_> {
                     ));
                 }
                 Stop {
+                    compass: placed.compass,
                     id: StopId(index as u32),
                     name: placed.name.clone(),
                     manual: ManualId(placed.manual as u32),
@@ -1942,6 +1966,7 @@ mod tests {
             ],
             stops: vec![
                 Stop {
+                    compass: None,
                     id: StopId(10),
                     name: "Principal 8".into(),
                     manual: ManualId(0),
@@ -1954,6 +1979,7 @@ mod tests {
                     }],
                 },
                 Stop {
+                    compass: None,
                     id: StopId(11),
                     name: "Hautbois 8".into(),
                     manual: ManualId(1),
@@ -2183,6 +2209,7 @@ mod tests {
                 rename: None,
                 pitch_label: None,
                 own_pipes: Some(true),
+                compass: Some("C3..B4".into()),
             },
             StopPull {
                 from: "A".into(),
@@ -2192,6 +2219,7 @@ mod tests {
                 rename: None,
                 pitch_label: None,
                 own_pipes: None,
+                compass: None,
             },
         ];
         let built = assemble(&definition, &sources, Vec::new()).expect("assembles");
@@ -2204,6 +2232,8 @@ mod tests {
                 .expect("stop placed")
         };
         assert!(stop("Hautbois 8").own_pipes);
+        assert_eq!(stop("Hautbois 8").compass, Some((48, 71)));
+        assert_eq!(stop("Principal 8").compass, None);
         assert!(!stop("Principal 8").own_pipes);
     }
 
@@ -2220,6 +2250,7 @@ mod tests {
             rename: None,
             pitch_label: None,
             own_pipes: None,
+            compass: None,
         }];
         definition.enclosure_defs = vec![EnclosureDef {
             name: "Boîte".into(),
@@ -2266,6 +2297,7 @@ mod tests {
             rename: None,
             pitch_label: None,
             own_pipes: None,
+            compass: None,
         }];
         definition.enclosure_defs = vec![
             EnclosureDef {
@@ -2343,6 +2375,7 @@ mod tests {
             rename: Some("Montre 8".into()),
             pitch_label: None,
             own_pipes: None,
+            compass: None,
         }];
         let built = assemble(&definition, &sources, Vec::new()).expect("assembles");
         let organ = &built.organ;
@@ -2375,6 +2408,7 @@ mod tests {
             rename: None,
             pitch_label: None,
             own_pipes: None,
+            compass: None,
         }];
         let built = assemble(&definition, &sources, Vec::new()).expect("assembles");
         let organ = &built.organ;
@@ -2408,6 +2442,7 @@ mod tests {
             rename: None,
             pitch_label: None,
             own_pipes: None,
+            compass: None,
         }];
         let built = assemble(&definition, &sources, Vec::new()).expect("assembles");
         let organ = &built.organ;
@@ -2438,6 +2473,7 @@ mod tests {
                 rename: BTreeMap::new(),
                 pitch_label: BTreeMap::new(),
             own_pipes: BTreeMap::new(),
+            compass: BTreeMap::new(),
             },
             DivisionPull {
                 from: "B".into(),
@@ -2447,6 +2483,7 @@ mod tests {
                 rename: BTreeMap::new(),
                 pitch_label: BTreeMap::new(),
             own_pipes: BTreeMap::new(),
+            compass: BTreeMap::new(),
             },
         ];
         let built = assemble(&definition, &sources, Vec::new()).expect("assembles");
@@ -2471,6 +2508,7 @@ mod tests {
             rename: None,
             pitch_label: None,
             own_pipes: None,
+            compass: None,
         }];
         assert!(assemble(&definition, &sources, Vec::new()).is_err());
     }
@@ -2494,6 +2532,7 @@ mod tests {
                 rename: None,
                 pitch_label: None,
             own_pipes: None,
+            compass: None,
             },
             StopPull {
                 from: "A".into(),
@@ -2503,6 +2542,7 @@ mod tests {
                 rename: None,
                 pitch_label: None,
             own_pipes: None,
+            compass: None,
             },
         ];
         definition.divisions = vec![DivisionPull {
@@ -2513,6 +2553,7 @@ mod tests {
             rename: BTreeMap::new(),
             pitch_label: BTreeMap::new(),
             own_pipes: BTreeMap::new(),
+            compass: BTreeMap::new(),
         }];
         let built = assemble(&definition, &sources, Vec::new()).expect("still assembles");
         assert_eq!(built.organ.stops.len(), 1, "the resolvable pull lands");
@@ -2546,6 +2587,7 @@ mod tests {
                 rename: BTreeMap::new(),
                 pitch_label: BTreeMap::new(),
             own_pipes: BTreeMap::new(),
+            compass: BTreeMap::new(),
             },
             DivisionPull {
                 from: "A".into(),
@@ -2560,6 +2602,7 @@ mod tests {
                 .collect(),
                 pitch_label: BTreeMap::new(),
             own_pipes: BTreeMap::new(),
+            compass: BTreeMap::new(),
             },
         ];
         definition.stops = vec![StopPull {
@@ -2570,6 +2613,7 @@ mod tests {
             rename: None,
             pitch_label: None,
             own_pipes: None,
+            compass: None,
         }];
         let built = assemble(&definition, &sources, Vec::new()).expect("assembles");
         let names: Vec<&str> = built.organ.stops.iter().map(|s| s.name.as_str()).collect();
@@ -2627,6 +2671,7 @@ mod tests {
                 rename: BTreeMap::new(),
                 pitch_label: BTreeMap::new(),
             own_pipes: BTreeMap::new(),
+            compass: BTreeMap::new(),
             },
             DivisionPull {
                 from: "A".into(),
@@ -2636,6 +2681,7 @@ mod tests {
                 rename: BTreeMap::new(),
                 pitch_label: BTreeMap::new(),
             own_pipes: BTreeMap::new(),
+            compass: BTreeMap::new(),
             },
         ];
         definition.moves = vec![MoveDef {

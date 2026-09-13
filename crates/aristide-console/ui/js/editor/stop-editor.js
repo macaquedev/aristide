@@ -9,7 +9,7 @@
 import { commands } from "../api.js";
 import { renderIfChanged, resetRender, setText } from "../dom.js";
 import { menuItem } from "../menu.js";
-import { formatFootage, parseFootage, splitFootageName } from "../pitch.js";
+import { keyName, formatFootage, parseFootage, splitFootageName } from "../pitch.js";
 import { emptyNote, pistonRow } from "../wiring.js";
 
 export function wireStopForm(editor) {
@@ -117,6 +117,16 @@ export function wireStopForm(editor) {
     stopCommand(editor, commands.organStopLabel(editor.stopOpen, { label: editor.el.stopLabelText.value }));
   });
 
+  editor.el.stopCompass.addEventListener("change", () => {
+    if (editor.stopOpen == null) return;
+    const keys = editor.el.stopCompass.value.trim();
+    stopCommand(editor, commands.organStopCompass(editor.stopOpen, keys || null));
+  });
+  editor.el.stopCompassReset.addEventListener("click", () => {
+    if (editor.stopOpen == null) return;
+    stopCommand(editor, commands.organStopCompass(editor.stopOpen, null));
+  });
+
   editor.el.stopOwnPipes.addEventListener("change", () => {
     if (editor.stopOpen == null) return;
     stopCommand(editor, commands.organStopOwnPipes(editor.stopOpen, editor.el.stopOwnPipes.checked));
@@ -197,6 +207,17 @@ export function syncStopForm(editor) {
   if (labelMode === "custom" && editor.root.activeElement !== editor.el.stopLabelText) {
     editor.el.stopLabelText.value = stop.label;
   }
+
+  const manual = editor.lastSnapshot?.manuals?.[stop.midx];
+  const label = manual?.kind === "microtonal" ? String : keyName;
+  setText(editor.el.stopRecordedCompass, stop.native_compass
+    ? `Recorded range: ${stop.native_compass.map(label).join("–")}`
+    : "Recorded range: unavailable");
+  if (editor.root.activeElement !== editor.el.stopCompass) {
+    const bounds = stop.compass ?? stop.native_compass;
+    editor.el.stopCompass.value = bounds ? bounds.map(label).join("..") : "";
+  }
+  editor.el.stopCompassReset.disabled = stop.compass == null;
 
   editor.el.stopOwnPipes.checked = !!stop.own_pipes;
 

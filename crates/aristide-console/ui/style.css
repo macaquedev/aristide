@@ -1281,6 +1281,9 @@ input[type="range"]:hover::-webkit-slider-thumb { filter: brightness(1.15); }
 /* .editor-add-form input[type="text"] defaults to 100% width — too
    wide once a cents field shares its row */
 #editor-stop-footage { width: 70px; }
+#editor-stop-compass { width: 112px; min-width: 0; flex: 1 1 auto; }
+#editor-stop-recorded-compass { margin: 0; font-size: 11px; font-weight: 600; }
+#editor-stop-compass-hint { margin: 0; font-size: 11px; color: var(--text-dim); }
 
 /* the tuning popover's reference-pitch row: a compact key field (it
    only ever holds a note name like "A4" or "C#3"), not the full-width

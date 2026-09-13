@@ -566,6 +566,14 @@
         <span class="piston-box" id="editor-stop-voiced"></span>
       </div>
       <div class="settings-row">
+        <label class="rail-label" for="editor-stop-compass">Compass</label>
+        <input id="editor-stop-compass" type="text" placeholder="C2..B3"
+          autocomplete="off" spellcheck="false" aria-describedby="editor-stop-recorded-compass editor-stop-compass-hint" />
+        <button id="editor-stop-compass-reset" type="button" class="ghost">Reset</button>
+      </div>
+      <p id="editor-stop-recorded-compass"></p>
+      <p class="hint" id="editor-stop-compass-hint">Lowest..highest key, inclusive (C4 is middle C). Widening repitches the nearest available samples. Reset restores the source range.</p>
+      <div class="settings-row">
         <span class="rail-label"
           title="Speak an independent set of pipes — this stop doubles pipes other stops already sound instead of sharing them">Own pipes</span>
         <input id="editor-stop-own-pipes" type="checkbox"

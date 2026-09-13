@@ -111,6 +111,14 @@ earlier stays stopped, because a half-compass stop is a musical decision. Holes
 inside a rank (a sample that failed to load) are filled the same way — those are
 defects, not decisions.
 
+A stop can also declare an inclusive played-key compass (`compass = "C3..B4"`
+on its `[[stop]]` pull, or a per-stop `compass` map on `[[division]]`). The
+stop editor applies this live, including to held keys, and Reset removes the
+override. Narrowing silences keys outside it; widening extends only the outer
+rank ranges, using available pipes and repitching at their ends, so internal
+mixture breaks remain intact. The destination keyboard still bounds ordinary
+playing and couplers. The source sample set is unchanged.
+
 **Bindings (locked):** any input message — a MIDI note, controller or program
 change, or a computer key — can be bound to any console action, as text
 (`note:36` -> `stop:Montre 8'`). Bindings live per organ beside the input

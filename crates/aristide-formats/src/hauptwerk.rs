@@ -872,6 +872,7 @@ impl<'a> Builder<'a> {
             next_stop += 1;
             let name = stop.text("Name").trim();
             self.organ.stops.push(Stop {
+                compass: None,
                 id: StopId(next_stop),
                 name: if name.is_empty() {
                     format!("Stop {next_stop}")

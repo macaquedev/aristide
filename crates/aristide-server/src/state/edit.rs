@@ -750,6 +750,33 @@ impl State {
         Ok(())
     }
 
+    pub fn set_stop_compass(&mut self, stop: StopId, compass: Option<(i32, i32)>) -> Result<(), String> {
+        let (name, manual_name, prov) = self.stop_coordinates(stop)?;
+        let path = self.organ_file()?;
+        let span = compass.map(|(low, high)| format!("{low}..{high}"));
+        if !config::write_composite_stop_compass(&path, &prov, &manual_name, span.as_deref())? {
+            return Err(format!(
+                "the pull that brought {name:?} in isn't in {} — it was \
+                 hand-edited; edit it there",
+                path.display()
+            ));
+        }
+        let State {
+            engine, control, ..
+        } = &mut *self;
+        let Control::Organ(console) = control else {
+            return Err("no organ is loaded".into());
+        };
+        let (stopped, starts) = console.set_stop_compass(stop, compass);
+        for handle in stopped {
+            engine.send(Command::StopVoice { handle });
+        }
+        for start in starts {
+            engine.send(start.command());
+        }
+        Ok(())
+    }
+
     /// Rename a coupler — a rocker's engraving, so it lands live: the
     /// console name changes now, the file keeps it (a define's own
     /// name line, or the [couplers.rename] map for one a source

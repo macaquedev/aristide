@@ -120,6 +120,7 @@ fn respond(
         (Method::Post, "/api/organ/stop/voice") => stops::voice(state, query),
         (Method::Post, "/api/organ/voicing") => stops::voicing(state, query),
         (Method::Post, "/api/organ/stop/label") => stops::label(state, query),
+        (Method::Post, "/api/organ/stop/compass") => stops::compass(state, query),
         (Method::Post, "/api/organ/stop/own_pipes") => stops::own_pipes(state, query),
         (Method::Post, "/api/organ/coupler/rename") => couplers::rename(state, query),
         (Method::Post, "/api/organ/coupler/routes") => couplers::routes(state, query),
@@ -342,6 +343,17 @@ mod tests {
     use super::snapshot::state_json;
     use crate::Control;
     use std::path::Path;
+
+    fn stop_entry(body: &str, id: aristide_model::StopId) -> serde_json::Value {
+        let snapshot: serde_json::Value = serde_json::from_str(body).expect("valid snapshot");
+        snapshot["stops"]
+            .as_array()
+            .expect("stops array")
+            .iter()
+            .find(|stop| stop["id"] == id.0)
+            .expect("stop listed")
+            .clone()
+    }
 
     fn demo_state() -> Option<Arc<Mutex<State>>> {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -666,11 +678,6 @@ mod tests {
             &Method::Post,
             &format!("/api/organ/save?path={}", path.display().to_string().replace('/', "%2F")),
         );
-        let stop_entry = |body: &str, id: aristide_model::StopId| -> String {
-            let at = body.find(&format!("{{\"id\":{},\"name\":", id.0)).expect("stop listed");
-            let end = body[at..].find("\"ranks\":[").expect("ranks follow") + at;
-            body[at..end].to_string()
-        };
 
         // The set: every stop from it follows it.
         let ok = respond(&state, &Method::Post, "/api/tuning?source=s1&temperament=meantone");
@@ -681,7 +688,7 @@ mod tests {
             "set tuning shows: {body}"
         );
         assert!(
-            stop_entry(&body, stop).contains("\"tuning\":{\"scope\":\"source\",\"follow\":\"auto\"}"),
+            stop_entry(&body, stop)["tuning"] == serde_json::json!({"scope": "source", "follow": "auto"}),
             "a stop resolves to its set: {body}"
         );
         let bad = respond(&state, &Method::Post, "/api/tuning?source=nowhere&temperament=equal");
@@ -691,7 +698,7 @@ mod tests {
         respond(&state, &Method::Post, &format!("/api/tuning?stop={}&follow=organ", stop.0));
         let body = state_json(&state);
         assert!(
-            stop_entry(&body, stop).contains("\"scope\":\"organ\",\"follow\":\"organ\""),
+            stop_entry(&body, stop)["tuning"] == serde_json::json!({"scope": "organ", "follow": "organ"}),
             "pinned: {body}"
         );
         assert!(
@@ -704,7 +711,7 @@ mod tests {
             &format!("/api/tuning?stop={}&follow=own&temperament=pythagorean", stop.0),
         );
         let body = state_json(&state);
-        assert!(stop_entry(&body, stop).contains("\"scope\":\"stop\",\"follow\":\"own\""), "{body}");
+        assert!(stop_entry(&body, stop)["tuning"] == serde_json::json!({"scope": "stop", "follow": "own"}), "{body}");
         assert!(
             body.contains(&format!(
                 "\"stop_tuning\":[{{\"stop\":{},\"follow\":\"own\",\"temperament\":\"pythagorean\"",
@@ -713,7 +720,7 @@ mod tests {
             "own tuning listed: {body}"
         );
         assert!(
-            stop_entry(&body, other).contains("\"scope\":\"source\""),
+            stop_entry(&body, other)["tuning"]["scope"] == "source",
             "the other stop still follows the set: {body}"
         );
         respond(
@@ -757,7 +764,7 @@ mod tests {
         let body = state_json(&state);
         assert!(!body.contains("\"source_tuning\""), "{body}");
         assert!(!body.contains("\"stop_tuning\""), "{body}");
-        assert!(stop_entry(&body, stop).contains("\"scope\":\"organ\",\"follow\":\"auto\""));
+        assert!(stop_entry(&body, stop)["tuning"] == serde_json::json!({"scope": "organ", "follow": "auto"}));
         let saved = aristide_formats::instrument::load(&path).expect("reloads");
         assert!(saved.source_tuning.is_empty());
         let _ = std::fs::remove_file(&path);
@@ -882,14 +889,10 @@ mod tests {
         assert!(body.contains("\"tremulant\":false"));
 
         // Draw stop 1, verify, retire it again.
-        let object_for_id_1 = |body: &str| -> String {
-            let start = body.find("{\"id\":1,").expect("stop 1 present");
-            body[start..start + body[start..].find('}').expect("object closes")].to_string()
-        };
         respond(&state, &Method::Post, "/api/stop?id=1&on=1");
-        assert!(object_for_id_1(&state_json(&state)).contains("\"on\":true"));
+        assert_eq!(stop_entry(&state_json(&state), aristide_model::StopId(1))["on"], true);
         respond(&state, &Method::Post, "/api/stop?id=1&on=0");
-        assert!(object_for_id_1(&state_json(&state)).contains("\"on\":false"));
+        assert_eq!(stop_entry(&state_json(&state), aristide_model::StopId(1))["on"], false);
 
         respond(&state, &Method::Post, "/api/trem?on=1");
         assert!(state_json(&state).contains("\"tremulant\":true"));

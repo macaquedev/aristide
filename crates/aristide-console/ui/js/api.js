@@ -255,6 +255,9 @@ export const commands = {
   // name stands alone); `fields.auto: 1` goes back to engraving
   // whatever footage the stop actually speaks at.
   organStopLabel: (id, fields) => `/api/organ/stop/label?${new URLSearchParams({ stop: id, ...fields })}`,
+  // A stop's inclusive played-key bounds; null restores its source range.
+  organStopCompass: (id, keys) =>
+    `/api/organ/stop/compass?stop=${id}&${keys == null ? "reset=1" : `keys=${encodeURIComponent(keys)}`}`,
   // A stop's own-pipes flag, live — no rebuild. Off (the default) merges
   // this stop's pipes with any other route/stop already sounding them;
   // on, this stop always speaks its own independent set, doubling what's

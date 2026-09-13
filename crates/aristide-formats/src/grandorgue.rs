@@ -746,6 +746,7 @@ impl Builder<'_> {
 
         let referenced_ranks = section.int_or("NumberOfRanks", 0)?;
         let mut stop = Stop {
+            compass: None,
             id,
             name,
             manual,
