@@ -1109,6 +1109,14 @@ impl State {
         Ok(())
     }
 
+    /// Return every panel to automatic placement without changing the organ.
+    pub fn reset_panel_layout(&mut self) -> Result<(), String> {
+        let path = self.organ_file()?;
+        config::clear_composite_layout(&path)?;
+        self.layout.clear();
+        Ok(())
+    }
+
     /// Move (and optionally size) a console panel on the canvas: all
     /// four are normalized fractions, clamped and rounded to four
     /// decimals before they're written. Size given as `None` keeps

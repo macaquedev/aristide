@@ -3427,6 +3427,15 @@ fn console_order_mut(doc: &mut toml_edit::DocumentMut) -> Option<&mut toml_edit:
         .and_then(|order| order.as_table_mut())
 }
 
+/// Clear only panel geometry, preserving stop order and other console settings.
+pub fn clear_composite_layout(path: &Path) -> Result<(), String> {
+    let mut doc = composite_doc(path)?;
+    if let Some(console) = doc.get_mut("console").and_then(|item| item.as_table_mut()) {
+        console.remove("layout");
+    }
+    write_atomically(path, doc.to_string())
+}
+
 /// Upsert one console panel's canvas position: creates `[console.layout]`
 /// if the file doesn't have it yet, and writes (or replaces) the
 /// panel's quoted key inside it — `"keyboard:Great" = { x = .., y = .. }`.

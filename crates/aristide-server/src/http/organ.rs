@@ -327,6 +327,12 @@ pub(super) fn panel_place(state: &Mutex<State>, query: &str) -> Reply {
     if state.is_loading() {
         return bad_request("an organ is already loading");
     }
+    if param(query, "reset") == Some("1") {
+        return match state.reset_panel_layout() {
+            Ok(()) => json(state_json_locked(&state)),
+            Err(err) => bad_request(&err),
+        };
+    }
     let size = match (
         param(query, "w").map(|v| v.parse::<f32>()),
         param(query, "h").map(|v| v.parse::<f32>()),

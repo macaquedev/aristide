@@ -456,8 +456,13 @@ the shared settings field). Playing uses the console itself: stop/coupler
 toggles, volume, silence and one clear-stops action in the registration rail.
 Arrange console unlocks panel placement and stop ordering; Select control is an
 explicit touch alternative to context-clicking. Existing saved panel positions
-retain normalized canvas coordinates. Automatic layouts measure panel rows;
-small screens use flowing panels without rewriting desktop coordinates.
+retain normalized canvas coordinates when they fit without overlaps. If saved
+positions collide after resizing or an instrument edit, the console displays an
+automatic arrangement without changing the saved coordinates. Auto arrange in
+the editing toolbar clears saved panel geometry permanently; stop ordering and
+musical settings are preserved. Automatic rows adapt their column count to the
+number of keyboards and available width, with a centered 1800px content limit.
+Small screens use flowing panels without rewriting desktop coordinates.
 Instrument settings uses a sidebar on desktop and a section chooser on narrow
 screens, with a bounded scrolling body in both cases.
 

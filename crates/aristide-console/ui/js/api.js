@@ -180,6 +180,7 @@ export const commands = {
   // All fractions of the canvas. Cosmetic: written to the organ file
   // but no rebuild. Panel ids are "keyboard:<manual>",
   // "jamb:<manual>", "couplers", "shoes".
+  organPanelReset: () => "/api/organ/panel/place?reset=1",
   organPanelPlace: (panel, x, y, size) =>
     `/api/organ/panel/place?panel=${encodeURIComponent(panel)}&x=${x.toFixed(4)}&y=${y.toFixed(4)}` +
     (size ? `&w=${size.w.toFixed(4)}&h=${size.h.toFixed(4)}` : ""),

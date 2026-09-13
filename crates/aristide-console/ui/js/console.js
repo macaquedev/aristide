@@ -951,12 +951,14 @@ export class Console {
 
   // ---- placement ----------------------------------------------------
 
-  /// Positions every panel: placed ones from snapshot.layout (fractions
-  /// of the canvas), the rest from defaultLayout. A panel the editor is
-  /// mid-drag on is left alone — its position is the pointer's.
-  layoutPanels(snapshot) {
-    // Narrow screens use a flowing layout; never rewrite the saved desktop placement.
+  /// Replay a usable custom arrangement, otherwise give every control a seat
+  /// in the automatic grid. Old sizes, new divisions and window resizing can
+  /// make saved rectangles collide; never let that hide a playing control.
+  layoutPanels(snapshot, automatic = false) {
+    if (this.el.canvas.querySelector('[data-dragging]')) return;
+    // Narrow screens reflow without rewriting the saved desktop placement.
     if (usesFlowLayout()) {
+      this.el.canvas.dataset.layout = "flow";
       for (const [id, panel] of this.panels) {
         if (!id.startsWith("keyboard:")) continue;
         panel.style.setProperty("--kb-scale", "1");
@@ -969,49 +971,68 @@ export class Console {
       return;
     }
     const W = this.el.canvas.clientWidth;
-    const canvasTop = this.el.canvas.getBoundingClientRect().top + window.scrollY;
-    let H = Math.max(360, window.innerHeight - canvasTop);
     if (!W || !this.panels.size) return;
-    const placed = snapshot.layout ?? {};
-    const columns = Math.max(1, Math.min(3, Math.floor((W - 48) / 320)));
-    const columnWidth = (W - 48 - 24 * (columns - 1)) / columns;
+    const placed = automatic ? {} : snapshot.layout ?? {};
+    const custom = [...this.panels.keys()].some(id => placed[id]);
+    // Keep controls readable on very wide monitors. Four divisions use four
+    // columns when they fit; a second row is balanced instead of leaving an
+    // orphan division under three giant panels.
+    const width = Math.min(1800, W - 48);
+    const capacity = Math.max(1, Math.floor((width + 24) / 344));
+    const count = Math.max(1, snapshot.manuals.length);
+    const columns = Math.ceil(count / Math.ceil(count / capacity));
+    const columnWidth = Math.floor((width - 24 * (columns - 1)) / columns);
     for (const [id, el] of this.panels) {
-      if (el.dataset.dragging) continue;
       const sized = placed[id]?.w != null;
       el.classList.toggle("sized", sized);
       if (id.startsWith("keyboard:")) {
         const expanded = !el.querySelector(".keyboard")?.classList.contains("keys-collapsed");
         el.style.width = "";
-        const target = sized ? placed[id].w * W : expanded ? W - 48 : columnWidth;
+        const target = sized ? placed[id].w * W : expanded ? width : columnWidth;
         if (expanded) this.scaleKeyboard(el, target);
-        el.style.width = `${Math.round(target)}px`;
+        el.style.width = `${Math.floor(target)}px`;
       } else if (id.startsWith("jamb:")) {
-        el.style.width = `${Math.round(sized ? placed[id].w * W : columnWidth)}px`;
+        el.style.width = `${Math.floor(sized ? placed[id].w * W : columnWidth)}px`;
       } else if (["couplers", "pistons"].includes(id)) {
         const expression = id === "pistons" ? this.panels.get("shoes") : null;
         const reserve = expression?.offsetWidth ? expression.offsetWidth + 24 : 0;
-        el.style.width = `${Math.round(sized ? placed[id].w * W : W - 48 - reserve)}px`;
+        el.style.width = `${Math.floor(sized ? placed[id].w * W : width - reserve)}px`;
       }
     }
     const defaults = this.defaultLayout(snapshot, W);
+    const canvasTop = this.el.canvas.getBoundingClientRect().top + window.scrollY;
+    let H = Math.max(360, window.innerHeight - canvasTop);
     for (const [id, pos] of defaults) {
-      H = Math.max(H, pos.y + this.panels.get(id).offsetHeight + 100);
+      H = Math.max(H, pos.y + this.panels.get(id).offsetHeight + 80);
     }
-    // Rendering and drag persistence must normalize against the SAME canvas.
+    // Rendering and drag persistence normalize against the same canvas.
     this.el.canvas.style.height = `${Math.ceil(H)}px`;
     H = this.el.canvas.clientHeight;
+    const rectangles = [];
     for (const [id, el] of this.panels) {
-      if (el.dataset.dragging) continue;
       const pos = placed[id]
         ? { x: placed[id].x * W, y: placed[id].y * H }
         : (defaults.get(id) ?? { x: 24, y: 24 });
       const x = Math.max(0, Math.min(pos.x, W - el.offsetWidth));
-      // Automatic rows may extend below the viewport; scroll to them instead
-      // of clamping several panels onto the same bottom edge.
       const y = placed[id] ? Math.max(0, Math.min(pos.y, H - el.offsetHeight)) : pos.y;
       el.style.left = `${Math.round(x)}px`;
       el.style.top = `${Math.round(y)}px`;
+      if (el.offsetHeight) rectangles.push({
+        x: Math.round(x), y: Math.round(y), w: el.offsetWidth, h: el.offsetHeight,
+      });
     }
+    const overlaps = rectangles.some((a, i) => rectangles.slice(i + 1).some(b =>
+      a.x < b.x + b.w - 1 && b.x < a.x + a.w - 1 &&
+      a.y < b.y + b.h - 1 && b.y < a.y + a.h - 1
+    ));
+    const outside = rectangles.some(r => r.x + r.w > W + 1 || r.y + r.h > H + 1);
+    if (custom && (overlaps || outside)) {
+      // A display fallback only. The player's original coordinates remain in
+      // the organ file and return when the window can accommodate them.
+      this.layoutPanels(snapshot, true);
+      return;
+    }
+    this.el.canvas.dataset.layout = custom ? "custom" : "automatic";
   }
 
   /// Scales a keyboard panel so it comes out `targetPx` wide (null =
@@ -1029,11 +1050,11 @@ export class Console {
   /// The automatic arrangement reads in playing order: stops by division,
   /// couplers, keyboards, then registration and expression. Each row measures
   /// real panel sizes, so long names and expanded keyboards cannot overlap.
-  /// Explicit saved positions are replayed by layoutPanels, independently.
+  /// layoutPanels checks custom positions against the complete arrangement.
   defaultLayout(snapshot, W) {
     const positions = new Map();
-    const gap = 24, pad = 24;
-    let y = pad;
+    const gap = 24, pad = Math.max(24, (W - 1800) / 2);
+    let y = 24;
     const rows = (ids) => {
       let x = pad, rowHeight = 0;
       for (const id of ids) {

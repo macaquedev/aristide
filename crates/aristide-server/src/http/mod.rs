@@ -2295,6 +2295,31 @@ mod tests {
         let mut keys: Vec<&str> = reloaded.console_layout.keys().map(String::as_str).collect();
         keys.sort_unstable();
         assert_eq!(keys, ["jamb:Grand", "keyboard:Grand", "shoes"]);
+
+        // Auto arrange clears geometry only, including on a protected source
+        // organ. Stop ordering and all musical settings remain intact.
+        let before = format!("{}\n# Keep this order\n[console.order]\nGrand = [\"Montre 8\"]\n",
+            std::fs::read_to_string(&file).expect("reads"));
+        std::fs::write(&file, &before).expect("adds order");
+        let mut expected: toml::Value = toml::from_str(&before).expect("parses");
+        expected["console"].as_table_mut().expect("console").remove("layout");
+        state.lock().expect("state").loading = Some("rebuilding".into());
+        let refused = respond(&state, &Method::Post, "/api/organ/panel/place?reset=1");
+        assert_eq!(refused.status_code().0, 400);
+        assert_eq!(std::fs::read_to_string(&file).expect("reads"), before);
+        {
+            let mut state = state.lock().expect("state");
+            state.loading = None;
+            state.setup.adopted = true;
+        }
+        let reset = respond(&state, &Method::Post, "/api/organ/panel/place?reset=1");
+        assert_eq!(reset.status_code().0, 200);
+        assert!(state.lock().expect("state").layout.is_empty());
+        assert!(state.lock().expect("state").pending_load.is_none());
+        let after = std::fs::read_to_string(&file).expect("reads");
+        assert_eq!(toml::from_str::<toml::Value>(&after).expect("parses"), expected);
+        assert!(after.contains("# Keep this order"));
+        assert!(aristide_formats::instrument::load(&file).expect("reloads").console_layout.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -443,6 +443,9 @@ export class Editor {
       this.openAddMenu(rect.left, rect.top);
     });
     inspect.addEventListener("click", () => this.setInspect(!this.inspect));
+    this.root.getElementById("editor-auto-arrange").addEventListener("click", () => {
+      this.organCommand(commands.organPanelReset());
+    });
     // Explicit alternative to right-click, usable with one finger.
     this.el.canvas.addEventListener("pointerdown", (event) => {
       if (this.inspect) event.stopImmediatePropagation();
