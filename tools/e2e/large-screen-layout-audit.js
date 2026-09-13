@@ -31,7 +31,7 @@ try {
     const overlaps=panels.flatMap((a,i)=>panels.slice(i+1).filter(b=>a.x<b.right-1 && b.x<a.right-1 && a.y<b.bottom-1 && b.y<a.bottom-1).map(b=>a.id+' / '+b.id));
     const stops=[...document.querySelectorAll('.panel-jamb .knob')];
     return { panels, overlaps, fits:document.documentElement.scrollWidth<=innerWidth,
-      readable:stops.every(e=>e.clientWidth>=100 && e.clientHeight>=44 && e.querySelector('.stop-name').scrollWidth<=e.querySelector('.stop-name').clientWidth+1),
+      readable:stops.every(e=>e.clientWidth>=100 && e.offsetHeight>=(matchMedia('(pointer: coarse)').matches?44:28) && e.querySelector('.stop-name').scrollWidth<=e.querySelector('.stop-name').clientWidth+1),
       mode:document.querySelector('#console-canvas').dataset.layout, errors:window.auditErrors };
   })()`);
   for (const [width,height,scale,touch] of [[1440,900,1,false],[1919,976,1,false],[1919,1000,2,false],[2560,1440,1,false],[3838,1999,1,false],[1366,768,1,false],[1024,768,1,true],[390,844,1,true]]) {

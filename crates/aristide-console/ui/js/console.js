@@ -221,14 +221,13 @@ export class Console {
     this.el.emptyCard.append(title, note, open);
   }
 
-  /// Long stop names ("Trompette", "Tremblant") must never break
-  /// mid-word; instead the engraving shrinks until the widest word fits
-  /// on the knob face. Measured, not guessed, so it holds under any font.
+  /// Stop rows keep readable type and wrap long names. Smaller standalone
+  /// controls outside the jambs still fit their lettering to a fixed face.
   fitLabels() {
     for (const label of this.root.querySelectorAll(".stop-name")) {
       label.style.fontSize = "";
-      // Flow layouts wrap readable labels instead of shrinking the engraving.
-      if (usesFlowLayout()) continue;
+      // Stop names wrap at their readable size, even in the compact grid.
+      if (label.closest(".panel-jamb") || usesFlowLayout()) continue;
       for (let size = 10.5; label.scrollWidth > label.clientWidth && size > 7.5; ) {
         size -= 0.5;
         label.style.fontSize = `${size}px`;
@@ -458,6 +457,7 @@ export class Console {
     const knob = document.createElement("button");
     knob.className = "knob";
     knob.dataset.key = key;
+    knob.title = name;
     const [line, foot] = lines ?? splitLabel(name);
     const face = document.createElement("span");
     face.className = "face";
@@ -956,6 +956,7 @@ export class Console {
   /// make saved rectangles collide; never let that hide a playing control.
   layoutPanels(snapshot, automatic = false) {
     if (this.el.canvas.querySelector('[data-dragging]')) return;
+    this.el.canvas.parentElement.style.setProperty("--console-max", snapshot.stops.length >= 80 ? "100%" : "1800px");
     // Narrow screens reflow without rewriting the saved desktop placement.
     if (usesFlowLayout()) {
       this.el.canvas.dataset.layout = "flow";
@@ -974,10 +975,11 @@ export class Console {
     if (!W || !this.panels.size) return;
     const placed = automatic ? {} : snapshot.layout ?? {};
     const custom = [...this.panels.keys()].some(id => placed[id]);
-    // Keep controls readable on very wide monitors. Four divisions use four
+    // Large instruments use the available width for more compact stop columns.
+    // Smaller organs stay centered. Four divisions use four
     // columns when they fit; a second row is balanced instead of leaving an
     // orphan division under three giant panels.
-    const width = Math.min(1800, W - 48);
+    const width = Math.min(snapshot.stops.length >= 80 ? W : 1800, W - 48);
     const capacity = Math.max(1, Math.floor((width + 24) / 344));
     const count = Math.max(1, snapshot.manuals.length);
     const columns = Math.ceil(count / Math.ceil(count / capacity));
@@ -1053,7 +1055,7 @@ export class Console {
   /// layoutPanels checks custom positions against the complete arrangement.
   defaultLayout(snapshot, W) {
     const positions = new Map();
-    const gap = 24, pad = Math.max(24, (W - 1800) / 2);
+    const gap = 24, pad = snapshot.stops.length >= 80 ? 24 : Math.max(24, (W - 1800) / 2);
     let y = 24;
     const rows = (ids) => {
       let x = pad, rowHeight = 0;

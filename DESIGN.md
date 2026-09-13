@@ -461,7 +461,13 @@ positions collide after resizing or an instrument edit, the console displays an
 automatic arrangement without changing the saved coordinates. Auto arrange in
 the editing toolbar clears saved panel geometry permanently; stop ordering and
 musical settings are preserved. Automatic rows adapt their column count to the
-number of keyboards and available width, with a centered 1800px content limit.
+number of keyboards and available width, with a centered 1800px content limit
+for smaller organs. Instruments with 80 or more stops use the available width
+so extra columns fit on large displays. Stop controls are compact rows: 32px
+minimum height by default, 28px in Compact and 40px in Spacious. Names and pitch
+labels remain at 13px and long names wrap without shrinking the text. Touch
+controls keep at least 44px tap targets. Empty grid tracks stay empty rather
+than stretching a few stops into oversized tiles.
 Small screens use flowing panels without rewriting desktop coordinates.
 Instrument settings uses a sidebar on desktop and a section chooser on narrow
 screens, with a bounded scrolling body in both cases.
