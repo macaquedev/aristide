@@ -75,6 +75,7 @@ export function openingPopover(editor, kind) {
   closeQuickMenus(editor);
   const registry = popovers(editor);
   for (const other of POPOVER_CLOSES[kind] ?? []) registry[other].close();
+  editor.settings?.prepare(kind);
 }
 
 /// Every popover and quick menu, closed at once — a click outside all

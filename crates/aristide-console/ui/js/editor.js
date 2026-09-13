@@ -104,11 +104,7 @@ import { PITCH_ACTIONS, emptyNote } from "./wiring.js";
 /// The keyboard context menu's "Change type" radio group, in the order
 /// they're offered — the same vocabulary the add menu and the server's
 /// `kind=` param share.
-const KEYBOARD_KINDS = [
-  ["manual", "Manual"],
-  ["pedal", "Pedalboard"],
-  ["microtonal", "Microtonal keyboard"],
-];
+
 
 /// Anything with behavior of its own — a panel drag must never start on
 /// these, or a drawknob could not be clicked and a key could not play.
@@ -127,7 +123,6 @@ export class Editor {
     this.autoUnlockedFor = null; // organ name already auto-unlocked once
     this.offerings = null;
     this.offeringsFile = null; // setup.file the cached offerings were fetched for
-    this.renamingManual = null; // manual idx whose cheek is a rename input
     this.pendingRemove = null; // {kind: "manual"|"enclosure", ...} awaiting confirm
     this.pendingPlace = null; // {name, x, y}: place this manual's panels once it lands
     this.addAnchor = null; // where the add popover was opened, in px
@@ -444,7 +439,7 @@ export class Editor {
       const rect = add.getBoundingClientRect();
       this.openAddMenu(rect.left, rect.top);
     });
-    inspect.addEventListener("click", () => this.inspect ? this.setInspect(false) : this.openPreferences?.());
+    inspect.addEventListener("click", () => this.setInspect(!this.inspect));
     // Explicit alternative to right-click, usable with one finger.
     this.el.canvas.addEventListener("pointerdown", (event) => {
       if (this.inspect) event.stopImmediatePropagation();
@@ -476,7 +471,7 @@ export class Editor {
     this.root.body.classList.toggle("inspecting", this.inspect);
     const button = this.root.getElementById("editor-inspect");
     button.setAttribute("aria-pressed", String(this.inspect));
-    button.textContent = this.inspect ? "Cancel selection" : "Settings";
+    button.textContent = this.inspect ? "Cancel selection" : "Select control";
   }
 
   togglePadlock() {
@@ -517,7 +512,7 @@ export class Editor {
     this.el.lock.setAttribute("aria-label", "Lock editing");
     this.el.lock.dataset.tip = "Lock editing (Ctrl+E)";
     this.root.getElementById("editor-lock-label").textContent = "Done";
-    this.el.lockGlyph.innerHTML = "&#128275;"; // open padlock
+    this.el.lockGlyph.textContent = "✓"; // open padlock
     this.el.hint.classList.remove("hidden");
     this.el.drawerTab.classList.remove("hidden");
   }
@@ -530,8 +525,8 @@ export class Editor {
     this.el.lock.setAttribute("aria-pressed", "false");
     this.el.lock.setAttribute("aria-label", "Unlock editing");
     this.el.lock.dataset.tip = "Unlock editing (Ctrl+E)";
-    this.root.getElementById("editor-lock-label").textContent = "Edit console";
-    this.el.lockGlyph.innerHTML = "&#128274;"; // closed padlock
+    this.root.getElementById("editor-lock-label").textContent = "Arrange console";
+    this.el.lockGlyph.textContent = "↔"; // closed padlock
     this.el.hint.classList.add("hidden");
     this.el.drawerTab.classList.add("hidden");
     this.closeDrawer();
@@ -1021,48 +1016,8 @@ export class Editor {
   }
 
   startManualRename(idx) {
-    if (this.renamingManual === idx) return;
-    const board = this.root.querySelector(`.keyboard[data-manual="${idx}"]`);
-    const cheek = board?.querySelector(".cheek");
-    const manual = this.lastSnapshot?.manuals.find((m) => m.idx === idx);
-    if (!board || !cheek || !manual) return;
-    this.renamingManual = idx;
-    cheek.style.visibility = "hidden";
-
-    const input = document.createElement("input");
-    input.className = "editor-cheek-rename";
-    input.value = manual.name;
-    input.setAttribute("aria-label", `Rename ${manual.name}`);
-
-    const commit = () => {
-      if (this.renamingManual !== idx) return;
-      this.renamingManual = null;
-      input.remove();
-      cheek.style.visibility = "";
-      const name = input.value.trim();
-      if (name && name !== manual.name) this.organCommand(commands.organManualRename(idx, name));
-    };
-    const abandon = () => {
-      this.renamingManual = null;
-      input.remove();
-      cheek.style.visibility = "";
-    };
-    input.addEventListener("keydown", (event) => {
-      event.stopPropagation(); // never falls through to a key binding
-      if (event.key === "Enter") {
-        event.preventDefault();
-        commit();
-      } else if (event.key === "Escape") {
-        event.preventDefault();
-        abandon();
-      }
-    });
-    input.addEventListener("blur", commit);
-    board.append(input);
-    requestAnimationFrame(() => {
-      input.focus();
-      input.select();
-    });
+    this.settings?.openKeyboard(idx);
+    requestAnimationFrame(() => this.root.querySelector('#organ-prefs [aria-label="Keyboard name"]')?.focus());
   }
 
   // ---- moving panels ------------------------------------------------------
@@ -1184,7 +1139,8 @@ export class Editor {
     const start = { x: event.clientX, w: panel.offsetWidth, ...measured };
     panel.dataset.dragging = "1"; // layoutPanels leaves a mid-gesture panel alone
     const move = (e) => {
-      const target = start.w + e.clientX - start.x;
+      const target = Math.max(320, start.w + e.clientX - start.x);
+      panel.style.width = `${target}px`;
       panel.style.setProperty("--kb-scale", keyboardScale(start, target));
     };
     const up = (_event, cancelled) => {
@@ -1373,106 +1329,7 @@ export class Editor {
   // contract as the add menu) and a way into the tuning popover below.
 
   openKeyboardMenu(idx, x, y) {
-    this.closeAdd();
-    this.closeDivisionMenu();
-    this.closeTuningForm();
-    this.closeCouplerForm();
-    this.closeSettingsPopovers();
-    const menu = this.el.keyboardMenu;
-    menu.replaceChildren();
-    this.buildKeyboardMenuItems(menu, idx);
-    menu.classList.remove("hidden");
-    this.positionPopover(menu, x, y);
-  }
-
-  buildKeyboardMenuItems(menu, idx) {
-    const manual = this.lastSnapshot?.manuals.find((m) => m.idx === idx);
-    if (!manual) return;
-    const currentKind = manual.kind ?? (manual.pedal ? "pedal" : "manual");
-
-    const heading = document.createElement("span");
-    heading.className = "menu-heading";
-    heading.textContent = "Change type";
-    menu.append(heading);
-
-    for (const [kind, label] of KEYBOARD_KINDS) {
-      menu.append(
-        menuItem(label, {
-          radio: true,
-          checked: kind === currentKind,
-          onClick: () => {
-            this.closeKeyboardMenu();
-            if (kind !== currentKind) this.organCommand(commands.organManualKind(idx, kind));
-          },
-        })
-      );
-    }
-
-    menu.append(document.createElement("hr"));
-    menu.append(menuItem("Rename keyboard…", {
-      onClick: () => {
-        this.closeKeyboardMenu();
-        this.startManualRename(idx);
-      },
-    }));
-
-    // The bin gesture as a menu item — same confirm, same command.
-    menu.append(
-      menuItem("Remove keyboard…", {
-        onClick: () => {
-          this.closeKeyboardMenu();
-          const stopCount = (this.lastSnapshot?.stops ?? []).filter((s) => s.midx === idx).length;
-          this.showRemoveConfirm("manual", { idx, name: manual.name, stopCount });
-        },
-      })
-    );
-
-    // The manual's own wiring and reach, popovers of their own. Both
-    // sit above "Change tuning…" so the tuning item stays the menu's
-    // last (harness-hooks.js counts on that).
-    menu.append(
-      menuItem("MIDI input…", {
-        onClick: () => {
-          const rect = menu.getBoundingClientRect();
-          this.closeKeyboardMenu();
-          this.openMidiForm(idx, rect.left, rect.top);
-        },
-      })
-    );
-
-    menu.append(
-      menuItem("Compass…", {
-        onClick: () => {
-          const rect = menu.getBoundingClientRect();
-          this.closeKeyboardMenu();
-          this.openCompassForm(idx, rect.left, rect.top);
-        },
-      })
-    );
-
-    // A hex field is a microtonal-manual fact; the other kinds have
-    // no layout to offer.
-    if (currentKind === "microtonal") {
-      menu.append(
-        menuItem("Hex layout…", {
-          onClick: () => {
-            const rect = menu.getBoundingClientRect();
-            this.closeKeyboardMenu();
-            this.openHexForm(idx, rect.left, rect.top);
-          },
-        })
-      );
-    }
-
-    menu.append(
-      menuItem("Change tuning…", {
-        onClick: () => {
-          const rect = menu.getBoundingClientRect();
-          this.closeKeyboardMenu();
-          this.openTuningForm({ kind: "division", idx }, rect.left, rect.top);
-        },
-      })
-    );
+    this.settings?.openKeyboard(idx);
   }
 
   closeKeyboardMenu() {
@@ -2040,6 +1897,7 @@ export class Editor {
   }
 
   positionPopover(el, x, y) {
+    this.settings?.present(el);
     if (el.closest("#organ-prefs")) return;
     el.style.left = "0px";
     el.style.top = "0px";

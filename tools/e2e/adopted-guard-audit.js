@@ -38,7 +38,7 @@ import { dirname, join } from "node:path";
 
 const SERVER_PORT = 9896;
 const UI_PORT = 9897;
-const CDP_PORT = 9236;
+const CDP_PORT = 9234;
 const h = launchHarness({ name: "adopted-audit", serverPort: SERVER_PORT, uiPort: UI_PORT, cdpPort: CDP_PORT });
 const { REPO, S, demo, check, sleep, state, settled, post, waitForServer, done } = h;
 const OUT = join(REPO, "target", "adopted-guard-audit");

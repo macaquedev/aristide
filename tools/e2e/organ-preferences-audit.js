@@ -10,7 +10,8 @@ try {
   await d.navigate('http://127.0.0.1:9941/?server=http://127.0.0.1:9940');await sleep(600);
   const visible=sel=>d.eval(`!!document.querySelector(${JSON.stringify(sel)})?.getClientRects().length`);
   const tap=async sel=>{const p=await d.eval(`(()=>{const el=document.querySelector(${JSON.stringify(sel)});el.scrollIntoView({block:'center'});const r=el.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2,id:1};})()`);await d.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[p]});await d.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});await sleep(150);};
-  const open=async()=>{await d.eval(`[...document.querySelectorAll('#menus .menu-title')].find(b=>b.textContent==='Organ').click()`);await d.eval(`[...document.querySelectorAll('.menu-list:not(.hidden) button')].find(b=>b.textContent==='Preferences…').click()`);await sleep(150);};
+  const open=async()=>{await d.click('#instrument-settings');await sleep(150);};
+  const category=async id=>{await d.set('#organ-prefs-section',id);await sleep(100);};
   const action=async label=>{await d.eval(`[...document.querySelectorAll('#organ-prefs button')].find(b=>b.textContent.startsWith(${JSON.stringify(label)})).click()`);await sleep(180);};
   check(await d.eval(`document.querySelectorAll('.keyboard').length>0`),'keyboard cards are rendered');
   check(await d.eval(`[...document.querySelectorAll('.keyboard')].every(k=>k.classList.contains('keys-collapsed'))`),'keyboards start as compact cards');
@@ -38,9 +39,9 @@ try {
     await d.eval(`document.querySelectorAll('.keyboard-toggle')[${i}].click()`);
   }
   await tap('#editor-lock');
-  check(await d.eval(`[...document.querySelectorAll('.editor-toolbar button')].every(b=>b.offsetHeight>=56)`),'editing buttons have 56px touch targets');
+  check(await d.eval(`[...document.querySelectorAll('.editor-toolbar button')].every(b=>b.offsetHeight>=44)`),'editing buttons have at least 44px touch targets');
   await tap('#editor-add-button');check(await visible('#editor-add-menu'),'Add opens with an actual finger tap');
-  await tap('#editor-inspect');check(await visible('#organ-prefs'),'Settings opens centralized preferences with an actual finger tap');
+  await tap('#organ-prefs .modal-close');await tap('#instrument-settings');check(await visible('#organ-prefs'),'Settings opens centralized preferences with an actual finger tap');
   await d.shot('/tmp/aristide-organ-preferences-phone.png');
   check(await d.eval(`document.querySelector('#organ-prefs').contains(document.activeElement)&&document.querySelector('#console').inert`),'preferences contains focus and disables the playing surface');
   await action('Tuning & pitch');
@@ -48,8 +49,8 @@ try {
   await d.eval(`const f=document.querySelector('#editor-tuning-ref-hz');f.value='415';f.dispatchEvent(new Event('change',{bubbles:true}))`);await sleep(400);
   check((await state()).tuning.reference.hz===415,'tuning changes reach the real organ');
   await tap('#organ-prefs-back');await action('Room & noises');check(await visible('#editor-room'),'room controls are reachable inside preferences');
-  await tap('#organ-prefs-back');await action('Buttons & shortcuts');check(await visible('#editor-bindings'),'button assignments are reachable inside preferences');
-  await tap('[data-category="keyboards"]');await tap('.organ-pref-group summary');
+  await category('bindings');await action('Edit buttons & shortcuts');check(await visible('#editor-bindings'),'button assignments are reachable inside preferences');
+  await category('keyboards');await action('Pedal');
   await action('Connect keyboard / MIDI input');check(await visible('#editor-midi'),'MIDI input editor is reachable from the keyboard list');
   const midiFits = () => d.eval(`(()=>{
     const host=document.querySelector('.organ-prefs-content');
@@ -81,33 +82,41 @@ try {
   await d.shot('/tmp/aristide-midi-preferences-phone.png');
   await d.eval(`document.querySelectorAll('#editor-midi details').forEach(el=>el.open=true)`);
   check(await d.eval(`document.querySelector('.organ-prefs-content').scrollWidth<=document.querySelector('.organ-prefs-content').clientWidth+1`),'expanded shortcuts and available devices do not overflow');
-  await tap('[data-category="stops"]');await d.eval(`document.querySelector('#organ-prefs-index .organ-pref-action').click()`);await sleep(150);
+  await category('stops');await d.eval(`document.querySelector('#organ-prefs-index .organ-pref-action').click()`);await sleep(150);
   check(await visible('#editor-stop'),'stop voicing opens from the stop list');
   await d.shot('/tmp/aristide-stop-preferences-phone.png');
   await tap('#organ-prefs-back');await tap('#organ-prefs-index details summary');await action('Edit selected pipes');
   check(await visible('#editor-key-voicing'),'individual pipes can be edited without tapping a tiny key');
-  await tap('[data-category="couplers"]');await d.eval(`document.querySelectorAll('#organ-prefs-index .organ-pref-action')[1].click()`);await sleep(150);
+  await category('couplers');await d.eval(`document.querySelectorAll('#organ-prefs-index .organ-pref-action')[1].click()`);await sleep(150);
   check(await visible('#editor-coupler'),'coupler routes are editable in preferences');
-  await tap('[data-category="appearance"]');check(await visible('#organ-prefs [data-pane="appearance"]'),'appearance settings are available in the same window');
-  await tap('#organ-prefs .advanced-settings summary');
-  check(await d.eval(`(()=>{const r=document.querySelector('#organ-prefs .modal-card').getBoundingClientRect();return r.left>=0&&r.right<=innerWidth&&r.bottom<=innerHeight;})()`),'expanded preferences stay within the phone viewport');
-  await tap('[data-category="sources"]');await sleep(200);check(await d.eval(`document.querySelector('#organ-prefs-index').textContent.includes('Sample set tuning')`),'sample set tuning is available in preferences');
+  check(await d.eval(`document.querySelector('#prefs [data-pane="appearance"]')!==null && !document.querySelector('#organ-prefs [data-pane="appearance"]')`),'appearance has one home in App preferences');
+  check(await d.eval(`(()=>{const r=document.querySelector('#organ-prefs .modal-card').getBoundingClientRect();return r.left>=0&&r.right<=innerWidth&&r.bottom<=innerHeight;})()`),'settings stays within the phone viewport');
+  await category('sources');await sleep(200);check(await d.eval(`document.querySelector('#organ-prefs-index').textContent.includes('Sample set tuning')`),'sample set tuning is available in preferences');
   await tap('#organ-prefs [data-organ-prefs-close].modal-close');
   check(await d.eval(`document.querySelector('#editor-tuning').parentElement===document.body&&!document.querySelector('#console').inert`),'closing restores console shortcuts and focus boundary');
-  await tap('#tuning');check(await visible('#editor-tuning'),'the tuning shortcut still works outside preferences');
+  await tap('#tuning');check(await visible('#editor-tuning')&&await visible('#organ-prefs'),'the tuning shortcut opens the same settings workspace');
   await d.send('Input.dispatchKeyEvent',{type:'keyDown',key:'Escape',code:'Escape'});
-  await open();await tap('[data-category="general"]');
-  await action('Add to this organ');await tap('#editor-add-manual');
+  await open();await category('general');
+  await category('keyboards');await action('Add keyboard');
   await d.eval(`const n=document.querySelector('#editor-add-manual-name');n.value='New keyboard';document.querySelector('#editor-add-manual-form').requestSubmit()`);
   for(let i=0;i<60;i++){if((await state()).manuals.some(m=>m.name==='New keyboard'))break;await sleep(200);}
   check((await state()).manuals.some(m=>m.name==='New keyboard'),'keyboard creation works inside preferences');
   check(await visible('#organ-prefs'),'structural rebuild keeps preferences open');
-  await tap('[data-category="general"]');await action('Save a copy');
+  await category('general');await action('Save a copy');
   check(await visible('#save-as'),'Save a copy opens above preferences');
   await d.send('Input.dispatchKeyEvent',{type:'keyDown',key:'Escape',code:'Escape'});await sleep(150);
   check(await visible('#organ-prefs')&&!(await visible('#save-as')),'Escape closes only the nested save dialog');
   await d.send('Emulation.setDeviceMetricsOverride',{width:1500,height:950,deviceScaleFactor:1,mobile:false});
   await d.send('Emulation.setTouchEmulationEnabled',{enabled:false});await sleep(200);await d.shot('/tmp/aristide-organ-preferences-desktop.png');
+  const twin = (await state()).couplers.find(c=>!c.hidden);
+  await post(`/api/organ/coupler/add?name=Duplicate%20routes&routes=${encodeURIComponent(JSON.stringify(twin.routes))}`);
+  await settled(); await sleep(300);
+  await category('couplers'); await action('Duplicate routes');
+  await tap('#organ-prefs .modal-close');
+  check(await visible('#editor-link-confirm')&&await visible('#organ-prefs'),'closing a duplicate coupler preserves the existing link choice');
+  await tap('#editor-link-confirm-no');
+  await tap('#organ-prefs .modal-close');
+  check(!(await visible('#organ-prefs')),'the workspace closes after the link choice is answered');
   check(await d.eval('window.__uiErrors.length===0'),'no uncaught browser errors');
 } catch(e){fatal=true;console.error(e);}
 console.log(`${h.failures} failed${fatal?'; fatal error':''}`);await h.done(fatal||h.failures?1:0);

@@ -10,9 +10,9 @@
 // Each panel is absolutely positioned — from `snapshot.layout` (the
 // organ file's own [console.layout], normalized 0..1 fractions of the
 // canvas) when a panel has been placed, otherwise from `defaultLayout`,
-// which reproduces the classic arrangement: jambs flanking, manuals
-// stacked mid-case, pedalboard below, shoes beside it. Moving panels
-// is the editor's job (editor.js); this file only draws and places.
+// which groups measured panels into rows. Narrow screens use a flowing
+// layout without changing saved desktop positions. Moving panels is the
+// editor's job (editor.js); this file only draws and places.
 
 import { PointerNotes } from "./pointer-notes.js";
 import { keyboardScale, measureKeyboard, usesFlowLayout } from "./kb-scale.js";
@@ -128,6 +128,11 @@ export class Console {
     // a resize drag, a stored width landing — and its cheek refitted
     // to the new room. The field rather than the cheek: a fit changes
     // the cheek's own width, and an observer there would chase itself.
+    this.panelSizes = new ResizeObserver(() => {
+      if (!this.snapshot || this.el.canvas.querySelector('[data-dragging]')) return;
+      cancelAnimationFrame(this.layoutFrame);
+      this.layoutFrame = requestAnimationFrame(() => this.layoutPanels(this.snapshot));
+    });
     this.fields = new ResizeObserver((entries) => {
       for (const { target } of entries) {
         const cheek = target.parentElement?.querySelector(".cheek");
@@ -178,12 +183,15 @@ export class Console {
     this.notes.releaseAll();
     this.dragging.clear();
     this.el.organName.textContent = snapshot.organ ?? "No organ";
+    setText(this.root.getElementById("console-title"), snapshot.organ ?? "Your instrument");
+    setText(this.root.getElementById("console-summary"), `${snapshot.manuals.length} keyboards · ${snapshot.stops.length} stops`);
     // A loaded organ with nothing built yet has no panels worth drawing —
     // a card points at the editor instead. The canvas stays live under
     // it: double-clicking the bare case is how the first manual arrives.
     const empty = !!snapshot.organ && !snapshot.stops.length && !snapshot.manuals.length;
     this.el.emptyCard.classList.toggle("hidden", !empty);
     this.layoutSig = null; // panels are new; place them on next refresh
+    this.panelSizes.disconnect();
     this.fields.disconnect(); // the old fields go with the old panels
     if (empty) {
       this.panels.clear();
@@ -204,9 +212,8 @@ export class Console {
     title.textContent = snapshot.organ ?? "Untitled organ";
     const note = document.createElement("p");
     note.textContent =
-      "An empty organ, ready to build. Choose + Add to add " +
-      "manuals and sample sets. Added sets offer their stops in the " +
-      "Library drawer, ready to drag onto a manual.";
+      "Start with a keyboard and a sample set. Then choose the stops " +
+      "you want to play in Instrument settings.";
     const open = document.createElement("button");
     open.type = "button";
     open.textContent = "Start building";
@@ -299,6 +306,7 @@ export class Console {
     el.append(chrome, body);
     this.panels.set(id, el);
     this.el.canvas.append(el);
+    this.panelSizes.observe(el);
     return body;
   }
 
@@ -391,7 +399,6 @@ export class Console {
       });
       rail.append(rocker);
     }
-    rail.append(this.cancelPiston());
     couplersBody.append(rail);
 
     // The tremulant behaves like a stop; it joins the bottom of the last
@@ -580,7 +587,7 @@ export class Console {
       ),
       this.railButton(
         "cancel-rail",
-        "Cancel",
+        "Clear stops",
         () => this.cancel(),
         "cancel",
         "Push in every drawknob and release every coupler"
@@ -743,18 +750,6 @@ export class Console {
   /// General cancel: pushes in every stop and releases every coupler.
   /// Momentary — it never lights, so it carries no `on` state; the
   /// tremulant is a separate control and survives it.
-  cancelPiston() {
-    const piston = document.createElement("button");
-    piston.className = "rocker cancel";
-    piston.dataset.key = "cancel";
-    const face = document.createElement("span");
-    face.className = "tab";
-    face.textContent = "Cancel";
-    piston.append(face);
-    piston.addEventListener("click", () => this.cancel());
-    return piston;
-  }
-
   cancel() {
     // Optimistic — but never on a stop the crescendo is holding: Cancel
     // is a thumb on the jamb and cannot move a foot, so those stay lit
@@ -974,44 +969,46 @@ export class Console {
       return;
     }
     const W = this.el.canvas.clientWidth;
-    const H = this.el.canvas.clientHeight;
-    if (!W || !H || !this.panels.size) return;
+    const canvasTop = this.el.canvas.getBoundingClientRect().top + window.scrollY;
+    let H = Math.max(360, window.innerHeight - canvasTop);
+    if (!W || !this.panels.size) return;
     const placed = snapshot.layout ?? {};
-    // Sizes first, positions second: the default layout measures every
-    // panel to seat the unplaced ones around the placed, so a jamb's
-    // player-set width must be real before anything is measured — or
-    // the auto-laid panels seat themselves over the columns it grew.
+    const columns = Math.max(1, Math.min(3, Math.floor((W - 48) / 320)));
+    const columnWidth = (W - 48 - 24 * (columns - 1)) / columns;
     for (const [id, el] of this.panels) {
       if (el.dataset.dragging) continue;
       const sized = placed[id]?.w != null;
-      // A sized keyboard scales its keys to the recorded width (see
-      // --kb-scale in style.css) rather than taking a width style —
-      // the panel keeps hugging the (scaled) content, so keys are
-      // never clipped or orphaned in space.
-      if (id.startsWith("keyboard:")) {
-        this.scaleKeyboard(el, sized ? placed[id].w * W : Math.min(W * .52, 800));
-        continue;
-      }
-      // A player-sized panel: the dragged width is what wraps a
-      // jamb's knobs into columns; height always follows the content,
-      // so nothing is ever clipped. (`h` still rides the layout for
-      // symmetry; only the width is load-bearing today.)
       el.classList.toggle("sized", sized);
-      el.style.width = sized ? `${Math.round(placed[id].w * W)}px` : "";
+      if (id.startsWith("keyboard:")) {
+        const expanded = !el.querySelector(".keyboard")?.classList.contains("keys-collapsed");
+        el.style.width = "";
+        const target = sized ? placed[id].w * W : expanded ? W - 48 : columnWidth;
+        if (expanded) this.scaleKeyboard(el, target);
+        el.style.width = `${Math.round(target)}px`;
+      } else if (id.startsWith("jamb:")) {
+        el.style.width = `${Math.round(sized ? placed[id].w * W : columnWidth)}px`;
+      } else if (["couplers", "pistons"].includes(id)) {
+        const expression = id === "pistons" ? this.panels.get("shoes") : null;
+        const reserve = expression?.offsetWidth ? expression.offsetWidth + 24 : 0;
+        el.style.width = `${Math.round(sized ? placed[id].w * W : W - 48 - reserve)}px`;
+      }
     }
-    const defaults = this.defaultLayout(snapshot, W, H);
+    const defaults = this.defaultLayout(snapshot, W);
+    for (const [id, pos] of defaults) {
+      H = Math.max(H, pos.y + this.panels.get(id).offsetHeight + 100);
+    }
+    // Rendering and drag persistence must normalize against the SAME canvas.
+    this.el.canvas.style.height = `${Math.ceil(H)}px`;
+    H = this.el.canvas.clientHeight;
     for (const [id, el] of this.panels) {
       if (el.dataset.dragging) continue;
       const pos = placed[id]
         ? { x: placed[id].x * W, y: placed[id].y * H }
         : (defaults.get(id) ?? { x: 24, y: 24 });
-      // Kept on the canvas: a placement recorded on a wider window (or
-      // at a smaller zoom) would otherwise seat the panel past the
-      // edge, where the canvas clips it — the same clamp the editor's
-      // drag applies, so the panel sits where the drag would have
-      // left it.
       const x = Math.max(0, Math.min(pos.x, W - el.offsetWidth));
-      const y = Math.max(0, Math.min(pos.y, H - el.offsetHeight));
+      // Automatic rows may extend below the viewport; scroll to them instead
+      // of clamping several panels onto the same bottom edge.
+      const y = placed[id] ? Math.max(0, Math.min(pos.y, H - el.offsetHeight)) : pos.y;
       el.style.left = `${Math.round(x)}px`;
       el.style.top = `${Math.round(y)}px`;
     }
@@ -1029,84 +1026,34 @@ export class Console {
     if (measured) el.style.setProperty("--kb-scale", keyboardScale(measured, targetPx));
   }
 
-  /// The classic console, derived rather than hard-coded: coupler rail
-  /// on top, manuals stacked beneath it highest-first, pedalboard at
-  /// the bottom with the shoes at its right, jambs flanking — first
-  /// half of the divisions on the left, the rest on the right.
-  defaultLayout(snapshot, W, H) {
-    const pos = new Map();
-    const size = (id) => {
-      const el = this.panels.get(id);
-      return el ? { w: el.offsetWidth, h: el.offsetHeight } : null;
+  /// The automatic arrangement reads in playing order: stops by division,
+  /// couplers, keyboards, then registration and expression. Each row measures
+  /// real panel sizes, so long names and expanded keyboards cannot overlap.
+  /// Explicit saved positions are replayed by layoutPanels, independently.
+  defaultLayout(snapshot, W) {
+    const positions = new Map();
+    const gap = 24, pad = 24;
+    let y = pad;
+    const rows = (ids) => {
+      let x = pad, rowHeight = 0;
+      for (const id of ids) {
+        const panel = this.panels.get(id);
+        if (!panel?.offsetHeight) continue;
+        if (x > pad && x + panel.offsetWidth > W - pad + 1) {
+          y += rowHeight + gap;
+          x = pad; rowHeight = 0;
+        }
+        positions.set(id, { x, y });
+        x += panel.offsetWidth + gap;
+        rowHeight = Math.max(rowHeight, panel.offsetHeight);
+      }
+      if (rowHeight) y += rowHeight + gap;
     };
-    const GAP = 26; // room for the edit-mode title bar above each panel
-    const PAD = 24;
-
-    const pedal = snapshot.manuals.find((m) => m.name === this.pedalName) ?? null;
-    const manuals = snapshot.manuals.filter((m) => m !== pedal);
-
-    // The flanking jambs first — the keyboard stack centers in the
-    // space they leave, never under them.
-    const jambs = snapshot.manuals
-      .map((m) => `jamb:${m.name}`)
-      .filter((id) => this.panels.has(id));
-    const split = Math.ceil(jambs.length / 2);
-    const leftJambs = jambs.slice(0, split);
-    const rightJambs = jambs.slice(split);
-    const groupWidth = (ids) =>
-      ids.reduce((sum, id) => sum + (size(id)?.w ?? 0), 0) + 14 * Math.max(0, ids.length - 1);
-    let x = PAD;
-    for (const id of leftJambs) {
-      const s = size(id);
-      pos.set(id, { x, y: PAD });
-      x += s.w + 14;
-    }
-    x = W - PAD;
-    for (const id of rightJambs.slice().reverse()) {
-      const s = size(id);
-      x -= s.w;
-      pos.set(id, { x, y: PAD });
-      x -= 14;
-    }
-
-    const stack = [];
-    if (this.panels.has("couplers")) stack.push("couplers");
-    for (const manual of [...manuals].reverse()) stack.push(`keyboard:${manual.name}`);
-    if (pedal) stack.push(`keyboard:${pedal.name}`);
-    // The combination rail sits under the pedalboard, where the toe
-    // studs are: generals are reached with the thumbs on a real
-    // console, but on screen the space below the keys is the only one
-    // that doesn't crowd the manuals.
-    if (this.panels.has("pistons")) stack.push("pistons");
-
-    const innerLeft = PAD + groupWidth(leftJambs) + (leftJambs.length ? GAP : 0);
-    const innerRight = W - PAD - groupWidth(rightJambs) - (rightJambs.length ? GAP : 0);
-    const stackW = Math.max(0, ...stack.map((id) => size(id)?.w ?? 0));
-    const cx = innerLeft + Math.max(0, (innerRight - innerLeft - stackW) / 2);
-    let y = PAD;
-    for (const id of stack) {
-      const s = size(id);
-      if (!s) continue;
-      pos.set(id, { x: cx + Math.max(0, (stackW - s.w) / 2), y });
-      const shoesHeight = pedal && id === `keyboard:${pedal.name}` ? (size("shoes")?.h ?? 0) : 0;
-      y += Math.max(s.h, shoesHeight) + GAP;
-    }
-
-    // Shoes go beside the pedalboard, tops level with it: the manuals
-    // above and the jambs beside stay clear, and the rack hangs down
-    // into the apron, which is bare anyway.
-    if (this.panels.has("shoes")) {
-      const s = size("shoes");
-      const anchor = pedal && pos.get(`keyboard:${pedal.name}`);
-      const anchorSize = pedal && size(`keyboard:${pedal.name}`);
-      pos.set("shoes", anchor
-        ? {
-            x: anchor.x + anchorSize.w + GAP,
-            y: Math.min(anchor.y, H - s.h - PAD),
-          }
-        : { x: W - s.w - PAD, y: H - s.h - PAD });
-    }
-    return pos;
+    rows(snapshot.manuals.map(m => `jamb:${m.name}`));
+    rows(["couplers"]);
+    rows(snapshot.manuals.map(m => `keyboard:${m.name}`));
+    rows(["pistons", "shoes"]);
+    return positions;
   }
 
   // ---- state --------------------------------------------------------

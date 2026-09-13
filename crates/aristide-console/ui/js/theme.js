@@ -11,7 +11,7 @@
 // LED hues: an engaged control fills with the accent and its legend
 // goes ink, like any lit button on a control surface.
 const ACCENTS = {
-  amber: { accent: "#ffb02e", deep: "#e08900", ink: "#241500" },
+  amber: { accent: "#e3bd77", deep: "#b89452", ink: "#2a2111" },
   cyan: { accent: "#41c7e8", deep: "#279db8", ink: "#04222b" },
   green: { accent: "#7bd45b", deep: "#54a83a", ink: "#0e2405" },
   violet: { accent: "#a08eff", deep: "#7f6ae6", ink: "#191140" },
@@ -159,7 +159,7 @@ export function wireTheme(root) {
 
   const density = store.get("density", "regular");
   applyDensity(density);
-  segmented(densities, DENSITIES, density, (name) => name.toUpperCase(), (name) => {
+  segmented(densities, DENSITIES, density, (name) => name[0].toUpperCase() + name.slice(1), (name) => {
     store.set("density", name);
     applyDensity(name);
   });

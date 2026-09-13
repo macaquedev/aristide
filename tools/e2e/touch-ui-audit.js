@@ -26,10 +26,10 @@ try {
     check(await d.eval(`(() => {
       return [...document.querySelectorAll('.panel-jamb .knob')].every(k => {
         const r=k.getBoundingClientRect(), label=k.querySelector('.stop-name');
-        return r.width>=90 && r.width<=96 && r.height>=48 && parseFloat(getComputedStyle(label).fontSize)>=11.5
+        return r.width>=100 && r.height>=48 && parseFloat(getComputedStyle(label).fontSize)>=11.5
           && label.scrollWidth<=label.clientWidth+1;
       });
-    })()`), `${width}px: stop controls stay compact with readable labels and touch targets`);
+    })()`), `${width}px: stop controls have readable labels and touch targets`);
     check(await d.eval(`(() => {
       const label=document.querySelector('.panel-jamb .stop-name'), original=label.textContent;
       label.textContent='ContraBombardeExtraordinaire 32';
@@ -62,22 +62,22 @@ try {
   await tap('#editor-add-manual');
   check(await visible('#editor-add-manual-form'), 'keyboard creation is reachable by touch');
   await tap('#editor-add-manual-cancel');
+  await tap('#organ-prefs .modal-close');
   const stop=snapshot.stops[0];
   const knob=`.knob[data-key="stop-${stop.id}"]`;
   const before=(await state()).stops.find(s=>s.id===stop.id).on;
   await tap('#editor-inspect');
-  await d.eval(`[...document.querySelectorAll('#organ-prefs .organ-pref-action')].find(b=>b.textContent.startsWith('Choose a control on the console')).click()`);
   await tap(knob);
   check(await visible('#editor-stop'), 'Control settings opens a stop editor without right-click');
   check((await state()).stops.find(s=>s.id===stop.id).on===before, 'opening settings does not toggle the stop');
-  await tap('#editor-inspect');
-  await tap('[data-category="stops"]');
+  await d.set('#organ-prefs-section','stops');
   await tap('#organ-prefs-index details summary');
   await d.eval(`document.querySelector('#organ-prefs-index details select').value=${stop.id}; document.querySelector('#organ-prefs-index details select').dispatchEvent(new Event('change'))`);
-  await d.eval(`[...document.querySelectorAll('#organ-prefs .organ-pref-action')].find(b=>b.textContent==='Edit selected pipes').click()`);
+  await d.eval(`[...document.querySelectorAll('#organ-prefs .organ-pref-action')].find(b=>b.textContent.startsWith('Edit selected pipes')).click()`);
   check(await visible('#editor-key-voicing'), 'pipe voicing is reachable by touch from Preferences');
   check(!(await state()).manuals.find(m=>m.idx===stop.midx).held.length, 'choosing a pipe to edit does not play its note');
   await d.send('Input.dispatchKeyEvent',{type:'keyDown',key:'Escape',code:'Escape'});
+  await tap('#organ-prefs .modal-close');
   const ranks = JSON.stringify((await state()).manuals.map(m=>m.rank));
   const dragPoint = await center(knob);
   await touch('touchStart',[{...dragPoint,id:1}]);
@@ -97,7 +97,7 @@ try {
   await tap('#organ-name');
   check(await visible('#organ-menu-list'), 'touch switches directly between open menus');
   await tap('#app-menu');
-  await d.eval(`[...document.querySelectorAll('#app-menu-list button')].find(b=>b.textContent.includes('Preferences')).click()`);
+  await d.eval(`[...document.querySelectorAll('#app-menu-list button')].find(b=>b.textContent.includes('preferences')).click()`);
   await sleep(200);
   check(await d.eval(`document.querySelector('#prefs').contains(document.activeElement) && document.querySelector('#console').inert`), 'dialog focuses its controls and makes the console inactive');
   await d.eval(`const b=[...document.querySelectorAll('#prefs button')].filter(b=>!b.disabled && b.getClientRects().length); b.at(-1).focus()`);

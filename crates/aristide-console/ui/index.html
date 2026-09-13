@@ -19,13 +19,10 @@
     <div class="brand menu">
       <button id="organ-name" class="menu-title organ-title"
         aria-haspopup="true">Organ</button>
-      <form id="organ-rename-form" class="organ-rename hidden">
-        <input id="organ-rename" type="text" autocomplete="off"
-          spellcheck="false" aria-label="Organ name" />
-      </form>
       <div id="organ-menu-list" class="menu-list hidden" role="menu"></div>
     </div>
     <nav id="menus" class="menus" aria-label="Main menu"></nav>
+    <button id="instrument-settings" class="ghost instrument-settings" aria-haspopup="dialog">Instrument settings</button>
     <div class="rail-controls">
       <label class="slider-group" id="gain-group">
         <span class="rail-label">Volume</span>
@@ -38,16 +35,18 @@
   </header>
   <aside id="keys-legend" class="keys-legend hidden" aria-label="Computer keyboard mapping"></aside>
 
-  <!-- Organ preferences hosts the live instrument editors and offers
-       appearance/loading controls too. Each keeps its existing storage scope. -->
+  <!-- All instrument editors share this workspace. App preferences stay separate. -->
   <div id="organ-prefs" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="organ-prefs-title">
     <div class="modal-backdrop" data-organ-prefs-close></div>
     <div class="modal-card organ-prefs-card">
-      <header class="modal-head"><h1 id="organ-prefs-title">Organ preferences</h1><button class="modal-close" data-organ-prefs-close aria-label="Close organ preferences">×</button></header>
+      <header class="modal-head">
+        <div><h1 id="organ-prefs-title">Instrument settings</h1><p id="organ-prefs-context" class="pane-note"></p></div>
+        <button class="modal-close" data-organ-prefs-close aria-label="Close instrument settings">×</button>
+      </header>
+      <label class="organ-prefs-mobile-nav">Section<select id="organ-prefs-section"></select></label>
       <div class="organ-prefs-layout">
         <nav id="organ-prefs-nav" aria-label="Settings categories"></nav>
         <div class="organ-prefs-content">
-          <p id="organ-prefs-context" class="pane-note"></p>
           <button id="organ-prefs-back" class="ghost hidden">← Back to settings</button>
           <div id="organ-prefs-index"></div>
           <div id="organ-prefs-editors"></div>
@@ -62,7 +61,7 @@
     <div class="modal-backdrop" data-close></div>
     <div class="modal-card prefs-card">
       <header class="modal-head">
-        <h1 id="prefs-title">Preferences</h1>
+        <h1 id="prefs-title">App preferences</h1>
         <button class="modal-close" data-close aria-label="Close preferences">&times;</button>
       </header>
       <div class="modal-body">
@@ -198,6 +197,22 @@
   </div>
 
   <main id="console" class="console">
+    <div class="console-heading">
+      <div><span class="console-eyebrow">Console</span><h1 id="console-title">Your instrument</h1></div>
+      <div class="console-heading-actions"><p id="console-summary"></p>
+  <div id="editor-lock-dock" class="editor-lock-dock">
+    <p id="editor-lock-note" class="editor-lock-note hidden"></p>
+    <div class="editor-toolbar" role="toolbar" aria-label="Console editing">
+    <button id="editor-lock" class="editor-lock" aria-pressed="false"
+      aria-label="Unlock editing" data-tip="Unlock editing (Ctrl+E)">
+      <span class="editor-lock-glyph" id="editor-lock-glyph" aria-hidden="true">↔</span><span id="editor-lock-label">Arrange console</span>
+    </button>
+    <button id="editor-add-button" class="ghost editor-tool">+ Add</button>
+    <button id="editor-inspect" class="ghost editor-tool" aria-pressed="false">Select control</button>
+    </div>
+  </div>
+      </div>
+    </div>
     <div id="organ-empty-card" class="organ-empty-card hidden"></div>
     <div id="console-canvas" class="console-canvas"></div>
   </main>
@@ -208,20 +223,10 @@
        by their title bars and double-clicking empty canvas adds to the
        organ right there — ctrl reaches through the lock for all of it.
        See editor.js. -->
-  <div id="editor-lock-dock" class="editor-lock-dock">
-    <p id="editor-lock-note" class="editor-lock-note hidden"></p>
-    <div class="editor-toolbar" role="toolbar" aria-label="Console editing">
-    <button id="editor-lock" class="editor-lock" aria-pressed="false"
-      aria-label="Unlock editing" data-tip="Unlock editing (Ctrl+E)">
-      <span class="editor-lock-glyph" id="editor-lock-glyph" aria-hidden="true">&#128274;</span><span id="editor-lock-label">Edit console</span>
-    </button>
-    <button id="editor-add-button" class="ghost editor-tool">+ Add</button>
-    <button id="editor-inspect" class="ghost editor-tool" aria-pressed="false">Settings</button>
-    </div>
-  </div>
+
 
   <p id="editor-hint" class="editor-hint hidden">
-    Add keyboards and stops, or open Settings to edit the organ in one place.
+    Drag panels to arrange the console. Select a control to open its settings.
   </p>
 
   <p id="editor-status" class="editor-status hidden">

@@ -147,23 +147,22 @@ export function applyHarnessHooks({ prefs, editor }) {
     }, 400);
   }
 
-  // One step into the keyboard menu: the manual's MIDI-input popover
-  // or its compass popover, found by their labels.
-  for (const [param, label] of [
-    ["kbdMidi", "MIDI input"],
-    ["kbdCompass", "Compass"],
+  // Open the same live forms the keyboard settings page links to.
+  for (const [param, open] of [
+    ["kbdMidi", idx => editor.openMidiForm(idx, 120, 80)],
+    ["kbdCompass", idx => editor.openCompassForm(idx, 120, 80)],
+    ["kbdHexForm", idx => editor.openHexForm(idx, 120, 80)],
+    ["kbdTuning", idx => editor.openTuningForm({ kind: "division", idx }, 120, 80)],
+    ["kbdTuningScale", idx => {
+      editor.openTuningForm({ kind: "division", idx }, 120, 80);
+      setTimeout(() => document.getElementById("editor-tuning-scale-pick")?.click(), 200);
+    }],
   ]) {
-    const ref = params.get(param); // a manual name or idx
+    const ref = params.get(param);
     if (ref == null) continue;
     setTimeout(() => {
-      editor.unlock();
       const board = findKeyboardBoard(ref);
-      if (board) rightClick(board);
-      setTimeout(() => {
-        [...document.querySelectorAll("#editor-keyboard-menu .menu-item")]
-          .find((item) => item.textContent.includes(label))
-          ?.click();
-      }, 200);
+      if (board) open(Number(board.dataset.manual));
     }, 400);
   }
 
@@ -181,55 +180,6 @@ export function applyHarnessHooks({ prefs, editor }) {
         })
       );
     }, 600);
-  }
-
-  // One step into the keyboard menu: the microtonal hex-layout form,
-  // found by its label — it only exists on microtonal manuals.
-  const kbdHexParam = params.get("kbdHexForm"); // a manual name or idx
-  if (kbdHexParam != null) {
-    setTimeout(() => {
-      editor.unlock();
-      const board = findKeyboardBoard(kbdHexParam);
-      if (board) rightClick(board);
-      setTimeout(() => {
-        [...document.querySelectorAll("#editor-keyboard-menu .menu-item")]
-          .find((item) => item.textContent.includes("Hex layout"))
-          ?.click();
-      }, 200);
-    }, 400);
-  }
-
-  const kbdTuningParam = params.get("kbdTuning"); // a manual name or idx
-  if (kbdTuningParam != null) {
-    setTimeout(() => {
-      editor.unlock();
-      const board = findKeyboardBoard(kbdTuningParam);
-      if (board) rightClick(board);
-      // "Change tuning…" is always the menu's last item, after the
-      // three-kind radio group and its divider.
-      setTimeout(() => {
-        const items = [...document.querySelectorAll("#editor-keyboard-menu .menu-item")];
-        items[items.length - 1]?.click();
-      }, 200);
-    }, 400);
-  }
-
-  // Same as kbdTuning, one step further in: the tuning popover's own
-  // Scala-scale file browser, open — for a screenshot of real .scl rows.
-  const kbdTuningScaleParam = params.get("kbdTuningScale"); // a manual name or idx
-  if (kbdTuningScaleParam != null) {
-    setTimeout(() => {
-      editor.unlock();
-      const board = findKeyboardBoard(kbdTuningScaleParam);
-      if (board) rightClick(board);
-      setTimeout(() => {
-        const items = [...document.querySelectorAll("#editor-keyboard-menu .menu-item")];
-        items[items.length - 1]?.click();
-        setTimeout(() => {
-          document.getElementById("editor-tuning-scale-pick")?.click();
-        }, 200);
-      }, 200);
-    }, 400);
   }
 
   // A stop drawknob, found by its numeric id (the snapshot's `stops[].id`,

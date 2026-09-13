@@ -427,26 +427,38 @@ field would silently fork the division. A stop's row lives on its editor
 and drawknobs tuned apart wear a chip or a dot, and nothing shows for a scope
 that just follows.
 
-**Two scopes, two surfaces (locked 2026-08-28):** user preferences and organ
-settings never share a surface. The Preferences dialog (Aristide menu, Ctrl+,)
-is the *player's* — the console skin, and this machine's sample memory
-(residency, streaming, the load cache: the user config's `[samples]`, moved
-out of the organ file 2026-09-03 because whether a set fits is a fact about
-the box's RAM, not about the set; a change applies on the next load, and
-the pane offers the reload) — local to the installation and sending no
-organ command, ever. Every organ fact
-is edited on the console and lands in the organ's file: panel-anchored facts by
-right-click on their panel (a keyboard's MIDI input, compass, kind, tuning, hex
-layout; a stop's or coupler's editor, each with a quick piston row), organ-wide
-anchorless facts as popovers off the Organ menu (whole-instrument Tuning — also
-the bar's tuning readout — Room & noises, the flat Bindings list). Wiring is
-organ-scoped throughout: an unwired keyboard wears a "silent — no input" badge
-that opens its MIDI popover; hidden couplers restore from the add menu. The
-menu bar reads as the scopes read — Aristide = the app and the player, the
-organ-name menu = this organ's file, Organ = the instrument. Instrument-wide
-tuning, reverb wet and noises persist into the file (`[tuning]`, `[reverb]
-wet`, `[noises]` — sliders live-apply while dragging and persist on release),
-so an organ sounds tomorrow as it was left today.
+**Two scopes, two surfaces (locked storage boundary; UI revised 2026-09-13):**
+App preferences (Aristide menu, Ctrl+,) belong to the player: appearance is local
+to this console; sample residency, streaming and load cache belong to this
+machine's user config. These controls stay on that surface. Memory changes apply
+on the next load, with an explicit reload action.
+
+Instrument settings is the single workspace for the organ's name, sound,
+keyboards and inputs, stops and pipes, couplers, sample sets and bindings. Its
+button is always accessible on a loaded instrument, independently of layout
+unlocking. Console context shortcuts, input badges and the tuning readout enter
+the same workspace and the same live form; keyboard rename/type controls have
+one implementation. A stop's tuning and pipe subviews retain their parent while
+showing one editor at a time. Back returns within the workspace; closing it
+returns to playing. Fields commit before their subject is cleared. Appearance
+and memory are never transplanted into instrument settings.
+
+The organ-name menu owns file actions (load, create, save a copy, rename through
+the shared settings field). Playing uses the console itself: stop/coupler
+toggles, volume, silence and one clear-stops action in the registration rail.
+Arrange console unlocks panel placement and stop ordering; Select control is an
+explicit touch alternative to context-clicking. Existing saved panel positions
+retain normalized canvas coordinates. Automatic layouts measure panel rows;
+small screens use flowing panels without rewriting desktop coordinates.
+Instrument settings uses a sidebar on desktop and a section chooser on narrow
+screens, with a bounded scrolling body in both cases.
+
+Every organ edit still lands in its file: `[tuning]`, `[reverb]`, `[noises]`,
+MIDI wiring and instrument structure retain their existing persistence and
+scope contracts. Protected sample-set instruments still offer Save a copy
+before structural changes; player settings such as wiring and room changes
+remain immediately editable. The full UI rationale and validation are in
+`docs/progress/2026-09-13-ui-redesign.md`.
 
 Organs load at runtime, never implicitly (locked 2026-08-18): the server
 starts organ-less and the console opens on a picker — the `[[library]]` in the

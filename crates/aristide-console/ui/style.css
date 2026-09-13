@@ -3,19 +3,20 @@
    and each token lives in one custom property. */
 
 :root {
+  color-scheme: dark;
   /* Pro-audio panel chrome: dense dark panels split by near-black
      seams, controls as beveled buttons that light up when engaged,
      data areas as inset wells. Depth comes from one shared bevel
      (a hairline top highlight) and inset shadows, never from floating
      cards. */
-  --bg: #1b1c1e;
-  --surface: #232427;
-  --surface-2: #2e3033;
-  --well: #151619;
-  --border: #101113;
-  --border-strong: #3d4046;
-  --text: #d6d8db;
-  --text-dim: #8a8e95;
+  --bg: #191b19;
+  --surface: #222521;
+  --surface-2: #2c302b;
+  --well: #181b18;
+  --border: #343a32;
+  --border-strong: #474e43;
+  --text: #f0efe7;
+  --text-dim: #b0b5a7;
   /* Accent tokens are overridden as a set by theme.js when the user
      picks a different colour in the drawer. An engaged control is
      simply lit: accent fill, ink legend. */
@@ -23,17 +24,18 @@
   --accent-soft: #ffb02e24;
   --accent-deep: #e08900;
   --accent-ink: #241500;
+  --hover: #353b31;
   --danger: #e5484d;
   --danger-fill: #c0393f;
   --key-white: #e2e3e5;
   --key-black: #202225;
-  --bevel: inset 0 1px 0 #ffffff0f;
-  --bevel-well: inset 0 1px 3px #0000009a;
+  --bevel: none;
+  --bevel-well: none;
   /* System stacks only — no webfonts, the console must look right
      offline. Values and readouts go mono, like any meter bridge. */
   --sans: system-ui, "Segoe UI", Roboto, "DejaVu Sans", sans-serif;
   --mono: ui-monospace, "Cascadia Code", "DejaVu Sans Mono", Menlo, monospace;
-  --bar-h: 44px;
+  --bar-h: 72px;
 }
 
 * { box-sizing: border-box; user-select: none; -webkit-user-select: none; }
@@ -3176,354 +3178,368 @@ body.editing .kb-tuning-chip { top: -17px; border-radius: 3px 3px 0 0; }
    between the two selects — it's the half the player just played. */
 .editor-bindings-form .control-row .control-trigger { flex: 1 1 110px; }
 
-/* Shared comfort layer: readable labels, quiet surfaces and reachable actions.
-   Responsive flow is only a presentation; saved canvas coordinates stay intact. */
-:root {
-  --bg: #171b21;
-  --surface: #242a32;
-  --surface-2: #303844;
-  --well: #14191f;
-  --text: #edf0f4;
-  --text-dim: #adb6c3;
-  --border-strong: #485463;
-  --bar-h: 60px;
-}
-body { -webkit-tap-highlight-color: transparent; }
+/* Shared visual system. Layout, forms and every console control use these
+   rules; responsive adaptations live together below. */
+body { -webkit-tap-highlight-color: transparent; font-size: 14px; line-height: 1.45; }
 button, a, input, select, summary { touch-action: manipulation; }
 input, textarea { user-select: text; -webkit-user-select: text; }
-button { font-family: var(--sans); }
-button:disabled { cursor: default; opacity: .5; }
-button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible {
-  outline: 2px solid var(--accent); outline-offset: 3px;
+button, input, select, textarea { font-family: var(--sans); }
+button:disabled { cursor: default; opacity: .45; }
+button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible,
+[role="slider"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+input:not([type="range"]):not([type="checkbox"]), select, textarea {
+  min-height: 44px; min-width: 0; max-width: 100%; padding: 9px 12px;
+  color: var(--text); background: var(--well); border: 1px solid var(--border-strong);
+  border-radius: 8px; font-size: 14px; box-shadow: none;
 }
-.menubar { gap: 10px; padding: 0 20px; background: #222830; border-color: #ffffff12; }
-.menu-title { min-height: 40px; height: auto; font-size: 13px; border-radius: 8px; }
-.app-title { color: var(--accent); font-weight: 750; letter-spacing: -.3px; font-size: 16px; }
-.organ-title { color: var(--text); max-width: 260px; }
-.rail-controls { gap: 14px; }
-.rail-label { font-size: 11px; text-transform: none; letter-spacing: .2px; }
-.menu-list, .editor-add-menu, #editor-division-menu, #editor-keyboard-menu {
-  background: #272e38; border: 1px solid #ffffff1c; border-radius: 10px; padding: 6px;
+input::placeholder { color: var(--text-dim); }
+input[type="checkbox"] { width: 20px; height: 20px; min-height: 20px; accent-color: var(--accent); }
+input[type="range"] { min-height: 36px; cursor: pointer; }
+input[type="range"]::-webkit-slider-runnable-track { height: 4px; background: var(--border-strong); box-shadow: none; border-radius: 8px; }
+input[type="range"]::-webkit-slider-thumb { width: 18px; height: 18px; margin-top: -7px; border: 0; border-radius: 50%; background: var(--accent); box-shadow: none; }
+input[type="range"]::-moz-range-track { height: 4px; background: var(--border-strong); border-radius: 8px; }
+input[type="range"]::-moz-range-thumb { width: 18px; height: 18px; border: 0; border-radius: 50%; background: var(--accent); }
+.rail-label { font-size: 12px; font-weight: 500; color: var(--text-dim); letter-spacing: 0; text-transform: none; }
+.ghost, .picker-action, .menu-title, .rail-button, .rocker, .editor-lock {
+  min-height: 42px; padding: 9px 14px; border: 1px solid var(--border-strong);
+  border-radius: 8px; background: var(--surface-2); color: var(--text);
+  font-size: 13px; font-weight: 500; letter-spacing: 0; text-transform: none;
+  box-shadow: none; cursor: pointer; transition: background .12s, border-color .12s;
 }
-.menu-list { max-width: calc(100vw - 16px); max-height: calc(100dvh - 84px); overflow: auto; }
-.menu-item { min-height: 40px; border-radius: 5px; font-size: 13px; gap: 12px; }
-.menu-heading { color: var(--text-dim); font-size: 10px; }
-.panic { min-height: 40px; height: auto; padding: 0 15px; border-radius: 8px; font-size: 13px; }
-.tuning { min-height: 40px; }
-input[type="range"] { min-height: 36px; }
-input[type="range"]::-webkit-slider-thumb { width: 22px; height: 22px; }
-input[type="range"]::-moz-range-thumb { width: 22px; height: 22px; }
+.ghost:hover, .picker-action:hover, .rail-button:hover, .rocker:hover { background: var(--hover); filter: none; }
+.ghost.danger, .organ-pref-action.danger { color: #f5a7a0; }
+
+/* File identity and instrument editing stay visible; playing controls form
+   their own group. Header rows wrap at deliberate, shared breakpoints. */
+.menubar { height: var(--bar-h); padding: 0 28px; gap: 12px; background: var(--bg); border-bottom: 1px solid var(--border); box-shadow: none; }
+.menubar > .brand:nth-child(2) { min-width: 0; }
+.menu-title { border: 0; background: transparent; color: var(--text-dim); white-space: nowrap; }
+.app-title { font-size: 18px; font-weight: 650; color: var(--text); letter-spacing: -.6px; }
+.organ-title { color: var(--text-dim); max-width: 220px; font-size: 13px; }
+.menus { gap: 0; }
+.instrument-settings { background: var(--surface-2); border-color: var(--border-strong); white-space: nowrap; }
+.rail-controls { gap: 16px; min-width: 0; }
+#gain { width: 100px; }
+.tuning { min-height: 42px; max-width: 270px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 8px 12px; border: 0; background: transparent; box-shadow: none; color: var(--text-dim); font-size: 11px; letter-spacing: 0; }
+.tuning:hover { background: var(--surface-2); color: var(--text); }
+.panic { min-height: 42px; padding: 8px 14px; border: 1px solid #d98c8340; border-radius: 8px; background: #d98c8310; box-shadow: none; color: #f5ada6; font-size: 13px; font-weight: 500; text-transform: none; letter-spacing: 0; }
+.panic:hover { background: #d98c8326; filter: none; }
+.menu-list, .editor-add-menu, #editor-division-menu, #editor-keyboard-menu { background: var(--surface); border: 1px solid var(--border-strong); border-radius: 12px; padding: 6px; }
+.menu-list { max-width: calc(100vw - 24px); max-height: calc(100dvh - var(--bar-h) - 16px); overflow: auto; box-shadow: 0 16px 48px #0006; }
+.menu-item { min-height: 42px; border-radius: 6px; font-size: 13px; gap: 12px; }
+.menu-item:hover { background: var(--accent-soft); color: var(--text); }
+.menu-item:hover kbd { color: var(--text-dim); }
+.menu-heading { color: var(--text-dim); font-size: 11px; letter-spacing: .5px; }
+
+/* Playing surface: clear division headings, readable stop names and a single
+   registration rail. Saved custom arrangements still use the same panels. */
+.console-heading { display: flex; align-items: end; justify-content: space-between; gap: 16px; padding: 24px 28px 8px; }
+.console-heading h1 { margin: 0; font-size: 26px; letter-spacing: -.7px; font-weight: 550; line-height: 1.2; overflow-wrap: anywhere; }
+.console-eyebrow { display: block; margin-bottom: 6px; font-size: 11px; color: var(--text-dim); letter-spacing: 1.6px; text-transform: uppercase; }
+.console-heading-actions { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
+.console-heading p { margin: 0; color: var(--text-dim); font-size: 12px; white-space: nowrap; }
+.console-canvas { min-height: calc(100dvh - var(--bar-h) - 100px); }
+.panel { border-radius: 12px; }
+.panel-jamb .panel-body, .panel-keyboard .panel-body, .coupler-rail, .piston-rail, .shoes {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 12px; box-shadow: none;
+}
+body .panel-jamb .panel-body { padding: 16px; }
+body .panel-jamb .division { width: 100%; min-width: 0; gap: 16px; align-items: stretch; }
+.division-head { justify-content: space-between; min-height: 28px; }
+.division h2 { padding: 0; margin: 0; font-size: 15px; font-weight: 550; letter-spacing: -.15px; text-transform: none; color: var(--text); white-space: normal; }
+.division h2::after { display: none; }
+body .panel-jamb .division-knobs { display: grid; width: 100%; max-width: none; grid-template-columns: repeat(auto-fit, minmax(min(140px, 100%), 1fr)); gap: 8px; }
+body .panel-jamb .knob { width: 100%; min-width: 0; min-height: var(--stop-h, 58px); border: 1px solid var(--border-strong); border-radius: 8px; background: var(--surface-2); box-shadow: none; }
+body .panel-jamb .knob .face { flex-direction: row; justify-content: space-between; align-items: center; gap: 8px; padding: 10px 12px; }
+body .panel-jamb .stop-name { max-width: none; font-size: 13px; line-height: 1.35; font-weight: 450; text-align: left; overflow-wrap: anywhere; color: var(--text); }
+body .panel-jamb .stop-pitch { flex-shrink: 0; font-family: var(--mono); font-size: 12px; line-height: 1.3; font-weight: 400; letter-spacing: 0; color: var(--text-dim); }
+body .panel-jamb .knob:hover { background: var(--hover); filter: none; border-color: #777568; }
+body .panel-jamb .knob.on { background: var(--accent); border-color: var(--accent); box-shadow: none; }
+body .panel-jamb .knob.on :is(.stop-name, .stop-pitch) { color: var(--accent-ink); font-weight: 550; }
+body .panel-jamb .knob.crescendo-held.on { background: var(--accent-soft); border-color: var(--accent); }
+body .panel-jamb .knob.crescendo-held.on :is(.stop-name, .stop-pitch) { color: var(--accent); }
+.stop-tuning-dot { right: 4px; top: 4px; }
+body[data-density="compact"] { --stop-h: 48px; }
+body[data-density="spacious"] { --stop-h: 68px; }
+.coupler-rail { justify-content: flex-start; flex-wrap: wrap; padding: 14px; gap: 8px; }
+.coupler-rail::before { content: 'Couplers'; margin: 0 10px 0 2px; color: var(--text-dim); font-size: 12px; }
+body .rocker { height: auto; min-width: 66px; min-height: 42px; padding: 8px 14px; }
+.rocker .tab, .rail-button .tab { color: var(--text); font-size: 12px; font-weight: 500; text-transform: none; letter-spacing: 0; }
+.rocker.on, .rail-button.on { background: var(--accent); border-color: var(--accent); box-shadow: none; }
+.panel-keyboard { min-width: 320px; }
+.keyboard-card-head { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 12px; }
+.keyboard-card-head strong { flex: 1; min-width: 80px; font-size: 13px; font-weight: 550; overflow-wrap: anywhere; }
+.keyboard-card-head .ghost { min-height: 40px; padding: 8px 10px; font-size: 12px; background: transparent; border-color: transparent; color: var(--text-dim); }
+.keyboard-card-head .ghost:hover { color: var(--text); background: var(--hover); }
+.keyboard-card-head .keyboard-toggle { border-color: var(--border-strong); }
+.keyboard.keys-collapsed { display: none; }
+.keyboard .kb-silent { display: none; }
+.panel-keyboard .divisional-rail { flex-wrap: wrap; gap: 6px; padding: 0 12px 12px; }
+.piston { width: 36px; min-width: 36px; height: 36px; padding: 0; background: var(--surface-2); border: 1px solid var(--border-strong); border-radius: 7px; box-shadow: none; }
+.piston-face { font: 12px var(--mono); color: var(--text-dim); background: transparent; border: 0; box-shadow: none; }
+.piston.stored { border-color: var(--accent); background: var(--accent-soft); box-shadow: none; }
+.piston.stored .piston-face { color: var(--accent); }
+.piston-rail { flex-wrap: wrap; gap: 12px; padding: 14px; }
+.piston-bank, .piston-stepper { flex-wrap: wrap; gap: 6px; }
+.piston-bank::before { content: 'Generals'; color: var(--text-dim); font-size: 12px; margin-right: 8px; }
+.piston-stepper, .crescendo { border-color: var(--border-strong); }
+.rail-button { height: auto; min-height: 36px; }
+.readout { background: var(--well); border: 1px solid var(--border); border-radius: 6px; box-shadow: none; padding: 6px 8px; color: var(--text-dim); }
+.shoes { padding: 12px; gap: 12px; }
+.shoe-track { border-radius: 8px; background: var(--well); border-color: var(--border-strong); box-shadow: none; }
+.shoe-thumb { background: var(--text); border: 0; border-radius: 4px; box-shadow: none; }
+.shoe-label { color: var(--text-dim); letter-spacing: .3px; text-transform: none; }
+.crescendo-track { border: 1px solid var(--border-strong); border-radius: 6px; box-shadow: none; min-height: 32px; }
+.crescendo-thumb { background: var(--accent); border: 0; border-radius: 3px; }
 .key, .shoe-track, .crescendo-track { touch-action: none; }
-.modal { padding: 20px; }
-.modal-card { border: 1px solid #ffffff20; border-radius: 16px; box-shadow: 0 24px 80px #0009; }
-.modal-head, .picker-head { padding: 14px 18px; background: #2a313b; }
-.modal-head h1, .picker-head h1 { font-size: 19px; font-weight: 650; letter-spacing: -.3px; text-transform: none; }
-.modal-close, .editor-drawer-close { width: 40px; height: 40px; flex: 0 0 40px; border-radius: 8px; }
-.modal-body { min-height: 0; overflow-y: auto; }
-.pane { padding: 20px; }
-.pane h2 { font-size: 14px; letter-spacing: 0; text-transform: none; }
-.pane-note { font-size: 12px; line-height: 1.65; }
-.settings-row { min-height: 44px; gap: 12px; }
-.segment { flex-wrap: wrap; gap: 3px; background: transparent; border: 0; box-shadow: none; }
-.segment button { min-height: 36px; font-size: 12px; border: 1px solid #ffffff16; border-radius: 6px; }
-.segment button + button { border-left: 1px solid #ffffff16; }
-.swatch { width: 32px; height: 32px; }
-.ghost, .picker-action { min-height: 36px; padding: 7px 12px; border-radius: 7px; font-size: 12px; }
-.editor-add { max-width: calc(100vw - 16px); max-height: calc(100dvh - 16px); overflow: auto; overscroll-behavior: contain; }
-.editor-add-form { max-width: 100%; border-radius: 12px; padding: 16px; gap: 12px; background: #272e38; border-color: #ffffff20; }
-.editor-add-form input[type="text"], .editor-add-form input[type="number"],
-.editor-add-form select, .pane input[type="number"], .pane select {
-  min-height: 36px; font-size: 13px; border-radius: 6px;
-}
-.editor-add-form-actions { flex-wrap: wrap; }
-.advanced-settings { border-top: 1px solid #ffffff14; }
-.advanced-settings > summary { cursor: pointer; font-size: 14px; padding: 8px 0; }
-.advanced-settings > summary span { font-size: 11px; color: var(--text-dim); margin-left: 8px; }
-.advanced-settings[open] > summary { margin-bottom: 12px; }
-.panel-jamb .panel-body, .coupler-rail, .piston-rail, .shoes {
-  border-color: #ffffff14; border-radius: 10px; box-shadow: 0 5px 18px #0002, var(--bevel);
-}
-.knob { border-color: #ffffff24; }
-.knob.on, .rocker.on { box-shadow: 0 0 16px var(--accent-soft), var(--bevel); }
-.division h2 { color: var(--text); letter-spacing: .8px; }
-.editor-lock-dock { bottom: max(16px, env(safe-area-inset-bottom)); }
-.editor-toolbar { display: flex; gap: 6px; padding: 5px; border: 1px solid #ffffff20; border-radius: 12px; background: #242b35; box-shadow: 0 6px 24px #0005; }
-.editor-lock { display: flex; align-items: center; justify-content: center; gap: 8px; width: auto; height: 40px; padding: 0 12px; opacity: 1; border: 0; border-radius: 8px; font-size: 12px; color: var(--text); background: transparent; }
-.editor-lock.on { background: var(--accent-soft); }
-.editor-lock-glyph { font-size: 13px; }
-.editor-tool { display: none; }
-body.editing .editor-tool { display: block; }
-#editor-inspect[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); }
-body.inspecting .console-canvas :is(.knob, .keyboard, [data-action], .rocker) { cursor: crosshair; outline: 1px dashed var(--accent); outline-offset: 3px; }
-.editor-hint { bottom: 80px; max-width: min(440px, calc(100vw - 32px)); font-size: 12px; line-height: 1.5; }
+
+/* All dialogs share typography, field spacing and a bounded scroll area. */
+.modal { padding: 24px; z-index: 60; }
+.modal-card { border: 1px solid var(--border-strong); border-radius: 16px; box-shadow: 0 28px 100px #0009; max-height: calc(100dvh - 48px); }
+.modal-head, .picker-head { padding: 20px 24px; background: var(--surface); box-shadow: none; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.modal-head > div { min-width: 0; }
+.modal-head h1, .picker-head h1 { font-size: 20px; font-weight: 550; letter-spacing: -.4px; text-transform: none; }
+.modal-close, .editor-drawer-close { width: 44px; height: 44px; flex: 0 0 44px; border-radius: 8px; font-size: 24px; }
+.modal-body { overflow-y: auto; min-height: 0; }
+.pane { padding: 24px; }
+.pane h2 { font-size: 15px; text-transform: none; letter-spacing: 0; }
+.pane-note { font-size: 13px; line-height: 1.6; color: var(--text-dim); overflow-wrap: anywhere; }
+.settings-row { min-height: 44px; gap: 16px; }
+.settings-row > .rail-label { min-width: 76px; }
+.segment { flex-wrap: wrap; gap: 4px; background: transparent; border: 0; box-shadow: none; }
+.segment button, .segment button + button { min-height: 40px; padding: 8px 12px; font-size: 12px; font-weight: 500; letter-spacing: 0; border: 1px solid var(--border-strong); border-radius: 7px; background: var(--surface-2); box-shadow: none; color: var(--text-dim); }
+.segment button.on { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
+.swatch { width: 36px; height: 36px; border-radius: 50%; }
+.advanced-settings { border-top: 1px solid var(--border); }
+.advanced-settings > summary { min-height: 48px; align-content: center; cursor: pointer; font-size: 14px; }
+.advanced-settings > summary > span { font-size: 11px; color: var(--text-dim); margin-left: 8px; }
+#scale-segment[aria-disabled="true"] { display: none; }
+.conflict-primary { min-height: 44px; padding: 10px 16px; border-radius: 8px; }
+.conflict-actions { flex-wrap: wrap; }
+
+/* Settings is a workspace, with a quiet navigation rail and one active form.
+   Parent stop editors stay alive while a tuning or pipe subview is displayed. */
+.organ-prefs-card { width: min(1060px, 100%); height: min(800px, calc(100dvh - 48px)); }
+#organ-prefs-context { margin: 5px 0 0; font-size: 12px; }
+.organ-prefs-layout { display: flex; flex: 1; min-height: 0; }
+#organ-prefs-nav { flex: 0 0 216px; padding: 20px 12px; overflow-y: auto; border-right: 1px solid var(--border); background: var(--bg); }
+.organ-prefs-content { flex: 1; min-width: 0; overflow: auto; padding: 28px 36px; overscroll-behavior: contain; }
+.organ-prefs-mobile-nav { display: none; }
+.organ-pref-action { display: flex; align-items: center; gap: 14px; width: 100%; min-height: 68px; padding: 16px 4px; text-align: left; color: var(--text); background: transparent; border: 0; border-bottom: 1px solid var(--border); border-radius: 0; font-size: 14px; cursor: pointer; }
+.organ-pref-action-copy { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 4px; overflow-wrap: anywhere; }
+.organ-pref-action-copy > span { font-weight: 500; }
+.organ-pref-action small { color: var(--text-dim); font-size: 12px; line-height: 1.5; font-weight: 400; }
+.organ-pref-arrow { color: var(--text-dim); font-size: 23px; }
+.organ-pref-action:hover { background: var(--hover); }
+#organ-prefs-nav .organ-pref-action { min-height: 46px; padding: 12px; margin-bottom: 5px; border: 0; border-radius: 8px; color: var(--text-dim); font-size: 13px; }
+#organ-prefs-nav .organ-pref-arrow { display: none; }
+#organ-prefs-nav [aria-current="true"] { background: var(--accent-soft); color: var(--accent); }
+#organ-prefs-index h2 { margin: 0 0 6px; font-size: 23px; font-weight: 500; letter-spacing: -.5px; overflow-wrap: anywhere; }
+.section-description { margin: 0 0 26px; }
+.organ-pref-add { color: var(--accent); }
+.organ-pref-rename { display: flex; align-items: end; gap: 10px; margin-bottom: 18px; }
+.organ-pref-rename label { flex: 1; min-width: 0; font-size: 12px; color: var(--text-dim); }
+.organ-pref-rename input { display: block; margin-top: 8px; width: 100%; }
+.organ-pref-field { display: grid; grid-template-columns: 1fr minmax(160px, 60%); align-items: center; gap: 16px; padding-bottom: 20px; color: var(--text-dim); font-size: 13px; }
+.organ-pref-group { margin: 10px 0; border-bottom: 1px solid var(--border); }
+.organ-pref-group > summary { cursor: pointer; min-height: 60px; align-content: center; font-size: 14px; padding: 10px 4px; }
+.organ-pref-group[open] { padding-bottom: 16px; }
+.organ-pref-group label { display: block; margin: 12px 0; color: var(--text-dim); font-size: 12px; }
+.organ-pref-group label input { display: block; margin-top: 6px; width: 100%; }
+.organ-pref-group select { width: 100%; }
+.organ-pref-source { margin: 24px 0; }
+.source-path { font-family: var(--mono); font-size: 11px; }
+#organ-prefs input[type="search"] { width: 100%; margin-bottom: 8px; }
+#organ-prefs-back { margin-bottom: 22px; border: 0; background: transparent; padding-left: 0; color: var(--text-dim); }
+#organ-prefs .editor-add, #organ-prefs .organ-remove-confirm { position: static !important; transform: none !important; width: 100% !important; max-width: 100%; max-height: none; overflow: visible; margin: 0; visibility: visible; }
+#organ-prefs .settings-suspended { display: none !important; }
+#organ-prefs .editor-add-form, #organ-prefs .editor-add-menu { width: 100%; max-width: 100%; box-sizing: border-box; border: 0; border-radius: 0; box-shadow: none; background: transparent; padding: 0; }
+#organ-prefs .editor-add-form { gap: 20px; }
+#organ-prefs .editor-add-form input, #organ-prefs .editor-add-form select { min-height: 44px; font-size: 14px; }
+#organ-prefs .editor-tuning-head { margin-bottom: 4px; flex-wrap: wrap; gap: 12px; }
+#organ-prefs .editor-tuning-head > .rail-label { color: var(--text); font-size: 22px; font-weight: 500; letter-spacing: -.4px; }
+#organ-prefs .editor-add-form .rail-label { font-size: 13px; }
+#organ-prefs .editor-add-form .editor-tuning-head > .rail-label { font-size: 22px; }
+#organ-prefs .editor-add-form-actions { gap: 10px; padding-top: 12px; border-top: 1px solid var(--border); flex-wrap: wrap; }
+#organ-prefs .editor-wiring-form, #organ-prefs .editor-bindings-form { max-height: none; overflow: visible; }
+#organ-prefs-errors #editor-error { position: static; transform: none; max-width: 100%; }
+#organ-prefs input[type="checkbox"] { min-height: 20px; }
+.editor-add { max-width: calc(100vw - 24px); max-height: calc(100dvh - 24px); overflow: auto; overscroll-behavior: contain; }
+.editor-add-form { background: var(--surface); border: 1px solid var(--border-strong); border-radius: 12px; padding: 20px; gap: 16px; }
+.editor-add-form input[type="text"], .editor-add-form input[type="number"], .editor-add-form select, .pane input[type="number"], .pane select { min-height: 44px; font-size: 14px; border-radius: 8px; box-shadow: none; background: var(--well); border-color: var(--border-strong); }
+
+/* MIDI assignments are field groups, so every device and channel keeps a
+   label as the card narrows. */
+#editor-midi .manual-inputs { gap: 12px; }
+#editor-midi .manual-input-slot { display: flex; flex-direction: column; align-items: stretch; gap: 12px; padding: 16px; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; }
+#editor-midi .manual-input { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+#editor-midi .input-field { display: flex; flex-direction: column; align-items: stretch; min-width: 0; gap: 6px; }
+#editor-midi .input-field > span { font-size: 12px; color: var(--text-dim); }
+#editor-midi .input-device-field { grid-column: 1 / -1; }
+#editor-midi .input-field select, #editor-midi .input-field input { width: 100%; min-width: 0; max-width: 100%; flex: none; }
+#editor-midi .listen-hint { white-space: normal; padding: 12px; background: var(--accent-soft); border-radius: 8px; line-height: 1.5; }
+#editor-midi .input-bend-row, #editor-midi .settings-row, #editor-midi .piston-row { flex-wrap: wrap; }
+#editor-midi .input-bend { width: 110px; }
+#editor-midi .midi-ports { margin: 12px 0; }
+#editor-midi .midi-port { white-space: normal; overflow-wrap: anywhere; }
+
+/* Editing chrome is subordinate to the instrument. */
+.editor-lock-dock { position: static; width: max-content; max-width: 100%; }
+.console-heading-actions .editor-lock-dock:not(:has(.editor-lock.on)) .editor-toolbar { padding: 0; border: 0; background: transparent; box-shadow: none; }
+body.editing .editor-lock-dock { position: fixed; left: 50%; transform: translateX(-50%); bottom: max(16px, env(safe-area-inset-bottom)); z-index: 49; width: max-content; max-width: calc(100vw - 24px); }
+.editor-toolbar { display: flex; gap: 6px; padding: 6px; background: var(--surface); border: 1px solid var(--border-strong); border-radius: 12px; box-shadow: 0 8px 32px #0005; }
+.editor-toolbar button { display: flex; align-items: center; justify-content: center; gap: 8px; width: auto; min-height: 44px; min-width: 0; padding: 10px 16px; border: 0; border-radius: 8px; font-size: 13px; opacity: 1; background: transparent; }
+.editor-lock-glyph { font-size: 18px; }
+.editor-toolbar .editor-tool { display: none; }
+body.editing .editor-toolbar .editor-tool { display: flex; }
+.editor-toolbar .editor-lock.on, #editor-inspect[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
+.editor-toolbar #editor-add-button { background: var(--accent); color: var(--accent-ink); }
+.editor-hint { display: none; }
 .editor-drawer { max-width: calc(100vw - 16px); background: var(--surface); }
 .editor-drawer-tab { min-height: 44px; border-radius: 8px 0 0 8px; }
-body.editing .panel-chrome, body.editing .panel-grip, body.editing .knob, body.editing .cheek { touch-action: none; }
+body.editing .panel-chrome { background: var(--surface-2); border-color: var(--border-strong); box-shadow: none; height: 24px; top: -24px; border-radius: 8px 8px 0 0; }
+.panel-chrome-title { font-size: 10px; text-transform: none; letter-spacing: .2px; }
+body.editing .panel-chrome, body.editing .panel-grip, body.editing .knob, body.editing .cheek,
+body.editing .organ-offerings-stop:not(.pulled), body.editing .organ-offerings-division-head { touch-action: none; }
 body.inspecting .knob, body.inspecting .cheek { touch-action: manipulation; }
+body.inspecting .console-canvas :is(.knob, .keyboard, [data-action], .rocker) { cursor: crosshair; outline: 1px dashed var(--accent); outline-offset: 3px; }
+.offline { z-index: 70; }
 
-@media (pointer: coarse) {
-  .menu-title, .menu-item, .ghost, .picker-action, .segment button, .modal-close,
-  .editor-drawer-close, .piston, .rail-button, .division-add, .editor-lock { min-height: 44px; min-width: 44px; }
-  .shoe-track { width: 48px; }
-  .crescendo-track { min-height: 44px; }
-  .swatch { width: 44px; height: 44px; }
-  input[type="text"], input[type="number"], select { font-size: 16px !important; min-height: 44px !important; }
-  [data-tip]::after, [data-tip]::before { display: none; }
-}
+/* Loading an instrument is a simple open action followed by recent files. */
+.picker-card { width: min(760px, 100%); height: min(680px, 100%); }
+.picker-pane { gap: 24px; padding: 24px; }
+.picker-actions, .picker-browse-head { flex-wrap: wrap; }
+#picker-new-set { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+#picker-new-blank { background: var(--surface-2); color: var(--text); }
+.picker-formats { flex-basis: 100%; margin-left: 0; font: 12px var(--sans); color: var(--text-dim); }
+.picker-search { width: 100%; margin-bottom: 12px; }
+.picker-library, .picker-browse-list { border: 0; background: transparent; }
+.picker-recent-row { padding: 0; gap: 0; border-radius: 8px; border-bottom: 1px solid var(--border); }
+.picker-open { display: flex; align-items: center; gap: 12px; flex: 1; min-width: 0; min-height: 72px; border: 0; border-radius: 8px; padding: 14px 10px; background: transparent; color: var(--text); text-align: left; cursor: pointer; }
+.picker-open:hover { background: var(--hover); }
+.picker-row-name { font-size: 14px; }
+.picker-row-path { font-size: 11px; margin-top: 5px; }
+.picker-forget { width: 44px; height: 44px; font-size: 22px; opacity: .7; border-radius: 8px; margin: 4px; }
+.picker-browse-list .picker-row { min-height: 48px; padding: 12px; }
+.picker-browse-dir::before { content: '▸'; color: var(--accent); }
+.picker-loading { padding: 14px; border-radius: 8px; background: var(--accent-soft); color: var(--text); font-size: 13px; }
+.picker-error { font-size: 13px; padding: 12px; background: #e5484d0c; border-radius: 8px; }
+.organ-empty-card { max-width: calc(100vw - 32px); padding: 28px; border-radius: 14px; background: var(--surface); border: 1px solid var(--border); box-shadow: none; }
+.organ-empty-card h2 { font-size: 23px; letter-spacing: -.4px; }
+.organ-empty-card p { font-size: 14px; }
+.organ-empty-card button { min-height: 44px; background: var(--accent); border: 0; border-radius: 8px; text-transform: none; letter-spacing: 0; font-size: 14px; }
 
+/* Responsive flow never writes desktop coordinates. */
 @media (max-width: 1100px), (pointer: coarse) and (max-width: 1600px) {
-  .console-canvas { display: flex; flex-wrap: wrap; align-content: flex-start; align-items: flex-start; gap: 16px; height: auto; min-height: calc(100dvh - var(--bar-h)); padding: 20px 16px 110px; overflow: visible; }
+  .console-canvas { display: flex; flex-wrap: wrap; align-content: flex-start; align-items: flex-start; gap: 16px; height: auto !important; padding: 20px 24px 110px; overflow: visible; }
   .console-canvas .panel { position: relative; left: auto !important; top: auto !important; width: 100% !important; min-width: 0; max-width: 100%; }
   .console-canvas .panel-jamb { flex: 1 1 280px; }
-  .division, .division-knobs, .panel.sized .division-knobs { width: 100%; max-width: none; }
-  .division { align-items: stretch; }
-  .division-knobs { justify-content: flex-start; gap: 12px; }
-  .division-head { justify-content: space-between; }
-  .panel-keyboard { overflow-x: auto; padding-bottom: 6px; }
-  .panel-keyboard .panel-body { width: max-content; min-width: 100%; }
-  .panel-keyboard .keyboard { min-width: max-content; }
-  .piston-rail, .piston-bank, .piston-stepper, .coupler-rail { flex-wrap: wrap; }
-  .piston-rail { gap: 12px; }
-  body.editing .panel-chrome { position: relative; top: auto; height: 32px; cursor: default; border-radius: 8px 8px 0 0; }
+  .console-canvas .panel-keyboard { flex: 1 1 340px; overflow: visible; }
+  .console-canvas .panel-keyboard:has(.keyboard:not(.keys-collapsed)) { flex-basis: 100%; }
+  .console-canvas .panel-shoes { flex: 0 1 auto; width: auto !important; }
+  .panel-keyboard .panel-body { width: 100%; min-width: 0; }
+  .panel-keyboard .keyboard { width: 100%; min-width: 0; overflow: hidden; }
+  .panel-keyboard .keyboard .keys { flex-shrink: 0; }
+  .keyboard.manual { --kb-h: max(64px, calc(96px * var(--kb-scale, 1))); }
+  .keyboard.pedal { --kb-h: max(56px, calc(84px * var(--kb-scale, 1))); }
+  body.editing .panel-chrome { position: relative; top: auto; height: 32px; cursor: default; }
   body.editing .panel-grip { display: none; }
-  .organ-empty-card { max-width: calc(100vw - 32px); }
 }
-
-@media (max-width: 680px) {
-  :root { --bar-h: 112px; }
-  .menubar { flex-wrap: wrap; align-content: center; gap: 2px 6px; height: var(--bar-h); padding: 6px 12px; }
-  .menubar > .brand:nth-child(2) { flex: 1; min-width: 0; }
-  .organ-title { max-width: 100%; width: 100%; text-align: left; }
-  .menus { margin-left: auto; }
-  .rail-controls { flex: 1 0 100%; justify-content: space-between; gap: 10px; }
-  .rail-controls .slider-group { flex: 1; }
-  #gain { width: min(26vw, 140px); }
-  .menu-title { padding: 0 7px; }
-  .menu-list { position: fixed; top: 56px; left: 8px; right: 8px; min-width: 0; }
-  .modal { padding: 8px; }
-  .modal-card { max-height: calc(100dvh - 16px); border-radius: 12px; }
-  .modal-head, .picker-head { padding: 10px 14px; }
-  .pane { padding: 16px; }
+@media (max-width: 1250px) {
+  :root { --bar-h: 120px; }
+  .menubar { flex-wrap: wrap; align-content: center; gap: 4px 10px; padding: 8px 24px; }
+  .menubar > .brand:nth-child(2) { flex: 1; }
+  .organ-title { max-width: 100%; }
+  .rail-controls { flex: 1 0 100%; justify-content: flex-end; }
+  #gain-group { margin-right: auto; }
+}
+@media (max-width: 720px) {
+  .modal { padding: 0; }
+  .modal-card { max-height: 100dvh; border-radius: 0; width: 100%; border: 0; }
+  .organ-prefs-card { height: 100dvh; }
+  .modal-head, .picker-head { padding: 16px; }
+  .modal-head h1, .picker-head h1 { font-size: 19px; }
+  .modal-body, .pane, .picker-pane { padding-left: 16px; padding-right: 16px; }
+  .pane .pane { padding-left: 0; padding-right: 0; }
+  #organ-prefs-nav { display: none; }
+  .organ-prefs-mobile-nav { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--bg); font-size: 12px; color: var(--text-dim); }
+  .organ-prefs-mobile-nav select { flex: 1; font-size: 16px; }
+  .organ-prefs-content { padding: 24px 20px; }
+  #organ-prefs-index h2 { font-size: 22px; }
+  #organ-prefs-context { line-height: 1.4; }
+  .organ-pref-field { grid-template-columns: 1fr; gap: 8px; }
+  #organ-prefs .settings-row { flex-wrap: wrap; gap: 8px; }
+  #organ-prefs .settings-row > .rail-label { flex: 0 0 100%; }
+  #organ-prefs .settings-row > .stepper { flex-wrap: wrap; max-width: 100%; }
+  #organ-prefs .settings-row > .stepper input { flex-shrink: 1; }
+  #organ-prefs .control-row { display: flex; flex-wrap: wrap; padding: 12px; gap: 8px; }
+  #organ-prefs .control-row .control-trigger { flex: 1 0 100%; }
+  #organ-prefs .control-row :is(.control-action, .control-target) { flex: 1 1 100px; }
+  #organ-prefs .coupler-route-row { flex-wrap: wrap; gap: 8px; }
+  #organ-prefs .coupler-route-row select { flex-basis: 120px; }
+  #organ-prefs .coupler-route-row .stepper { flex-wrap: wrap; }
   .settings-row { flex-wrap: wrap; }
-  .settings-row > .rail-label { flex: 0 0 100%; }
-  .settings-row .segment { max-width: 100%; }
-  .picker-actions, .picker-browse-head { flex-wrap: wrap; }
-  .picker-formats { width: 100%; }
+  .settings-row > .rail-label { flex-basis: 100%; }
+  .prefs-card { height: auto; }
+  .picker-card { height: 100dvh; }
+  .picker-row-kind { display: none; }
+  input:not([type="range"]):not([type="checkbox"]), select { font-size: 16px !important; }
+  .memory-stale { flex-wrap: wrap; }
   .editor-add { left: 8px !important; top: 8px !important; width: calc(100vw - 16px); max-height: calc(100dvh - 16px); }
-  .editor-add > .editor-add-form { width: 100%; }
-  .editor-toolbar { gap: 2px; }
-  .editor-lock-dock { left: 8px; max-width: calc(100vw - 16px); }
-  .editor-lock { padding: 0 8px; }
-  .editor-tool { padding: 7px 8px; }
-  .editor-hint { left: 8px; bottom: 82px; }
-  .editor-drawer-tab { bottom: 80px; }
+}
+@media (max-width: 600px) {
+  :root { --bar-h: 154px; }
+  .menubar { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; grid-template-rows: repeat(3, 44px); padding: 8px 16px; gap: 2px 8px; }
+  .menubar > .brand:first-child { grid-row: 1; grid-column: 1; }
+  .menubar > .brand:nth-child(2) { grid-row: 1; grid-column: 2 / -1; min-width: 0; }
+  .menubar .menus { grid-row: 2; grid-column: 1; }
+  .menubar .instrument-settings { grid-row: 2; grid-column: 2 / -1; justify-self: end; }
+  .menubar .rail-controls { grid-row: 3; grid-column: 1 / -1; margin-left: 0; }
+  .app-title { padding-left: 0; }
+  .menus { margin-right: auto; }
+  .instrument-settings { flex: 0 0 auto; }
+  .rail-controls { gap: 6px; }
+  .rail-controls .slider-group { flex: 1; min-width: 0; }
+  #gain { width: 100%; min-width: 40px; max-width: 140px; }
+  #gain-group .rail-label { display: none; }
+  #tuning { max-width: 120px; font-size: 11px; padding: 8px; }
+  .menu-list { position: fixed; top: 52px; left: 8px; right: 8px; min-width: 0; }
+  .console-heading { padding: 24px 16px 4px; align-items: start; flex-direction: column; gap: 8px; }
+  .console-heading h1 { font-size: 24px; }
+  .console-heading p { white-space: normal; }
+  .console-heading-actions { width: 100%; flex-direction: row; justify-content: space-between; align-items: center; }
+  .console-heading-actions .editor-toolbar button { padding: 8px; font-size: 12px; }
+  .console-canvas { gap: 14px; padding: 18px 16px 100px; }
+  .console-canvas .panel-jamb { flex-basis: 100%; }
+  body .panel-jamb .division-knobs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  body .panel-jamb .knob .face { flex-direction: column; align-items: flex-start; gap: 5px; }
+  body .panel-jamb .stop-name { font-size: 13px; }
+  body .panel-jamb .knob { min-height: 68px; }
+  .keyboard-card-head { gap: 4px; }
+  .keyboard-card-head strong { flex-basis: 100%; margin-bottom: 6px; }
+  .keyboard-card-head .ghost { flex: 1; text-align: center; }
+  .editor-toolbar button { padding: 10px 12px; font-size: 12px; }
+  .editor-drawer-tab { bottom: 84px; }
   .editor-drawer { width: calc(100vw - 16px); }
+  .piston-rail { gap: 12px 8px; }
+  .piston-bank { flex: 1 1 100%; }
+  .piston-bank::before { flex-basis: 100%; margin-bottom: 4px; }
+  .piston-stepper, .crescendo { border-left: 0; padding-left: 0; flex-wrap: wrap; }
+  .crescendo-track { flex: 1; min-width: 80px; }
+  .crescendo { width: 100%; }
+}
+@media (max-width: 380px) {
+  .panel-keyboard .divisional-rail { padding: 0 8px 8px; gap: 1px; }
+}
+@media (pointer: coarse) {
+  .menu-title, .menu-item, .ghost, .picker-action, .segment button, .modal-close,
+  .editor-drawer-close, .piston, .rail-button, .division-add, .editor-lock, .rocker { min-height: 44px; min-width: 44px; }
+  .editor-toolbar button { min-height: 52px; }
+  .swatch { width: 44px; height: 44px; }
+  .shoe-track { width: 48px; }
+  .crescendo-track { min-height: 44px; }
+  [data-tip]::after, [data-tip]::before { display: none; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; animation-duration: .01ms !important; }
 }
-/* Keep secondary information from competing with the playing surface. */
-#scale-segment[aria-disabled="true"] { display: none; }
-.prefs-card { max-height: calc(100dvh - 40px); }
-.kb-silent { font-size: 11px; padding: 6px 10px; min-height: 32px; border-radius: 6px; }
-.conflict-primary { min-height: 44px; padding: 8px 14px; }
-.conflict-actions { flex-wrap: wrap; }
-body.editing .organ-offerings-stop:not(.pulled), body.editing .organ-offerings-division-head { touch-action: none; }
-@media (pointer: coarse) {
-  .kb-silent { min-height: 44px; }
-  .rocker { min-height: 44px; }
-}
-@media (max-width: 680px) {
-  #tuning { font-size: 0; flex: 0 0 70px; height: 40px; padding: 0 8px; }
-  #tuning::after { content: 'Tuning'; display: inline; position: static; font: 12px var(--sans); color: var(--accent); opacity: 1; visibility: visible; background: transparent; border: 0; padding: 0; }
-  .prefs-card { max-height: calc(100dvh - 16px); }
-}
-body.inspecting .editor-add { visibility: hidden; }
-@media (max-width: 680px) {
-  .coupler-route-row { flex-wrap: wrap; }
-  .coupler-route-row select { flex-basis: 120px; }
-}
-[role="slider"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
-@media (max-width: 1100px), (pointer: coarse) and (max-width: 1600px) {
-  .keyboard:has(.kb-silent) { padding-top: 60px; }
-  .kb-silent { left: 12px; right: auto; top: 8px; }
-}
-/* Editing tools stay reachable beside a tall popover; dialogs cover both. */
-.editor-lock-dock { z-index: 49; }
-body.editing .editor-add { max-height: calc(100dvh - 90px); }
-.modal { z-index: 60; }
-.offline { z-index: 70; }
-@media (max-width: 400px) {
-  body.editing #editor-lock-label { font-size: 0; }
-  body.editing #editor-lock-label::after { content: 'Done'; font-size: 12px; }
-}
-
-/* Loading is a task, with one obvious open action and a searchable history. */
-.picker-card { width: min(760px, 100%); height: min(680px, 100%); }
-.picker-pane { gap: 18px; padding: 20px; }
-.picker-actions { flex-wrap: wrap; }
-#picker-new-blank { background: var(--surface-2); color: var(--text); }
-#picker-new-set { background: var(--accent); color: var(--accent-ink); }
-.picker-actions .picker-action { text-transform: none; letter-spacing: 0; font-size: 13px; }
-.picker-formats { flex-basis: 100%; margin-left: 0; font-family: var(--sans); font-size: 11px; }
-.picker-search { width: 100%; min-height: 42px; margin-bottom: 10px; padding: 10px 12px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--well); color: var(--text); font: 14px var(--sans); }
-.picker-search::placeholder { color: var(--text-dim); }
-.picker-recent-row { padding: 0; gap: 0; border-radius: 7px; }
-.picker-open { display: flex; align-items: center; gap: 12px; flex: 1; min-width: 0; min-height: 60px; border: 0; border-radius: 7px; padding: 10px 12px; background: transparent; color: var(--text); text-align: left; cursor: pointer; }
-.picker-row-name { font-size: 14px; }
-.picker-row-path { font-size: 11px; margin-top: 3px; }
-.picker-forget { width: 44px; height: 44px; font-size: 22px; opacity: .7; border-radius: 7px; margin: 4px; }
-.picker-library, .picker-browse-list { border-radius: 9px; }
-.picker-browse-list .picker-row { min-height: 44px; padding: 10px 12px; }
-.picker-browse-dir::before { content: '▸'; color: var(--accent); }
-.picker-loading { padding: 12px; border-radius: 8px; background: var(--accent-soft); color: var(--text); font-size: 13px; }
-.picker-error { font-size: 13px; padding: 10px 12px; background: #e5484d0c; border-radius: 0 8px 8px 0; }
-@media (max-width: 680px) {
-  .picker-pane { padding: 14px; }
-  .picker-row-kind { display: none; }
-  .picker-open { padding: 10px; }
-}
-
-/* A compact keyboard card is useful even when playing from physical keys. */
-.keyboard-card-head { display:flex; align-items:center; gap:8px; padding:10px; border-radius:10px; background:var(--surface); }
-.keyboard-card-head strong { flex:1; min-width:0; font-size:13px; overflow-wrap:anywhere; }
-.keyboard-card-head .ghost { flex-shrink:0; min-height:44px; }
-.keyboard.keys-collapsed { display:none; }
-.panel-keyboard { min-width:340px; }
-.panel-keyboard .divisional-rail { padding:6px 10px; gap:6px; }
-.keyboard .kb-silent { display:none; }
-.editor-lock-dock { left:50%; transform:translateX(-50%); bottom:max(18px, env(safe-area-inset-bottom)); max-width:calc(100vw - 24px); }
-.editor-toolbar { gap:10px; padding:8px; }
-.editor-toolbar button { min-height:56px; min-width:90px; padding:10px 18px; font-size:15px; font-weight:600; }
-body.editing .editor-tool { display:block; }
-.editor-hint { display:none; }
-#editor-add-button { background:var(--accent); color:var(--accent-ink); }
-body.editing .editor-add { max-height:calc(100dvh - 112px); }
-
-/* One settings window, with the same live controls as the console shortcuts. */
-.organ-prefs-card { width:min(1000px,calc(100vw - 32px)); height:min(780px,calc(100dvh - 40px)); display:flex; flex-direction:column; }
-.organ-prefs-layout { display:flex; flex:1; min-height:0; }
-#organ-prefs-nav { flex:0 0 210px; padding:12px; border-right:1px solid var(--border-strong); overflow:auto; }
-.organ-prefs-content { flex:1; min-width:0; overflow:auto; padding:20px; overscroll-behavior:contain; }
-.organ-pref-action { display:flex; flex-direction:column; justify-content:center; gap:4px; width:100%; min-height:56px; padding:12px 14px; margin:0 0 8px; text-align:left; color:var(--text); background:var(--surface-2); border:1px solid #ffffff18; border-radius:10px; font-size:14px; cursor:pointer; }
-.organ-pref-action small { color:var(--text-dim); font-size:12px; line-height:1.5; }
-#organ-prefs-nav .organ-pref-action { background:transparent; border-color:transparent; }
-#organ-prefs-nav [aria-current="true"] { background:var(--accent-soft); border-color:var(--accent); }
-#organ-prefs-index h2 { margin:4px 0 16px; font-size:18px; }
-#organ-prefs input, #organ-prefs select { min-height:48px; max-width:100%; font-size:16px; }
-#organ-prefs input[type=search] { width:100%; margin-bottom:12px; padding:10px; }
-#organ-prefs button { touch-action:manipulation; }
-#organ-prefs .ghost, #organ-prefs .menu-item, #organ-prefs .segment button { min-height:48px; }
-#organ-prefs .editor-add, #organ-prefs .organ-remove-confirm { position:static !important; transform:none !important; width:100% !important; max-width:100%; max-height:none; overflow:visible; margin:12px 0; visibility:visible; }
-#organ-prefs .editor-add-form, #organ-prefs .editor-add-menu { width:100%; max-width:100%; box-sizing:border-box; box-shadow:none; }
-#organ-prefs .editor-add-form { padding:16px; }
-#organ-prefs .editor-add-form .rail-label { font-size:13px; }
-#organ-prefs .editor-add-form-actions { gap:10px; }
-#organ-prefs-errors #editor-error { position:static; transform:none; max-width:100%; }
-.organ-pref-group { margin-bottom:10px; border:1px solid var(--border-strong); border-radius:10px; padding:10px; }
-.organ-pref-group summary { cursor:pointer; min-height:48px; padding:12px 4px; font-size:15px; }
-.organ-pref-group label { display:block; margin:10px 0; }
-.organ-pref-group label input { display:block; width:100%; }
-.organ-pref-group select { width:100%; margin-bottom:10px; }
-.organ-pref-rename { display:flex; gap:8px; margin-bottom:16px; }
-.organ-pref-rename input { width:100%; min-width:0; padding:8px; }
-#organ-prefs-context { margin:0 0 16px; }
-#organ-prefs .pane-note { overflow-wrap:anywhere; }
-
-@media (max-width:1100px), (pointer:coarse) and (max-width:1600px) {
-  .console-canvas { gap:10px; padding:12px 12px 110px; }
-  .console-canvas .panel-jamb { flex:0 0 calc(50% - 5px); align-self:flex-start; }
-  .panel-jamb .panel-body { height:auto; padding:10px; }
-  /* Compact stops wrap without growing to fill the panel. */
-  body .console-canvas .panel-jamb .panel-body { padding:10px; }
-  body .console-canvas .panel-jamb .division { min-width:0; gap:8px; }
-  .panel-jamb .division-head { min-height:20px; }
-  .panel-jamb .division h2 { margin:0; padding:0; font-size:12px; line-height:1.4; white-space:normal; overflow-wrap:anywhere; }
-  .panel-jamb .division h2::after { display:none; }
-  /* Beat desktop density caps, including saved, resized jambs. */
-  body .console-canvas .panel-jamb .division-knobs { display:grid; width:100%; max-width:none; grid-template-columns:repeat(auto-fill,minmax(0,96px)); gap:6px; align-items:start; }
-  body .console-canvas .panel-jamb .knob { width:100%; min-width:0; min-height:48px; border-radius:5px; background:var(--well); box-shadow:none; }
-  .panel-jamb .knob .face { align-items:center; gap:2px; padding:6px; }
-  .panel-jamb .stop-name { max-width:100%; font-size:11.5px; line-height:1.2; text-align:center; overflow-wrap:anywhere; color:var(--text); }
-  .panel-jamb .stop-pitch { font-size:10px; line-height:1.2; }
-  .panel-jamb .knob.on { background:var(--accent); border-color:var(--accent); box-shadow:inset 3px 0 0 var(--accent-ink); }
-  .panel-jamb .knob.on .stop-name { color:var(--accent-ink); }
-  .panel-jamb .knob:focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
-  .panel-jamb .stop-tuning-dot { right:5px; top:5px; }
-  .panel-keyboard { overflow:visible; padding-bottom:0; }
-  .panel-keyboard .panel-body { width:100%; min-width:0; }
-  .panel-keyboard .keyboard { width:100%; min-width:0; overflow:hidden; }
-  .panel-keyboard .keyboard .keys { flex-shrink:0; }
-  .keyboard.manual { --kb-h:max(64px,calc(96px * var(--kb-scale,1))); }
-  .keyboard.pedal { --kb-h:max(56px,calc(84px * var(--kb-scale,1))); }
-  .keyboard-card-head { padding:8px 10px; }
-  .divisional-rail { flex-wrap:wrap; }
-}
-@media (max-width:680px) {
-  .organ-prefs-card { width:100%; height:calc(100dvh - 16px); }
-  .organ-prefs-layout { flex-direction:column; }
-  #organ-prefs-nav { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); flex:0 0 auto; padding:8px; gap:6px; border-right:0; border-bottom:1px solid var(--border-strong); }
-  #organ-prefs-nav .organ-pref-action { margin:0; padding:8px; min-height:56px; font-size:12px; }
-  .organ-prefs-content { padding:12px; }
-  .editor-toolbar { gap:8px; width:100%; }
-  .editor-toolbar button { min-width:0; padding:10px 12px; flex:1; font-size:14px; }
-  body.editing .editor-lock-dock { width:calc(100vw - 24px); }
-  .console-canvas .panel-jamb { flex-basis:100%; }
-  .keyboard-card-head { gap:6px; flex-wrap:wrap; }
-  .keyboard-card-head strong { flex-basis:100%; }
-  .keyboard-card-head .ghost { flex:1; }
-}
-#organ-prefs input:not([type=range]), #organ-prefs select { color:var(--text); background:var(--well); border:1px solid var(--border-strong); border-radius:7px; }
-@media (max-width:1100px), (pointer:coarse) and (max-width:1600px) {
-  .console-canvas .panel-keyboard { flex:1 1 320px; width:auto !important; }
-  .console-canvas .panel-keyboard:has(.keyboard:not(.keys-collapsed)) { flex-basis:100%; }
-  .console-canvas .panel-shoes { flex:0 1 auto; width:auto !important; }
-}
-@media (max-width:680px) {
-  .keyboard-card-head { flex-wrap:nowrap; }
-  .keyboard-card-head strong { flex:1; font-size:12px; }
-  .keyboard-card-head .ghost { flex:0 0 auto; padding:6px 8px; font-size:11px; }
-}
-@media (min-width:681px) and (max-width:1100px) {
-  :root { --bar-h:112px; }
-  .menubar { flex-wrap:wrap; align-content:center; height:var(--bar-h); gap:4px 12px; padding:6px 16px; }
-  .menus { margin-left:auto; }
-  .rail-controls { flex:1 0 100%; justify-content:space-between; }
-  #tuning { white-space:nowrap; min-width:190px; }
-  .console-canvas .panel-keyboard:not(:has(.keyboard:not(.keys-collapsed))) { flex:0 1 calc(50% - 5px); }
-}
-.editor-add-menu .menu-item { min-height:56px; padding:12px; }
-#organ-prefs input[type=checkbox] { min-height:24px; width:24px; height:24px; accent-color:var(--accent); }
-#organ-prefs .editor-add-form label { min-height:48px; }
-#organ-prefs .editor-wiring-form, #organ-prefs .editor-bindings-form { max-height:none; overflow:visible; }
-@media (max-width:680px) {
-  .keyboard:has(.kb-silent) { padding-top:10px; }
-}
-@media (max-width:380px) {
-  #gain-group { min-width:0; }
-  #gain-group .rail-label { display:none; }
-  #gain { width:100%; min-width:40px; }
-}
-.editor-lock-dock { width:max-content; }
-#editor-lock-label { white-space:nowrap; }
-
-/* Keyboard connection is a vertical flow. The generic editor select rule
-   gives every select 100% width, so a single flex row clips the action. */
-#editor-midi .manual-inputs { flex: none; align-items: stretch; gap: 12px; }
-#editor-midi .manual-input { flex-direction: column; align-items: stretch; gap: 12px; min-width: 0; }
-#editor-midi .input-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: space-between; }
-#editor-midi .input-actions .listen, #editor-midi .add-input {
-  min-height: 48px; background: var(--accent); color: var(--accent-ink); border-color: var(--accent);
-}
-#editor-midi .input-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-#editor-midi .input-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; font-size: 12px; color: var(--text-dim); }
-#editor-midi .input-device-field { grid-column: 1 / -1; }
-#editor-midi .input-field select, #editor-midi .input-field input { width: 100%; min-width: 0; max-width: 100%; box-sizing: border-box; flex: none; }
-#editor-midi .listen-hint { white-space: normal; padding: 10px; background: var(--accent-soft); border-radius: 6px; line-height: 1.5; }
-#editor-midi .input-bend-row { flex-wrap: wrap; }
-#editor-midi .input-bend { width: 110px; }
-#editor-midi .advanced-settings > summary { min-height: 48px; display: list-item; align-content: center; box-sizing: border-box; }
-#editor-midi .midi-ports { margin: 12px 0; }
-#editor-midi .midi-port { white-space: normal; overflow-wrap: anywhere; }
-#editor-midi .settings-row { flex-wrap: wrap; }
-#editor-midi .piston-row { flex-wrap: wrap; }

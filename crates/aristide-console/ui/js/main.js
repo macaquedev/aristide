@@ -30,7 +30,6 @@ const prefs = new Preferences(document, (query) => send(query));
 const picker = new Picker(document, base, (query, options) => send(query, options));
 const editor = new Editor(document, base, (query) => send(query));
 const organPrefs = new OrganPreferences(document, editor);
-editor.openPreferences = () => organPrefs.open();
 // The bar's tuning readout opens the whole-instrument tuning popover —
 // an organ fact, edited where organ facts are edited, on the console.
 const view = new Console(
@@ -39,7 +38,7 @@ const view = new Console(
   (x, y) => editor.openTuningForm("organ", x, y),
   (x, y) => editor.beginBuild(x, y)
 );
-view.onKeyboardSettings = (idx) => { organPrefs.open(); organPrefs.select("keyboards"); organPrefs.edit(() => editor.openMidiForm(idx,20,80)); };
+view.onKeyboardSettings = (idx) => editor.openMidiForm(idx, 20, 80);
 view.decorate = (snapshot) => editor.decorateConsole(snapshot);
 const keys = new PianoKeys(document, (query) => send(query));
 const conflict = new ConflictDialog(document, (query) => send(query));
@@ -54,46 +53,14 @@ function fullscreen() {
   else document.documentElement.requestFullscreen?.();
 }
 
-// Renaming happens right where the name is shown: the organ's name in
-// the bar becomes a text field, Enter or clicking away commits, Escape
-// abandons. The server owns what a rename really means (the file, the
-// wiring key, the library), so this only sends the new name.
+// File actions and console shortcuts lead to the same instrument editor.
 const organButton = document.getElementById("organ-name");
-const renameForm = document.getElementById("organ-rename-form");
-const renameInput = document.getElementById("organ-rename");
-let renaming = false;
-
+document.getElementById("instrument-settings").addEventListener("click", () => organPrefs.open());
 function startRename() {
-  renaming = true;
-  renameInput.value = snapshot.organ ?? "";
-  organButton.classList.add("hidden");
-  renameForm.classList.remove("hidden");
-  renameInput.focus();
-  renameInput.select();
+  organPrefs.open();
+  organPrefs.select("general");
+  requestAnimationFrame(() => document.querySelector('#organ-prefs [aria-label="Organ name"]')?.focus());
 }
-
-function endRename(commit) {
-  if (!renaming) return; // the submit's blur must not commit twice
-  renaming = false;
-  const name = renameInput.value.trim();
-  if (commit && name && name !== snapshot.organ) {
-    send(commands.organRename(name));
-  }
-  renameForm.classList.add("hidden");
-  organButton.classList.remove("hidden");
-}
-
-renameForm.addEventListener("submit", (event) => {
-  event.preventDefault();
-  endRename(true);
-});
-renameInput.addEventListener("blur", () => endRename(true));
-renameInput.addEventListener("keydown", (event) => {
-  if (event.key === "Escape") {
-    event.stopPropagation();
-    endRename(false);
-  }
-});
 
 // Menus are rebuilt each time one is pulled down, so every item states
 // what is true at that moment — whether the legend is up, whether the
@@ -103,9 +70,8 @@ renameInput.addEventListener("keydown", (event) => {
 //
 // The bar reads as the scopes read: the Aristide menu is the app and
 // the player (About, Preferences — nothing in it touches the organ);
-// the organ's own name is its file (pick, rename, save); the Organ
-// menu is the instrument — performance actions plus the organ-wide
-// preferences window; each setting keeps its existing storage scope.
+// the organ's own name is its file (pick, rename, save). Instrument
+// settings is a direct button; each setting keeps its storage scope.
 // An ad-hoc combination has no file to keep a name in, so renaming
 // waits until it is saved as one.
 new MenuBar(document, document.getElementById("menus"), [
@@ -113,7 +79,7 @@ new MenuBar(document, document.getElementById("menus"), [
     button: document.getElementById("app-menu"),
     list: document.getElementById("app-menu-list"),
     items: () => [
-      { label: "Preferences…", accel: "Ctrl ,", run: () => prefs.open() },
+      { label: "App preferences…", accel: "Ctrl ,", run: () => prefs.open() },
       "-",
       { label: "About Aristide", run: () => prefs.openAbout() },
     ],
@@ -156,15 +122,6 @@ new MenuBar(document, document.getElementById("menus"), [
     ],
   },
   {
-    title: "Organ",
-    items: () => [
-      { label: "Clear stops & couplers", run: () => view.cancel() },
-      { label: "Silence everything", accel: "Panic", run: () => view.panic() },
-      "-",
-      { label: "Preferences…", disabled: !snapshot.organ, run: () => organPrefs.open() },
-    ],
-  },
-  {
     title: "View",
     items: () => [
       { label: "Computer keyboard map", check: keys.isOpen, run: () => keys.toggle() },
@@ -186,8 +143,7 @@ window.addEventListener("keydown", (event) => {
   if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
   if (event.key === ",") {
     event.preventDefault();
-    if (organPrefs.isOpen) organPrefs.select("appearance");
-    else prefs.isOpen ? prefs.close() : prefs.open();
+    prefs.isOpen ? prefs.close() : prefs.open();
   } else if (event.key in ZOOM_KEYS && stepScale(ZOOM_KEYS[event.key])) {
     event.preventDefault();
   }

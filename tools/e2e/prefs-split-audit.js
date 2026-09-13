@@ -71,17 +71,13 @@ try {
 
   const appItems = await menuLabels(`document.getElementById("app-menu").click()`);
   check(
-    appItems.some((l) => l.startsWith("Preferences")) && appItems.some((l) => l.includes("About")),
+    appItems.some((l) => l.startsWith("App preferences")) && appItems.some((l) => l.includes("About")),
     `Aristide menu holds Preferences and About (${appItems.join(" / ")})`
   );
   await escape();
 
-  const organItems = await menuLabels(`${titleButton("Organ")}.click()`);
-  for (const wanted of ["Preferences…"]) {
-    check(organItems.includes(wanted), `Organ menu offers ${wanted}`);
-  }
-  check(!organItems.includes("Tuning…"), "Organ menu omits the duplicate tuning entry");
-  await escape();
+  check(await drive.eval(`document.querySelector('#instrument-settings').getClientRects().length > 0`), "Instrument settings is directly accessible while locked");
+  check(await drive.eval(`![...document.querySelectorAll('#menus .menu-title')].some(b=>b.textContent==='Organ')`), "no second Organ settings menu");
 
   const viewItems = await menuLabels(`${titleButton("View")}.click()`);
   check(!viewItems.some((l) => l.startsWith("Appearance")), "View menu lost Appearance");
@@ -101,7 +97,7 @@ try {
   await drive.eval(`document.getElementById("app-menu").click()`);
   await sleep(120);
   await drive.eval(`[...document.querySelectorAll(".menu-list:not(.hidden) .menu-item")]
-    .find((b) => b.textContent.includes("Preferences")).click()`);
+    .find((b) => b.textContent.includes("preferences")).click()`);
   await sleep(200);
   check(
     await drive.eval(`!document.getElementById("prefs").classList.contains("hidden")`),
@@ -205,16 +201,13 @@ try {
 
   // ---- 4. room & noises ---------------------------------------------
 
-  await drive.eval(`${titleButton("Organ")}.click()`);
-  await sleep(120);
-  await drive.eval(`[...document.querySelectorAll(".menu-list:not(.hidden) .menu-item")]
-    .find((b) => b.textContent.includes("Preferences")).click()`);
+  await drive.eval(`document.querySelector('#instrument-settings').click()`);
   await sleep(150);
   await drive.eval(`document.querySelector('[data-category="general"]').click();[...document.querySelectorAll("#organ-prefs .organ-pref-action")].find(b=>b.textContent.startsWith("Room")).click()`);
   await sleep(200);
   check(
     await drive.eval(`!document.getElementById("editor-room").classList.contains("hidden")`),
-    "Room & noises opens from the Organ menu"
+    "Room & noises opens from Instrument settings"
   );
   const reverbHidden = await drive.eval(
     `document.getElementById("editor-room-reverb-row").classList.contains("hidden")`
@@ -265,16 +258,13 @@ try {
 
   // ---- 6. bindings: the flat list and a stop's piston row -----------
 
-  await drive.eval(`${titleButton("Organ")}.click()`);
-  await sleep(120);
-  await drive.eval(`[...document.querySelectorAll(".menu-list:not(.hidden) .menu-item")]
-    .find((b) => b.textContent.includes("Preferences")).click()`);
+  await drive.eval(`document.querySelector('#instrument-settings').click()`);
   await sleep(150);
-  await drive.eval(`document.querySelector('[data-category="general"]').click();[...document.querySelectorAll("#organ-prefs .organ-pref-action")].find(b=>b.textContent.startsWith("Buttons & shortcuts")).click()`);
+  await drive.eval(`document.querySelector('[data-category="bindings"]').click();[...document.querySelectorAll("#organ-prefs .organ-pref-action")].find(b=>b.textContent.startsWith("Edit buttons & shortcuts")).click()`);
   await sleep(200);
   check(
     await drive.eval(`!document.getElementById("editor-bindings").classList.contains("hidden")`),
-    "Bindings opens from the Organ menu"
+    "Bindings opens from Instrument settings"
   );
   await drive.eval(`document.getElementById("editor-bindings-add").click()`);
   await sleep(300);

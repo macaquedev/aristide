@@ -53,6 +53,7 @@ try {
   const press = async (selector, holdMs = 300) => {
     const c = await drive.eval(`(() => { const el = document.querySelector(${JSON.stringify(selector)});
       if (!el) return null;
+      el.scrollIntoView({block:"center"});
       const range = document.createRange(); range.selectNodeContents(el);
       const r = range.getBoundingClientRect().width ? range.getBoundingClientRect() : el.getBoundingClientRect();
       return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`);
@@ -99,7 +100,7 @@ try {
   check(await visible("#editor-tuning"), "readout: a 300 ms press on its text opens the tuning popover");
   await quiet("whole-instrument tuning popover", "#editor-tuning");
   // Popovers dismiss on a press outside them, not a click.
-  await drive.eval(`document.body.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0 }))`);
+  await drive.eval(`document.querySelector("#organ-prefs .modal-close").click()`);
   await sleep(200);
 
   await contextMenu(`.knob[data-key="stop-${mixture.id}"]`);
@@ -115,7 +116,7 @@ try {
   await contextMenu(`.keyboard[data-manual="${mixture.midx}"] .key[data-midi="60"]`);
   await sleep(400);
   check(await visible("#editor-key-voicing"), "right-click a key: the key-voicing popover opens");
-  check(await visible("#editor-stop"), "…and its stop editor stays open");
+  check(await drive.eval(`!document.querySelector("#editor-stop").classList.contains("hidden") && document.querySelector("#editor-stop").classList.contains("settings-suspended")`), "…and its stop editor is retained as the parent view");
   await quiet("key-voicing popover", "#editor-key-voicing");
   await drive.eval(`document.getElementById("editor-key-voicing-close").click()`);
   await sleep(250);
