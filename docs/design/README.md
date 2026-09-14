@@ -24,3 +24,17 @@ retiring registrations, keeping registration when switching shapes, and Space
 activation. All 45 checks passed; no uncaught JavaScript exceptions occurred
 while loading and exercising the prototype. No Rust or production UI code is
 changed by this study.
+
+## Rocker refinement
+
+The user selected C. The refined rocker keeps the same ivory face, text and
+border colours in both states. Engagement uses a 3px pressed position, inset
+shading and a filled dark marker; retired tabs have a hollow marker. C now opens
+by default. The other proposals remain available for comparison.
+
+An additional browser review passed 24 checks, covering matching face colours,
+state markers, default selection, individual toggles, JavaScript exceptions,
+and both densities with 24/200 stops at 320, 390, 768, 1919 and 2560px.
+
+To bypass an embedded-browser failure, open this standalone HTML file directly
+in an ordinary browser. All code is included; no server or build is required.
