@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Aristide · Stop design study</title>
+<link rel="icon" href="data:,">
+<style>
+:root { color-scheme: dark; --bg:#131715; --panel:#1c211e; --line:#353c35; --text:#edece4; --muted:#acb4a9; --gold:#d7b77b; --ink:#242820; font-family:Inter, "Segoe UI", system-ui, sans-serif; font-size:14px; }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--text); }
+button,select { font:inherit; }
+button { cursor:pointer; }
+button:focus-visible, select:focus-visible, a:focus-visible { outline:3px solid #efc787; outline-offset:5px; }
+button, a, select { -webkit-tap-highlight-color:transparent; }
+a { color:inherit; text-underline-offset:4px; }
+.masthead { border-bottom:1px solid var(--line); padding:20px 36px; display:flex; align-items:center; gap:20px; }
+.wordmark { font-size:20px; font-weight:650; letter-spacing:-.6px; }
+.masthead .context { color:var(--muted); border-left:1px solid #495044; padding-left:20px; }
+.study-label { margin-left:auto; color:var(--muted); font-size:12px; }
+main { max-width:1720px; margin:auto; padding:40px 36px 56px; }
+.intro { display:flex; align-items:end; justify-content:space-between; gap:24px; margin-bottom:30px; }
+h1 { font-size:clamp(28px,3vw,40px); line-height:1.15; letter-spacing:-1.4px; font-weight:550; margin:0 0 12px; }
+.intro p { color:var(--muted); line-height:1.65; margin:0; max-width:700px; }
+.legend { display:flex; gap:20px; font-size:12px; white-space:nowrap; padding-bottom:5px; }
+.legend span { display:flex; align-items:center; gap:8px; }
+.legend i { width:14px; height:14px; background:#d4d4c7; border-radius:50%; border:2px solid #6f7668; }
+.legend .drawn { border:3px solid var(--gold); box-shadow:0 0 0 2px #4f4837; background:#f3edda; }
+.directions { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:20px; }
+.direction { min-width:0; padding:24px; background:var(--panel); border:1px solid var(--line); border-radius:14px; display:flex; flex-direction:column; }
+.direction header { display:flex; align-items:center; gap:12px; }
+.letter { width:28px; height:28px; border-radius:50%; display:grid; place-items:center; border:1px solid #68715f; font-size:12px; color:#dfdfd1; flex-shrink:0; }
+h2 { font-size:20px; margin:0; font-weight:550; letter-spacing:-.45px; }
+.description { margin:12px 0 0; color:var(--muted); line-height:1.55; min-height:44px; }
+.specimen { margin:24px 0 22px; padding:18px 10px 16px; border-top:1px solid #343b32; border-bottom:1px solid #343b32; min-height:272px; display:flex; flex-direction:column; }
+.division-label { color:#aeb7a7; text-transform:uppercase; letter-spacing:2px; font-weight:550; font-size:10px; display:flex; align-items:center; gap:10px; margin-bottom:20px; }
+.division-label:after { content:""; height:1px; background:#343b32; flex:1; }
+.stop-grid { display:grid; align-content:start; justify-content:start; }
+.stop { appearance:none; position:relative; display:flex; align-items:center; justify-content:center; flex-direction:column; gap:4px; color:var(--ink); border:1px solid #696f60; background:linear-gradient(#dddcd0,#c7cbbd); box-shadow:inset 0 1px 0 #f5f2e280, 0 2px 2px #0005; padding:8px; transition:background .12s,box-shadow .12s,transform .12s; min-width:0; }
+.stop:hover { background:linear-gradient(#efede1,#d9dccd); }
+.stop .name { font-size:13px; line-height:1.15; font-weight:500; overflow-wrap:anywhere; text-wrap:balance; }
+.stop .pitch { font-size:13px; line-height:1.05; font-weight:680; }
+.stop[aria-pressed="true"] { background:linear-gradient(#faf4e4,#e9e4cd); border-color:var(--gold); }
+.stop[aria-pressed="true"]:after { content:""; position:absolute; background:#85612a; }
+[data-style="round"] .stop-grid { grid-template-columns:repeat(auto-fill,88px); gap:14px 12px; }
+[data-style="round"] .stop { width:88px; height:88px; border-radius:50%; padding:12px 8px; box-shadow:0 0 0 3px #101510, 0 0 0 4px #444d40, inset 0 1px 1px #ffffef80, 0 4px 5px #0005; }
+[data-style="round"] .stop[aria-pressed="true"] { box-shadow:0 0 0 3px #d7b77b, 0 0 0 5px #554b34, inset 0 1px 1px #fff7dd; transform:translateY(-2px); }
+[data-style="round"] .stop[aria-pressed="true"]:after { width:14px; height:3px; border-radius:2px; bottom:8px; }
+[data-style="oval"] .stop-grid { grid-template-columns:repeat(auto-fill,minmax(118px,1fr)); gap:12px 10px; }
+[data-style="oval"] .stop { min-height:56px; border-radius:50%; padding:8px 14px; box-shadow:0 0 0 2px #101510, 0 0 0 3px #454d40, inset 0 1px 1px #ffffef80, 0 3px 3px #0005; }
+[data-style="oval"] .stop[aria-pressed="true"] { box-shadow:0 0 0 2px #d7b77b, 0 0 0 4px #554b34, inset 0 1px 1px #fff7dd; transform:translateY(-1px); }
+[data-style="oval"] .stop[aria-pressed="true"]:after { width:14px; height:3px; bottom:4px; border-radius:2px; }
+[data-style="rocker"] .stop-grid { grid-template-columns:repeat(auto-fill,minmax(86px,1fr)); gap:12px 9px; }
+[data-style="rocker"] .stop { min-height:76px; border-radius:5px 5px 13px 13px; padding:10px 8px 15px; border-bottom:6px solid #929a85; background:linear-gradient(175deg,#f0edde 0%,#d7d9c9 64%,#b7beab 100%); box-shadow:0 0 0 2px #101510,0 4px 3px #0005; }
+[data-style="rocker"] .stop[aria-pressed="true"] { background:linear-gradient(175deg,#d5d5c3,#f5efdb); border-bottom-color:var(--gold); box-shadow:0 0 0 2px #806b44,inset 0 3px 4px #70684640; transform:translateY(2px); }
+[data-style="rocker"] .stop[aria-pressed="true"]:after { width:16px; height:3px; border-radius:2px; bottom:4px; }
+.tradeoff { color:#c9cfc2; font-size:13px; line-height:1.55; margin:0 0 20px; flex:1; }
+.tradeoff strong { display:block; color:var(--text); font-weight:550; margin-bottom:4px; }
+.try-button { width:100%; min-height:44px; border:1px solid #515b49; background:transparent; border-radius:7px; text-align:left; color:var(--text); padding:10px 14px; display:flex; justify-content:space-between; align-items:center; }
+.try-button:hover { background:#2e372a; border-color:#8e9a80; }
+.try-button[aria-pressed="true"] { border-color:var(--gold); background:#302f24; }
+.trial { margin-top:44px; scroll-margin-top:24px; }
+.trial-head { display:flex; justify-content:space-between; align-items:end; gap:24px; margin-bottom:20px; }
+.trial h2 { font-size:26px; }
+.trial-head p { margin:8px 0 0; color:var(--muted); line-height:1.5; }
+.trial-controls { display:flex; gap:12px; align-items:end; flex-wrap:wrap; }
+.field { display:flex; flex-direction:column; gap:7px; font-size:11px; color:var(--muted); }
+select { padding:10px 30px 10px 12px; background:#20271f; color:var(--text); border:1px solid #505c49; border-radius:6px; min-height:44px; font-size:13px; max-width:100%; }
+.console { border:1px solid #424b3a; border-radius:12px; background:#191f1a; overflow:hidden; }
+.console-bar { display:flex; align-items:center; flex-wrap:wrap; gap:14px; padding:18px 24px; border-bottom:1px solid #394331; background:#20271f; }
+.console-bar .wordmark { font-size:17px; }
+.console-bar .organ-name { color:#c9d0bd; padding-left:14px; border-left:1px solid #536047; }
+.console-status { margin-left:auto; color:var(--muted); font-size:12px; }
+.clear { border:1px solid #62664e; color:#e7dbc2; background:transparent; min-height:36px; border-radius:6px; padding:6px 12px; }
+.console-divisions { padding:26px; display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:28px; align-items:start; }
+.division { min-width:0; padding:0 8px; }
+.division h3 { font-size:12px; letter-spacing:1.5px; text-transform:uppercase; display:flex; align-items:center; gap:10px; margin:0 0 22px; font-weight:600; }
+.division h3:after { content:""; height:1px; background:#3d4937; flex:1; }
+.division h3 span { color:#a3b198; font-size:10px; letter-spacing:0; font-weight:400; }
+.console[data-size="200"] .console-divisions { grid-template-columns:repeat(5,minmax(0,1fr)); }
+.console[data-density="compact"][data-style="round"] .stop-grid { grid-template-columns:repeat(auto-fill,88px); gap:10px 10px; }
+.console[data-density="compact"][data-style="round"] .stop { width:88px; height:88px; padding:8px 4px; }
+.console[data-density="compact"][data-style="round"] .stop .name { font-size:13px; }
+.console[data-density="compact"][data-style="oval"] .stop-grid { grid-template-columns:repeat(auto-fill,minmax(110px,1fr)); gap:10px; }
+.console[data-density="compact"][data-style="oval"] .stop { min-height:48px; padding:6px 12px; }
+.console[data-density="compact"][data-style="rocker"] .stop-grid { grid-template-columns:repeat(auto-fill,minmax(82px,1fr)); gap:10px 8px; }
+.console[data-density="compact"][data-style="rocker"] .stop { min-height:62px; padding:8px 5px 12px; }
+.console-foot { display:flex; flex-wrap:wrap; align-items:center; gap:14px; padding:16px 24px; border-top:1px solid #394331; color:var(--muted); font-size:12px; }
+.pistons { display:flex; gap:7px; }
+.piston { border:1px solid #717c62; background:#303a2a; color:#e1e6d9; width:34px; height:34px; border-radius:50%; font-size:12px; }
+.piston[aria-pressed="true"] { border:2px solid var(--gold); color:#f5dfba; background:#47422e; }
+.console-foot .note { margin-left:auto; }
+.design-note { color:var(--muted); line-height:1.65; margin:16px 0 0; font-size:13px; }
+footer { border-top:1px solid var(--line); display:flex; gap:24px; justify-content:space-between; color:var(--muted); font-size:12px; padding:22px 36px; }
+[hidden] { display:none!important; }
+@media(min-width:1850px) { main:has(.console[data-size="200"]) { max-width:2400px; } }
+@media(max-width:1250px) and (min-width:951px) { .direction { padding:20px; } .specimen { padding-left:4px; padding-right:4px; min-height:372px; } }
+@media(max-width:1100px) { .console[data-size="200"] .console-divisions { grid-template-columns:repeat(3,minmax(0,1fr)); } .trial-head { align-items:start; flex-direction:column; } }
+@media(max-width:950px) { .directions { grid-template-columns:1fr; } .direction { display:grid; grid-template-columns:minmax(200px,1fr) minmax(280px,1.1fr); column-gap:28px; } .direction header { grid-column:1; } .description { grid-column:1; min-height:0; } .specimen { grid-column:2; grid-row:1/5; margin:0; border:none; padding:6px; min-height:250px; justify-content:center; } .tradeoff { margin-top:18px; grid-column:1; } .try-button { grid-column:1; } .intro { align-items:start; flex-direction:column; gap:18px; } .console-divisions,.console[data-size="200"] .console-divisions { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+@media(max-width:640px) { .masthead { padding:18px 20px; gap:12px; } .masthead .context { padding-left:12px; font-size:12px; } .study-label { display:none; } main { padding:28px 20px 36px; } .intro { margin-bottom:24px; } .direction { display:flex; padding:22px; } .specimen { padding:20px 2px; margin:18px 0; border-top:1px solid #343b32; border-bottom:1px solid #343b32; min-height:0; } .tradeoff { margin-top:0; } .trial { margin-top:32px; } .trial-controls { gap:10px; display:grid; grid-template-columns:1fr 1fr; width:100%; } .field { min-width:0; } .field:first-child { grid-column:1 / -1; } .console-bar { padding:16px; } .console-status { margin-left:0; } .console-divisions,.console[data-size="200"] .console-divisions { grid-template-columns:1fr; padding:22px 12px; gap:32px; } .console-foot { padding:16px; gap:10px; } .console-foot .note { width:100%; margin:0; } .clear { margin-left:auto; min-height:44px; } .piston { width:44px; height:44px; } footer { flex-direction:column; gap:10px; padding:20px; } }
+@media(prefers-reduced-motion:reduce) { *, *:before, *:after { transition:none!important; scroll-behavior:auto!important; } }
+</style>
+</head>
+<body>
+<header class="masthead"><div class="wordmark">Aristide</div><div class="context">Stop design study</div><div class="study-label">14 September 2026 · Interactive concepts</div></header>
+<main>
+<section class="intro"><div><h1>Three ways to draw a stop.</h1><p>Familiar shapes, quiet surfaces, legible names. Compare the same registration below.<br>Click any stop to try its drawn and retired states.</p></div><div class="legend"><span><i></i>Retired</span><span><i class="drawn"></i>Drawn</span></div></section>
+<section class="directions" aria-label="Compare three stop designs">
+<article class="direction" data-style="round"><header><span class="letter">A</span><h2>Round drawknobs</h2></header><p class="description">A familiar circular head with an ivory face and a fine rim.</p><div class="specimen"><div class="division-label">Grand-Orgue</div><div class="stop-grid" data-specimen="round"></div></div><p class="tradeoff"><strong>The strongest traditional character.</strong>Names sit on the knob. Circles need more room, especially with long labels.</p><button class="try-button" data-pick="round" aria-pressed="false">Try round drawknobs <span aria-hidden="true">↗</span></button></article>
+<article class="direction" data-style="oval"><header><span class="letter">B</span><h2>Oval stop heads</h2></header><p class="description">The same ivory-and-rim language, in a lower, wider head.</p><div class="specimen"><div class="division-label">Grand-Orgue</div><div class="stop-grid" data-specimen="oval"></div></div><p class="tradeoff"><strong>A balance of character and space.</strong>More room for names, less height per stop. A warm ring marks a drawn stop.</p><button class="try-button" data-pick="oval" aria-pressed="true">Try oval stop heads <span aria-hidden="true">↗</span></button></article>
+<article class="direction" data-style="rocker"><header><span class="letter">C</span><h2>Rocker tabs</h2></header><p class="description">Short ivory tabs with a slight slope and a defined lower edge.</p><div class="specimen"><div class="division-label">Grand-Orgue</div><div class="stop-grid" data-specimen="rocker"></div></div><p class="tradeoff"><strong>A compact electric-console feel.</strong>Tabs settle down when engaged. Closely spaced banks make scanning easy.</p><button class="try-button" data-pick="rocker" aria-pressed="false">Try rocker tabs <span aria-hidden="true">↗</span></button></article>
+</section>
+<section class="trial" id="trial" aria-labelledby="trial-title"><div class="trial-head"><div><h2 id="trial-title">Try it as a console</h2><p>Switch the shape, load 200 stops, and try a registration.</p></div><div class="trial-controls"><label class="field">Stop design<select id="style"><option value="round">A · Round drawknobs</option><option value="oval" selected>B · Oval stop heads</option><option value="rocker">C · Rocker tabs</option></select></label><label class="field">Instrument<select id="size"><option value="24">24 stops</option><option value="200">200 stops</option></select></label><label class="field">Size<select id="density"><option value="compact" selected>Compact</option><option value="regular">Comfortable</option></select></label></div></div>
+<div class="console" id="console" data-style="oval" data-size="24" data-density="compact"><div class="console-bar"><span class="wordmark">Aristide</span><span class="organ-name" id="organ-name">Study organ · 24 stops</span><span class="console-status" id="drawn-count" aria-live="polite"></span><button class="clear" id="clear">Retire all</button></div><div class="console-divisions" id="divisions"></div><div class="console-foot"><span>Generals</span><div class="pistons" role="group" aria-label="Example registrations"><button class="piston" data-registration="1" aria-pressed="true" aria-label="Recall example registration 1">1</button><button class="piston" data-registration="2" aria-pressed="false" aria-label="Recall example registration 2">2</button><button class="piston" data-registration="3" aria-pressed="false" aria-label="Recall example registration 3">3</button></div><span class="note">Visual prototype · stop switching only, no audio</span></div></div><p class="design-note" id="design-note"></p>
+</section>
+</main><footer><span>Design proposals for choosing and refining a direction.</span><span>Shape, spacing and finish can be mixed.</span></footer>
+<script>
+const sample=[['Bourdon','16′'],['Montre','8′'],['Flûte douce','8′'],['Prestant','4′'],['Nazard','2 2/3′'],['Doublette','2′'],['Plein jeu','IV'],['Trompette','8′']];
+const voices=[...sample,['Viola da gamba','8′'],['Flûte harmonique','8′'],['Voix céleste','8′'],['Clarinette','8′'],['Contrebombarde','32′'],['Salicional','8′'],['Tierce','1 3/5′'],['Cor anglais','8′'],['Flûte octaviante','4′'],['Quintaton','16′'],['Sesquialtera','II'],['Voix humaine','8′']];
+const drawn=new Set();
+const specimens=new Set([1,3]);
+const container=document.querySelector('#console');
+const divisions=document.querySelector('#divisions');
+function stopButton(label,id,on){
+  const button=document.createElement('button'); button.className='stop'; button.type='button';
+  button.dataset.stop=id; button.setAttribute('aria-pressed',String(on)); button.title=label.join(' '); button.setAttribute('aria-label',label.join(' '));
+  const name=document.createElement('span'); name.className='name'; name.textContent=label[0];
+  const pitch=document.createElement('span'); pitch.className='pitch'; pitch.textContent=label[1];
+  button.append(name,pitch); return button;
+}
+function renderSpecimens(){
+  for(const grid of document.querySelectorAll('[data-specimen]')) grid.replaceChildren(...sample.map((s,i)=>stopButton(s,i,specimens.has(i))));
+}
+function updateCount(){document.querySelector('#drawn-count').textContent=`${drawn.size} drawn`;}
+function syncDrawn(){for(const button of divisions.querySelectorAll('.stop'))button.setAttribute('aria-pressed',String(drawn.has(Number(button.dataset.stop))));updateCount();}
+function resetPistons(){for(const p of document.querySelectorAll('.piston'))p.setAttribute('aria-pressed','false');}
+function recall(n){
+  drawn.clear();const total=Number(container.dataset.size);
+  for(let i=0;i<total;i++)if(n===1?[1,3].includes(i%8):n===2?i%4<2:i%8<7)drawn.add(i);
+  syncDrawn();resetPistons();document.querySelector(`[data-registration="${n}"]`).setAttribute('aria-pressed','true');
+}
+function renderInstrument(){
+  const total=Number(document.querySelector('#size').value), count=total===200?5:3, per=total/count;
+  container.dataset.size=total;divisions.replaceChildren();
+  document.querySelector('#organ-name').textContent=`Study organ · ${total} stops`;
+  const names=total===200?['Pedal','Grand-Orgue','Positif','Récit','Solo']:['Grand-Orgue','Positif','Récit'];
+  for(let division=0;division<count;division++){
+    const section=document.createElement('section');section.className='division';
+    const heading=document.createElement('h3');heading.textContent=names[division];
+    const number=document.createElement('span');number.textContent=`${per} stops`;heading.append(number);
+    const grid=document.createElement('div');grid.className='stop-grid';
+    for(let i=0;i<per;i++){
+      const base=(total===200?voices:sample)[i%(total===200?voices.length:sample.length)];
+      const label=[base[0]+(i>=voices.length?' doux':''),base[1]];
+      grid.append(stopButton(label,division*per+i,false));
+    }
+    section.append(heading,grid);divisions.append(section);
+  }
+  recall(1);
+}
+function setStyle(style){
+  container.dataset.style=style;document.querySelector('#style').value=style;
+  for(const b of document.querySelectorAll('[data-pick]'))b.setAttribute('aria-pressed',String(b.dataset.pick===style));
+  const notes={round:'A · The most familiar silhouette. Heads stay 88px across to preserve 13px labels; Compact tightens the spacing. Long names are the limiting case. Try the 200-stop instrument to judge the extra height.',oval:'B · A lower head with more width for lettering. Compact heads start at 48px high and grow with long names. This is the direction I would start refining.',rocker:'C · A tab bank with a distinct lower edge. Compact tabs start at 62px high. Drawn tabs tilt down and expose a warm edge; the lettering stays dark on ivory.'};
+  document.querySelector('#design-note').textContent=notes[style];
+}
+for(const grid of document.querySelectorAll('[data-specimen]'))grid.addEventListener('click',e=>{
+  const button=e.target.closest('.stop');if(!button)return;const id=Number(button.dataset.stop);
+  specimens.has(id)?specimens.delete(id):specimens.add(id);
+  for(const b of document.querySelectorAll(`[data-specimen] [data-stop="${id}"]`))b.setAttribute('aria-pressed',String(specimens.has(id)));
+});
+for(const button of document.querySelectorAll('[data-pick]'))button.addEventListener('click',()=>{setStyle(button.dataset.pick);document.querySelector('#trial').scrollIntoView({behavior:matchMedia('(prefers-reduced-motion: reduce)').matches?'instant':'smooth',block:'start'});document.querySelector('#style').focus({preventScroll:true});});
+divisions.addEventListener('click',e=>{const b=e.target.closest('.stop');if(!b)return;const id=Number(b.dataset.stop);drawn.has(id)?drawn.delete(id):drawn.add(id);syncDrawn();resetPistons();});
+document.querySelector('#style').addEventListener('change',e=>setStyle(e.target.value));
+document.querySelector('#size').addEventListener('change',renderInstrument);
+document.querySelector('#density').addEventListener('change',e=>container.dataset.density=e.target.value);
+document.querySelector('#clear').addEventListener('click',()=>{drawn.clear();syncDrawn();resetPistons();});
+for(const button of document.querySelectorAll('.piston'))button.addEventListener('click',()=>recall(Number(button.dataset.registration)));
+renderSpecimens();renderInstrument();setStyle('oval');
+</script>
+</body>
+</html>
