@@ -27,14 +27,19 @@ changed by this study.
 
 ## Rocker refinement
 
-The user selected C. The refined rocker keeps the same ivory face, text and
-border colours in both states. Engagement uses a 3px pressed position, inset
-shading and a filled dark marker; retired tabs have a hollow marker. C now opens
-by default. The other proposals remain available for comparison.
+The user selected C. Rockers are ivory when off and saturated warm amber when
+on, with a light amber outline. A 3px pressed position and filled dark marker
+reinforce engagement; retired tabs sit raised with a hollow marker. C opens by
+default. The other proposals remain available for comparison.
 
-An additional browser review passed 24 checks, covering matching face colours,
-state markers, default selection, individual toggles, JavaScript exceptions,
-and both densities with 24/200 stops at 320, 390, 768, 1919 and 2560px.
+The initial monochrome treatment was too subtle. The on-state colour now changes
+the whole tab face, so active registrations can be scanned across a large organ.
+Text size and stop dimensions are preserved.
+
+Validation: 24 browser checks passed across 320–2560px, both densities and
+24/200-stop instruments; no JavaScript exceptions. Text contrast measures
+7.25:1 on amber and 11.92:1 on ivory. The standalone HTML also opens and toggles
+correctly without a server.
 
 To bypass an embedded-browser failure, open this standalone HTML file directly
 in an ordinary browser. All code is included; no server or build is required.
