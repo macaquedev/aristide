@@ -457,6 +457,7 @@ export class Console {
     const knob = document.createElement("button");
     knob.className = "knob";
     knob.dataset.key = key;
+    knob.setAttribute("aria-pressed", "false");
     knob.title = name;
     const [line, foot] = lines ?? splitLabel(name);
     const face = document.createElement("span");
@@ -475,6 +476,7 @@ export class Console {
     knob.addEventListener("click", () => {
       const on = !knob.classList.contains("on");
       knob.classList.toggle("on", on); // optimistic
+      knob.setAttribute("aria-pressed", String(on));
       flip(on);
     });
     return knob;
@@ -1196,6 +1198,9 @@ export class Console {
     // control ever wears two faces.
     for (const control of this.root.querySelectorAll(`[data-key="${key}"]`)) {
       control.classList.toggle("on", on);
+      if (control.matches(".knob") && control.getAttribute("aria-pressed") !== String(on)) {
+        control.setAttribute("aria-pressed", String(on));
+      }
     }
   }
 

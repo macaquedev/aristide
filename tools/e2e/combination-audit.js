@@ -136,6 +136,14 @@ try {
   check((await drawn("Hautbois 8'")).hand === false, "…and the snapshot says the hand has it in");
   check(await count(`.knob[data-key="stop-${hautbois.id}"].crescendo-held`) === 1,
     "…and the console draws it lit-but-not-drawn");
+  check(await drive.eval(`(() => {
+    const held=document.querySelector('.knob[data-key="stop-${hautbois.id}"]');
+    const hand=document.querySelector('.knob[data-key="stop-${montre.id}"]');
+    const a=getComputedStyle(held),b=getComputedStyle(hand);
+    return a.backgroundColor==='rgb(233, 229, 217)' && b.backgroundColor==='rgb(221, 166, 79)'
+      && a.transform==='none' && b.transform!=='none'
+      && held.getAttribute('aria-pressed')==='true' && hand.getAttribute('aria-pressed')==='true';
+  })()`), "crescendo holds use a raised ivory rocker; hand-drawn stops are pressed amber");
   check((await drawn("Montre 8'")).on, "the hand's own stop is untouched by the pedal");
   await mouse("mousePressed", track.x, track.y);
   await mouse("mouseReleased", track.x, track.y);

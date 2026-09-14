@@ -11,9 +11,9 @@ all three. The console below switches between shapes, compact/comfortable
 spacing and 24/200 illustrative stops. Stops and sample general registrations
 are interactive; they do not play audio or modify instrument files.
 
-This is a proposal for selection and refinement. It does not change the shipped
-console or the locked appearance decisions in `DESIGN.md`. The style choice,
-size and registration are transient and reset on reload.
+The approved C rocker design is now implemented in the app, as recorded in
+`DESIGN.md`. This standalone study remains available for comparing directions.
+Its style choice, size and registration are transient and reset on reload.
 
 ## Validation
 
@@ -22,8 +22,9 @@ covered all three shapes with 24 and 200 stops at widths 320, 390, 768, 1280,
 1919 and 2560, plus comfortable sizing, shared specimen states, recalling and
 retiring registrations, keeping registration when switching shapes, and Space
 activation. All 45 checks passed; no uncaught JavaScript exceptions occurred
-while loading and exercising the prototype. No Rust or production UI code is
-changed by this study.
+while loading and exercising the prototype. The study runs independently of
+the production UI; the app integration has its own validation report at
+`../progress/2026-09-14-rocker-stops.md`.
 
 ## Rocker refinement
 

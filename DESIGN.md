@@ -463,11 +463,15 @@ the editing toolbar clears saved panel geometry permanently; stop ordering and
 musical settings are preserved. Automatic rows adapt their column count to the
 number of keyboards and available width, with a centered 1800px content limit
 for smaller organs. Instruments with 80 or more stops use the available width
-so extra columns fit on large displays. Stop controls are compact rows: 32px
-minimum height by default, 28px in Compact and 40px in Spacious. Names and pitch
-labels remain at 13px and long names wrap without shrinking the text. Touch
-controls keep at least 44px tap targets. Empty grid tracks stay empty rather
-than stretching a few stops into oversized tiles.
+so extra columns fit on large displays. Stop controls use the rocker-tab design
+approved on 2026-09-14: ivory when off, warm amber with a light rim and pressed
+position when drawn, with centred names above the pitch and no on/off indicator
+bars. Minimum heights are 62px by default, 54px in Compact and 76px in Spacious;
+smaller track widths fit more stop columns. Names and pitch labels remain at
+13px and long names wrap without shrinking the text. All presets exceed 44px
+touch targets. A crescendo-only stop retains its raised ivory face with an amber
+rim, distinct from a hand-drawn stop. Empty grid tracks stay empty rather than
+stretching a few stops into oversized tiles.
 Small screens use flowing panels without rewriting desktop coordinates.
 Instrument settings uses a sidebar on desktop and a section chooser on narrow
 screens, with a bounded scrolling body in both cases.

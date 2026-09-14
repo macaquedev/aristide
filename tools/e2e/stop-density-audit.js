@@ -18,6 +18,9 @@ try {
   h.check(snapshot.stops.length===200,'load a real 200-stop instrument');
   const d=await connect(9294);
   await d.navigate('http://127.0.0.1:9971/?server=http://127.0.0.1:9970');
+  // Panel observation schedules placement on the next frame. Wait for that
+  // layout work, rather than racing it with a wall-clock sleep on a busy host.
+  const afterLayout=()=>d.eval('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>requestAnimationFrame(resolve))))');
   const measure=()=>d.eval(`(()=>{
     const stops=[...document.querySelectorAll('.panel-jamb .knob[data-key^="stop-"]')];
     const rects=stops.map(e=>e.getBoundingClientRect());
@@ -33,14 +36,14 @@ try {
   for(const [width,height] of [[1919,1080],[2560,1440],[3838,1999]]) {
     await d.send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:false});
     for(const density of ['compact','regular','spacious']) {
-      await d.eval(`document.body.dataset.density=${JSON.stringify(density)}`);await d.sleep(180);
+      await d.eval(`document.body.dataset.density=${JSON.stringify(density)}`);await afterLayout();
       const g=await measure();
       h.check(g.count===200 && g.readable && g.fits && !g.overlaps,`${width}px ${density}: every stop remains readable and reachable`);
-      h.check(g.median<={compact:28,regular:32,spacious:40}[density],`${width}px ${density}: compact controls, median ${g.median}px`);
-      if(density==='regular') h.check(g.last<=height,`${width}px: all 200 stop controls fit vertically`);
+      h.check(g.min>={compact:54,regular:62,spacious:76}[density] && g.median<={compact:86,regular:94,spacious:108}[density],`${width}px ${density}: readable rocker proportions, median ${g.median}px`);
+      if(width>=2560 && density==='regular') h.check(g.last<=height,`${width}px: all 200 stop controls fit vertically`);
       // Spacious deliberately trades capacity for breathing room; the full
       // console must fit in the default and compact desktop presets.
-      if(width>=2560 && density!=='spacious') h.check(g.controls<=height,`${width}px ${density}: the complete console fits on screen`);
+      if(width>=2560 && density!=='spacious') h.check(g.controls<=height,`${width}px ${density}: the complete console fits on screen (${Math.round(g.controls)}px)`);
     }
   }
   await d.send('Emulation.setDeviceMetricsOverride',{width:1919,height:1080,deviceScaleFactor:1,mobile:false});
@@ -52,6 +55,15 @@ try {
   await d.send('Input.dispatchMouseEvent',{type:'mouseReleased',...p,button:'left',clickCount:1});await d.sleep(300);
   const drawn=await h.state();
   h.check(drawn.stops.find(s=>s.id===target.id).on && !drawn.stops.find(s=>s.id===neighbor.id).on,'clicking a dense stop toggles only that stop');
+  const appearance=await d.eval(`(()=>{
+    const on=document.querySelector(${JSON.stringify(selector)}),off=document.querySelector('.knob[data-key="stop-${neighbor.id}"]');
+    const a=getComputedStyle(on),b=getComputedStyle(off),face=getComputedStyle(on.querySelector('.face'));
+    return {amber:a.backgroundColor==='rgb(221, 166, 79)',ivory:b.backgroundColor==='rgb(233, 229, 217)',
+      pressed:on.getAttribute('aria-pressed')==='true' && off.getAttribute('aria-pressed')==='false' && a.transform!==b.transform,
+      labels:face.flexDirection==='column' && getComputedStyle(on.querySelector('.stop-name')).textAlign==='center',
+      noIndicators:[on,off].every(e=>getComputedStyle(e,'::after').content==='none')};
+  })()`);
+  h.check(Object.values(appearance).every(Boolean),'real stop uses amber/ivory rocker states, accessible toggles and no indicator bars');
   const longName='Contrebombarde harmonique extraordinaire';
   await h.post(`/api/organ/stop/rename?stop=${target.id}&name=${encodeURIComponent(longName)}`);await d.sleep(300);
   const long=await d.eval(`(()=>{const e=document.querySelector(${JSON.stringify(selector)}),label=e.querySelector('.stop-name');return {name:label.textContent,font:parseFloat(getComputedStyle(label).fontSize),fits:label.scrollWidth<=label.clientWidth+1 && label.getBoundingClientRect().bottom<=e.getBoundingClientRect().bottom};})()`);
@@ -61,7 +73,7 @@ try {
   await d.shot('/tmp/aristide-200-stops-wide.png');
   await d.send('Emulation.setTouchEmulationEnabled',{enabled:true});
   for(const width of [320,390,768,1024]) {
-    await d.send('Emulation.setDeviceMetricsOverride',{width,height:900,deviceScaleFactor:1,mobile:true});await d.sleep(200);
+    await d.send('Emulation.setDeviceMetricsOverride',{width,height:900,deviceScaleFactor:1,mobile:true});await afterLayout();
     const g=await measure();
     h.check(g.min>=44 && g.readable && g.fits && !g.overlaps,`${width}px touch: compact layout retains readable labels and 44px tap targets`);
   }

@@ -26,7 +26,7 @@ try {
     check(await d.eval(`(() => {
       return [...document.querySelectorAll('.panel-jamb .knob')].every(k => {
         const r=k.getBoundingClientRect(), label=k.querySelector('.stop-name');
-        return r.width>=100 && r.height>=44 && parseFloat(getComputedStyle(label).fontSize)>=13
+        return r.width>=90 && r.height>=54 && parseFloat(getComputedStyle(label).fontSize)>=13
           && label.scrollWidth<=label.clientWidth+1;
       });
     })()`), `${width}px: stop controls have readable labels and touch targets`);

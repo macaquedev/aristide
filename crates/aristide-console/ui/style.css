@@ -2109,7 +2109,7 @@ body.editing .division-add { display: block; }
   background: #ffffff22;
 }
 
-/* a stop is a flat toggle tile */
+/* Base stop structure; the playing-surface rules below define the rocker. */
 .knob {
   position: relative; /* anchors .stop-tuning-dot */
   width: 88px;
@@ -3251,20 +3251,31 @@ body .panel-jamb .division { width: 100%; min-width: 0; gap: 8px; align-items: s
 .division-head { justify-content: space-between; min-height: 22px; }
 .division h2 { padding: 0; margin: 0; font-size: 15px; font-weight: 550; letter-spacing: -.15px; text-transform: none; color: var(--text); white-space: normal; }
 .division h2::after { display: none; }
-body .panel-jamb .division-knobs { display: grid; width: 100%; max-width: none; grid-template-columns: repeat(auto-fill, minmax(min(150px, 100%), 1fr)); gap: var(--stop-gap, 4px); }
-body .panel-jamb .knob { width: 100%; min-width: 0; min-height: var(--stop-h, 32px); border: 1px solid var(--border-strong); border-radius: 5px; background: var(--surface-2); box-shadow: none; }
-body .panel-jamb .knob .face { display: grid; grid-template-columns: minmax(0, 1fr) fit-content(42%); align-items: center; gap: 6px; padding: var(--stop-pad, 5px) 8px; }
-body .panel-jamb .stop-name:only-child { grid-column: 1 / -1; }
-body .panel-jamb .stop-name { max-width: none; font-size: 13px; line-height: 1.25; font-weight: 500; text-align: left; overflow-wrap: anywhere; color: var(--text); }
-body .panel-jamb .stop-pitch { min-width: 0; font-family: var(--sans); font-size: 13px; line-height: 1.25; font-weight: 500; letter-spacing: 0; text-align: right; overflow-wrap: anywhere; color: #dce0d2; }
-body .panel-jamb .knob:hover { background: var(--hover); filter: none; border-color: #777568; }
-body .panel-jamb .knob.on { background: var(--accent); border-color: var(--accent); box-shadow: none; }
-body .panel-jamb .knob.on :is(.stop-name, .stop-pitch) { color: var(--accent-ink); font-weight: 550; }
-body .panel-jamb .knob.crescendo-held.on { background: var(--accent-soft); border-color: var(--accent); }
-body .panel-jamb .knob.crescendo-held.on :is(.stop-name, .stop-pitch) { color: var(--accent); }
+/* Approved rocker tabs: ivory at rest, amber when drawn. Keep the whole
+   face as the state cue; there are no individual on/off indicator bars. */
+body .panel-jamb .division-knobs { display: grid; width: 100%; max-width: none; grid-template-columns: repeat(auto-fill, minmax(min(var(--stop-w, 100px), 100%), 1fr)); gap: var(--stop-gap, 8px) 8px; padding: 2px 2px 6px; }
+body .panel-jamb .knob { --stop-shadow: 0 0 0 2px #101510, inset 0 1px 0 #fff9, 0 4px 3px #0005; width: 100%; min-width: 0; min-height: var(--stop-h, 62px); border: 1px solid #8c8b7e; border-bottom: 6px solid #bab6a9; border-radius: 5px 5px 13px 13px; background: #e9e5d9; box-shadow: var(--stop-shadow); transition: background-color .1s, border-color .1s, box-shadow .1s, transform .1s; }
+body .panel-jamb .knob .face { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; padding: var(--stop-pad, 8px) 6px; }
+body .panel-jamb .stop-name { max-width: 100%; font-size: 13px; line-height: 1.15; font-weight: 500; text-align: center; text-wrap: balance; overflow-wrap: anywhere; color: #242820; }
+body .panel-jamb .stop-pitch { min-width: 0; max-width: 100%; font-family: var(--sans); font-size: 13px; line-height: 1.05; font-weight: 680; letter-spacing: 0; text-align: center; overflow-wrap: anywhere; color: #242820; }
+body .panel-jamb .knob:hover { filter: none; border-color: #5c6254; border-bottom-color: #a7a699; }
+body .panel-jamb .knob:active { filter: none; }
+body .panel-jamb .knob:focus-visible { outline: 3px solid #f6cd85; outline-offset: 4px; }
+body .panel-jamb .knob.on { --stop-shadow: 0 0 0 2px #f6cd85, inset 0 3px 3px #6b461b40; background: #dda64f; border-color: #f6cd85; border-bottom-color: #a97930; transform: translateY(3px); }
+body .panel-jamb .knob.on :is(.stop-name, .stop-pitch) { color: #2b2112; }
+/* The crescendo can sound a stop without drawing it by hand. Its amber rim
+   surrounds a raised ivory face, distinct from the filled, pressed hand stop. */
+body .panel-jamb .knob.crescendo-held.on { --stop-shadow: 0 0 0 2px #dda64f, inset 0 1px 0 #fff9, 0 4px 3px #0005; background: #e9e5d9; border-color: #dda64f; border-bottom-color: #bab6a9; transform: none; }
+body .panel-jamb .knob.crescendo-held.on :is(.stop-name, .stop-pitch) { color: #242820; }
+/* Keep insertion seams visible over both rocker states while arranging. */
+body.editing .panel-jamb .knob.insert-before { box-shadow: 0 -7px 0 -2px var(--accent), var(--stop-shadow); }
+body.editing .panel-jamb .knob.insert-after { box-shadow: 0 7px 0 -2px var(--accent), var(--stop-shadow); }
+body.editing .panel-jamb .knob.insert-left { box-shadow: -9px 0 0 -2px var(--accent), var(--stop-shadow); }
+body.editing .panel-jamb .knob.insert-right { box-shadow: 9px 0 0 -2px var(--accent), var(--stop-shadow); }
 .stop-tuning-dot { right: 4px; top: 4px; }
-body[data-density="compact"] { --stop-h: 28px; --stop-gap: 3px; --stop-pad: 3px; }
-body[data-density="spacious"] { --stop-h: 40px; --stop-gap: 6px; --stop-pad: 8px; }
+body[data-density="compact"] { --stop-h: 54px; --stop-w: 92px; --stop-gap: 8px; --stop-pad: 6px; }
+body[data-density="spacious"] { --stop-h: 76px; --stop-w: 110px; --stop-gap: 12px; --stop-pad: 10px; }
+@media (prefers-reduced-motion: reduce) { body .panel-jamb .knob { transition: none; } }
 body[data-density="compact"] .panel-jamb .panel-body { padding: 8px; }
 body[data-density="spacious"] .panel-jamb .panel-body { padding: 12px; }
 .coupler-rail { justify-content: flex-start; flex-wrap: wrap; padding: 14px; gap: 8px; }
@@ -3519,7 +3530,6 @@ body.inspecting .console-canvas :is(.knob, .keyboard, [data-action], .rocker) { 
   .console-canvas .panel-jamb { flex-basis: 100%; }
   body .panel-jamb .division-knobs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   body .panel-jamb .stop-name { font-size: 13px; }
-  body .panel-jamb .knob { min-height: 40px; }
   .keyboard-card-head { gap: 4px; }
   .keyboard-card-head strong { flex-basis: 100%; margin-bottom: 6px; }
   .keyboard-card-head .ghost { flex: 1; text-align: center; }
@@ -3538,7 +3548,6 @@ body.inspecting .console-canvas :is(.knob, .keyboard, [data-action], .rocker) { 
   .panel-keyboard .divisional-rail { padding: 0 8px 8px; gap: 1px; }
 }
 @media (pointer: coarse) {
-  body .panel-jamb .knob { min-height: 44px; }
   .menu-title, .menu-item, .ghost, .picker-action, .segment button, .modal-close,
   .editor-drawer-close, .piston, .rail-button, .division-add, .editor-lock, .rocker { min-height: 44px; min-width: 44px; }
   .editor-toolbar button { min-height: 52px; }
