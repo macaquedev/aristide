@@ -28,8 +28,9 @@ changed by this study.
 ## Rocker refinement
 
 The user selected C. Rockers are ivory when off and saturated warm amber when
-on, with a light amber outline. A 3px pressed position and filled dark marker
-reinforce engagement; retired tabs sit raised with a hollow marker. C opens by
+on, with a light amber outline. A 3px pressed position
+reinforces engagement; retired tabs sit raised. The individual indicator bars
+have been removed, leaving a clean face with centred lettering. C opens by
 default. The other proposals remain available for comparison.
 
 The initial monochrome treatment was too subtle. The on-state colour now changes
