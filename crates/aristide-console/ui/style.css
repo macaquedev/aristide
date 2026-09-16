@@ -3397,6 +3397,9 @@ body .rocker { height: auto; min-width: 66px; min-height: 42px; padding: 8px 14p
 #editor-midi .listen-hint { white-space: normal; padding: 12px; background: var(--accent-soft); border-radius: 8px; line-height: 1.5; }
 #editor-midi .input-bend-row, #editor-midi .settings-row, #editor-midi .piston-row { flex-wrap: wrap; }
 #editor-midi .input-bend { width: 110px; }
+#editor-midi .midi-devices { border-top: 1px solid var(--border); padding-top: 16px; }
+#editor-midi .midi-devices-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+#editor-midi .midi-devices-heading h3 { margin: 0; font-size: 14px; font-weight: 500; }
 #editor-midi .midi-ports { margin: 12px 0; }
 #editor-midi .midi-port { white-space: normal; overflow-wrap: anywhere; }
 

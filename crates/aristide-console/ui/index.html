@@ -830,15 +830,17 @@
         Connect a MIDI keyboard: press <em>Listen</em> below, then play its lowest and highest keys. To use your computer keyboard, choose it from the input device list.
       </p>
       <div id="editor-midi-inputs" class="manual-inputs"></div>
+      <section class="midi-devices" aria-labelledby="editor-midi-devices-title">
+        <div class="midi-devices-heading">
+          <h3 id="editor-midi-devices-title">Available input devices</h3>
+          <button class="ghost" type="button" id="editor-midi-rescan">Rescan inputs</button>
+        </div>
+        <p class="pane-note" id="editor-midi-ports-note" role="status">Devices are detected automatically. Rescan to reconnect a missing or unresponsive MIDI input.</p>
+        <div id="editor-midi-ports" class="midi-ports"></div>
+      </section>
       <details class="advanced-settings">
         <summary>Octave &amp; transpose shortcuts</summary>
         <div id="editor-midi-pistons" class="editor-midi-pistons"></div>
-      </details>
-      <details class="advanced-settings">
-        <summary>Available input devices</summary>
-        <p class="pane-note" id="editor-midi-ports-note">Plug in your MIDI keyboard. If it does not appear in the device list, rescan for inputs.</p>
-        <div id="editor-midi-ports" class="midi-ports"></div>
-        <button class="ghost" type="button" id="editor-midi-rescan">Rescan inputs</button>
       </details>
       <span class="editor-add-form-actions">
         <button class="ghost" type="button" id="editor-midi-close">Close</button>

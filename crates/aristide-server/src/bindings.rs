@@ -258,12 +258,29 @@ const MIDI_CONNECT_GRACE: std::time::Duration = std::time::Duration::from_millis
 /// second of latency is imperceptible for that.
 const MIDI_SCAN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1000);
 
-/// Set by the HTTP API to force a reconnect even when the port list
-/// looks unchanged (a cable re-seated behind an unchanged name).
-static MIDI_RESCAN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Request/completion tickets let clients distinguish an unchanged device
+/// list from a scan that has not run yet.
+#[derive(Clone, Default, serde::Serialize)]
+pub(crate) struct MidiScan {
+    pub requested: u64,
+    pub completed: u64,
+    pub error: Option<String>,
+}
+
+static MIDI_SCAN: Mutex<MidiScan> = Mutex::new(MidiScan {
+    requested: 0,
+    completed: 0,
+    error: None,
+});
+
+pub(crate) fn midi_scan_status() -> MidiScan {
+    MIDI_SCAN.lock().expect("MIDI scan poisoned").clone()
+}
 
 pub fn request_midi_rescan() {
-    MIDI_RESCAN.store(true, std::sync::atomic::Ordering::Relaxed);
+    let mut scan = MIDI_SCAN.lock().expect("MIDI scan poisoned");
+    scan.requested += 1;
+    scan.error = None;
 }
 
 /// Owns every open MIDI input for the life of the process. Connections
@@ -278,7 +295,9 @@ pub(crate) fn spawn_midi_supervisor(state: Arc<Mutex<State>>) {
             let mut connections: Vec<MidiInputConnection<()>> = Vec::new();
             let mut known: Vec<String> = Vec::new();
             loop {
-                let forced = MIDI_RESCAN.swap(false, std::sync::atomic::Ordering::Relaxed);
+                let scan = midi_scan_status();
+                let forced = scan.requested > scan.completed;
+                let mut scan_error = None;
                 match port_names() {
                     Ok(names) if forced || names != known => {
                         // Drop first: a port can only be subscribed once,
@@ -288,6 +307,12 @@ pub(crate) fn spawn_midi_supervisor(state: Arc<Mutex<State>>) {
                             tracing::info!("midi: {} input(s) found", names.len());
                         }
                         connections = connect_all_midi_inputs(&state, &names);
+                        if connections.len() < names.len() {
+                            scan_error = Some(format!(
+                                "Connected {} of {} MIDI inputs. Check device connections and try again.",
+                                connections.len(), names.len()
+                            ));
+                        }
                         if connections.is_empty() {
                             tracing::warn!(
                                 "no MIDI inputs connected — console UI and computer \
@@ -298,11 +323,17 @@ pub(crate) fn spawn_midi_supervisor(state: Arc<Mutex<State>>) {
                     }
                     Ok(_) => {}
                     Err(err) => {
+                        scan_error = Some(format!("MIDI unavailable: {err}"));
                         if !known.is_empty() || connections.is_empty() {
                             tracing::warn!("MIDI unavailable ({err}) — console UI input only");
                         }
                         known.clear();
                     }
+                }
+                if forced {
+                    let mut status = MIDI_SCAN.lock().expect("MIDI scan poisoned");
+                    status.completed = scan.requested;
+                    status.error = scan_error;
                 }
                 if SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
                     return;

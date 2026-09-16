@@ -52,6 +52,18 @@ try {
   await category('bindings');await action('Edit buttons & shortcuts');check(await visible('#editor-bindings'),'button assignments are reachable inside preferences');
   await category('keyboards');await action('Pedal');
   await action('Connect keyboard / MIDI input');check(await visible('#editor-midi'),'MIDI input editor is reachable from the keyboard list');
+  check(await visible('#editor-midi-rescan') && await d.eval(`!document.querySelector('#editor-midi-rescan').closest('details')`),'rescan is visible without expanding advanced settings');
+  const beforeScan = (await state()).midi.scan.requested;
+  await d.click('#editor-midi-rescan');
+  for(let i=0;i<40;i++) {
+    const scan=(await state()).midi.scan;
+    if(scan.requested>beforeScan && scan.completed===scan.requested)break;
+    await sleep(100);
+  }
+  const scan=(await state()).midi.scan;
+  check(scan.requested>beforeScan && scan.completed===scan.requested,'Rescan inputs completes a real server scan');
+  await sleep(400);
+  check(await d.eval(`!document.querySelector('#editor-midi-rescan').disabled && /Rescan (complete|failed):?/.test(document.querySelector('#editor-midi-ports-note').textContent)`),'rescan reports completion or a device error and permits retry');
   const midiFits = () => d.eval(`(()=>{
     const host=document.querySelector('.organ-prefs-content');
     const r=host.getBoundingClientRect();

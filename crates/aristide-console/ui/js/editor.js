@@ -344,6 +344,7 @@ export class Editor {
       midi: root.getElementById("editor-midi"),
       midiTitle: root.getElementById("editor-midi-title"),
       midiRescan: root.getElementById("editor-midi-rescan"),
+      midiPortsNote: root.getElementById("editor-midi-ports-note"),
       midiInputs: root.getElementById("editor-midi-inputs"),
       midiPistons: root.getElementById("editor-midi-pistons"),
       midiPorts: root.getElementById("editor-midi-ports"),

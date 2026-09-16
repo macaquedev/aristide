@@ -564,6 +564,7 @@ struct MidiView {
     /// Which key the dialog is still waiting for.
     #[serde(skip_serializing_if = "Option::is_none")]
     learning: Option<LearningView>,
+    scan: crate::bindings::MidiScan,
 }
 
 #[derive(Serialize)]
@@ -1010,6 +1011,7 @@ fn snapshot(state: &State) -> Snapshot {
     }
 
     let midi = MidiView {
+        scan: crate::bindings::midi_scan_status(),
         ports: state
             .midi_ports
             .iter()

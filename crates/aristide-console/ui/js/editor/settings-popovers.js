@@ -21,7 +21,32 @@ import { buildManualInputs, buildControlsList, emptyNote, keyboardNote, pistonRo
 
 export function wireMidiForm(editor) {
   editor.el.midiClose.addEventListener("click", () => editor.closeMidiForm());
-  editor.el.midiRescan.addEventListener("click", () => editor.send(commands.midiRescan()));
+  editor.el.midiRescan.addEventListener("click", async () => {
+    if (editor.el.midiRescan.disabled) return;
+    const note = editor.el.midiPortsNote;
+    editor.el.midiRescan.disabled = true;
+    editor.el.midiRescan.textContent = "Rescanning…";
+    note.textContent = "Scanning and reconnecting MIDI inputs…";
+    const result = await editor.send(commands.midiRescan());
+    if (!result.ok) {
+      editor.el.midiRescan.disabled = false;
+      editor.el.midiRescan.textContent = "Rescan inputs";
+      note.textContent = `Rescan failed: ${result.error}`;
+    }
+  });
+}
+
+export function syncMidiScan(editor, midi) {
+  const scan = midi.scan;
+  if (!scan?.requested) return;
+  const pending = scan.completed < scan.requested;
+  editor.el.midiRescan.disabled = pending;
+  editor.el.midiRescan.textContent = pending ? "Rescanning…" : "Rescan inputs";
+  const count = midi.ports.filter(port => !port.virtual).length;
+  editor.el.midiPortsNote.textContent = pending
+    ? "Scanning and reconnecting MIDI inputs…"
+    : scan.error ? `Rescan failed: ${scan.error}`
+    : `Rescan complete. ${count} MIDI input${count === 1 ? "" : "s"} connected. Choose a device above to assign it to this keyboard.`;
 }
 
 export function openMidiForm(editor, idx, x, y) {
@@ -49,6 +74,7 @@ export function closeMidiForm(editor) {
 export function syncMidiForm(editor) {
   const idx = editor.midiManual;
   const midi = editor.lastSnapshot?.midi ?? { ports: [], manuals: [] };
+  syncMidiScan(editor, midi);
   const entry = midi.manuals.find((m) => m.idx === idx);
   if (!entry) {
     editor.closeMidiForm();
