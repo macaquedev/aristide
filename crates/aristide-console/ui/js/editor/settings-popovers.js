@@ -21,19 +21,54 @@ import { buildManualInputs, buildControlsList, emptyNote, keyboardNote, pistonRo
 
 export function wireMidiForm(editor) {
   editor.el.midiClose.addEventListener("click", () => editor.closeMidiForm());
-  editor.el.midiRescan.addEventListener("click", async () => {
-    if (editor.el.midiRescan.disabled) return;
-    const note = editor.el.midiPortsNote;
-    editor.el.midiRescan.disabled = true;
-    editor.el.midiRescan.textContent = "Rescanning…";
-    note.textContent = "Scanning and reconnecting MIDI inputs…";
-    const result = await editor.send(commands.midiRescan());
-    if (!result.ok) {
-      editor.el.midiRescan.disabled = false;
-      editor.el.midiRescan.textContent = "Rescan inputs";
-      note.textContent = `Rescan failed: ${result.error}`;
-    }
+  editor.el.midiRescan.addEventListener("click", () => rescanMidi(editor));
+}
+
+// Track this operation independently of the console's general state polling:
+// an old server, a lost poll or a stalled device driver must not leave the
+// button disabled indefinitely. A successful POST only acknowledges a request.
+export async function rescanMidi(editor, { timeoutMs = 10000, pollMs = 250 } = {}) {
+  const button = editor.el.midiRescan;
+  if (button.disabled) return;
+  const note = editor.el.midiPortsNote;
+  button.disabled = true;
+  button.textContent = "Rescanning…";
+  note.textContent = "Scanning and reconnecting MIDI inputs…";
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const request = (path, method) => localFetch(editor.base, path, {
+    method, json: true, signal: controller.signal,
   });
+  try {
+    let result = await request(commands.midiRescan(), "POST");
+    if (!result.ok) throw new Error(result.error);
+    const ticket = result.data?.midi?.scan?.requested;
+    if (!ticket) {
+      note.textContent = "Rescan requested, but this server cannot report completion. Update and restart the Aristide server, then try again.";
+      return;
+    }
+    while (!controller.signal.aborted) {
+      const midi = result.data?.midi;
+      if (!midi?.scan || midi.scan.requested < ticket) {
+        throw new Error("The server restarted or lost the rescan request. Try again.");
+      }
+      syncMidiScan(editor, {...midi, scan:{...midi.scan, requested:ticket}});
+      if (midi.scan.completed >= ticket) return;
+      await new Promise(resolve => setTimeout(resolve, pollMs));
+      if (controller.signal.aborted) break;
+      result = await request("/api/state", "GET");
+      if (!result.ok) throw new Error(result.error);
+    }
+    throw new Error("Scan timed out");
+  } catch (error) {
+    note.textContent = controller.signal.aborted
+      ? "Rescan completion could not be confirmed within 10 seconds. Check the server and MIDI device connections, then try again."
+      : `Rescan failed: ${error.message}`;
+  } finally {
+    clearTimeout(timeout);
+    button.disabled = false;
+    button.textContent = "Rescan inputs";
+  }
 }
 
 export function syncMidiScan(editor, midi) {
@@ -74,7 +109,6 @@ export function closeMidiForm(editor) {
 export function syncMidiForm(editor) {
   const idx = editor.midiManual;
   const midi = editor.lastSnapshot?.midi ?? { ports: [], manuals: [] };
-  syncMidiScan(editor, midi);
   const entry = midi.manuals.find((m) => m.idx === idx);
   if (!entry) {
     editor.closeMidiForm();

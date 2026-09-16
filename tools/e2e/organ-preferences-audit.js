@@ -64,6 +64,20 @@ try {
   check(scan.requested>beforeScan && scan.completed===scan.requested,'Rescan inputs completes a real server scan');
   await sleep(400);
   check(await d.eval(`!document.querySelector('#editor-midi-rescan').disabled && /Rescan (complete|failed):?/.test(document.querySelector('#editor-midi-ports-note').textContent)`),'rescan reports completion or a device error and permits retry');
+  await d.eval(`window.__scanFetch = window.fetch; window.fetch = async (...args) => {
+    const response = await window.__scanFetch(...args);
+    if(String(args[0]).endsWith('/api/midi/rescan')) {
+      const state=await response.json();delete state.midi.scan;
+      return new Response(JSON.stringify(state),{status:200});
+    }
+    return response;
+  }`);
+  try {
+    await d.click('#editor-midi-rescan');await sleep(500);
+    check(await d.eval(`!document.querySelector('#editor-midi-rescan').disabled && document.querySelector('#editor-midi-ports-note').textContent.includes('cannot report completion')`),'an older server gives an explanation instead of leaving rescan stuck');
+  } finally {
+    await d.eval('window.fetch=window.__scanFetch;delete window.__scanFetch');
+  }
   const midiFits = () => d.eval(`(()=>{
     const host=document.querySelector('.organ-prefs-content');
     const r=host.getBoundingClientRect();
