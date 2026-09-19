@@ -517,8 +517,7 @@ export class Editor {
     this.el.lock.classList.add("on");
     this.el.lock.setAttribute("aria-pressed", "true");
     this.el.lock.setAttribute("aria-label", "Lock editing");
-    this.el.lock.dataset.tip = "Lock editing (Ctrl+E)";
-    this.root.getElementById("editor-lock-label").textContent = "Done";
+    this.root.getElementById("editor-lock-label").textContent = "Done (Ctrl+E)";
     this.el.lockGlyph.innerHTML = "&#128275;"; // open padlock
     this.el.hint.classList.remove("hidden");
     this.el.drawerTab.classList.remove("hidden");
@@ -531,8 +530,7 @@ export class Editor {
     this.el.lock.classList.remove("on");
     this.el.lock.setAttribute("aria-pressed", "false");
     this.el.lock.setAttribute("aria-label", "Unlock editing");
-    this.el.lock.dataset.tip = "Unlock editing (Ctrl+E)";
-    this.root.getElementById("editor-lock-label").textContent = "Edit console";
+    this.root.getElementById("editor-lock-label").textContent = "Edit console (Ctrl+E)";
     this.el.lockGlyph.innerHTML = "&#128274;"; // closed padlock
     this.el.hint.classList.add("hidden");
     this.el.drawerTab.classList.add("hidden");
