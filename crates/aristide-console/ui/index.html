@@ -199,7 +199,18 @@
   <main id="console" class="console">
     <div class="console-heading">
       <div><span class="console-eyebrow">Console</span><h1 id="console-title">Your instrument</h1></div>
-      <div class="console-heading-actions"><p id="console-summary"></p>
+      <div class="console-heading-actions"><p id="console-summary"></p></div>
+    </div>
+    <div id="organ-empty-card" class="organ-empty-card hidden"></div>
+    <div id="console-canvas" class="console-canvas"></div>
+  </main>
+
+  <!-- The organ-structure editor: Max-MSP-style patch editing right on the
+       console, not a dialog. The console is a canvas of panels (jambs,
+       keyboards, the coupler rail, the shoe rack); unlocked, panels move
+       by their title bars and double-clicking empty canvas adds to the
+       organ right there — ctrl reaches through the lock for all of it.
+       See editor.js. -->
   <div id="editor-lock-dock" class="editor-lock-dock">
     <p id="editor-lock-note" class="editor-lock-note hidden"></p>
     <div class="editor-toolbar" role="toolbar" aria-label="Console editing">
@@ -212,18 +223,6 @@
     <button id="editor-inspect" class="ghost editor-tool" aria-pressed="false">Select control</button>
     </div>
   </div>
-      </div>
-    </div>
-    <div id="organ-empty-card" class="organ-empty-card hidden"></div>
-    <div id="console-canvas" class="console-canvas"></div>
-  </main>
-
-  <!-- The organ-structure editor: Max-MSP-style patch editing right on the
-       console, not a dialog. The console is a canvas of panels (jambs,
-       keyboards, the coupler rail, the shoe rack); unlocked, panels move
-       by their title bars and double-clicking empty canvas adds to the
-       organ right there — ctrl reaches through the lock for all of it.
-       See editor.js. -->
 
 
   <p id="editor-hint" class="editor-hint hidden">

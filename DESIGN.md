@@ -454,7 +454,8 @@ and memory are never transplanted into instrument settings.
 The organ-name menu owns file actions (load, create, save a copy, rename through
 the shared settings field). Playing uses the console itself: stop/coupler
 toggles, volume, silence and one clear-stops action in the registration rail.
-The padlock (Edit console, Ctrl+E) unlocks panel placement and stop ordering; Select control is an
+The padlock docked bottom-left, as in Max (Edit console, Ctrl+E), unlocks panel
+placement and stop ordering; Select control is an
 explicit touch alternative to context-clicking. Existing saved panel positions
 retain normalized canvas coordinates when they fit without overlaps. If saved
 positions collide after resizing or an instrument edit, the console displays an

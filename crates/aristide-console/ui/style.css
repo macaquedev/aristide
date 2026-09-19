@@ -3404,9 +3404,9 @@ body .rocker { height: auto; min-width: 66px; min-height: 42px; padding: 8px 14p
 #editor-midi .midi-port { white-space: normal; overflow-wrap: anywhere; }
 
 /* Editing chrome is subordinate to the instrument. */
-.editor-lock-dock { position: static; width: max-content; max-width: 100%; }
-.console-heading-actions .editor-lock-dock:not(:has(.editor-lock.on)) .editor-toolbar { padding: 0; border: 0; background: transparent; box-shadow: none; }
-body.editing .editor-lock-dock { position: fixed; left: 50%; transform: translateX(-50%); bottom: max(16px, env(safe-area-inset-bottom)); z-index: 49; width: max-content; max-width: calc(100vw - 24px); }
+/* The padlock docks bottom-left like Max's patcher lock, locked or not;
+   the editing tools unfold beside it in the same tray. */
+.editor-lock-dock { left: max(16px, env(safe-area-inset-left)); bottom: max(16px, env(safe-area-inset-bottom)); z-index: 49; width: max-content; max-width: calc(100vw - 24px); }
 .editor-toolbar { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px; background: var(--surface); border: 1px solid var(--border-strong); border-radius: 12px; box-shadow: 0 8px 32px #0005; }
 .editor-toolbar button { display: flex; align-items: center; justify-content: center; gap: 8px; width: auto; min-height: 44px; min-width: 0; padding: 10px 16px; border: 0; border-radius: 8px; font-size: 13px; opacity: 1; background: transparent; }
 .editor-lock-glyph { font-size: 18px; }
@@ -3528,7 +3528,6 @@ body.inspecting .console-canvas :is(.knob, .keyboard, [data-action], .rocker) { 
   .console-heading h1 { font-size: 24px; }
   .console-heading p { white-space: normal; }
   .console-heading-actions { width: 100%; flex-direction: row; justify-content: space-between; align-items: center; }
-  .console-heading-actions .editor-toolbar button { padding: 8px; font-size: 12px; }
   .console-canvas { gap: 14px; padding: 18px 16px 100px; }
   .console-canvas .panel-jamb { flex-basis: 100%; }
   body .panel-jamb .division-knobs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
