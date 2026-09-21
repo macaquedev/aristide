@@ -16,3 +16,10 @@ load a large sample set.
 Validation: startup selection/migration and config round-trip tests, existing
 configuration tests, and the copy/adoption integration test. This does not yet
 implement first-run discovery or the bundled organ.
+
+Native release verification: started Tauri with an isolated test config whose
+last instrument was the adopted GrandOrgue demo. With no interaction, the runtime
+loaded that organ and WebKit displayed its 20 stops on Play in perform mode.
+Inspected `/tmp/aristide-native-restored.png`; the native log reported
+`organ ready: GrandOrgue demo V1`. The release build used
+`CARGO_NET_OFFLINE=true bun run desktop:build`.

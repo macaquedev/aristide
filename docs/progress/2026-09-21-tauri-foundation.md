@@ -68,3 +68,14 @@ be adapted before the new editors can meet the sound-continuity contract.
   512 frames. Inspected `/tmp/aristide-native-ready.png`. This verifies startup,
   not listening quality or a loaded organ performance. No real-time OS priority
   was available on this machine; no system settings were changed.
+- Real-engine navigation check: loaded the GrandOrgue demo (20 stops), drew
+  Montre 8′, and held key 60 while the browser visited Library, Route, Tuning,
+  Setup and Play. Browser requests were forwarded to the real server, with
+  isolated configuration/cache directories. Every panel preserved the held note
+  and no load began. The engine's stereo 44.1 kHz recording contained 6.45 seconds
+  of signal including its release; 50 ms RMS windows showed no silent gap in the
+  central signal (peak 47.76, minimum 7.57, in 16-bit sample units). The server
+  reported zero late callbacks. Inspected the real-organ Play screenshot.
+  Artifacts: `/tmp/aristide-live-ui-IfmW35/` (temporary, not committed).
+  This checks engine output continuity during navigation, not listening quality,
+  physical speaker delivery, sub-window glitches, or future editor mutations.
