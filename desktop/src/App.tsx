@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { ActionIcon, Button, Card, Drawer, Group, Loader, Modal, SegmentedControl, Stack, Text, TextInput, Tooltip, useMantineColorScheme } from '@mantine/core';
 import { ArrowLeft, ChevronLeft, ChevronRight, Folder, LockKeyhole, Settings, Undo2, UnlockKeyhole } from 'lucide-react';
-import { endpoint, request, type Browse, type Snapshot, type Stop } from './api';
+import { endpoint, request, native, type Browse, type Snapshot, type Stop } from './api';
 import { useEngine } from './engine';
 
 const panels = ['Play', 'Build', 'Route', 'Tuning', 'Library'] as const;
@@ -25,6 +25,15 @@ export function App() {
     }
   }, [state?.loading, state?.load_error]);
   const error = engine.error ?? (state?.load_error !== dismissedLoadError ? state?.load_error : undefined);
+  const errorTitle = engine.error === 'connection-lost' ? 'Aristide is not connected'
+    : engine.error === 'change-failed' ? 'The change could not be made'
+    : engine.error ? 'Audio is unavailable' : 'The organ could not be opened';
+  const errorMessage = engine.error === 'connection-lost'
+    ? native ? 'The connection to the sound engine was lost. Aristide will reconnect automatically when it is available.'
+      : 'This browser view cannot reach the sound engine. Open the Aristide desktop app to play, or explore the design previews here.'
+    : engine.error === 'change-failed' ? 'The sound engine could not complete that action. Check the current setting and try again.'
+    : engine.error ? 'Check that your audio device is connected, then reopen Aristide.'
+    : 'Check that the organ and its samples are still in their original folder, then choose it again.';
   return <div className="app" data-density={density}>
     <header className="topbar">
       <Text className="instrument" fw={600} title={state?.organ}>{state?.organ ?? 'Aristide'}</Text>
@@ -38,7 +47,9 @@ export function App() {
       <ActionIcon size="lg" variant={panel === 'Setup' ? 'filled' : 'default'} aria-label="Setup" onClick={() => setPanel('Setup')}><Settings size={20}/></ActionIcon>
     </header>
     <main>
-      {!state && <Group justify="center" p="xl"><Loader size="sm"/><Text>{engine.error ? 'Waiting for audio' : 'Starting audio…'}</Text></Group>}
+      {!state && <Stack align="center" p="xl"><Group><Loader size="sm"/><Text>Connecting to the sound engine…</Text></Group>
+        {!native && <><Text c="dimmed">Design previews work without audio.</Text><PreviewLinks/></>}
+      </Stack>}
       {panel === 'Play' && state && <Play state={state} command={command} edit={edit} openLibrary={() => setPanel('Library')} openStop={stop => { setSelected(stop); setPanel('Build'); }}/>} 
       {panel === 'Library' && <Library state={state} command={command}/>}
       {panel === 'Setup' && <Stack p="lg"><Group><Button variant="subtle" leftSection={<ArrowLeft size={18}/>} onClick={() => setPanel('Play')}>Play</Button><Text fw={600}>Setup</Text></Group>
@@ -51,11 +62,17 @@ export function App() {
         <Button variant="default" w="fit-content" onClick={() => setPanel('Play')}>Back to Play</Button>
       </Stack>}
     </main>
-    <Modal opened={Boolean(error)} title={engine.error ? 'Audio is unavailable' : 'The organ could not be opened'} onClose={() => { engine.dismissError(); setDismissedLoadError(state?.load_error); }}>
-      <Stack><Text>{engine.error ? 'Check that your audio device is connected, then reopen Aristide.' : 'Check that the organ and its samples are still in their original folder, then choose it again.'}</Text>
+    <Modal opened={Boolean(error)} title={errorTitle} onClose={() => { engine.dismissError(); setDismissedLoadError(state?.load_error); }}>
+      <Stack><Text>{errorMessage}</Text>
+        {!native && engine.error === 'connection-lost' && <PreviewLinks/>}
         <Button onClick={() => { engine.dismissError(); setDismissedLoadError(state?.load_error); }}>Close</Button></Stack>
     </Modal>
   </div>;
+}
+
+function PreviewLinks() {
+  return <Group><Button component="a" href="/?study=1&panel=build" variant="default">Preview Build</Button>
+    <Button component="a" href="/?study=1&panel=tuning" variant="default">Preview Tuning</Button></Group>;
 }
 
 function Play({ state, command, edit, openStop, openLibrary }: { state: Snapshot; command: Command; edit: boolean; openStop: (stop: Stop) => void; openLibrary: () => void }) {

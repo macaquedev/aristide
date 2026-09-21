@@ -6,6 +6,7 @@ import { endpoint, request, status, type Snapshot } from './api';
 export function useEngine() {
   const [snapshot, setSnapshot] = useState<Snapshot>();
   const [error, setError] = useState<string>();
+  const [dismissedError, setDismissedError] = useState<string>();
   const [ready, setReady] = useState(false);
   const queue = useRef<Promise<unknown>>(Promise.resolve());
   const mounted = useRef(true);
@@ -13,12 +14,16 @@ export function useEngine() {
     const task = queue.current.catch(() => {}).then(() => request<Snapshot>(method, url));
     queue.current = task;
     return task.then(value => {
-      if (mounted.current) { setSnapshot(value); setReady(true); }
+      if (mounted.current) {
+        setSnapshot(value); setReady(true);
+        setError(previous => previous === 'connection-lost' || previous === 'audio-unavailable' ? undefined : previous);
+        setDismissedError(previous => previous === 'connection-lost' || previous === 'audio-unavailable' ? undefined : previous);
+      }
       return value;
     });
   }, []);
   const command = useCallback((path: string, values: Record<string, string | number> = {}) => {
-    void update('POST', endpoint(path, values)).catch(() => setError('change-failed'));
+    void update('POST', endpoint(path, values)).catch(() => { setDismissedError(undefined); setError('change-failed'); });
   }, [update]);
 
   useEffect(() => {
@@ -59,5 +64,5 @@ export function useEngine() {
     window.addEventListener('blur', release);
     return () => { release(); window.removeEventListener('keydown', keyDown); window.removeEventListener('keyup', keyUp); window.removeEventListener('blur', release); };
   }, [command, ready]);
-  return { snapshot, ready, error, dismissError: () => setError(undefined), command };
+  return { snapshot, ready, error: error === dismissedError ? undefined : error, dismissError: () => setDismissedError(error), command };
 }

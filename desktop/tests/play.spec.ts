@@ -96,3 +96,41 @@ test('medium touchscreen visual review', async ({ page }) => {
   await expect(page.getByRole('button', { name: 'Bourdon' })).toHaveAttribute('aria-pressed', 'true');
   await page.screenshot({ path: 'test-results/play-medium.png', fullPage: true });
 });
+
+
+test('offline browser offers previews without blaming the audio device', async ({ page }) => {
+  await page.route('**/api/**', route => route.abort());
+  await page.goto('/');
+  const dialog = page.getByRole('dialog');
+  await expect(dialog).toContainText('Aristide is not connected');
+  await expect(dialog).not.toContainText('audio device');
+  await expect(dialog).toHaveCSS('opacity', '1');
+  await page.screenshot({ path: 'test-results/connection-unavailable.png', fullPage: true });
+  await dialog.getByRole('link', { name: 'Preview Build' }).click();
+  await expect(page.getByText('Prototype data only.', { exact: false })).toBeVisible();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+});
+
+test('connection recovery clears its modal without restarting', async ({ page }) => {
+  await rig(page);
+  let offline = true;
+  await page.route('**/api/**', route => offline ? route.abort() : route.fallback());
+  await expect(page.getByRole('dialog')).toContainText('Aristide is not connected');
+  offline = false;
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Panic', exact: true })).toBeEnabled();
+});
+
+test('dismissed connection error stays closed until a new outage', async ({ page }) => {
+  await rig(page);
+  let offline = true;
+  await page.route('**/api/**', route => offline ? route.abort() : route.fallback());
+  await expect(page.getByRole('dialog')).toBeVisible();
+  await page.getByRole('dialog').getByRole('button', { name: 'Close', exact: true }).click();
+  await page.waitForTimeout(800);
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  offline = false;
+  await expect(page.getByRole('button', { name: 'Panic', exact: true })).toBeEnabled();
+  offline = true;
+  await expect(page.getByRole('dialog')).toContainText('Aristide is not connected');
+});
