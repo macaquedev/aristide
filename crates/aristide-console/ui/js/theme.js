@@ -1,35 +1,7 @@
-// Client-side appearance settings — accent colour, layout density and
-// the size of the whole console. Purely cosmetic and local to this
-// console: stored in localStorage, never sent to the server, applied
-// before the first snapshot arrives.
-
-// Each accent carries its own dark ink (text over the accent) and a
-// deeper shade (held sharps), picked by eye rather than derived, so
-// every choice keeps contrast. The 1f/33 alpha suffixes match the
-// soft/glow tokens in style.css. The pickers live in the Preferences
-// dialog, which is exactly and only this: the player's own settings.
-// LED hues: an engaged control fills with the accent and its legend
-// goes ink, like any lit button on a control surface.
-const ACCENTS = {
-  amber: { accent: "#e3bd77", deep: "#b89452", ink: "#2a2111" },
-  cyan: { accent: "#41c7e8", deep: "#279db8", ink: "#04222b" },
-  green: { accent: "#7bd45b", deep: "#54a83a", ink: "#0e2405" },
-  violet: { accent: "#a08eff", deep: "#7f6ae6", ink: "#191140" },
-  coral: { accent: "#ff7a54", deep: "#e05426", ink: "#2b0d02" },
-};
-
-const DENSITIES = ["compact", "regular", "spacious"];
-
-// Whole-console size, as a browser's zoom: 1 is the native design size
-// (a 13px label is 13 device-independent pixels). Density changes what
-// fits; scale changes how big it all is, text included — the two are
-// independent and compose. This is a *webview* zoom, done by the
-// desktop shell (see `set_zoom` in main.rs), never a CSS zoom: the
-// panel canvas, every drag and every popover are laid out in CSS
-// pixels, and a page-level zoom keeps those pixels the ones the code
-// measures in. In a plain browser the browser's own zoom (Ctrl +/−)
-// already does exactly this and remembers it per site, so the row
-// only points there.
+// Screen zoom is local to the console and never alters the instrument.
+// Play density is automatic; its fixed palette lives in style.css.
+// Tauri uses webview zoom so hit testing stays in CSS pixels. Browsers use
+// their own zoom controls. Existing stored accent/density choices are ignored.
 const SCALES = [0.5, 0.6, 0.7, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2];
 const NATIVE_SCALE = 1;
 
@@ -49,19 +21,6 @@ const store = {
     }
   },
 };
-
-function applyAccent(name) {
-  const { accent, deep, ink } = ACCENTS[name] ?? ACCENTS.amber;
-  const root = document.documentElement.style;
-  root.setProperty("--accent", accent);
-  root.setProperty("--accent-soft", `${accent}24`);
-  root.setProperty("--accent-deep", deep);
-  root.setProperty("--accent-ink", ink);
-}
-
-function applyDensity(name) {
-  document.body.dataset.density = DENSITIES.includes(name) ? name : "regular";
-}
 
 const hostZooms = () => Boolean(window.__TAURI__);
 
@@ -131,39 +90,8 @@ export function segmented(segment, values, current, render, onPick) {
 /// Builds the picker rows in the Preferences dialog and restores the
 /// saved choices. Call once at startup.
 export function wireTheme(root) {
-  const swatches = root.getElementById("accent-swatches");
-  const densities = root.getElementById("density-segment");
   const scales = root.getElementById("scale-segment");
   const scaleNote = root.getElementById("scale-note");
-
-  let accent = store.get("accent", "amber");
-  applyAccent(accent);
-  for (const [name, { accent: colour }] of Object.entries(ACCENTS)) {
-    const swatch = document.createElement("button");
-    swatch.className = "swatch";
-    swatch.style.setProperty("--c", colour);
-    swatch.setAttribute("aria-label", `${name} accent`);
-    swatch.classList.toggle("on", name === accent);
-    swatch.setAttribute("aria-pressed", String(name === accent));
-    swatch.addEventListener("click", () => {
-      accent = name;
-      store.set("accent", name);
-      applyAccent(name);
-      for (const other of swatches.children) {
-        other.classList.toggle("on", other === swatch);
-        other.setAttribute("aria-pressed", String(other === swatch));
-      }
-    });
-    swatches.append(swatch);
-  }
-
-  const density = store.get("density", "regular");
-  applyDensity(density);
-  segmented(densities, DENSITIES, density, (name) => name[0].toUpperCase() + name.slice(1), (name) => {
-    store.set("density", name);
-    applyDensity(name);
-  });
-
   scale = readScale();
   applyScale(scale);
   onScaleChange = segmented(scales, SCALES, scale, (value) => `${Math.round(value * 100)}%`, chooseScale);

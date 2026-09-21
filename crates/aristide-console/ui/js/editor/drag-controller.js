@@ -1,4 +1,4 @@
-// Drag controller: plain when unlocked, ctrl-drag always.
+// Drag controller: available only in the unlocked desk editor.
 //
 // Plain pointer events, not HTML5 drag-and-drop: a floating label
 // follows the pointer and the drop target is read straight off
@@ -97,7 +97,7 @@ export function spliceRank(editor, midx, drag) {
 export function wireDragSource(editor, el, getInfo) {
   el.addEventListener("pointerdown", (event) => {
     if (event.button !== 0 || editor.drag) return;
-    if (!(event.ctrlKey || editor.unlocked)) return;
+    if (!editor.unlocked) return;
     event.stopPropagation(); // a control drag is never a panel move
     const startX = event.clientX;
     const startY = event.clientY;

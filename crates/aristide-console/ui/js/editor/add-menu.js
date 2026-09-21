@@ -1,7 +1,6 @@
 // Adding to the organ: double-click the canvas.
 //
-// The Max gesture: double-click empty canvas (unlocked — or
-// ctrl-double-click through the lock) and the add menu opens where
+// In the desk layout editor, double-click empty canvas and the add menu opens where
 // you clicked. A manual or pedalboard added this way lands its
 // panels at that spot, via `pendingPlace` once the rebuild settles.
 
@@ -28,7 +27,7 @@ export function wireCanvas(editor) {
   // gesture; only its button stays out.
   const addGesture = (event) => {
     event.preventDefault();
-    if (!(editor.unlocked || event.ctrlKey)) {
+    if (!editor.unlocked) {
       editor.nudgeUnlock();
       return;
     }
@@ -60,7 +59,7 @@ export function wireCanvas(editor) {
     "pointerdown",
     (event) => {
       if (event.button !== 0) return;
-      if (event.target.closest(".menubar, .modal, .editor-toolbar")) return;
+      if (event.target.closest(".menubar, .modal, .workspace, .editor-toolbar")) return;
       if (editor.inspect && editor.el.canvas.contains(event.target)) return;
       const inside = [
         editor.el.add,

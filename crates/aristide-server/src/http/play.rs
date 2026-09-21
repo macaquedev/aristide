@@ -60,6 +60,10 @@ pub(super) fn general(state: &Mutex<State>, query: &str) -> Reply {
     if let Some(slot) = slot {
         if param(query, "store") == Some("1") {
             state.store_general(slot);
+        } else if param(query, "recall") == Some("1") {
+            // Locked Play never writes a registration, even if a physical
+            // MIDI setter is armed. Desk controls retain the setter action.
+            state.recall_general(slot);
         } else {
             // Not `recall_general`: a press on screen must mean what a
             // press under a thumb means, and with the setter armed
@@ -82,6 +86,8 @@ pub(super) fn divisional(state: &Mutex<State>, query: &str) -> Reply {
     let mut state = state.lock().expect("state poisoned");
     if param(query, "store") == Some("1") {
         state.store_divisional(manual, slot);
+    } else if param(query, "recall") == Some("1") {
+        state.recall_divisional(manual, slot);
     } else {
         state.divisional(manual, slot);
     }

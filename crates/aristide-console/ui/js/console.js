@@ -14,6 +14,7 @@
 // layout without changing saved desktop positions. Moving panels is the
 // editor's job (editor.js); this file only draws and places.
 
+import { PlayLayout } from "./play-layout.js";
 import { PointerNotes } from "./pointer-notes.js";
 import { keyboardScale, measureKeyboard, usesFlowLayout } from "./kb-scale.js";
 import { commands } from "./api.js";
@@ -107,6 +108,7 @@ export class Console {
       canvas: root.getElementById("console-canvas"),
       emptyCard: root.getElementById("organ-empty-card"),
     };
+    this.playLayout = new PlayLayout(this);
     this.wireRail();
     window.matchMedia("(pointer: coarse)").addEventListener("change", () => {
       if (this.snapshot) {
@@ -142,7 +144,8 @@ export class Console {
   }
 
   offline(message) {
-    this.el.offline.textContent = `no connection to the organ — ${message}`;
+    this.el.offline.textContent = "Connection lost. Reconnecting…";
+    this.el.offline.dataset.reason = message;
     this.el.offline.classList.remove("hidden");
   }
 
@@ -180,6 +183,7 @@ export class Console {
   // ---- structure ----------------------------------------------------
 
   build(snapshot) {
+    this.playLayout.restore();
     this.notes.releaseAll();
     this.dragging.clear();
     this.el.organName.textContent = snapshot.organ ?? "No organ";
@@ -226,6 +230,7 @@ export class Console {
   fitLabels() {
     for (const label of this.root.querySelectorAll(".stop-name")) {
       label.style.fontSize = "";
+      if (this.root.body.dataset.workspace === "play") continue;
       // Stop names wrap at their readable size, even in the compact grid.
       if (label.closest(".panel-jamb") || usesFlowLayout()) continue;
       for (let size = 10.5; label.scrollWidth > label.clientWidth && size > 7.5; ) {
@@ -464,7 +469,7 @@ export class Console {
     face.className = "face";
     const label = document.createElement("span");
     label.className = "stop-name";
-    label.textContent = line;
+    label.textContent = line.replace(/^\d+[_\s]+/, "").replaceAll("_", " ");
     face.append(label);
     if (foot) {
       const pitch = document.createElement("span");
@@ -551,7 +556,7 @@ export class Console {
           `divisional-${manual.idx}-${n}`,
           n,
           `divisional:${manual.name}:${n}`,
-          () => this.send(commands.divisional(manual.idx, n))
+          () => this.send(commands.divisional(manual.idx, n, false, this.root.body.dataset.workspace === "play"))
         )
       );
     }
@@ -571,7 +576,7 @@ export class Console {
     for (const n of pistonSlots(snapshot.generals ?? [], GENERAL_PISTONS)) {
       generals.append(
         this.piston(`general-${n}`, n, `general:${n}`, () =>
-          this.send(commands.general(n))
+          this.send(commands.general(n, false, this.root.body.dataset.workspace === "play"))
         )
       );
     }
@@ -957,6 +962,7 @@ export class Console {
   /// in the automatic grid. Old sizes, new divisions and window resizing can
   /// make saved rectangles collide; never let that hide a playing control.
   layoutPanels(snapshot, automatic = false) {
+    if (this.root.body.dataset.workspace === "play") { this.playLayout.layout(); return; }
     if (this.el.canvas.querySelector('[data-dragging]')) return;
     this.el.canvas.parentElement.style.setProperty("--console-max", snapshot.stops.length >= 80 ? "100%" : "1800px");
     // Narrow screens reflow without rewriting the saved desktop placement.
@@ -1097,7 +1103,7 @@ export class Console {
       // why it is speaking and that pulling the pedal back will take
       // it away. `hand` rides the snapshot only when the two layers
       // disagree, so this is exactly "the pedal's doing".
-      this.setFlag(`stop-${stop.id}`, "crescendo-held", stop.hand === false);
+      this.setFlag(`stop-${stop.id}`, "crescendo-held", stop.on && stop.hand === false);
     }
     for (const coupler of snapshot.couplers) {
       this.setToggle(`coupler-${coupler.idx}`, coupler.on);
@@ -1112,14 +1118,20 @@ export class Console {
     for (const [manual, slots] of Object.entries(combos?.divisionals ?? {})) {
       for (const slot of slots) stored.add(`divisional-${manual}-${slot}`);
     }
+    const matching = new Set((combos?.matching_generals ?? []).map(slot => `general-${slot}`));
+    for (const [manual, slots] of Object.entries(combos?.matching_divisionals ?? {})) {
+      for (const slot of slots) matching.add(`divisional-${manual}-${slot}`);
+    }
     for (const piston of this.root.querySelectorAll(".piston")) {
+      piston.classList.toggle("on", matching.has(piston.dataset.key));
+      piston.setAttribute("aria-pressed", String(matching.has(piston.dataset.key)));
       piston.classList.toggle("stored", stored.has(piston.dataset.key));
     }
     if (combos) {
       if (this.el.stepperFrame) {
         setText(
           this.el.stepperFrame,
-          combos.frames ? `${combos.frame} / ${combos.frames}` : "—"
+          combos.frames ? `${combos.frame} / ${combos.frames} · Next ${Math.min(combos.frame + 1, combos.frames)}` : "No sequence"
         );
       }
       if (!this.dragging.has("crescendo")) {
@@ -1198,7 +1210,7 @@ export class Console {
     // control ever wears two faces.
     for (const control of this.root.querySelectorAll(`[data-key="${key}"]`)) {
       control.classList.toggle("on", on);
-      if (control.matches(".knob") && control.getAttribute("aria-pressed") !== String(on)) {
+      if (control.matches(".knob, .rocker, .rail-button") && control.getAttribute("aria-pressed") !== String(on)) {
         control.setAttribute("aria-pressed", String(on));
       }
     }

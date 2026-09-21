@@ -129,8 +129,8 @@ export class Picker {
     this.buildLibrary(this.library);
   }
 
-  close() {
-    if (!this.closable || this.pickPending) return;
+  close(allowEmpty = false) {
+    if ((!this.closable && !allowEmpty) || this.pickPending) return;
     this.el.modal.classList.add("hidden");
     this.root.body.classList.remove("modal-open");
     // Next open starts at home again: name field blank, browser shut.
@@ -234,7 +234,7 @@ export class Picker {
     // on the canvas), and that must never pop the picker over an open
     // popover. A load started with no organ yet (the common case)
     // still opens this because !hasOrgan already covers it.
-    if (!this.isOpen && !hasOrgan) {
+    if (!this.isOpen && !hasOrgan && this.shouldAutoOpen?.() !== false) {
       this.openedWithOrgan = undefined;
       this.pickedHere = false;
       this.show();

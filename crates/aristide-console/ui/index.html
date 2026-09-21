@@ -6,23 +6,19 @@
   <title>Aristide</title>
   <link rel="stylesheet" href="style.css" />
 </head>
-<body>
+<body data-workspace="library">
   <div id="offline" class="offline hidden" role="status">Connection lost. Reconnecting to the organ…</div>
   <header id="menubar" class="menubar">
-    <!-- The app menu: the player's own scope — About, Preferences.
-         Nothing in it touches the organ; the organ's menus follow. -->
-    <div class="brand menu">
-      <button id="app-menu" class="menu-title app-title"
-        aria-haspopup="true">Aristide</button>
-      <div id="app-menu-list" class="menu-list hidden" role="menu"></div>
-    </div>
-    <div class="brand menu">
-      <button id="organ-name" class="menu-title organ-title"
-        aria-haspopup="true">Organ</button>
-      <div id="organ-menu-list" class="menu-list hidden" role="menu"></div>
-    </div>
-    <nav id="menus" class="menus" aria-label="Main menu"></nav>
-    <button id="instrument-settings" class="ghost instrument-settings" aria-haspopup="dialog">Instrument settings</button>
+    <span class="app-wordmark">Aristide</span>
+    <span id="organ-name" class="organ-title">No organ</span>
+    <nav id="workspace-nav" aria-label="Workspaces">
+      <button data-workspace="library">Library</button>
+      <button data-workspace="build">Build</button>
+      <button data-workspace="voice">Voice</button>
+      <button data-workspace="setup">Setup</button>
+    </nav>
+    <button id="command-open" class="desk-only" aria-keyshortcuts="Control+k">Find a command <kbd>Ctrl K</kbd></button>
+    <button id="instrument-settings" class="hidden">Build</button>
     <div class="rail-controls">
       <label class="slider-group" id="gain-group">
         <span class="rail-label">Volume</span>
@@ -36,12 +32,12 @@
   <aside id="keys-legend" class="keys-legend hidden" aria-label="Computer keyboard mapping"></aside>
 
   <!-- All instrument editors share this workspace. App preferences stay separate. -->
-  <div id="organ-prefs" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="organ-prefs-title">
+  <div id="organ-prefs" class="workspace hidden" role="region" aria-labelledby="organ-prefs-title">
     <div class="modal-backdrop" data-organ-prefs-close></div>
     <div class="modal-card organ-prefs-card">
       <header class="modal-head">
-        <div><h1 id="organ-prefs-title">Instrument settings</h1><p id="organ-prefs-context" class="pane-note"></p></div>
-        <button class="modal-close" data-organ-prefs-close aria-label="Close instrument settings">×</button>
+        <div><h1 id="organ-prefs-title">Build</h1><p id="organ-prefs-context" class="pane-note"></p></div>
+        <button class="modal-close" data-organ-prefs-close aria-label="Return to Play">Play</button>
       </header>
       <label class="organ-prefs-mobile-nav">Section<select id="organ-prefs-section"></select></label>
       <div class="organ-prefs-layout">
@@ -56,33 +52,26 @@
     </div>
   </div>
 
-  <div id="prefs" class="modal hidden" role="dialog" aria-modal="true"
+  <div id="prefs" class="workspace hidden" role="region"
     aria-labelledby="prefs-title">
     <div class="modal-backdrop" data-close></div>
     <div class="modal-card prefs-card">
       <header class="modal-head">
-        <h1 id="prefs-title">App preferences</h1>
-        <button class="modal-close" data-close aria-label="Close preferences">&times;</button>
+        <h1 id="prefs-title">Setup</h1>
+        <button class="modal-close" data-close aria-label="Return to Play">Play</button>
       </header>
       <div class="modal-body">
         <section class="pane" data-pane="appearance">
-          <h2>Appearance</h2>
-          <div class="settings-row" id="accent-row">
-            <span class="rail-label">Accent</span>
-            <span class="swatches" id="accent-swatches"></span>
-          </div>
-          <div class="settings-row" id="density-row">
-            <span class="rail-label">Spacing</span>
-            <span class="segment" id="density-segment"></span>
-          </div>
+          <h2>Screen</h2>
+          <p class="pane-note">Play adjusts its density to your screen and keeps every stop within reach through pages.</p>
           <div class="settings-row" id="scale-row">
             <span class="rail-label">Size</span>
             <span class="segment" id="scale-segment"></span>
           </div>
           <p class="pane-note settings-hint" id="scale-note"></p>
         </section>
-        <details class="pane advanced-settings" data-pane="memory">
-          <summary>Memory &amp; loading <span>Advanced</span></summary>
+        <section class="pane" data-pane="memory">
+          <h2>Memory &amp; loading</h2>
           <div class="settings-row" id="streaming-row">
             <span class="rail-label">Release tails</span>
             <span class="segment" id="streaming-segment"></span>
@@ -112,19 +101,20 @@
           </div>
           <p class="pane-note">Auto balances memory and disk use. Held notes always play from memory.
             These settings apply to this computer; your instrument settings stay with the organ.</p>
-        </details>
+        </section>
+        <p class="pane-note">Performance recording: when implemented.</p>
       </div>
     </div>
   </div>
 
-  <div id="picker" class="modal hidden" role="dialog" aria-modal="true"
+  <div id="picker" class="workspace hidden" role="region"
     aria-labelledby="picker-title">
     <div class="modal-backdrop" data-close></div>
     <div class="modal-card picker-card">
       <header class="picker-head">
-        <h1 id="picker-title">Load an organ</h1>
+        <h1 id="picker-title">Library</h1>
         <button class="modal-close" id="picker-close" data-close
-          aria-label="Close organ loader">&times;</button>
+          aria-label="Return to Play">Play</button>
       </header>
       <div class="picker-pane">
         <p class="picker-error hidden" id="picker-error" role="alert"></p>
@@ -136,8 +126,8 @@
           <section class="picker-section">
             <div class="picker-rule"><h2>Open or create</h2></div>
             <div class="picker-actions">
-              <button class="picker-action" id="picker-new-blank">Blank organ&hellip;</button>
-              <button class="picker-action" id="picker-new-set">Open organ or sample set&hellip;</button>
+              <button class="picker-action" id="picker-new-blank">Create organ</button>
+              <button class="picker-action" id="picker-new-set">Load organ or sample set</button>
               <span class="picker-formats">GrandOrgue &middot; Hauptwerk &middot; Aristide</span>
             </div>
             <form id="picker-name-form" class="picker-name hidden">
@@ -209,14 +199,14 @@
        console, not a dialog. The console is a canvas of panels (jambs,
        keyboards, the coupler rail, the shoe rack); unlocked, panels move
        by their title bars and double-clicking empty canvas adds to the
-       organ right there — ctrl reaches through the lock for all of it.
+       organ right there. These gestures exist only in the desk editor.
        See editor.js. -->
   <div id="editor-lock-dock" class="editor-lock-dock">
     <p id="editor-lock-note" class="editor-lock-note hidden"></p>
     <div class="editor-toolbar" role="toolbar" aria-label="Console editing">
     <button id="editor-lock" class="editor-lock" aria-pressed="false"
       aria-label="Unlock editing">
-      <span class="editor-lock-glyph" id="editor-lock-glyph" aria-hidden="true">&#128274;</span><span id="editor-lock-label">Edit console (Ctrl+E)</span>
+      <span class="editor-lock-glyph" id="editor-lock-glyph" aria-hidden="true"></span><span id="editor-lock-label">Edit</span>
     </button>
     <button id="editor-add-button" class="ghost editor-tool">+ Add</button>
     <button id="editor-auto-arrange" class="ghost editor-tool">Auto arrange</button>
@@ -249,7 +239,7 @@
   </aside>
 
   <div id="editor-bin" class="organ-bin" data-drop-bin>
-    <span class="organ-bin-glyph" aria-hidden="true">&#128465;</span>
+    <span class="organ-bin-glyph" aria-hidden="true"></span>
     <span>Remove from this organ</span>
   </div>
 
@@ -972,6 +962,12 @@
     </div>
   </div>
 
+  <div id="command-palette" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="command-title">
+    <div class="modal-card">
+      <header class="modal-head"><h1 id="command-title">Find a command</h1><button id="command-close" aria-label="Close commands">Close</button></header>
+      <div class="modal-body"><input id="command-search" type="search" placeholder="Search workspaces and actions" aria-label="Find a command" /><div id="command-results"></div></div>
+    </div>
+  </div>
   <script type="module" src="js/main.js"></script>
 </body>
 </html>

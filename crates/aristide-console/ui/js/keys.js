@@ -195,7 +195,8 @@ export class PianoKeys {
   /// The organ has the keyboard only when no dialog is up: inside
   /// a dialog a stray "z" must not sound a pipe.
   get busy() {
-    return document.body.classList.contains("modal-open");
+    return document.body.classList.contains("modal-open") ||
+      !["play", "layout"].includes(document.body.dataset.workspace);
   }
 
   wire() {

@@ -210,6 +210,9 @@ struct MemoryView {
 /// The combination action's live state, for the piston rail.
 #[derive(Serialize)]
 struct CombinationsView {
+    /// Registration matches, not merely the last piston pressed.
+    matching_generals: Vec<u8>,
+    matching_divisionals: BTreeMap<usize, Vec<u8>>,
     /// Divisionals with something stored: manual index → piston slots.
     divisionals: BTreeMap<usize, Vec<u8>>,
     /// Where the stepper stands, 1-based, and how many frames there
@@ -1084,6 +1087,10 @@ fn snapshot(state: &State) -> Snapshot {
             let organ = state.midi_config.organs.get(&state.organ_key);
             let names = console.manual_states();
             CombinationsView {
+                matching_generals: state.matching_pistons(None),
+                matching_divisionals: (0..names.len())
+                    .map(|index| (index, state.matching_pistons(Some(index))))
+                    .collect(),
                 divisionals: organ
                     .map(|organ| {
                         organ

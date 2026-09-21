@@ -1,11 +1,7 @@
-//! A deliberately small local web console: draw/retire stops, toggle
-//! the tremulant, set master gain. Serves one embedded page plus a
-//! JSON state endpoint on localhost.
-//!
-//! This is a stopgap until the real IPC control plane + native GUI
-//! (M5); it exists so registration changes don't need a restart. It
-//! runs on its own thread and talks to the engine exactly like MIDI
-//! does: lock the shared state, send commands.
+//! The shared desktop/browser console and its localhost JSON API.
+//! Public frontend assets are embedded at build time from aristide-console/ui.
+//! The HTTP thread talks to the engine exactly like MIDI: lock the shared
+//! control state and send commands; audio never waits on frontend work.
 //!
 //! This module holds the server loop, the route table, the shared
 //! request helpers (`param`, `unescape`, `json`, `bad_request`) and
@@ -42,7 +38,9 @@ mod tuning;
 /// Every handler answers with one of these: a body plus a status.
 type Reply = Response<std::io::Cursor<Vec<u8>>>;
 
-const PAGE: &str = include_str!("../console.html");
+mod assets {
+    include!(concat!(env!("OUT_DIR"), "/console_assets.rs"));
+}
 
 pub fn spawn(state: Arc<Mutex<State>>, port: u16) -> std::io::Result<()> {
     let server = Server::http(("127.0.0.1", port))
@@ -80,6 +78,13 @@ fn respond(
     url: &str,
 ) -> Response<std::io::Cursor<Vec<u8>>> {
     let (path, query) = url.split_once('?').unwrap_or((url, ""));
+    if *method == Method::Get
+        && let Some((bytes, mime)) = assets::asset(path)
+    {
+        return Response::from_data(bytes.to_vec()).with_header(
+            Header::from_bytes("Content-Type", mime).expect("asset MIME type"),
+        );
+    }
     // A sample set's own organ stays the instrument the set defines:
     // one gate, ahead of every handler, so no change to the instrument
     // itself lands live or in the file until the organ is saved under
@@ -95,7 +100,6 @@ fn respond(
         return adopted_refusal();
     }
     match (method, path) {
-        (Method::Get, "/") => html(PAGE),
         (Method::Get, "/api/state") => json(snapshot::state_json(state)),
         (Method::Post, "/api/stop") => stops::draw(state, query),
         (Method::Post, "/api/cancel") => play::cancel(state, query),
@@ -280,12 +284,6 @@ fn params<'a>(query: &'a str, key: &'a str) -> impl Iterator<Item = &'a str> {
         .filter_map(|pair| pair.split_once('='))
         .filter(move |(k, _)| *k == key)
         .map(|(_, v)| v)
-}
-
-fn html(body: &str) -> Response<std::io::Cursor<Vec<u8>>> {
-    Response::from_string(body).with_header(
-        Header::from_bytes("Content-Type", "text/html; charset=utf-8").expect("valid header"),
-    )
 }
 
 fn json(body: String) -> Response<std::io::Cursor<Vec<u8>>> {
@@ -925,6 +923,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn browser_and_desktop_share_the_embedded_console() {
+        let (page, mime) = super::assets::asset("/").expect("console index");
+        assert_eq!(mime, "text/html; charset=utf-8");
+        assert!(String::from_utf8_lossy(page).contains("workspace-nav"));
+        assert_eq!(super::assets::asset("/index.html").unwrap().0, page);
+        assert_eq!(super::assets::asset("/style.css").unwrap().1, "text/css; charset=utf-8");
+        assert!(super::assets::asset("/js/workspaces.js").is_some());
+        assert_eq!(super::assets::asset("/fonts/InterVariable.woff2").unwrap().1, "font/woff2");
+        assert!(super::assets::asset("/js/play-layout.test.js").is_none());
+        assert!(super::assets::asset("/../Cargo.toml").is_none());
+    }
+
     /// The combination action over HTTP, and the shape the piston rail
     /// reads it in: every endpoint is the on-screen twin of a binding
     /// action, and the snapshot says where the stepper and the pedal
@@ -949,13 +960,25 @@ mod tests {
         assert!(body.contains("\"setter\":false"), "storing disarmed: {body}");
         assert!(body.contains("\"generals\":[2]"), "slot 2 has something in it: {body}");
 
+        assert!(body.contains("\"matching_generals\":[2]"));
         respond(&state, &Method::Post, "/api/cancel");
+        assert!(state_json(&state).contains("\"matching_generals\":[]"));
         respond(&state, &Method::Post, "/api/general?n=2");
+        assert!(state_json(&state).contains("\"matching_generals\":[2]"));
         assert!(
             state_json(&state)[..state_json(&state).find("\"manuals\"").expect("manuals")]
                 .contains("\"on\":true"),
             "the general recalled its registration"
         );
+
+        // Play recalls explicitly: an armed MIDI setter must not turn a
+        // screen press into an invisible write to the organ file.
+        respond(&state, &Method::Post, "/api/cancel");
+        respond(&state, &Method::Post, "/api/setter?on=1");
+        respond(&state, &Method::Post, "/api/general?n=2&recall=1");
+        assert!(state_json(&state).contains("\"matching_generals\":[2]"));
+        assert!(state_json(&state).contains("\"setter\":true"));
+        respond(&state, &Method::Post, "/api/setter?on=0");
 
         // The stepper: a frame is stored, walked to and counted.
         respond(&state, &Method::Post, "/api/stepper?store=1");

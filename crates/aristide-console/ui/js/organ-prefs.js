@@ -76,6 +76,7 @@ export class OrganPreferences {
 
   open(preserveEditors = false) {
     if (this.isOpen || !this.editor.lastSnapshot?.organ) return;
+    this.onOpen?.();
     this.editor.setInspect(false);
     if (!preserveEditors) this.editor.closeAllPopovers();
     this.editor.closeDrawer();
@@ -141,7 +142,10 @@ export class OrganPreferences {
       category = kind === "division" ? "keyboards" : kind === "source" ? "sources"
         : ["stop", "rank"].includes(kind) ? "stops" : "general";
     }
-    if (category) this.category = category;
+    if (category) {
+      this.category = category;
+      this.onCategory?.(category);
+    }
     this.syncNavigation();
     this.syncPanels();
     if (changed) {
@@ -217,7 +221,9 @@ export class OrganPreferences {
 
   syncNavigation() {
     this.section.value = this.category;
+    for (const option of this.section.options) option.hidden = !!this.allowedCategories && !this.allowedCategories.includes(option.value);
     for (const button of this.modal.querySelectorAll("[data-category]")) {
+      button.hidden = !!this.allowedCategories && !this.allowedCategories.includes(button.dataset.category);
       button.setAttribute("aria-current", String(button.dataset.category === this.category));
     }
     setText(this.root.getElementById("organ-prefs-context"),
@@ -318,20 +324,21 @@ export class OrganPreferences {
     this.index.replaceChildren();
     if (this.category === "keyboards" && this.keyboard != null) { this.renderKeyboard(s); return; }
     const category = CATEGORIES.find(([id]) => id === this.category);
-    this.heading(category?.[1] ?? "Instrument");
+    const voice = this.root.body.dataset.workspace === "voice";
+    this.heading(voice && this.category === "general" ? "Tuning & acoustics" : category?.[1] ?? "Instrument");
     this.index.append(node("p", category?.[2] ?? "", "pane-note section-description"));
     if (this.category === "general") {
-      this.rename("Organ name", s.organ, name => e.send(commands.organRename(name)));
+      if (!voice) this.rename("Organ name", s.organ, name => e.send(commands.organRename(name)));
       this.action("Tuning & pitch", () => e.openTuningForm("organ", 20, 80), "Temperament, reference pitch and transposition");
       this.action("Room & noises", () => e.openRoomForm(20, 80), "Reverb and mechanical sounds");
       if (s.trems?.some(t => !t.wave)) this.action("Tremulant", () => e.openTremForm(20, 80), "Speed, depth and response");
       const boxes = node("details", "", "organ-pref-group");
-      boxes.append(node("summary", "Swell boxes")); this.index.append(boxes);
+      boxes.append(node("summary", "Swell boxes")); if (!voice) this.index.append(boxes);
       this.action("Add swell box", () => this.add("enc"), null, boxes);
       for (const box of s.enclosures ?? []) this.action(`Remove ${box.name}…`, () => e.showRemoveConfirm("enclosure", {
         name: box.name, stopCount: s.stops.filter(stop => (stop.enc ?? []).includes(box.idx)).length,
       }), "Stops remain in the organ", boxes);
-      this.action(s.setup?.file ? "Save a copy…" : "Save organ…", () => s.setup?.file ? e.openSaveAsForm() : e.openSaveForm(), "Keep a named version of this instrument");
+      if (!voice) this.action(s.setup?.file ? "Save a copy…" : "Save organ…", () => s.setup?.file ? e.openSaveAsForm() : e.openSaveForm(), "Keep a named version of this instrument");
     } else if (this.category === "keyboards") {
       this.action("Add keyboard", () => this.add("manual"), "Hand keyboard, pedalboard or microtonal layout").classList.add("organ-pref-add");
       for (const m of s.manuals ?? []) this.action(m.name, () => this.openKeyboard(m.idx),
@@ -425,8 +432,11 @@ export class OrganPreferences {
     const input = node("input"); input.value = value; input.required = true;
     input.setAttribute("aria-label", label);
     field.append(input);
-    const button = node("button", "Rename", "ghost"); button.type = "submit";
-    form.append(field, button);
+    form.append(field);
+    input.addEventListener("change", () => {
+      const name = input.value.trim();
+      if (name && name !== value) { save(name); value = name; }
+    });
     form.addEventListener("submit", event => {
       event.preventDefault();
       const name = input.value.trim();

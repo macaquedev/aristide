@@ -56,3 +56,15 @@ when the window closes. The pieces still run separately when you want
 them to — `aristide-server` is a plain headless daemon, and
 `aristide-console http://host:9669` attaches to one already running,
 here or on another machine.
+
+## Interface design
+
+The [design rules](docs/design/design-rules.md) govern UI changes and are required
+by the shared project instructions in `CLAUDE.md`. Play is the locked performance
+surface; Edit opens the Library, Build, Voice and Setup workspaces. Ctrl+K finds
+commands while editing. Performance recording is planned for when implemented.
+
+The server's `http://127.0.0.1:9669/` and the desktop shell use the same bundled
+interface, including its local Inter font. Organs become playable only after the
+entire load completes. See the [workspace redesign notes](docs/progress/2026-09-21-workspaces.md)
+for validation and current limitations.

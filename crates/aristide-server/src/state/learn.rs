@@ -1212,6 +1212,43 @@ impl State {
         })
     }
 
+    /// Saved pistons whose scoped registration matches the live sounding state.
+    /// Calculated control-side so MIDI, browser and desktop clients agree.
+    pub fn matching_pistons(&self, manual: Option<usize>) -> Vec<u8> {
+        let scope = manual.map_or(Scope::Whole, Scope::Division);
+        let Some(current) = self.capture(scope) else {
+            return Vec::new();
+        };
+        let Some(organ) = self.midi_config.organs.get(&self.organ_key) else {
+            return Vec::new();
+        };
+        let slots = match manual {
+            None => &organ.generals,
+            Some(index) => {
+                let names = self.manual_names();
+                let Some(name) = names.get(index) else {
+                    return Vec::new();
+                };
+                let Some(slots) = organ.divisionals.get(name) else {
+                    return Vec::new();
+                };
+                slots
+            }
+        };
+        let same = |a: &[String], b: &[String]| {
+            a.len() == b.len() && a.iter().all(|name| b.contains(name))
+        };
+        slots
+            .iter()
+            .filter_map(|(slot, saved)| {
+                (same(&saved.stops, &current.stops)
+                    && same(&saved.couplers, &current.couplers)
+                    && same(&saved.tremulants, &current.tremulants))
+                .then_some(*slot)
+            })
+            .collect()
+    }
+
     /// The console as it stands, within `scope`, as names.
     ///
     /// What is *sounding* is what gets stored, crescendo included —

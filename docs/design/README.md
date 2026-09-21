@@ -1,7 +1,8 @@
-# Console design studies
+# Console design
 
 [Aristide design rules](design-rules.md) contain the user-provided UI and
-product design guidance. The studies below document earlier design work.
+product design guidance. The [workspace redesign](../progress/2026-09-21-workspaces.md)
+documents the current implementation. The studies below document earlier design work.
 
 Open `stop-concepts.html` directly in a browser, or serve this directory with a
 static HTTP server. It is a self-contained HTML/CSS/JavaScript prototype with no
@@ -14,8 +15,8 @@ all three. The console below switches between shapes, compact/comfortable
 spacing and 24/200 illustrative stops. Stops and sample general registrations
 are interactive; they do not play audio or modify instrument files.
 
-The approved C rocker design is now implemented in the app, as recorded in
-`DESIGN.md`. This standalone study remains available for comparing directions.
+The C rocker design was implemented on September 14, as recorded in
+`DESIGN.md`; the September 21 workspace redesign supersedes that styling. This standalone study remains available for comparing directions.
 Its style choice, size and registration are transient and reset on reload.
 
 ## Validation

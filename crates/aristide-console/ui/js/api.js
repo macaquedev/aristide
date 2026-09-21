@@ -90,9 +90,9 @@ export const commands = {
   // `store` on a general/divisional is what an armed setter does; the
   // rail sends it explicitly so a click never depends on the setter
   // being armed a moment ago.
-  general: (n, store) => `/api/general?n=${n}` + (store ? "&store=1" : ""),
-  divisional: (manual, n, store) =>
-    `/api/divisional?manual=${manual}&n=${n}` + (store ? "&store=1" : ""),
+  general: (n, store, recall = false) => `/api/general?n=${n}` + (store ? "&store=1" : recall ? "&recall=1" : ""),
+  divisional: (manual, n, store, recall = false) =>
+    `/api/divisional?manual=${manual}&n=${n}` + (store ? "&store=1" : recall ? "&recall=1" : ""),
   setter: (on) => `/api/setter` + (on == null ? "" : `?on=${on ? 1 : 0}`),
   // `go` is "next", "prev" or a 1-based frame; the editing gestures are
   // their own flags.

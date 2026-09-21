@@ -1,9 +1,6 @@
-// The organ-structure editor: a Max-MSP-style unlockable patch, not a
-// dialog. Locked, the console behaves exactly as it always has, except
-// that a ctrl-drag still edits — that's the "reach through the lock"
-// gesture the rest of this module exists to serve. Unlocked, plain
-// drags do the same thing, panels move by their title bars, and
-// double-clicking empty canvas adds to the organ right there.
+// Live instrument editors and the desk-only console arrangement surface.
+// Play is strictly locked: no Ctrl gesture bypasses it. The workspace
+// controller owns navigation; this module owns musical editing and storage.
 //
 // This owns the editing chrome (padlock, drawer, bin, hint, the add
 // popovers, the rebuild status strip) and decorates the DOM Console
@@ -486,14 +483,11 @@ export class Editor {
       this.lock();
       return;
     }
-    // An ad-hoc combination has no file for a structural edit to write
-    // into — the server would 400 on the first one. Say so instead of
-    // unlocking into affordances that can't work yet.
+    // An ad-hoc combination needs a file before structural edits. Enter
+    // the desk workspace and offer the existing save form there.
     if (this.lastSnapshot?.setup?.implicit) {
-      this.showLockNote(
-        "This organ hasn't been saved as a file yet — save the combination " +
-          "first (organ menu), then its structure can be edited here."
-      );
+      this.unlock();
+      this.openSaveForm();
       return;
     }
     this.unlock();
@@ -517,10 +511,11 @@ export class Editor {
     this.el.lock.classList.add("on");
     this.el.lock.setAttribute("aria-pressed", "true");
     this.el.lock.setAttribute("aria-label", "Lock editing");
-    this.root.getElementById("editor-lock-label").textContent = "Done (Ctrl+E)";
-    this.el.lockGlyph.innerHTML = "&#128275;"; // open padlock
+    this.root.getElementById("editor-lock-label").textContent = "Play";
+    this.el.lockGlyph.innerHTML = ""; // open padlock
     this.el.hint.classList.remove("hidden");
     this.el.drawerTab.classList.remove("hidden");
+    this.onModeChange?.(true);
   }
 
   lock() {
@@ -530,8 +525,8 @@ export class Editor {
     this.el.lock.classList.remove("on");
     this.el.lock.setAttribute("aria-pressed", "false");
     this.el.lock.setAttribute("aria-label", "Unlock editing");
-    this.root.getElementById("editor-lock-label").textContent = "Edit console (Ctrl+E)";
-    this.el.lockGlyph.innerHTML = "&#128274;"; // closed padlock
+    this.root.getElementById("editor-lock-label").textContent = "Edit";
+    this.el.lockGlyph.innerHTML = ""; // closed padlock
     this.el.hint.classList.add("hidden");
     this.el.drawerTab.classList.add("hidden");
     this.closeDrawer();
@@ -544,16 +539,14 @@ export class Editor {
     this.closeStopForm();
     this.closeCouplerForm();
     this.closeCouplersMenu();
+    this.onModeChange?.(false);
   }
 
   // A double-click on a locked canvas is someone reaching for the add
   // gesture — silence would read as "there is no such gesture", so the
   // padlock answers instead.
   nudgeUnlock() {
-    this.showLockNote(
-      "The console is locked — click the padlock (Ctrl+E) to edit, " +
-        "or hold Ctrl to reach through it."
-    );
+    // Play has no overlays or edit-through gestures. The lock is the entry.
   }
 
   showLockNote(text) {
@@ -820,7 +813,7 @@ export class Editor {
     for (const knob of this.root.querySelectorAll('.knob[data-key^="stop-"]')) {
       const id = Number(knob.dataset.key.slice("stop-".length));
       knob.title =
-        "Drag to reorder, move, or enclose this stop (ctrl reaches through the lock) — " +
+        "Drag to reorder, move, or enclose this stop — " +
         "right-click to edit it.";
       this.wireDragSource(knob, () => {
         const stop = this.lastSnapshot?.stops.find((s) => s.id === id);
@@ -839,7 +832,7 @@ export class Editor {
       knob.addEventListener("contextmenu", (event) => {
         event.preventDefault();
         event.stopPropagation();
-        if (!this.unlocked && !event.ctrlKey) {
+        if (!this.unlocked) {
           this.nudgeUnlock();
           return;
         }
@@ -854,7 +847,7 @@ export class Editor {
       const cheek = board.querySelector(".cheek");
       if (!cheek) continue;
       cheek.title =
-        "Ctrl-drag to reorder or remove this manual — unlock to drag it plain. Double-click to rename.";
+        "Drag to reorder or remove this division. Double-click to rename.";
       this.wireDragSource(cheek, () => {
         const manual = this.lastSnapshot?.manuals.find((m) => m.idx === idx);
         if (!manual) return null;
@@ -869,7 +862,7 @@ export class Editor {
       const idx = Number(shoe.dataset.enclosure);
       const label = shoe.querySelector(".shoe-label");
       if (!label) continue;
-      label.title = `${label.textContent} — Ctrl-drag to the bin to remove this swell box; its stops stay, unenclosed.`;
+      label.title = `${label.textContent} — Drag to the bin to remove this swell box; its stops stay, unenclosed.`;
       this.wireDragSource(label, () => {
         const enclosure = this.lastSnapshot?.enclosures.find((e) => e.idx === idx);
         if (!enclosure) return null;
@@ -885,7 +878,7 @@ export class Editor {
       const cheek = board.querySelector(".cheek");
       if (!cheek) continue;
       cheek.addEventListener("dblclick", (event) => {
-        if (!this.unlocked && !event.ctrlKey) return;
+        if (!this.unlocked) return;
         this.startManualRename(idx);
       });
     }
@@ -918,12 +911,11 @@ export class Editor {
     for (const control of this.root.querySelectorAll('[data-key^="coupler-"]')) {
       const idx = Number(control.dataset.key.slice("coupler-".length));
       control.title =
-        "Drag to a jamb to seat this coupler among the stops (ctrl reaches " +
-        "through the lock) — right-click to edit it.";
+        "Drag to a division to place this coupler among its stops, or right-click to edit it.";
       control.addEventListener("contextmenu", (event) => {
         event.preventDefault();
         event.stopPropagation();
-        if (!this.unlocked && !event.ctrlKey) {
+        if (!this.unlocked) {
           this.nudgeUnlock();
           return;
         }
@@ -972,7 +964,7 @@ export class Editor {
       if (event.target.closest('[data-key^="coupler-"]')) return; // its own editor
       event.preventDefault();
       event.stopPropagation();
-      if (!this.unlocked && !event.ctrlKey) {
+      if (!this.unlocked) {
         this.nudgeUnlock();
         return;
       }
@@ -1042,7 +1034,7 @@ export class Editor {
       });
       panel.addEventListener("pointerdown", (event) => {
         if (event.button !== 0) return;
-        if (!(event.ctrlKey || this.unlocked)) return;
+        if (!this.unlocked) return;
         if (event.target.closest(INTERACTIVE)) return;
         if (event.target.closest(".panel-chrome")) return; // chrome handled above
         this.startPanelDrag(panel, event);
@@ -1123,7 +1115,7 @@ export class Editor {
         : "Drag to widen — the stops wrap into columns.";
       grip.addEventListener("pointerdown", (event) => {
         if (event.button !== 0) return;
-        if (!(event.ctrlKey || this.unlocked)) return;
+        if (!this.unlocked) return;
         event.preventDefault();
         event.stopPropagation(); // never also a panel move
         if (keyboard) this.startKeyboardResize(panel, event);
@@ -1641,7 +1633,7 @@ export class Editor {
       control.addEventListener("contextmenu", (event) => {
         event.preventDefault();
         event.stopPropagation();
-        if (!this.unlocked && !event.ctrlKey) {
+        if (!this.unlocked) {
           this.nudgeUnlock();
           return;
         }
