@@ -2,11 +2,13 @@
 
 At the start of every task in this repository, read `CLAUDE.md` in full and
 follow it as shared project instructions, including when working as Codex or
-another agent. Its filename does not limit it to Claude. Read `DESIGN.md` before
-implementation work, as it requires, and consult the referenced format notes
-when working on their respective loaders. For UI work, also read
-`docs/design/design-rules.md`, as required by `CLAUDE.md`. Re-read these instructions if they
-change during a task.
+another agent. Its filename does not limit it to Claude. Also read the full
+[`docs/design/ui-flow-spec.md`](docs/design/ui-flow-spec.md) at the start of every
+task/session, including after a context reset, as `CLAUDE.md` requires. It is the
+new design authority; the removed UI and old design rules must not guide the rebuild.
+Read `DESIGN.md` before implementation work and consult the referenced format
+notes when working on their respective loaders. Re-read these instructions and
+the spec if they change during a task.
 
 Keep shared project context and ground rules in `CLAUDE.md`; this file adds the
 commit-and-push workflow. Keep both files consistent when updating instructions.

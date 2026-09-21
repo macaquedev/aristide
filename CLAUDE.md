@@ -3,23 +3,63 @@
 These instructions apply to all agents working in this repository, including
 Codex and Claude. Read this file in full at the start of every task.
 
-Read `DESIGN.md` first before implementation work: it holds the architecture, all locked decisions, and the
-milestone plan (M0–M7). Do not re-litigate locked decisions without the user.
+Also read [`docs/design/ui-flow-spec.md`](docs/design/ui-flow-spec.md) **in full
+at the start of every task/session**, including after a context reset. It is Alex's
+authoritative UI, flow and target instrument-model specification, supplied on
+2026-09-21. A summary, remembered conventions or previous screenshots are not a
+substitute. Re-read both files if they change during a task.
 
-## Current scope
+Read `DESIGN.md` before implementation work for engine architecture, existing
+contracts and implementation history. The new spec supersedes earlier product,
+interaction, visual and target-model decisions in that document, the old design
+rules and historical progress notes. Preserve audio safety and file compatibility
+when adapting the backend to the new requirements; document needed migrations.
 
-Aristide is headless as of the user-requested cleanup on 2026-09-21.
-Keep the audio engine, model, sample loaders, MIDI/device I/O, and JSON sound-control
-API. The Tauri shell, browser UI, visual assets, and presentation-only endpoints
-have been removed. Do not restore them unless the user requests a new UI.
+## New UI: start from the new spec
+
+The old UI was deliberately removed on 2026-09-21. The user has now requested a
+new UI, built slowly and incrementally from `docs/design/ui-flow-spec.md`.
+**Do not restore, reskin or use the deleted UI as the design template.** Its
+screens, navigation, styling and workflows are not a starting point. The old
+`docs/design/design-rules.md` is only a redirect to the new specification.
+
+The current implementation is still headless. Reuse the audio engine, model,
+sample loaders, MIDI/device I/O and JSON sound-control API where they support the
+new requirements. Do not assume that the backend already implements every feature
+in the spec, or change the spec to fit an old endpoint.
 `crates/aristide-server/src/console.rs` is musical control logic (stops, couplers,
 combinations and voices), not a graphical interface; it remains essential.
 Existing organ-file metadata must stay compatible and edits must preserve unrelated
-settings. Audio safety and persistence contracts still apply.
+settings. Imported organs and samples remain untouched; customisation lives in layers.
 
-If a future task introduces a UI, read [`docs/design/design-rules.md`](docs/design/design-rules.md)
-in full first. It is a retained design reference, not a description of current
-features. Record unsupported capabilities and any rule exceptions in a progress note.
+## UI implementation workflow
+
+- Work in small, coherent, reviewable increments. State the scope and the relevant
+  spec sections before implementing; avoid building every panel at once.
+- The seven Control flow rules outrank individual screen designs. Play is home;
+  the top-bar padlock separates perform and edit; Build opens through a stop in
+  edit mode; sheets and edits must leave audio running. Follow the spec's autosave,
+  global undo, snapshots and shared number behaviour.
+- Use the new five-panel shell: Play, Build, Route, Tuning, Library, with Setup
+  separate. Do not bring back the old Voice workspace or its settings hierarchy.
+- Follow the new Visual rules without exceptions: flat and abstract, dark by
+  default, three colour roles, one typeface/two weights/three sizes, about 60 px
+  Play targets, meaningful marks only. Use a stock component library's defaults
+  for everything outside the console. Do not inherit the old palette or tokens.
+- Play, Route, Library and Setup each get one implementation. For Build and
+  Tuning, first produce four structurally different clickable mocks as specified;
+  let Alex pick by feel, then make four mutations of the chosen direction.
+  Do not choose a winner on Alex's behalf or implement the old editor by default.
+- Design for one medium touchscreen first, with touch and mouse working throughout;
+  account for the spec's small-screen sheets and multiple-screen arrangements.
+- Keep prototype behaviour distinct from connected functionality. Record backend
+  gaps, incomplete requirements and validation in a progress note. Never present
+  dummy controls, fake progress or an unimplemented feature as working.
+- Screenshot the running UI and review it against **Control flow rules** and
+  **Visual rules** before calling a UI increment complete. Exercise touch and
+  mouse interactions and verify that navigation and editing preserve audio.
+- For the first-run review, use a fresh session to role-play a first-time organist
+  and record every hesitation as a bug, as the spec requests.
 
 ## Ground rules
 

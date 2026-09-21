@@ -9,6 +9,10 @@ Named for Aristide Cavaillé-Coll. GPLv3, free forever.
 **Status: pre-alpha, under heavy construction.** See [DESIGN.md](DESIGN.md) for the
 architecture and roadmap.
 
+The new UI will be built incrementally from Alex's
+[UI and flow spec](docs/design/ui-flow-spec.md). It replaces all earlier UI
+design guidance. The current runnable application is still the headless server.
+
 ## Sample sets
 
 Aristide loads GrandOrgue `.organ` sets and unencrypted Hauptwerk sets (the XML

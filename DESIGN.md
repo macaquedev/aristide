@@ -7,9 +7,17 @@ current UI. The Tauri/browser console, visual assets, and presentation-only
 server state and endpoints are removed. The engine, sample loaders, musical
 control logic, MIDI/audio I/O, recording and localhost JSON API remain.
 Older UI descriptions and progress notes are historical; they do not describe
-available screens. [Design rules](docs/design/design-rules.md) are retained only
-as a reference for a future UI. Audio, model, storage and tuning contracts remain
-in force. See [cleanup notes](docs/progress/2026-09-21-headless-cleanup.md).
+available screens. See [cleanup notes](docs/progress/2026-09-21-headless-cleanup.md).
+
+**New UI direction (2026-09-21):** Alex's full
+[UI and flow spec](docs/design/ui-flow-spec.md) is now the authority for the new
+UI, user flows and target instrument model. It supersedes the old design rules
+and any conflicting product/model decisions below. Rebuild incrementally from
+that specification; do not restore or reskin the deleted UI. The implementation
+is still headless. This document records the engine architecture and existing
+behaviour, not proof that the new spec's features already work. Preserve real-time
+audio safety, imported source files and compatibility while implementing the
+required model and persistence changes.
 
 Aristide aims to (a) render existing sample sets **better than Hauptwerk** and far better
 than GrandOrgue, and (b) be the first VPO built for **contemporary music**: microtonality,
@@ -27,7 +35,7 @@ MIDI/audio routing. Free forever, GPLv3.
 | Formats | GO `.organ` + unencrypted Hauptwerk read **directly**; Aristide features live in **sidecar files** | Sound quality is engine-side; sidecars add superpowers to every existing free set with no conversion |
 | Native standalone format | Deferred | Only needed for future multi-mic/spatial recordings |
 | Effects | Internal RT-safe modular node graph | Taps at pipe/stop/division/output level; per-pipe delays |
-| Future UI | Deferred; retained design brief in `docs/design/design-rules.md` | No graphical interface is currently shipped |
+| New UI | Incremental rebuild under `docs/design/ui-flow-spec.md` | New specification; no graphical interface is currently shipped |
 | Multi-organ | **Compose at load** (`aristide-formats::instrument`): composite TOML files and multi-set launches assemble N sources into one `Organ`; engine/console/UI stay single-instrument | One playable instrument from any sources is the organ-native abstraction (a console with three builders' ranks is one organ); cross-set couplers become plain routes; no organ tag threads through every API forever |
 
 **Legal boundary:** encrypted Hauptwerk sample sets (HW5+-era commercial sets) are
@@ -452,12 +460,21 @@ structural edits; player settings such as wiring and room changes remain editabl
 Legacy display metadata is read for compatibility and preserved by file edits,
 but is not part of the headless server's runtime state.
 
+This describes existing storage. The new spec instead requires named combination
+sets saved separately from the instrument, stop on/off registration only, and
+automatic layers on first edit with global undo and snapshots. Those requirements
+govern the rebuild; implementation and compatibility migration remain to be done.
+
 Organs load at runtime, never implicitly (locked 2026-08-18): the server starts
 without a sampled organ; CLI paths queue a load, and subsequent loads come through
 `POST /api/organ/load`. The engine's bank is fixed at construction (the RT path
 never swaps pointers), so a load builds the new musical console and bank off-thread,
 then replaces engine and stream together on the main thread. A failed load reports
 through the API and leaves the running organ untouched.
+
+The new client's everyday flow will restore the last instrument automatically,
+as specified in `docs/design/ui-flow-spec.md`. The server behaviour above is not
+a reason to require a fresh Library pick on every launch.
 
 ## Milestones
 
@@ -489,7 +506,8 @@ through the API and leaves the running organ untouched.
   (2026-09-02). Nothing is left open on this list.
 - **M5 — headless control**: localhost HTTP/JSON API retained. The Tauri/browser
   UI shipped in August and was removed at the user's request on 2026-09-21.
-  Future clients, richer IPC, OSC and remote control remain deferred.
+  A new UI is now requested under `docs/design/ui-flow-spec.md`, to be implemented
+  incrementally. Richer IPC, OSC and remote control remain deferred.
 - **M6 — contemporary layer**: Scala/MPE/MIDI2/Lumatone input, effects graph public,
   multichannel routing, per-pipe delays. ✅ core complete 2026-08-24 (opened ahead of
   M4/M5 by decision the same day): Scala per-division tuning with nearest-pipe
