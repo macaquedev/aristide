@@ -155,35 +155,6 @@ impl MidiPort {
         any.then_some((low, high))
     }
 
-    /// The colour each extended manual key inherits from this port's
-    /// Lumatone maps targeting `manual`, as `(key, 0xRRGGBB)`. The
-    /// `.ltn` colours physical keys; this walks the same channel-rank
-    /// extended numbering as [`note_lands`](Self::note_lands), so a
-    /// colour lands exactly where its key's notes do. Ports without
-    /// maps yield nothing.
-    pub fn map_colors(&self, manual: usize) -> Vec<(u16, u32)> {
-        let mut colors = Vec::new();
-        for route in &self.routes {
-            let Some(map) = &route.map else { continue };
-            if route.manual != manual {
-                continue;
-            }
-            for (rank, channel) in map.channels().enumerate() {
-                for note in 0..128u8 {
-                    let Some(physical) = map.key_for(channel, note) else { continue };
-                    let Some(colour) = map.colour(physical) else { continue };
-                    let extended = rank as i32 * 128 + note as i32 + route.transpose as i32;
-                    if let Ok(key) = u16::try_from(extended) {
-                        colors.push((key, colour));
-                    }
-                }
-            }
-        }
-        colors.sort_unstable();
-        colors.dedup_by_key(|(key, _)| *key);
-        colors
-    }
-
     fn matching(&self, channel: u8, key: Option<u8>) -> Vec<usize> {
         let mut manuals: Vec<usize> = self
             .routes
@@ -1318,16 +1289,11 @@ mod tests {
             provenance: Default::default(),
             stop_voicing: Default::default(),
         pipe_voicing: Default::default(),
-            stop_labels: Default::default(),
-            stop_order: Default::default(),
             compass_overrides: Vec::new(),
             pending_load: None,
             loading: None,
             load_error: None,
             load_warnings: Vec::new(),
-            layout: Default::default(),
-            coupled_keys: true,
-            coupler_key_modes: Default::default(),
             memory: None,
         }));
         // Everything downstream reads the resolved tables, exactly as
@@ -1459,44 +1425,9 @@ mod tests {
         );
     }
 
-    /// A map's key colours reach the console keyed by the extended
-    /// manual key its notes land on — physical key numbering stays
-    /// the map's private business. Colours on CC keys never surface
-    /// (no note lands there), and other manuals see nothing.
+    /// Saved Lumatone assignments still load their note mappings without a UI.
     #[test]
-    fn lumatone_colours_land_on_extended_keys() {
-        let ltn = "[Board0]\n\
-                   Key_0=60\nChan_0=1\nCol_0=FF0000\n\
-                   Key_1=62\nChan_1=1\n\
-                   Key_2=4\nChan_2=2\nCol_2=64C8DC\n\
-                   Key_3=70\nChan_3=1\nKTyp_3=2\nCol_3=00FF00\n";
-        let map = aristide_model::lumatone::LumatoneMap::parse(ltn).expect("parses");
-        let port = MidiPort {
-            name: "Lumatone".into(),
-            routes: vec![Route {
-                channel: None,
-                manual: 1,
-                keys: (0, 127),
-                transpose: 0,
-                bend: None,
-                map: Some(std::sync::Arc::new(map)),
-            }],
-            bindings: Vec::new(),
-        };
-        assert_eq!(
-            port.map_colors(1),
-            vec![(60, 0xFF0000), (132, 0x64C8DC)],
-            "coloured note keys in extended numbering; uncoloured and CC keys absent"
-        );
-        assert!(port.map_colors(0).is_empty(), "other manuals see nothing");
-    }
-
-    /// The whole live path from a saved assignment to key colours:
-    /// set_input names an .ltn, resolve_routes loads and attaches it,
-    /// and the port then answers map_colors with extended-key colours
-    /// — what the snapshot serves the hex field.
-    #[test]
-    fn resolved_routes_carry_map_colours() {
+    fn resolved_routes_carry_lumatone_note_mappings() {
         let Some((state, manual)) = demo_state("Gamba 8'") else {
             return;
         };
@@ -1522,9 +1453,9 @@ mod tests {
         }
         let locked = state.lock().expect("state poisoned");
         assert_eq!(
-            locked.midi_ports[0].map_colors(manual),
-            vec![(60, 0xFF0000)],
-            "the resolved route serves its map's colours"
+            locked.midi_ports[0].note_lands(0, 60),
+            vec![(manual, 60)],
+            "the resolved route plays its mapped key"
         );
     }
 

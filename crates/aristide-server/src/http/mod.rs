@@ -1,22 +1,19 @@
-//! The shared desktop/browser console and its localhost JSON API.
-//! Public frontend assets are embedded at build time from aristide-console/ui.
+//! Localhost JSON control API for the headless audio server.
 //! The HTTP thread talks to the engine exactly like MIDI: lock the shared
-//! control state and send commands; audio never waits on frontend work.
+//! control state and send commands; audio never waits on API work.
 //!
 //! This module holds the server loop, the route table, the shared
 //! request helpers (`param`, `unescape`, `json`, `bad_request`) and
 //! the state snapshot every handler answers with. One handler module
 //! per domain holds the routes themselves:
 //!
-//! - [`organ`] — loading, saving, the library and browser, manuals,
-//!   enclosures and panel placement
-//! - [`stops`] — drawing, pulling and retiring stops, their order,
-//!   voicing and editor
+//! - [`organ`] — loading, saving, library discovery, manuals and enclosures
+//! - [`stops`] — drawing, pulling and retiring stops, and voicing
 //! - [`couplers`] — engaging, defining and linking couplers
 //! - [`tuning`] — every tuning scope, from instrument to rank
 //! - [`midi`] — ports, input bindings, learn and control bindings
 //! - [`room`] — reverb, noises, tremulants, swell and master gain
-//! - [`play`] — the playing surface: keys, pistons, cancel, panic
+//! - [`play`] — performance controls: keys, pistons, cancel, panic
 
 use std::sync::{Arc, Mutex};
 
@@ -38,27 +35,22 @@ mod tuning;
 /// Every handler answers with one of these: a body plus a status.
 type Reply = Response<std::io::Cursor<Vec<u8>>>;
 
-mod assets {
-    include!(concat!(env!("OUT_DIR"), "/console_assets.rs"));
-}
-
 pub fn spawn(state: Arc<Mutex<State>>, port: u16) -> std::io::Result<()> {
     let server = Server::http(("127.0.0.1", port))
         .map_err(|e| std::io::Error::other(format!("http bind: {e}")))?;
-    tracing::info!("console ui: http://127.0.0.1:{port}/");
+    tracing::info!("control API: http://127.0.0.1:{port}/api/state");
     std::thread::Builder::new()
         .name("aristide-http".into())
         .spawn(move || {
             for request in server.incoming_requests() {
                 // Log every non-poll request so phantom traffic (e.g. a
                 // client sending note-ons nobody asked for) shows up in
-                // the server log with a timestamp. /api/state is the UI's
+                // the server log with a timestamp. /api/state is the client's
                 // steady poll and would drown everything else out.
                 if request.url() != "/api/state" {
                     tracing::info!("http {} {}", request.method(), request.url());
                 }
-                // Consoles are web pages (Tauri webview, plain browser);
-                // they fetch this API cross-origin, so every response
+                // API clients may fetch cross-origin, so every response
                 // carries the permissive CORS header. The bind stays
                 // localhost-only, which is the actual access control.
                 let response = respond(&state, request.method(), request.url())
@@ -78,103 +70,90 @@ fn respond(
     url: &str,
 ) -> Response<std::io::Cursor<Vec<u8>>> {
     let (path, query) = url.split_once('?').unwrap_or((url, ""));
-    if *method == Method::Get
-        && let Some((bytes, mime)) = assets::asset(path)
-    {
-        return Response::from_data(bytes.to_vec()).with_header(
-            Header::from_bytes("Content-Type", mime).expect("asset MIME type"),
-        );
-    }
+    let handler: fn(&Mutex<State>, &str) -> Reply = match (method, path) {
+        (Method::Get, "/api/state") => |state, _| json(snapshot::state_json(state)),
+        (Method::Post, "/api/stop") => stops::draw,
+        (Method::Post, "/api/cancel") => play::cancel,
+        (Method::Post, "/api/coupler") => couplers::engage,
+        (Method::Post, "/api/noises") => room::noises,
+        (Method::Post, "/api/bus") => room::bus,
+        (Method::Post, "/api/reverb") => room::reverb,
+        (Method::Post, "/api/tuning") => tuning::set,
+        (Method::Post, "/api/organ/move") => stops::move_to_manual,
+        (Method::Post, "/api/organ/coupler") => couplers::keep,
+        (Method::Post, "/api/organ/compass") => organ::compass,
+        (Method::Post, "/api/organ/manual/add") => organ::manual_add,
+        (Method::Post, "/api/organ/manual/kind") => organ::manual_kind,
+        (Method::Post, "/api/organ/manual/hex") => organ::manual_hex,
+        (Method::Post, "/api/organ/manual/rename") => organ::manual_rename,
+        (Method::Post, "/api/organ/manual/remove") => organ::manual_remove,
+        (Method::Post, "/api/organ/manual/order") => organ::manual_order,
+        (Method::Post, "/api/organ/source/add") => organ::source_add,
+        (Method::Post, "/api/organ/pull") => stops::pull,
+        (Method::Post, "/api/organ/unpull") => stops::unpull,
+        (Method::Post, "/api/organ/stop/rename") => stops::rename,
+        (Method::Post, "/api/organ/stop/voice") => stops::voice,
+        (Method::Post, "/api/organ/voicing") => stops::voicing,
+        (Method::Post, "/api/organ/stop/compass") => stops::compass,
+        (Method::Post, "/api/organ/stop/own_pipes") => stops::own_pipes,
+        (Method::Post, "/api/organ/coupler/rename") => couplers::rename,
+        (Method::Post, "/api/organ/coupler/routes") => couplers::routes,
+        (Method::Post, "/api/organ/coupler/add") => couplers::add,
+        (Method::Post, "/api/organ/coupler/remove") => couplers::remove,
+        (Method::Post, "/api/organ/coupler/link") => couplers::link,
+        (Method::Post, "/api/organ/stop/source") => stops::source,
+        (Method::Post, "/api/organ/enclosure/add") => organ::enclosure_add,
+        (Method::Post, "/api/organ/enclosure/remove") => organ::enclosure_remove,
+        (Method::Post, "/api/organ/enclosure/assign") => organ::enclosure_assign,
+        (Method::Get, "/api/organ/offerings") => organ::offerings,
+        (Method::Post, "/api/organ/load") => organ::load,
+        (Method::Post, "/api/organ/new") => organ::create,
+        (Method::Post, "/api/organ/rename") => organ::rename,
+        (Method::Post, "/api/library/forget") => organ::library_forget,
+        (Method::Post, "/api/prefs/samples") => prefs::samples,
+        (Method::Get, "/api/browse") => organ::browse,
+        (Method::Post, "/api/organ/save") => organ::save,
+        (Method::Post, "/api/organ/save_as") => organ::save_as,
+        (Method::Post, "/api/midi/bind") => midi::bind,
+        (Method::Post, "/api/midi/unbind") => midi::unbind,
+        (Method::Post, "/api/midi/learn") => midi::learn,
+        (Method::Post, "/api/key") => midi::key,
+        (Method::Post, "/api/action") => midi::action,
+        (Method::Post, "/api/control/bind") => midi::control_bind,
+        (Method::Post, "/api/control/unbind") => midi::control_unbind,
+        (Method::Post, "/api/conflict") => midi::conflict,
+        (Method::Post, "/api/control/learn") => midi::control_learn,
+        (Method::Post, "/api/couplers") => couplers::repitch,
+        (Method::Post, "/api/midi/rescan") => midi::rescan,
+        (Method::Post, "/api/note") => play::note,
+        (Method::Post, "/api/panic") => play::panic_button,
+        (Method::Post, "/api/general") => play::general,
+        (Method::Post, "/api/divisional") => play::divisional,
+        (Method::Post, "/api/stepper") => play::stepper,
+        (Method::Post, "/api/crescendo") => play::crescendo,
+        (Method::Post, "/api/setter") => play::setter,
+        (Method::Post, "/api/trem") => room::trem,
+        (Method::Post, "/api/trem/params") => room::trem_params,
+        (Method::Post, "/api/enclosure") => room::enclosure,
+        (Method::Post, "/api/gain") => room::gain,
+        _ => return Response::from_string("not found").with_status_code(404),
+    };
     // A sample set's own organ stays the instrument the set defines:
     // one gate, ahead of every handler, so no change to the instrument
     // itself lands live or in the file until the organ is saved under
     // a different name. The player's own settings (wiring, room,
-    // whole-instrument pitch, console layout) pass — they are about
-    // this player, not the set. 409, not 400 — the request is fine,
-    // the organ's state is what refuses — so the console can answer
-    // with the save-as dialog rather than an error strip.
+    // whole-instrument pitch) pass. The organ's state refuses an
+    // instrument edit with 409 so clients can save a copy before retrying.
     if *method == Method::Post
         && changes_instrument(path, query)
         && state.lock().expect("state poisoned").setup.adopted
     {
         return adopted_refusal();
     }
-    match (method, path) {
-        (Method::Get, "/api/state") => json(snapshot::state_json(state)),
-        (Method::Post, "/api/stop") => stops::draw(state, query),
-        (Method::Post, "/api/cancel") => play::cancel(state, query),
-        (Method::Post, "/api/coupler") => couplers::engage(state, query),
-        (Method::Post, "/api/noises") => room::noises(state, query),
-        (Method::Post, "/api/bus") => room::bus(state, query),
-        (Method::Post, "/api/reverb") => room::reverb(state, query),
-        (Method::Post, "/api/tuning") => tuning::set(state, query),
-        (Method::Post, "/api/organ/move") => stops::move_to_manual(state, query),
-        (Method::Post, "/api/organ/coupler") => couplers::keep(state, query),
-        (Method::Post, "/api/organ/compass") => organ::compass(state, query),
-        (Method::Post, "/api/organ/manual/add") => organ::manual_add(state, query),
-        (Method::Post, "/api/organ/manual/kind") => organ::manual_kind(state, query),
-        (Method::Post, "/api/organ/manual/hex") => organ::manual_hex(state, query),
-        (Method::Post, "/api/organ/manual/rename") => organ::manual_rename(state, query),
-        (Method::Post, "/api/organ/manual/remove") => organ::manual_remove(state, query),
-        (Method::Post, "/api/organ/manual/order") => organ::manual_order(state, query),
-        (Method::Post, "/api/organ/source/add") => organ::source_add(state, query),
-        (Method::Post, "/api/organ/pull") => stops::pull(state, query),
-        (Method::Post, "/api/organ/unpull") => stops::unpull(state, query),
-        (Method::Post, "/api/organ/stop/rename") => stops::rename(state, query),
-        (Method::Post, "/api/organ/stop/voice") => stops::voice(state, query),
-        (Method::Post, "/api/organ/voicing") => stops::voicing(state, query),
-        (Method::Post, "/api/organ/stop/label") => stops::label(state, query),
-        (Method::Post, "/api/organ/stop/compass") => stops::compass(state, query),
-        (Method::Post, "/api/organ/stop/own_pipes") => stops::own_pipes(state, query),
-        (Method::Post, "/api/organ/coupler/rename") => couplers::rename(state, query),
-        (Method::Post, "/api/organ/coupler/routes") => couplers::routes(state, query),
-        (Method::Post, "/api/organ/coupler/add") => couplers::add(state, query),
-        (Method::Post, "/api/organ/coupler/remove") => couplers::remove(state, query),
-        (Method::Post, "/api/organ/coupler/link") => couplers::link(state, query),
-        (Method::Post, "/api/organ/coupler/keys") => couplers::keys(state, query),
-        (Method::Post, "/api/organ/coupled_keys") => couplers::coupled_keys(state, query),
-        (Method::Post, "/api/organ/stop/source") => stops::source(state, query),
-        (Method::Post, "/api/organ/enclosure/add") => organ::enclosure_add(state, query),
-        (Method::Post, "/api/organ/enclosure/remove") => organ::enclosure_remove(state, query),
-        (Method::Post, "/api/organ/enclosure/assign") => organ::enclosure_assign(state, query),
-        (Method::Post, "/api/organ/panel/place") => organ::panel_place(state, query),
-        (Method::Post, "/api/organ/stop/order") => stops::order(state, query),
-        (Method::Get, "/api/organ/offerings") => organ::offerings(state, query),
-        (Method::Post, "/api/organ/load") => organ::load(state, query),
-        (Method::Post, "/api/organ/new") => organ::create(state, query),
-        (Method::Post, "/api/organ/rename") => organ::rename(state, query),
-        (Method::Post, "/api/library/forget") => organ::library_forget(state, query),
-        (Method::Post, "/api/prefs/samples") => prefs::samples(state, query),
-        (Method::Get, "/api/browse") => organ::browse(state, query),
-        (Method::Post, "/api/organ/save") => organ::save(state, query),
-        (Method::Post, "/api/organ/save_as") => organ::save_as(state, query),
-        (Method::Post, "/api/midi/bind") => midi::bind(state, query),
-        (Method::Post, "/api/midi/unbind") => midi::unbind(state, query),
-        (Method::Post, "/api/midi/learn") => midi::learn(state, query),
-        (Method::Post, "/api/key") => midi::key(state, query),
-        (Method::Post, "/api/action") => midi::action(state, query),
-        (Method::Post, "/api/control/bind") => midi::control_bind(state, query),
-        (Method::Post, "/api/control/unbind") => midi::control_unbind(state, query),
-        (Method::Post, "/api/conflict") => midi::conflict(state, query),
-        (Method::Post, "/api/control/learn") => midi::control_learn(state, query),
-        (Method::Post, "/api/couplers") => couplers::repitch(state, query),
-        (Method::Post, "/api/midi/rescan") => midi::rescan(state, query),
-        (Method::Post, "/api/note") => play::note(state, query),
-        (Method::Post, "/api/panic") => play::panic_button(state, query),
-        (Method::Post, "/api/general") => play::general(state, query),
-        (Method::Post, "/api/divisional") => play::divisional(state, query),
-        (Method::Post, "/api/stepper") => play::stepper(state, query),
-        (Method::Post, "/api/crescendo") => play::crescendo(state, query),
-        (Method::Post, "/api/setter") => play::setter(state, query),
-        (Method::Post, "/api/trem") => room::trem(state, query),
-        (Method::Post, "/api/trem/params") => room::trem_params(state, query),
-        (Method::Post, "/api/enclosure") => room::enclosure(state, query),
-        (Method::Post, "/api/gain") => room::gain(state, query),
-        _ => Response::from_string("not found").with_status_code(404),
-    }
+    handler(state, query)
 }
 
-/// A key press/release from the UI — same path as a MIDI note, but
+/// A key press/release from an API client — same path as a MIDI note, but
 /// addressed by manual index rather than channel.
 fn apply_note(state: &Mutex<State>, manual: usize, key: u16, on: bool) {
     let mut state = state.lock().expect("state poisoned");
@@ -311,8 +290,7 @@ fn adopted_refusal() -> Response<std::io::Cursor<Vec<u8>>> {
 /// tuning of any scope below the whole instrument, the tremulant's
 /// shape, the organ's name) is the instrument. Anything about how
 /// this player uses it — MIDI wiring and the learns and conflicts
-/// that end in a bind, the room, the whole-instrument pitch, where
-/// panels sit, how knobs are ordered, whether coupled keys show — is
+/// that end in a bind, the room, the whole-instrument pitch — is
 /// the player's, and lands in the set's own organ file so the set
 /// comes back wired and pitched as they left it. Playing (stops,
 /// keys, swell, gain, pistons) is no change at all; neither is
@@ -327,10 +305,7 @@ fn changes_instrument(path: &str, query: &str) -> bool {
             .iter()
             .any(|scope| param(query, scope).is_some()),
         "/api/trem/params" => true,
-        "/api/organ/load" | "/api/organ/new" | "/api/organ/save" | "/api/organ/save_as"
-        | "/api/organ/panel/place" | "/api/organ/stop/order" | "/api/organ/coupled_keys" => {
-            false
-        }
+        "/api/organ/load" | "/api/organ/new" | "/api/organ/save" | "/api/organ/save_as" => false,
         _ => path.starts_with("/api/organ/"),
     }
 }
@@ -440,17 +415,12 @@ mod tests {
             setup: Default::default(),
             provenance,
             stop_voicing: Default::default(),
-        pipe_voicing: Default::default(),
-            stop_labels: Default::default(),
-            stop_order: Default::default(),
+            pipe_voicing: Default::default(),
             compass_overrides: Vec::new(),
             pending_load: None,
             loading: None,
             load_error: None,
             load_warnings: Vec::new(),
-            layout: Default::default(),
-            coupled_keys: true,
-            coupler_key_modes: Default::default(),
             memory: None,
         }));
         // As the server does once before it opens any device: routing,
@@ -921,19 +891,6 @@ mod tests {
             !cancelled.contains("\"on\":true"),
             "cancel left something drawn: {cancelled}"
         );
-    }
-
-    #[test]
-    fn browser_and_desktop_share_the_embedded_console() {
-        let (page, mime) = super::assets::asset("/").expect("console index");
-        assert_eq!(mime, "text/html; charset=utf-8");
-        assert!(String::from_utf8_lossy(page).contains("workspace-nav"));
-        assert_eq!(super::assets::asset("/index.html").unwrap().0, page);
-        assert_eq!(super::assets::asset("/style.css").unwrap().1, "text/css; charset=utf-8");
-        assert!(super::assets::asset("/js/workspaces.js").is_some());
-        assert_eq!(super::assets::asset("/fonts/InterVariable.woff2").unwrap().1, "font/woff2");
-        assert!(super::assets::asset("/js/play-layout.test.js").is_none());
-        assert!(super::assets::asset("/../Cargo.toml").is_none());
     }
 
     /// The combination action over HTTP, and the shape the piston rail
@@ -1710,32 +1667,6 @@ mod tests {
         let text = std::fs::read_to_string(&file).expect("reads");
         assert!(!text.contains("stops = [\"Diapason 8\"]"), "{text}");
 
-        // The knob engraving: live like the rename, a value in the
-        // snapshot and a line in the file; auto takes both away again.
-        let labeled = respond(
-            &state,
-            &Method::Post,
-            "/api/organ/stop/label?stop=16&label=8%20Fuss",
-        );
-        assert_eq!(labeled.status_code().0, 200);
-        assert!(
-            state.lock().expect("state").pending_load.is_none(),
-            "an engraving is a label — no rebuild"
-        );
-        assert!(state_json(&state).contains("\"label\":\"8 Fuss\""));
-        let text = std::fs::read_to_string(&file).expect("reads");
-        assert!(text.contains("pitch_label = \"8 Fuss\""), "{text}");
-        let hidden = respond(&state, &Method::Post, "/api/organ/stop/label?stop=16&label=");
-        assert_eq!(hidden.status_code().0, 200);
-        assert!(
-            state_json(&state).contains("\"label\":\"\""),
-            "the empty engraving is a value, not an absence"
-        );
-        let auto = respond(&state, &Method::Post, "/api/organ/stop/label?stop=16&auto=1");
-        assert_eq!(auto.status_code().0, 200);
-        assert!(!state_json(&state).contains("\"label\""));
-        assert!(!std::fs::read_to_string(&file).expect("reads").contains("pitch_label"));
-
         // Re-sourcing is structural: the pull line now names the other
         // stop, keeps the drawknob's label, and the organ rebuilds.
         let retargeted = respond(
@@ -1763,111 +1694,6 @@ mod tests {
             !def.stops.iter().any(|pull| pull.stop == "Montre 8'"),
             "the old pull is gone"
         );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// Drawknob order and panel size are display facts with the panel-
-    /// placement contract: live (no rebuild), written to the file's
-    /// [console] section, and name-keyed order follows a stop rename.
-    #[test]
-    fn stop_order_and_panel_size_are_live_layout_facts() {
-        let Some(state) = demo_state() else { return };
-        let demo = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../testsets/grandorgue-demo/demo.organ");
-        let dir = std::env::temp_dir().join("aristide-order-endpoints-test");
-        let _ = std::fs::remove_dir_all(&dir);
-        let organ = aristide_formats::grandorgue::load(&demo).expect("demo parses").organ;
-        let canonical = demo.canonicalize().expect("canonicalizes");
-        let file =
-            crate::config::create_wrapper_organ(&dir, "Order Test", &canonical, &organ, None)
-                .expect("inventory written");
-        state.lock().expect("state").composite_path = Some(file.clone());
-
-        // First Manual's stops in snapshot order; reorder them reversed.
-        let ids = |body: &str| -> Vec<u64> {
-            let value: serde_json::Value = serde_json::from_str(body).expect("valid JSON");
-            value["stops"]
-                .as_array()
-                .expect("stops")
-                .iter()
-                .filter(|stop| stop["midx"] == 1)
-                .map(|stop| stop["id"].as_u64().expect("id"))
-                .collect()
-        };
-        let before = ids(&state_json(&state));
-        let reversed: Vec<String> = before.iter().rev().map(u64::to_string).collect();
-        let ordered = respond(
-            &state,
-            &Method::Post,
-            &format!("/api/organ/stop/order?manual=1&stops={}", reversed.join(",")),
-        );
-        assert_eq!(ordered.status_code().0, 200);
-        assert!(
-            state.lock().expect("state").pending_load.is_none(),
-            "an order is display only — no rebuild"
-        );
-        let after = ids(&state_json(&state));
-        assert_eq!(
-            after,
-            before.iter().rev().copied().collect::<Vec<_>>(),
-            "the snapshot deals the stops out in the new order"
-        );
-        let def: aristide_formats::instrument::Definition =
-            toml::from_str(&std::fs::read_to_string(&file).expect("reads")).expect("parses");
-        let listed = def.console.order.get("First Manual").expect("order written");
-        assert_eq!(listed.len(), before.len());
-
-        // The order is name-keyed; a rename must carry its entry.
-        assert_eq!(listed[0], "Cornett III", "reversed: the last stop leads");
-        let montre = respond(
-            &state,
-            &Method::Post,
-            "/api/organ/stop/rename?stop=16&name=Diapason%208",
-        );
-        assert_eq!(montre.status_code().0, 200);
-        let def: aristide_formats::instrument::Definition =
-            toml::from_str(&std::fs::read_to_string(&file).expect("reads")).expect("parses");
-        let listed = def.console.order.get("First Manual").expect("still ordered");
-        assert!(listed.iter().any(|name| name == "Diapason 8"), "{listed:?}");
-        assert!(listed.iter().all(|name| name != "Montre 8'"));
-        let after_rename = ids(&state_json(&state));
-        assert_eq!(after, after_rename, "the renamed knob kept its place");
-
-        // A stray id refuses — the reorder raced an edit.
-        let stray = respond(
-            &state,
-            &Method::Post,
-            "/api/organ/stop/order?manual=1&stops=0",
-        );
-        assert_eq!(stray.status_code().0, 400, "stop 0 is the Pedal's");
-
-        // Sizing a jamb rides panel placement: w/h in the layout, the
-        // file, and later plain moves keep the size.
-        let sized = respond(
-            &state,
-            &Method::Post,
-            "/api/organ/panel/place?panel=jamb%3AFirst%20Manual&x=0.1&y=0.2&w=0.25&h=0.5",
-        );
-        assert_eq!(sized.status_code().0, 200);
-        let value: serde_json::Value =
-            serde_json::from_str(&state_json(&state)).expect("valid JSON");
-        assert_eq!(value["layout"]["jamb:First Manual"]["w"], 0.25);
-        assert_eq!(value["layout"]["jamb:First Manual"]["h"], 0.5);
-        let moved = respond(
-            &state,
-            &Method::Post,
-            "/api/organ/panel/place?panel=jamb%3AFirst%20Manual&x=0.3&y=0.2",
-        );
-        assert_eq!(moved.status_code().0, 200);
-        let value: serde_json::Value =
-            serde_json::from_str(&state_json(&state)).expect("valid JSON");
-        assert_eq!(value["layout"]["jamb:First Manual"]["x"], 0.3);
-        assert_eq!(
-            value["layout"]["jamb:First Manual"]["h"], 0.5,
-            "a plain move never un-sizes"
-        );
-        let text = std::fs::read_to_string(&file).expect("reads");
-        assert!(text.contains("w = 0.25"), "{text}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1984,12 +1810,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Couplers seat in jambs (a `c` token in the rank order), link
-    /// into one action that moves together, and pull coupled keys down
-    /// for the display — all live console facts, no rebuild; deleting
-    /// a define rewrites the file and rebuilds.
+    /// Coupler links apply live, while deleting a definition reloads the organ.
     #[test]
-    fn couplers_seat_link_and_pull_keys() {
+    fn coupler_links_apply_live_and_removal_reloads() {
         let Some(state) = demo_state() else { return };
         let demo = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../testsets/grandorgue-demo/demo.organ");
@@ -2015,65 +1838,12 @@ mod tests {
                 .expect("idx")
         };
 
-        // Seat II/I in First Manual's jamb, between its stops: the
-        // rank order takes the `c` token, the snapshot deals the
-        // manual's rank with the coupler in place and stamps the
-        // coupler's seat — live, no rebuild.
-        let value = snapshot();
-        let ii_i = coupler_idx(&value, "II/I");
-        let stops: Vec<String> = value["stops"]
-            .as_array()
-            .expect("stops")
-            .iter()
-            .filter(|stop| stop["midx"] == 1)
-            .map(|stop| format!("s{}", stop["id"].as_u64().expect("id")))
-            .collect();
-        let mut items = stops.clone();
-        items.insert(1, format!("c{ii_i}"));
-        let seated = respond(
-            &state,
-            &Method::Post,
-            &format!("/api/organ/stop/order?manual=1&items={}", items.join(",")),
-        );
-        assert_eq!(seated.status_code().0, 200);
-        assert!(
-            state.lock().expect("state").pending_load.is_none(),
-            "a seat is display only — no rebuild"
-        );
-        let value = snapshot();
-        let manual = &value["manuals"].as_array().expect("manuals")[1];
-        let rank: Vec<&str> =
-            manual["rank"].as_array().expect("rank").iter().map(|t| t.as_str().unwrap()).collect();
-        assert_eq!(rank[1], format!("c{ii_i}"), "the coupler sits second: {rank:?}");
-        assert_eq!(
-            value["couplers"].as_array().expect("couplers")[ii_i as usize]["midx"], 1,
-            "the coupler knows its jamb"
-        );
-        let text = std::fs::read_to_string(&file).expect("reads");
-        assert!(text.contains("coupler:II/I"), "{text}");
-
-        // A coupler has one seat: listing it in another division's
-        // rank unseats it from the first.
-        let moved = respond(
-            &state,
-            &Method::Post,
-            &format!("/api/organ/stop/order?manual=2&items=c{ii_i}"),
-        );
-        assert_eq!(moved.status_code().0, 200);
-        let value = snapshot();
-        assert_eq!(value["couplers"].as_array().expect("couplers")[ii_i as usize]["midx"], 2);
-        let first: Vec<&str> = value["manuals"].as_array().expect("manuals")[1]["rank"]
-            .as_array()
-            .expect("rank")
-            .iter()
-            .map(|t| t.as_str().unwrap())
-            .collect();
-        assert!(!first.contains(&format!("c{ii_i}").as_str()), "unseated: {first:?}");
+        let ii_i = coupler_idx(&snapshot(), "II/I");
 
         // Linking two couplers makes them one action: engaging either
         // engages both, releasing either releases both — live, in the
         // snapshot's `linked`, and in the file's [couplers] link.
-        let ii_p = coupler_idx(&value, "II/P");
+        let ii_p = coupler_idx(&snapshot(), "II/P");
         let linked = respond(
             &state,
             &Method::Post,
@@ -2106,38 +1876,6 @@ mod tests {
         let value = snapshot();
         assert!(on(&value, ii_i) && !on(&value, ii_p), "unlinked couplers part ways");
 
-        // With II/I engaged, a First Manual key pulls the coupled key
-        // down on the Second Manual — display only, `coupled` beside
-        // `held`, and never a note the sound path didn't already play.
-        respond(&state, &Method::Post, "/api/note?manual=1&key=60&on=1");
-        let value = snapshot();
-        let manuals = value["manuals"].as_array().expect("manuals");
-        assert_eq!(manuals[1]["held"][0], 60);
-        assert_eq!(manuals[2]["coupled"][0], 60, "the coupled key goes down too");
-        assert!(manuals[2]["held"].as_array().is_none_or(|held| held.is_empty()));
-
-        // The organ default turns the display off; a per-coupler
-        // "always" override brings this coupler's back.
-        let off = respond(&state, &Method::Post, "/api/organ/coupled_keys?on=0");
-        assert_eq!(off.status_code().0, 200);
-        let value = snapshot();
-        assert_eq!(value["coupled_keys"], false);
-        assert!(value["manuals"][2]["coupled"].as_array().is_none_or(|c| c.is_empty()));
-        let always = respond(
-            &state,
-            &Method::Post,
-            &format!("/api/organ/coupler/keys?idx={ii_i}&mode=always"),
-        );
-        assert_eq!(always.status_code().0, 200);
-        let value = snapshot();
-        assert_eq!(value["manuals"][2]["coupled"][0], 60);
-        assert_eq!(value["couplers"].as_array().expect("couplers")[ii_i as usize]["keys"], "always");
-        let def: aristide_formats::instrument::Definition =
-            toml::from_str(&std::fs::read_to_string(&file).expect("reads")).expect("parses");
-        assert_eq!(def.console.coupled_keys, Some(false));
-        assert_eq!(def.console.coupler_keys.get("II/I").map(String::as_str), Some("always"));
-        respond(&state, &Method::Post, "/api/note?manual=1&key=60&on=0");
-
         // Deleting a define rewrites the file — every reference goes
         // with it — and rebuilds.
         let removed = respond(
@@ -2156,193 +1894,6 @@ mod tests {
             toml::from_str(&std::fs::read_to_string(&file).expect("reads")).expect("parses");
         assert!(!def.couplers.define.iter().any(|d| d.name == "II/I"), "the define is gone");
         assert!(def.console.coupler_keys.is_empty(), "its override went with it");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// Panel placement (`/api/organ/panel/place`) is cosmetic console
-    /// geometry, not organ structure: it writes `[console.layout]` and
-    /// updates the snapshot, but — unlike every editor above — never
-    /// queues a rebuild. Manual renames/removals carry a placed panel's
-    /// key along or drop it.
-    #[test]
-    fn panel_placement_persists_without_reloading() {
-        let Some(state) = demo_state() else { return };
-
-        // No organ at all: refused outright.
-        let none = tone_state();
-        let no_organ = respond(
-            &none,
-            &Method::Post,
-            "/api/organ/panel/place?panel=shoes&x=0&y=0",
-        );
-        assert_eq!(no_organ.status_code().0, 400);
-
-        // An organ that isn't saved as a file yet (the fixture's
-        // `demo_state` never sets `composite_path`): refused the same
-        // way every other structural editor is.
-        let implicit = respond(
-            &state,
-            &Method::Post,
-            "/api/organ/panel/place?panel=shoes&x=0&y=0",
-        );
-        assert_eq!(implicit.status_code().0, 400);
-
-        let demo = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../testsets/grandorgue-demo/demo.organ");
-        let dir = std::env::temp_dir().join("aristide-panel-place-test");
-        let _ = std::fs::remove_dir_all(&dir);
-        let organ = aristide_formats::grandorgue::load(&demo).expect("demo parses").organ;
-        let canonical = demo.canonicalize().expect("canonicalizes");
-        let file =
-            crate::config::create_wrapper_organ(&dir, "Panel Test", &canonical, &organ, None)
-                .expect("inventory written");
-        state.lock().expect("state").composite_path = Some(file.clone());
-
-        // Place a keyboard panel: 200, the snapshot carries it, the
-        // file on disk has the line — and nothing was queued for
-        // reload, unlike every structural edit.
-        let ok = respond(
-            &state,
-            &Method::Post,
-            "/api/organ/panel/place?panel=keyboard%3AFirst%20Manual&x=0.4375&y=0.3125",
-        );
-        assert_eq!(ok.status_code().0, 200);
-        assert!(
-            state.lock().expect("state").pending_load.is_none(),
-            "a cosmetic edit never queues a rebuild"
-        );
-        let value: serde_json::Value =
-            serde_json::from_str(&state_json(&state)).expect("valid JSON");
-        assert_eq!(value["layout"]["keyboard:First Manual"]["x"], 0.4375);
-        assert_eq!(value["layout"]["keyboard:First Manual"]["y"], 0.3125);
-        let text = std::fs::read_to_string(&file).expect("reads");
-        assert!(text.contains("[console.layout]"), "{text}");
-        assert!(text.contains("\"keyboard:First Manual\""), "{text}");
-        assert!(text.contains("0.4375") && text.contains("0.3125"), "{text}");
-
-        // Out-of-range coordinates are clamped, not refused.
-        let clamped = respond(
-            &state,
-            &Method::Post,
-            "/api/organ/panel/place?panel=shoes&x=-0.5&y=1.75",
-        );
-        assert_eq!(clamped.status_code().0, 200);
-        let value: serde_json::Value =
-            serde_json::from_str(&state_json(&state)).expect("valid JSON");
-        assert_eq!(value["layout"]["shoes"]["x"], 0.0);
-        assert_eq!(value["layout"]["shoes"]["y"], 1.0);
-
-        // Invalid panel ids are refused outright, nothing written.
-        let no_such_manual = respond(
-            &state,
-            &Method::Post,
-            "/api/organ/panel/place?panel=keyboard%3ANope&x=0&y=0",
-        );
-        assert_eq!(no_such_manual.status_code().0, 400);
-        let garbage = respond(
-            &state,
-            &Method::Post,
-            "/api/organ/panel/place?panel=garbage&x=0&y=0",
-        );
-        assert_eq!(garbage.status_code().0, 400);
-        assert!(
-            !std::fs::read_to_string(&file).expect("reads").contains("Nope"),
-            "the refused edit never touched the file"
-        );
-
-        // Placing on a manual's jamb too, then renaming that manual:
-        // both its panel keys — keyboard and jamb — follow the rename,
-        // in the snapshot and in the file.
-        respond(
-            &state,
-            &Method::Post,
-            "/api/organ/panel/place?panel=jamb%3AFirst%20Manual&x=0.1&y=0.2",
-        );
-        let renamed = respond(
-            &state,
-            &Method::Post,
-            "/api/organ/manual/rename?manual=1&name=Grand",
-        );
-        assert_eq!(renamed.status_code().0, 200);
-        {
-            // No main loop runs in tests: a structural edit still
-            // queues a rebuild (unlike panel placement), so it must be
-            // cleared before the next editor call is allowed.
-            let mut state = state.lock().expect("state");
-            assert!(state.pending_load.is_some(), "the rename is structural");
-            state.pending_load = None;
-            state.loading = None;
-        }
-        let value: serde_json::Value =
-            serde_json::from_str(&state_json(&state)).expect("valid JSON");
-        let layout = value["layout"].as_object().expect("layout object");
-        assert!(layout.contains_key("keyboard:Grand"), "{layout:?}");
-        assert!(layout.contains_key("jamb:Grand"), "{layout:?}");
-        assert!(
-            !layout.contains_key("keyboard:First Manual") && !layout.contains_key("jamb:First Manual"),
-            "the old keys are gone: {layout:?}"
-        );
-        let text = std::fs::read_to_string(&file).expect("reads");
-        assert!(text.contains("\"keyboard:Grand\""), "{text}");
-        assert!(text.contains("\"jamb:Grand\""), "{text}");
-
-        // Placing on, then removing, an unrelated manual drops just
-        // its own panel key.
-        respond(
-            &state,
-            &Method::Post,
-            "/api/organ/panel/place?panel=keyboard%3ASecond%20Manual&x=0.6&y=0.6",
-        );
-        let removed = respond(&state, &Method::Post, "/api/organ/manual/remove?manual=2");
-        assert_eq!(removed.status_code().0, 200);
-        {
-            let mut state = state.lock().expect("state");
-            assert!(state.pending_load.is_some());
-            state.pending_load = None;
-            state.loading = None;
-        }
-        let value: serde_json::Value =
-            serde_json::from_str(&state_json(&state)).expect("valid JSON");
-        let layout = value["layout"].as_object().expect("layout object");
-        assert!(
-            !layout.contains_key("keyboard:Second Manual"),
-            "the removed manual's panel is gone: {layout:?}"
-        );
-        assert!(layout.contains_key("keyboard:Grand"), "the untouched manual survives");
-        assert!(layout.contains_key("shoes"));
-
-        // Reloading the file straight through the format layer (the
-        // test runs no main loop to reload the live console) carries
-        // exactly what survived: shoes, and Grand's two panels.
-        let reloaded = aristide_formats::instrument::load(&file).expect("reloads");
-        let mut keys: Vec<&str> = reloaded.console_layout.keys().map(String::as_str).collect();
-        keys.sort_unstable();
-        assert_eq!(keys, ["jamb:Grand", "keyboard:Grand", "shoes"]);
-
-        // Auto arrange clears geometry only, including on a protected source
-        // organ. Stop ordering and all musical settings remain intact.
-        let before = format!("{}\n# Keep this order\n[console.order]\nGrand = [\"Montre 8\"]\n",
-            std::fs::read_to_string(&file).expect("reads"));
-        std::fs::write(&file, &before).expect("adds order");
-        let mut expected: toml::Value = toml::from_str(&before).expect("parses");
-        expected["console"].as_table_mut().expect("console").remove("layout");
-        state.lock().expect("state").loading = Some("rebuilding".into());
-        let refused = respond(&state, &Method::Post, "/api/organ/panel/place?reset=1");
-        assert_eq!(refused.status_code().0, 400);
-        assert_eq!(std::fs::read_to_string(&file).expect("reads"), before);
-        {
-            let mut state = state.lock().expect("state");
-            state.loading = None;
-            state.setup.adopted = true;
-        }
-        let reset = respond(&state, &Method::Post, "/api/organ/panel/place?reset=1");
-        assert_eq!(reset.status_code().0, 200);
-        assert!(state.lock().expect("state").layout.is_empty());
-        assert!(state.lock().expect("state").pending_load.is_none());
-        let after = std::fs::read_to_string(&file).expect("reads");
-        assert_eq!(toml::from_str::<toml::Value>(&after).expect("parses"), expected);
-        assert!(after.contains("# Keep this order"));
-        assert!(aristide_formats::instrument::load(&file).expect("reloads").console_layout.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2499,7 +2050,29 @@ mod tests {
         assert!(silent.is_empty());
     }
 
-    /// A state with no organ loaded — what the picker talks to.
+    /// Removing the frontend must not disable the headless control API.
+    #[test]
+    fn headless_api_has_no_frontend_or_presentation_routes() {
+        let state = tone_state();
+        for path in ["/", "/index.html", "/style.css", "/js/main.js", "/fonts/InterVariable.woff2"] {
+            assert_eq!(respond(&state, &Method::Get, path).status_code().0, 404, "{path}");
+        }
+        // Even a protected instrument cannot revive removed UI routes.
+        state.lock().expect("state").setup.adopted = true;
+        for path in [
+            "/api/organ/panel/place?panel=shoes&x=0&y=0",
+            "/api/organ/stop/order?manual=0&stops=1",
+            "/api/organ/stop/label?stop=1&label=8",
+            "/api/organ/coupler/keys?idx=0&mode=always",
+            "/api/organ/coupled_keys?on=1",
+        ] {
+            assert_eq!(respond(&state, &Method::Post, path).status_code().0, 404, "{path}");
+        }
+        assert_eq!(respond(&state, &Method::Get, "/api/state").status_code().0, 200);
+        assert_eq!(respond(&state, &Method::Post, "/api/gain?v=0.1").status_code().0, 200);
+        assert_eq!(respond(&state, &Method::Post, "/api/panic").status_code().0, 200);
+    }
+
     fn tone_state() -> Arc<Mutex<State>> {
         let (_engine, handle) =
             aristide_engine::Engine::new(48000.0, std::sync::Arc::new(Default::default()));
@@ -2530,17 +2103,12 @@ mod tests {
             setup: Default::default(),
             provenance: Default::default(),
             stop_voicing: Default::default(),
-        pipe_voicing: Default::default(),
-            stop_labels: Default::default(),
-            stop_order: Default::default(),
+            pipe_voicing: Default::default(),
             compass_overrides: Vec::new(),
             pending_load: None,
             loading: None,
             load_error: None,
             load_warnings: Vec::new(),
-            layout: Default::default(),
-            coupled_keys: true,
-            coupler_key_modes: Default::default(),
             memory: None,
         }))
     }
@@ -3000,6 +2568,13 @@ mod tests {
         let canonical = demo.canonicalize().expect("canonicalizes");
         let file = crate::config::create_wrapper_organ(&dir, "Repro", &canonical, &organ, None)
             .expect("inventory written");
+        // Existing files may still contain visual metadata; musical edits
+        // must preserve their readability even though placement has no API.
+        let legacy = format!(
+            "{}\n[console.layout]\n\"keyboard:First Manual\" = {{ x = 0.4, y = 0.3 }}\n\"jamb:First Manual\" = {{ x = 0.1, y = 0.3 }}\n",
+            std::fs::read_to_string(&file).expect("reads")
+        );
+        std::fs::write(&file, legacy).expect("legacy panel metadata");
         state.lock().expect("state").composite_path = Some(file.clone());
 
         let clear = |state: &Mutex<State>| {
@@ -3015,8 +2590,6 @@ mod tests {
         };
 
         let steps: &[(&str, &str)] = &[
-            ("place keyboard", "/api/organ/panel/place?panel=keyboard%3AFirst%20Manual&x=0.4&y=0.3"),
-            ("place jamb", "/api/organ/panel/place?panel=jamb%3AFirst%20Manual&x=0.1&y=0.3"),
             ("move a stop", "/api/organ/move?stop=16&manual=0"),
             ("enclose: add box named like the manual", "/api/organ/enclosure/add?name=First%20Manual"),
             ("enclose: assign a stop", "/api/organ/enclosure/assign?enclosure=First%20Manual&stop=17&in=1"),

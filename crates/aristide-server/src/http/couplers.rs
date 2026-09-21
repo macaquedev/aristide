@@ -161,43 +161,6 @@ pub(super) fn link(state: &Mutex<State>, query: &str) -> Reply {
     }
 }
 
-// One coupler's coupled-keys override: auto (follow the organ
-// default), never, or always. Display only — live, no rebuild.
-pub(super) fn keys(state: &Mutex<State>, query: &str) -> Reply {
-    let mut state = state.lock().expect("state poisoned");
-    if state.is_loading() {
-        return bad_request("an organ is already loading");
-    }
-    let mode = match param(query, "mode") {
-        Some("auto") => None,
-        Some(mode @ ("never" | "always")) => Some(mode),
-        _ => return bad_request("mode must be auto, never or always"),
-    };
-    match param(query, "idx").and_then(|v| v.parse::<usize>().ok()) {
-        Some(index) => match state.set_coupler_key_mode(index, mode) {
-            Ok(()) => json(state_json_locked(&state)),
-            Err(err) => bad_request(&err),
-        },
-        None => bad_request("missing idx"),
-    }
-}
-
-// The organ-wide coupled-keys default: whether engaged couplers
-// pull the coupled keys down on screen. Display only — live.
-pub(super) fn coupled_keys(state: &Mutex<State>, query: &str) -> Reply {
-    let mut state = state.lock().expect("state poisoned");
-    if state.is_loading() {
-        return bad_request("an organ is already loading");
-    }
-    match param(query, "on").map(|v| v != "0") {
-        Some(on) => match state.set_coupled_keys(on) {
-            Ok(()) => json(state_json_locked(&state)),
-            Err(err) => bad_request(&err),
-        },
-        None => bad_request("missing on"),
-    }
-}
-
 // Whether couplers may repitch to reach pipes a division hasn't
 // got. Off is the default and the musically honest answer; a
 // piece that wants the other can turn it on without editing the

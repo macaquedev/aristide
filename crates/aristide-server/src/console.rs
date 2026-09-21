@@ -2675,60 +2675,6 @@ impl Console {
         (Vec::new(), Vec::new())
     }
 
-    /// The keys engaged couplers are pulling down right now, per manual
-    /// index — the mechanical-action view for on-screen keyboards,
-    /// never consulted by the sound path. `show` filters by coupler
-    /// index (the per-organ default and per-coupler overrides live in
-    /// the server's State, not here). Keys are in each board's own
-    /// coordinates: the played key's ladder landing minus the sounding
-    /// division's transpose — the key a tracker rod would move.
-    pub fn coupled_display_keys(&self, show: &dyn Fn(usize) -> bool) -> Vec<Vec<u16>> {
-        let mut out = vec![Vec::new(); self.organ.manuals.len()];
-        for &(manual_index, key) in self.sounding.keys() {
-            let Some(origin) = self.organ.manuals.get(manual_index).map(|m| m.id) else {
-                continue;
-            };
-            let played = key as i16 + self.effective_tuning(manual_index).transpose as i16;
-            for &engaged in &self.engaged_couplers {
-                if !show(engaged) {
-                    continue;
-                }
-                let Some(coupler) = self.organ.couplers.get(engaged) else {
-                    continue;
-                };
-                for route in &coupler.routes {
-                    if route.from_manual != origin
-                        || !route.covers(played)
-                        || !self.route_hears(origin, played, route)
-                    {
-                        continue;
-                    }
-                    let Some(target) = &route.target else { continue };
-                    let Some(index) = self
-                        .organ
-                        .manuals
-                        .iter()
-                        .position(|m| m.id == target.manual)
-                    else {
-                        continue;
-                    };
-                    let shown = played.saturating_add(target.key_shift)
-                        - self.effective_tuning(index).transpose as i16;
-                    let (low, high) = self.compass[index];
-                    if shown < low || shown > high {
-                        continue;
-                    }
-                    out[index].push(shown as u16);
-                }
-            }
-        }
-        for keys in &mut out {
-            keys.sort_unstable();
-            keys.dedup();
-        }
-        out
-    }
-
     /// Re-derive what every held key should sound under the current
     /// coupler state and diff it against what it does sound: pipes no
     /// longer demanded are released, newly demanded ones started. This

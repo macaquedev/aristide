@@ -6,13 +6,20 @@ Codex and Claude. Read this file in full at the start of every task.
 Read `DESIGN.md` first before implementation work: it holds the architecture, all locked decisions, and the
 milestone plan (M0–M7). Do not re-litigate locked decisions without the user.
 
-For any UI work, read [`docs/design/design-rules.md`](docs/design/design-rules.md)
-in full before designing or implementing. It is the authoritative product and
-visual design brief. The user requested a full redesign around it on 2026-09-21;
-its Play/desk separation and visual rules supersede earlier UI styling and menu
-placement decisions in `DESIGN.md`. Architecture, audio safety and persistence
-contracts still apply. Document unsupported capabilities and any rule exceptions
-in the implementation progress note; do not present future features as working.
+## Current scope
+
+Aristide is headless as of the user-requested cleanup on 2026-09-21.
+Keep the audio engine, model, sample loaders, MIDI/device I/O, and JSON sound-control
+API. The Tauri shell, browser UI, visual assets, and presentation-only endpoints
+have been removed. Do not restore them unless the user requests a new UI.
+`crates/aristide-server/src/console.rs` is musical control logic (stops, couplers,
+combinations and voices), not a graphical interface; it remains essential.
+Existing organ-file metadata must stay compatible and edits must preserve unrelated
+settings. Audio safety and persistence contracts still apply.
+
+If a future task introduces a UI, read [`docs/design/design-rules.md`](docs/design/design-rules.md)
+in full first. It is a retained design reference, not a description of current
+features. Record unsupported capabilities and any rule exceptions in a progress note.
 
 ## Ground rules
 

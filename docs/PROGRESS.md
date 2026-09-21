@@ -1,7 +1,10 @@
 # Progress log
 
 Newest first. One entry per work session; keep entries factual and short.
-Milestones refer to DESIGN.md.
+Milestones refer to DESIGN.md. Older UI entries are historical; the current
+headless scope is described by the latest cleanup note.
+
+- [2026-09-21 — remove the UI and retain headless audio](progress/2026-09-21-headless-cleanup.md)
 
 - [2026-09-03 — sample memory is the player's: `[samples]` moves to Preferences](progress/2026-09-03-sample-memory-prefs.md)
 - [2026-09-02 — voicing reaches the pipe](progress/2026-09-02-pipe-voicing.md)

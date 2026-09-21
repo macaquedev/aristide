@@ -9,7 +9,7 @@ use aristide_formats::instrument;
 use aristide_model::units::cents_between;
 use aristide_model::StopId;
 
-use super::{Control, CouplerRouteEdit, RankItem, State};
+use super::{Control, CouplerRouteEdit, State};
 use crate::{config, load};
 
 /// How long a live voicing edit takes to reach a held pipe's pitch.
@@ -256,11 +256,6 @@ impl State {
                 organ.divisionals.insert(name.to_string(), slots);
             }
         }
-        for prefix in ["keyboard", "jamb"] {
-            if let Some(pos) = self.layout.remove(&format!("{prefix}:{old}")) {
-                self.layout.insert(format!("{prefix}:{name}"), pos);
-            }
-        }
         self.persist();
         self.reload_organ_file(path);
         Ok(())
@@ -286,9 +281,6 @@ impl State {
                     .as_deref()
                     .is_some_and(|m| m.eq_ignore_ascii_case(name))
             });
-        }
-        for prefix in ["keyboard", "jamb"] {
-            self.layout.remove(&format!("{prefix}:{name}"));
         }
         self.persist();
         self.reload_organ_file(path);
@@ -428,19 +420,10 @@ impl State {
         };
         console.rename_stop(stop, new);
         // Session-side name references follow too, or saving an
-        // implicit combination later would write stale move names —
-        // and the display order is name-keyed, so it follows or the
-        // renamed knob would fall to the bottom of its jamb.
+        // implicit combination later would write stale move names.
         for (moved, ..) in &mut self.setup.moves {
             if moved.eq_ignore_ascii_case(&old) {
                 *moved = new.to_string();
-            }
-        }
-        for names in self.stop_order.values_mut() {
-            for name in names.iter_mut() {
-                if name.eq_ignore_ascii_case(&old) {
-                    *name = new.to_string();
-                }
             }
         }
         Ok(())
@@ -689,37 +672,6 @@ impl State {
         Ok(rules)
     }
 
-    /// A stop's knob engraving — the footage line on the drawknob
-    /// face. `None` goes back to showing the footage the stop actually
-    /// speaks at; `Some("")` engraves nothing; anything else is the
-    /// text itself. A label, so it lands live: map now, file line now,
-    /// no rebuild.
-    pub fn set_stop_pitch_label(
-        &mut self,
-        stop: StopId,
-        label: Option<String>,
-    ) -> Result<(), String> {
-        let (name, manual_name, prov) = self.stop_coordinates(stop)?;
-        let path = self.organ_file()?;
-        if !config::write_composite_stop_pitch_label(&path, &prov, &manual_name, label.as_deref())?
-        {
-            return Err(format!(
-                "the pull that brought {name:?} in isn't in {} — it was \
-                 hand-edited; edit it there",
-                path.display()
-            ));
-        }
-        match label {
-            Some(label) => {
-                self.stop_labels.insert(stop, label);
-            }
-            None => {
-                self.stop_labels.remove(&stop);
-            }
-        }
-        Ok(())
-    }
-
     /// Declare whether a stop speaks pipes of its own (doubling pipes
     /// other stops sound) or shares them — the default, and what a
     /// real unit action does. Lands live (held keys re-derive, no
@@ -895,10 +847,6 @@ impl State {
         };
         let path = self.organ_file()?;
         if config::remove_composite_coupler(&path, &name)? {
-            self.coupler_key_modes.remove(&name);
-            for names in self.stop_order.values_mut() {
-                names.retain(|n| !n.eq_ignore_ascii_case(&format!("coupler:{name}")));
-            }
             self.reload_organ_file(path);
         } else if !self.set_coupler_pick(index, false) {
             return Err("no such coupler".into());
@@ -937,42 +885,6 @@ impl State {
             engine.send(start.command());
         }
         config::write_composite_coupler_link(&path, &a, &b, on)
-    }
-
-    /// The organ-wide coupled-keys default — display only, live, and
-    /// in the file's `[console] coupled_keys`.
-    pub fn set_coupled_keys(&mut self, on: bool) -> Result<(), String> {
-        let path = self.organ_file()?;
-        config::write_composite_coupled_keys(&path, on)?;
-        self.coupled_keys = on;
-        Ok(())
-    }
-
-    /// One coupler's coupled-keys override: `"never"`, `"always"`, or
-    /// None for auto (follow the organ default). Display only, live,
-    /// and in the file's `[console.coupler_keys]`.
-    pub fn set_coupler_key_mode(&mut self, index: usize, mode: Option<&str>) -> Result<(), String> {
-        let Control::Organ(console) = &self.control else {
-            return Err("no organ is loaded".into());
-        };
-        let Some(name) = console
-            .coupler_states()
-            .get(index)
-            .map(|(_, name, _, _)| name.to_string())
-        else {
-            return Err("no such coupler".into());
-        };
-        let path = self.organ_file()?;
-        config::write_composite_coupler_key_mode(&path, &name, mode)?;
-        match mode {
-            Some(mode) => {
-                self.coupler_key_modes.insert(name, mode.to_string());
-            }
-            None => {
-                self.coupler_key_modes.remove(&name);
-            }
-        }
-        Ok(())
     }
 
     /// Route tuples from the API (from, to, shift, low, high,
@@ -1109,140 +1021,4 @@ impl State {
         Ok(())
     }
 
-    /// Return every panel to automatic placement without changing the organ.
-    pub fn reset_panel_layout(&mut self) -> Result<(), String> {
-        let path = self.organ_file()?;
-        config::clear_composite_layout(&path)?;
-        self.layout.clear();
-        Ok(())
-    }
-
-    /// Move (and optionally size) a console panel on the canvas: all
-    /// four are normalized fractions, clamped and rounded to four
-    /// decimals before they're written. Size given as `None` keeps
-    /// whatever size the panel already has on record — a plain move
-    /// never un-sizes a resized jamb. Cosmetic geometry only — unlike
-    /// every structural edit above, this never queues a rebuild; the
-    /// in-memory layout is updated directly instead.
-    pub fn place_panel(
-        &mut self,
-        panel: &str,
-        x: f32,
-        y: f32,
-        size: Option<(f32, f32)>,
-    ) -> Result<(), String> {
-        if !matches!(self.control, Control::Organ(_)) {
-            return Err("no organ is loaded".into());
-        }
-        let manual_names = self.manual_names();
-        let valid = matches!(panel, "couplers" | "shoes")
-            || ["keyboard:", "jamb:"].iter().any(|prefix| {
-                panel
-                    .strip_prefix(prefix)
-                    .is_some_and(|name| manual_names.iter().any(|existing| existing == name))
-            });
-        if !valid {
-            return Err(format!("{panel:?} is not a panel of this organ"));
-        }
-        let path = self.organ_file()?;
-        let round4 = |v: f32| (v.clamp(0.0, 1.0) * 10_000.0).round() / 10_000.0;
-        let kept = self.layout.get(panel);
-        let (w, h) = match size {
-            Some((w, h)) => (
-                Some(round4(w.max(0.02))),
-                Some(round4(h.max(0.02))),
-            ),
-            None => (kept.and_then(|pos| pos.w), kept.and_then(|pos| pos.h)),
-        };
-        let pos = instrument::PanelPos {
-            x: round4(x),
-            y: round4(y),
-            w,
-            h,
-        };
-        config::write_composite_panel(&path, panel, pos)?;
-        self.layout.insert(panel.to_string(), pos);
-        Ok(())
-    }
-
-    /// A division's drawknob order — display only: the file keeps the
-    /// console names top-first (couplers seated in the jamb as
-    /// `coupler:<name>` entries), the snapshot deals the rank out in
-    /// that order, and nothing structural moves (ids, voicing,
-    /// combinations all stay put). Live, like panel placement. A
-    /// coupler has one seat, so listing it here unseats it from every
-    /// other division's rank.
-    pub fn set_rank_order(&mut self, manual: usize, items: &[RankItem]) -> Result<(), String> {
-        let manual_names = self.manual_names();
-        let Some(manual_name) = manual_names.get(manual).cloned() else {
-            return Err("no such manual".into());
-        };
-        let (names, seated) = {
-            let Control::Organ(console) = &self.control else {
-                return Err("no organ is loaded".into());
-            };
-            let states = console.stop_states();
-            let couplers = console.coupler_states();
-            let mut names = Vec::with_capacity(items.len());
-            let mut seated: Vec<String> = Vec::new();
-            for item in items {
-                match item {
-                    RankItem::Stop(id) => {
-                        let Some((_, name, ..)) = states
-                            .iter()
-                            .find(|(existing, _, _, midx, _)| existing == id && *midx == manual)
-                        else {
-                            return Err(format!(
-                                "the order names a stop that isn't on {manual_name:?} — \
-                                 reordering raced an edit; try again"
-                            ));
-                        };
-                        names.push(name.to_string());
-                    }
-                    RankItem::Coupler(index) => {
-                        let Some((_, name, _, _)) = couplers.get(*index) else {
-                            return Err(
-                                "the order names a coupler that no longer exists — \
-                                 reordering raced an edit; try again"
-                                    .into(),
-                            );
-                        };
-                        seated.push(format!("coupler:{name}"));
-                        names.push(format!("coupler:{name}"));
-                    }
-                }
-            }
-            (names, seated)
-        };
-        let path = self.organ_file()?;
-        config::write_composite_stop_order(&path, &manual_name, &names)?;
-        if names.is_empty() {
-            self.stop_order.remove(&manual_name);
-        } else {
-            self.stop_order.insert(manual_name.clone(), names);
-        }
-        // Unseat the couplers just listed from every other division —
-        // in memory and in the file, one rewrite per list that changes.
-        for other in manual_names {
-            if other == manual_name {
-                continue;
-            }
-            let Some(list) = self.stop_order.get(&other) else { continue };
-            let kept: Vec<String> = list
-                .iter()
-                .filter(|name| !seated.iter().any(|token| token.eq_ignore_ascii_case(name)))
-                .cloned()
-                .collect();
-            if kept.len() == list.len() {
-                continue;
-            }
-            config::write_composite_stop_order(&path, &other, &kept)?;
-            if kept.is_empty() {
-                self.stop_order.remove(&other);
-            } else {
-                self.stop_order.insert(other, kept);
-            }
-        }
-        Ok(())
-    }
 }

@@ -17,7 +17,7 @@ mod tuning;
 // naming these at the crate root.
 pub use bindings::{request_midi_rescan, COMPUTER_KEYBOARD};
 pub use state::{
-    Control, CouplerRouteEdit, LoadRequest, Pending, RankItem, Resolution, Setup, State,
+    Control, CouplerRouteEdit, LoadRequest, Pending, Resolution, Setup, State,
     TremControl,
 };
 
@@ -43,7 +43,7 @@ struct Args {
     stops: Vec<String>,
     list_stops: bool,
     master_gain: Option<f32>,
-    /// Local web console port.
+    /// Local JSON control API port.
     http_port: u16,
     /// Requested audio buffer size in frames.
     buffer_frames: u32,
@@ -197,7 +197,7 @@ fn main() -> Result<()> {
 
     // The audio output is up before any organ is: the server starts on
     // an empty bank (the M1 test tone), and every organ — named on the
-    // CLI or picked in the console later — arrives through the same
+    // CLI or requested through the API later — arrives through the same
     // load path in the main loop below.
     let (record_tx, recorder) = match args.record.clone() {
         Some(path) => {
@@ -484,11 +484,6 @@ fn perform_load(
         provenance,
         stop_voicing,
         pipe_voicing,
-        stop_labels,
-        stop_order,
-        layout,
-        coupled_keys,
-        coupler_key_modes,
         buses,
         warnings,
     } = load::prepare_with(
@@ -665,11 +660,6 @@ fn perform_load(
         provenance,
         stop_voicing,
         pipe_voicing,
-        stop_labels,
-        stop_order,
-        layout,
-        coupled_keys,
-        coupler_key_modes,
         load_warnings: warnings,
     });
     tracing::info!("organ ready: {}", state.organ_key);

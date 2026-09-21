@@ -201,14 +201,6 @@ pub struct State {
     /// popover shows and writes back.
     pub pipe_voicing:
         std::collections::HashMap<(StopId, load::VoicingScope), load::PipeVoicing>,
-    /// Per stop: its declared knob engraving (`""` = engrave nothing);
-    /// stops absent here engrave the footage they actually speak at.
-    pub stop_labels: std::collections::HashMap<StopId, String>,
-    /// Per manual name: its declared drawknob order (console stop
-    /// names, top of the jamb first) — the file's `[console.order]`.
-    /// Display only; the snapshot deals stops out in this order and
-    /// names that no longer resolve simply have no effect.
-    pub stop_order: std::collections::BTreeMap<String, Vec<String>>,
     /// Per composite manual: a player-declared compass overriding the
     /// set's own. Asked when sets are combined; editable later in
     /// Preferences; saved into the composite file.
@@ -226,20 +218,6 @@ pub struct State {
     /// starts — an organ that loads emptier than its file intends must
     /// say so where the player is looking, not only in the log.
     pub load_warnings: Vec<String>,
-    /// Where the console's movable panels sit, by panel id
-    /// (`"keyboard:<manual>"`, `"jamb:<manual>"`, `"couplers"`,
-    /// `"shoes"`) — only the ones a player has explicitly placed.
-    /// Loaded from the organ file's `[console.layout]` and kept in
-    /// step with it; purely cosmetic, so editing it never rebuilds the
-    /// engine.
-    pub layout: std::collections::BTreeMap<String, instrument::PanelPos>,
-    /// Whether engaged couplers pull the coupled keys down on the
-    /// on-screen keyboards — the organ file's `[console] coupled_keys`.
-    /// Display only, so editing it never rebuilds; true by default.
-    pub coupled_keys: bool,
-    /// Per-coupler `"never"` / `"always"` overrides of `coupled_keys`,
-    /// by console name — the file's `[console.coupler_keys]`.
-    pub coupler_key_modes: std::collections::BTreeMap<String, String>,
     /// How the loaded organ's bank was built: what lives in RAM, what
     /// streams, and under which preferences — so Preferences can say
     /// whether an edit is waiting on a reload.
@@ -293,16 +271,6 @@ pub struct CouplerRouteEdit {
     pub own_pipes: bool,
 }
 
-/// One entry of a division's display rank, as the order endpoint
-/// speaks it: a stop by id (`s12`), or a coupler by console index
-/// (`c3`) — a coupler listed in a division's rank is seated in that
-/// jamb, a drawknob among the stops, instead of on the rail.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum RankItem {
-    Stop(StopId),
-    Coupler(usize),
-}
-
 /// The provenance of the loaded instrument.
 #[derive(Default)]
 pub struct Setup {
@@ -320,7 +288,7 @@ pub struct Setup {
     pub implicit: bool,
     /// The sample set's own organ (its file carries `adopted = true`):
     /// kept as the set defines it. The player's settings — wiring,
-    /// room, whole-instrument pitch, layout — land in its file; any
+    /// room, whole-instrument pitch — land in its file; any
     /// change to the instrument itself is refused until the organ is
     /// saved under a different name — the copy is the player's and
     /// takes every edit.
@@ -351,11 +319,6 @@ pub struct Installed {
     pub stop_voicing: std::collections::HashMap<StopId, load::StopVoicing>,
     pub pipe_voicing:
         std::collections::HashMap<(StopId, load::VoicingScope), load::PipeVoicing>,
-    pub stop_labels: std::collections::HashMap<StopId, String>,
-    pub stop_order: std::collections::BTreeMap<String, Vec<String>>,
-    pub layout: std::collections::BTreeMap<String, instrument::PanelPos>,
-    pub coupled_keys: bool,
-    pub coupler_key_modes: std::collections::BTreeMap<String, String>,
     pub load_warnings: Vec<String>,
 }
 
@@ -400,16 +363,11 @@ impl State {
             provenance: Default::default(),
             stop_voicing: Default::default(),
             pipe_voicing: Default::default(),
-            stop_labels: Default::default(),
-            stop_order: Default::default(),
             compass_overrides: Vec::new(),
             loading: pending_load.as_ref().map(|_| "loading…".to_string()),
             pending_load,
             load_error: None,
             load_warnings: Vec::new(),
-            layout: Default::default(),
-            coupled_keys: true,
-            coupler_key_modes: Default::default(),
             memory: None,
         }
     }
@@ -467,12 +425,7 @@ impl State {
         self.provenance = loaded.provenance;
         self.stop_voicing = loaded.stop_voicing;
         self.pipe_voicing = loaded.pipe_voicing;
-        self.stop_labels = loaded.stop_labels;
-        self.stop_order = loaded.stop_order;
         self.compass_overrides = Vec::new();
-        self.layout = loaded.layout;
-        self.coupled_keys = loaded.coupled_keys;
-        self.coupler_key_modes = loaded.coupler_key_modes;
         self.learn = None;
         self.control_learn = None;
         self.pending = None;

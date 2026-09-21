@@ -1,5 +1,8 @@
 # Aristide — Design Rules
 
+Retained reference for a future UI. The current UI was removed on 2026-09-21;
+these rules do not imply that any screens or workspaces currently exist.
+
 You are the product designer and front-end engineer for Aristide, a virtual
 pipe organ application. These rules apply to every screen, component and line
 of UI copy you produce. They override your defaults. If a rule blocks a

@@ -2,11 +2,14 @@
 
 *An open-source virtual pipe organ. Named for Aristide Cavaillé-Coll.*
 
-**UI redesign (2026-09-21):** [Design rules](docs/design/design-rules.md) now
-govern product design, workspace separation, typography and visual styling.
-The earlier UI descriptions below record implementation history; their menu
-placement, unlocked-console behavior and rocker styling are superseded by the
-new brief. Audio, model, storage and tuning contracts remain in force.
+**Headless cleanup (2026-09-21):** the user requested removal of the entire
+current UI. The Tauri/browser console, visual assets, and presentation-only
+server state and endpoints are removed. The engine, sample loaders, musical
+control logic, MIDI/audio I/O, recording and localhost JSON API remain.
+Older UI descriptions and progress notes are historical; they do not describe
+available screens. [Design rules](docs/design/design-rules.md) are retained only
+as a reference for a future UI. Audio, model, storage and tuning contracts remain
+in force. See [cleanup notes](docs/progress/2026-09-21-headless-cleanup.md).
 
 Aristide aims to (a) render existing sample sets **better than Hauptwerk** and far better
 than GrandOrgue, and (b) be the first VPO built for **contemporary music**: microtonality,
@@ -19,12 +22,12 @@ MIDI/audio routing. Free forever, GPLv3.
 |---|---|---|
 | Language | Rust | RT-safe concurrency without GC, SIMD, modern tooling |
 | Shape | Headless engine + clients | Console PCs, tablet remotes, future CLAP wrapper |
-| GUI | Tauri 2 shell over a zero-build HTML/CSS/JS console (revised 2026-08-13; the egui GUI was removed) | One UI for the desktop shell and any browser; the server stays headless |
+| GUI | None (removed 2026-09-21) | Headless audio server controlled by MIDI, CLI and JSON API |
 | License | GPLv3 | Nobody takes it proprietary; ecosystem norm |
 | Formats | GO `.organ` + unencrypted Hauptwerk read **directly**; Aristide features live in **sidecar files** | Sound quality is engine-side; sidecars add superpowers to every existing free set with no conversion |
 | Native standalone format | Deferred | Only needed for future multi-mic/spatial recordings |
 | Effects | Internal RT-safe modular node graph | Taps at pipe/stop/division/output level; per-pipe delays |
-| UI style | Modern-first; photoreal console skins supported | 2026 UI by default, keep the charm when sets ship artwork |
+| Future UI | Deferred; retained design brief in `docs/design/design-rules.md` | No graphical interface is currently shipped |
 | Multi-organ | **Compose at load** (`aristide-formats::instrument`): composite TOML files and multi-set launches assemble N sources into one `Organ`; engine/console/UI stay single-instrument | One playable instrument from any sources is the organ-native abstraction (a console with three builders' ranks is one organ); cross-set couplers become plain routes; no organ tag threads through every API forever |
 
 **Legal boundary:** encrypted Hauptwerk sample sets (HW5+-era commercial sets) are
@@ -182,8 +185,8 @@ audible impact:
 │                 couplers, tuning/temperament (Scala), key mappings (MPE/MIDI2/Lumatone) │
 │                 aristide-formats (lib): GO loader, HW(unenc) loader, sidecar read/write │
 └─────────────────────────────────────────────────────────────────────────────────────────┘
-                                   ▲ HTTP
-                aristide-console (bin): Tauri console UI (HTTP to server)
+                                   ▲ HTTP/JSON
+                       External scripts and control clients
 ```
 
 - The **audio thread never allocates, locks, or touches disk**. Control → RT communication
@@ -213,7 +216,7 @@ audible impact:
 
 Human-readable (TOML) files next to a loaded sample set, never modifying it:
 voicing, tuning/temperament, audio routing & speaker groups, per-pipe effects/delays,
-input mappings, console-skin overrides. A set + its sidecars = a reproducible instrument.
+input mappings, legacy display metadata (preserved for compatibility). A set + its sidecars = a reproducible instrument.
 
 ## Multi-organ composition
 
@@ -441,62 +444,20 @@ field would silently fork the division. A stop's row lives on its editor
 and drawknobs tuned apart wear a chip or a dot, and nothing shows for a scope
 that just follows.
 
-**Two scopes, two surfaces (locked storage boundary; UI revised 2026-09-13):**
-App preferences (Aristide menu, Ctrl+,) belong to the player: appearance is local
-to this console; sample residency, streaming and load cache belong to this
-machine's user config. These controls stay on that surface. Memory changes apply
-on the next load, with an explicit reload action.
+**Persistence scopes:** sample residency, streaming and load-cache preferences
+belong to this machine's user config and apply on the next load. Instrument
+structure, tuning, voicing, reverb, noises, MIDI wiring and combinations belong
+to the organ file. Protected sample-set instruments require a saved copy before
+structural edits; player settings such as wiring and room changes remain editable.
+Legacy display metadata is read for compatibility and preserved by file edits,
+but is not part of the headless server's runtime state.
 
-Instrument settings is the single workspace for the organ's name, sound,
-keyboards and inputs, stops and pipes, couplers, sample sets and bindings. Its
-button is always accessible on a loaded instrument, independently of layout
-unlocking. Console context shortcuts, input badges and the tuning readout enter
-the same workspace and the same live form; keyboard rename/type controls have
-one implementation. A stop's tuning and pipe subviews retain their parent while
-showing one editor at a time. Back returns within the workspace; closing it
-returns to playing. Fields commit before their subject is cleared. Appearance
-and memory are never transplanted into instrument settings.
-
-The organ-name menu owns file actions (load, create, save a copy, rename through
-the shared settings field). Playing uses the console itself: stop/coupler
-toggles, volume, silence and one clear-stops action in the registration rail.
-The padlock docked bottom-left, as in Max (Edit console, Ctrl+E), unlocks panel
-placement and stop ordering; Select control is an
-explicit touch alternative to context-clicking. Existing saved panel positions
-retain normalized canvas coordinates when they fit without overlaps. If saved
-positions collide after resizing or an instrument edit, the console displays an
-automatic arrangement without changing the saved coordinates. Auto arrange in
-the editing toolbar clears saved panel geometry permanently; stop ordering and
-musical settings are preserved. Automatic rows adapt their column count to the
-number of keyboards and available width, with a centered 1800px content limit
-for smaller organs. Instruments with 80 or more stops use the available width
-so extra columns fit on large displays. Stop controls use the rocker-tab design
-approved on 2026-09-14: ivory when off, warm amber with a light rim and pressed
-position when drawn, with centred names above the pitch and no on/off indicator
-bars. Minimum heights are 62px by default, 54px in Compact and 76px in Spacious;
-smaller track widths fit more stop columns. Names and pitch labels remain at
-13px and long names wrap without shrinking the text. All presets exceed 44px
-touch targets. A crescendo-only stop retains its raised ivory face with an amber
-rim, distinct from a hand-drawn stop. Empty grid tracks stay empty rather than
-stretching a few stops into oversized tiles.
-Small screens use flowing panels without rewriting desktop coordinates.
-Instrument settings uses a sidebar on desktop and a section chooser on narrow
-screens, with a bounded scrolling body in both cases.
-
-Every organ edit still lands in its file: `[tuning]`, `[reverb]`, `[noises]`,
-MIDI wiring and instrument structure retain their existing persistence and
-scope contracts. Protected sample-set instruments still offer Save a copy
-before structural changes; player settings such as wiring and room changes
-remain immediately editable. The full UI rationale and validation are in
-`docs/progress/2026-09-13-ui-redesign.md`.
-
-Organs load at runtime, never implicitly (locked 2026-08-18): the server
-starts organ-less and the console opens on a picker — the `[[library]]` in the
-user config (every organ this machine has loaded, most recent first) plus a
-file browser; CLI paths are just a pre-queued pick. The engine's bank is fixed
-at construction (the RT path never swaps pointers), so a load builds the new
-console and bank off-thread, then replaces engine and stream together on the
-main thread; a failed load reports and leaves the running organ untouched.
+Organs load at runtime, never implicitly (locked 2026-08-18): the server starts
+without a sampled organ; CLI paths queue a load, and subsequent loads come through
+`POST /api/organ/load`. The engine's bank is fixed at construction (the RT path
+never swaps pointers), so a load builds the new musical console and bank off-thread,
+then replaces engine and stream together on the main thread. A failed load reports
+through the API and leaves the running organ untouched.
 
 ## Milestones
 
@@ -526,11 +487,9 @@ main thread; a failed load reports and leaves the running organ untouched.
   organ file (2026-09-02), wave-trem switch on held notes (2026-09-02),
   pipe-scope voicing with a brightness/EQ leg and live voicing edits
   (2026-09-02). Nothing is left open on this list.
-- **M5 — headless split + GUI**: IPC protocol, native GUI console, multi-window. The
-  console shipped 2026-08-13 as a Tauri 2 shell over the web console (replacing the
-  egui GUI) and edits the organ in place (see "The console edits the instrument"
-  above). Still open: a control-plane protocol beyond the localhost HTTP API (tablet
-  remote, OSC, scripting), multi-window.
+- **M5 — headless control**: localhost HTTP/JSON API retained. The Tauri/browser
+  UI shipped in August and was removed at the user's request on 2026-09-21.
+  Future clients, richer IPC, OSC and remote control remain deferred.
 - **M6 — contemporary layer**: Scala/MPE/MIDI2/Lumatone input, effects graph public,
   multichannel routing, per-pipe delays. ✅ core complete 2026-08-24 (opened ahead of
   M4/M5 by decision the same day): Scala per-division tuning with nearest-pipe

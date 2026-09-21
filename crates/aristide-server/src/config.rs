@@ -2340,49 +2340,6 @@ pub fn rename_composite_stop(
     Ok(true)
 }
 
-/// Write (or with `None`, remove) a stop's declared knob engraving —
-/// the `pitch_label` field on its `[[stop]]` line, or the entry in its
-/// `[[division]]` line's `pitch_label` map. `""` engraves nothing;
-/// absent, the knob shows the footage the stop actually speaks at.
-pub fn write_composite_stop_pitch_label(
-    path: &Path,
-    prov: &instrument::StopProvenance,
-    on: &str,
-    label: Option<&str>,
-) -> Result<bool, String> {
-    let mut doc = composite_doc(path)?;
-    if prov.via_division {
-        let Some(index) = division_pull_index(&doc, prov, on) else {
-            return Ok(false);
-        };
-        let table = doc["division"]
-            .as_array_of_tables_mut()
-            .and_then(|tables| tables.get_mut(index))
-            .expect("division line just found");
-        division_map_set(table, "pitch_label", &prov.source_stop, label);
-    } else {
-        let Some(index) = doc
-            .get("stop")
-            .and_then(|s| s.as_array_of_tables())
-            .and_then(|stops| stop_pull_index(stops, prov, on))
-        else {
-            return Ok(false);
-        };
-        let table = doc["stop"]
-            .as_array_of_tables_mut()
-            .and_then(|tables| tables.get_mut(index))
-            .expect("stop line just found");
-        match label {
-            Some(label) => set_string_preserving(table, "pitch_label", label),
-            None => {
-                table.remove("pitch_label");
-            }
-        }
-    }
-    write_atomically(path, doc.to_string())?;
-    Ok(true)
-}
-
 pub fn write_composite_stop_compass(
     path: &Path,
     prov: &instrument::StopProvenance,
@@ -3272,59 +3229,6 @@ fn remove_console_order_coupler(doc: &mut toml_edit::DocumentMut, name: &str) {
     }
 }
 
-/// The organ-wide coupled-keys default: `[console] coupled_keys`.
-/// True is the default, so true removes the line.
-pub fn write_composite_coupled_keys(path: &Path, on: bool) -> Result<(), String> {
-    let mut doc = composite_doc(path)?;
-    let console = doc
-        .entry("console")
-        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
-    let Some(console) = console.as_table_mut() else {
-        return Err("[console] is not a table".into());
-    };
-    console.set_implicit(true);
-    if on {
-        console.remove("coupled_keys");
-    } else {
-        console["coupled_keys"] = toml_edit::value(false);
-    }
-    write_atomically(path, doc.to_string())
-}
-
-/// One coupler's coupled-keys override in `[console.coupler_keys]`:
-/// `"never"`, `"always"`, or None for auto (entry removed).
-pub fn write_composite_coupler_key_mode(
-    path: &Path,
-    name: &str,
-    mode: Option<&str>,
-) -> Result<(), String> {
-    let mut doc = composite_doc(path)?;
-    match mode {
-        Some(mode) => {
-            let map = console_section(&mut doc, "coupler_keys")?;
-            map.insert(name, toml_edit::value(mode));
-        }
-        None => {
-            if let Some(map) = console_map_mut(&mut doc, "coupler_keys") {
-                let stale: Vec<String> = map
-                    .iter()
-                    .filter(|(key, _)| key.eq_ignore_ascii_case(name))
-                    .map(|(key, _)| key.to_string())
-                    .collect();
-                for key in stale {
-                    map.remove(&key);
-                }
-                if map.is_empty()
-                    && let Some(console) = doc.get_mut("console").and_then(|c| c.as_table_mut())
-                {
-                    console.remove("coupler_keys");
-                }
-            }
-        }
-    }
-    write_atomically(path, doc.to_string())
-}
-
 /// Define a new (empty) swell box in a composite file. The pane fills
 /// it by dragging stops in afterwards.
 pub fn append_composite_enclosure(path: &Path, name: &str) -> Result<(), String> {
@@ -3425,89 +3329,6 @@ fn console_order_mut(doc: &mut toml_edit::DocumentMut) -> Option<&mut toml_edit:
     doc.get_mut("console")
         .and_then(|console| console.get_mut("order"))
         .and_then(|order| order.as_table_mut())
-}
-
-/// Clear only panel geometry, preserving stop order and other console settings.
-pub fn clear_composite_layout(path: &Path) -> Result<(), String> {
-    let mut doc = composite_doc(path)?;
-    if let Some(console) = doc.get_mut("console").and_then(|item| item.as_table_mut()) {
-        console.remove("layout");
-    }
-    write_atomically(path, doc.to_string())
-}
-
-/// Upsert one console panel's canvas position: creates `[console.layout]`
-/// if the file doesn't have it yet, and writes (or replaces) the
-/// panel's quoted key inside it — `"keyboard:Great" = { x = .., y = .. }`.
-/// Purely cosmetic: unlike the structural editors above, nothing calls
-/// this expects a reload — the caller updates the in-memory snapshot
-/// itself.
-pub fn write_composite_panel(
-    path: &Path,
-    panel: &str,
-    pos: instrument::PanelPos,
-) -> Result<(), String> {
-    let mut doc = composite_doc(path)?;
-    let layout = console_section(&mut doc, "layout")?;
-    let mut entry = toml_edit::InlineTable::new();
-    entry.insert("x", (pos.x as f64).into());
-    entry.insert("y", (pos.y as f64).into());
-    if let Some(w) = pos.w {
-        entry.insert("w", (w as f64).into());
-    }
-    if let Some(h) = pos.h {
-        entry.insert("h", (h as f64).into());
-    }
-    layout.insert(panel, toml_edit::Item::Value(toml_edit::Value::InlineTable(entry)));
-    write_atomically(path, doc.to_string())
-}
-
-/// One table under `[console]` (`layout`, `order`), the `[console]`
-/// header itself kept implicit so it never crowds a future key.
-fn console_section<'a>(
-    doc: &'a mut toml_edit::DocumentMut,
-    key: &str,
-) -> Result<&'a mut toml_edit::Table, String> {
-    let console = doc
-        .entry("console")
-        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
-    let Some(console) = console.as_table_mut() else {
-        return Err("[console] is not a table".into());
-    };
-    console.set_implicit(true);
-    let section = console
-        .entry(key)
-        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
-    section
-        .as_table_mut()
-        .ok_or_else(|| format!("[console.{key}] is not a table"))
-}
-
-/// A division's drawknob order — the console names, top of the jamb
-/// first. An empty list takes the entry (and an emptied section) out,
-/// back to the assembled order.
-pub fn write_composite_stop_order(
-    path: &Path,
-    manual: &str,
-    stops: &[String],
-) -> Result<(), String> {
-    let mut doc = composite_doc(path)?;
-    let order = console_section(&mut doc, "order")?;
-    if stops.is_empty() {
-        order.remove(manual);
-        if order.is_empty()
-            && let Some(console) = doc.get_mut("console").and_then(|c| c.as_table_mut())
-        {
-            console.remove("order");
-        }
-    } else {
-        let mut list = toml_edit::Array::new();
-        for stop in stops {
-            list.push(stop.as_str());
-        }
-        order.insert(manual, toml_edit::value(list));
-    }
-    write_atomically(path, doc.to_string())
 }
 
 /// Rename a sample-set organ without touching the set: the name goes
@@ -4338,12 +4159,11 @@ mod tests {
 
         // A declared drawknob order rides [console.order], keyed by
         // manual name — so a manual rename must carry the key.
-        write_composite_stop_order(
-            &path,
-            "Grand orgue",
-            &["Montre 8".to_string(), "Bourdon 16".to_string()],
-        )
-        .expect("orders");
+        let legacy = format!(
+            "{}\n[console.order]\n\"Grand orgue\" = [\"Montre 8\", \"Bourdon 16\"]\n",
+            std::fs::read_to_string(&path).expect("reads")
+        );
+        std::fs::write(&path, legacy).expect("legacy console metadata");
         assert_eq!(
             def(&path).console.order.get("Grand orgue").map(Vec::len),
             Some(2)
@@ -4418,6 +4238,7 @@ high = 96
 from = "anne"
 manual = "Hauptwerk"
 on = "Great"
+pitch_label = { "Montre 8" = "" } # Legacy engraving survives re-sourcing.
 
 [[stop]]
 from = "gib"
@@ -4489,28 +4310,6 @@ stops = ["Montre 8"]
                 .expect("renames")
         );
         assert_eq!(def(&path).stops[0].rename.as_deref(), Some("Tromba"));
-
-        // A knob engraving rides the same lines: a field on a stop
-        // pull, a map entry on a division pull — and the empty string
-        // (engrave nothing) is a value, not an absence.
-        assert!(
-            write_composite_stop_pitch_label(&path, &pulled_stop, "Great", Some("8"))
-                .expect("labels")
-        );
-        assert_eq!(def(&path).stops[0].pitch_label.as_deref(), Some("8"));
-        assert!(
-            write_composite_stop_pitch_label(&path, &division_stop, "Great", Some(""))
-                .expect("labels")
-        );
-        assert_eq!(
-            def(&path).divisions[0].pitch_label.get("Montre 8").map(String::as_str),
-            Some("")
-        );
-        assert!(
-            write_composite_stop_pitch_label(&path, &pulled_stop, "Great", None)
-                .expect("unlabels")
-        );
-        assert!(def(&path).stops[0].pitch_label.is_none());
 
         // Pipe sharing rides the same lines, and shared (false) is
         // spelled by absence.
@@ -4808,6 +4607,9 @@ name = "Gt/Ped (thumb)"
 from = "Great"
 to = "Pedal"
 
+[console.coupler_keys]
+"Gt/Ped (thumb)" = "never"
+
 [console.order]
 "Great" = ["Montre 8", "coupler:Gt/Ped (thumb)", "Bourdon 8"]
 "#,
@@ -4825,19 +4627,7 @@ to = "Pedal"
         write_composite_coupler_link(&path, "Gt/Ped", "II/I", false).expect("unlinks");
         assert_eq!(def(&path).couplers.link, [["Gt/Ped", "Gt/Ped (thumb)"]]);
 
-        // The coupled-keys settings: an organ-wide default (true is
-        // the default, so true removes the line) and per-coupler
-        // overrides in [console.coupler_keys].
-        write_composite_coupled_keys(&path, false).expect("writes");
-        assert_eq!(def(&path).console.coupled_keys, Some(false));
-        write_composite_coupled_keys(&path, true).expect("clears");
-        assert_eq!(def(&path).console.coupled_keys, None);
-        write_composite_coupler_key_mode(&path, "Gt/Ped (thumb)", Some("never")).expect("sets");
-        assert_eq!(
-            def(&path).console.coupler_keys.get("Gt/Ped (thumb)").map(String::as_str),
-            Some("never")
-        );
-
+        // Old visual metadata survives edits to musical couplers.
         // A rename carries the link entry, the override and the jamb
         // seat along.
         rename_composite_coupler(&path, "Gt/Ped (thumb)", "Gt/Ped (toe)").expect("renames");

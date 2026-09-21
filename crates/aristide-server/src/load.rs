@@ -2,7 +2,7 @@
 //! bank → a fully configured console, plus every engine setting the
 //! sources imply. Pure control-side work — no device, stream, or shared
 //! state is touched — so the same path serves the CLI at startup and
-//! the console's organ picker at runtime.
+//! the JSON control API at runtime.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -121,23 +121,6 @@ pub struct PreparedInstrument {
     /// Per stop, the narrowed rules of the console's own: what the
     /// per-key voicing popover shows and writes back.
     pub pipe_voicing: std::collections::HashMap<(StopId, VoicingScope), PipeVoicing>,
-    /// Per stop: its declared knob engraving (`""` = engrave nothing).
-    /// Stops absent here engrave the footage they actually speak at.
-    pub stop_labels: std::collections::HashMap<StopId, String>,
-    /// The file's `[console.order]` — per manual name, its drawknob
-    /// display order. Empty unless a composite loaded alone declared
-    /// one, same condition as `layout`.
-    pub stop_order: std::collections::BTreeMap<String, Vec<String>>,
-    /// The organ file's `[console.layout]` — empty unless it is a
-    /// composite loaded alone, same condition as `composite` above.
-    pub layout: std::collections::BTreeMap<String, instrument::PanelPos>,
-    /// The file's `[console] coupled_keys` — whether engaged couplers
-    /// pull the coupled keys down on the on-screen keyboards. Display
-    /// only; true unless the file says otherwise.
-    pub coupled_keys: bool,
-    /// The file's `[console.coupler_keys]` — per-coupler `"never"` /
-    /// `"always"` overrides of `coupled_keys`, by console name.
-    pub coupler_key_modes: std::collections::BTreeMap<String, String>,
     /// Bus setups from the sidecar's `[routing]`, ready to send to the
     /// engine (bus 0, the main pair, is never listed). The per-stop
     /// half of the plan is already installed in the console.
@@ -279,22 +262,17 @@ fn load_impulse_response(
 
 /// Every source path's contribution before assembly: the organs and
 /// sidecars themselves, plus whatever a lone composite definition
-/// contributed (MIDI wiring, provenance, tuning, layout) — populated
+/// contributed (MIDI wiring, provenance, tuning) — populated
 /// only when it was the sole path.
 struct Sources {
     sources: Vec<(String, Organ)>,
     sidecars: Vec<aristide_formats::sidecar::Sidecar>,
     composite_midi: Option<(PathBuf, instrument::MidiDef, instrument::CombinationsDef)>,
     single_provenance: std::collections::HashMap<StopId, instrument::StopProvenance>,
-    stop_labels: std::collections::HashMap<StopId, String>,
     manual_tuning_defs: Vec<instrument::ManualTuningDef>,
     source_tuning_defs:
         std::collections::BTreeMap<String, aristide_formats::sidecar::TuningOverride>,
     rank_sources: Vec<String>,
-    console_order: std::collections::BTreeMap<String, Vec<String>>,
-    console_layout: std::collections::BTreeMap<String, instrument::PanelPos>,
-    console_coupled_keys: bool,
-    coupler_key_modes: std::collections::BTreeMap<String, String>,
 }
 
 /// A non-composite sample set: parsed as-is, its sidecar loaded (or
@@ -342,8 +320,6 @@ fn load_sources(
     let mut composite_midi: Option<(PathBuf, instrument::MidiDef, instrument::CombinationsDef)> = None;
     let mut single_provenance: std::collections::HashMap<StopId, instrument::StopProvenance> =
         std::collections::HashMap::new();
-    let mut stop_labels: std::collections::HashMap<StopId, String> =
-        std::collections::HashMap::new();
     let mut manual_tuning_defs: Vec<instrument::ManualTuningDef> = Vec::new();
     let mut source_tuning_defs: std::collections::BTreeMap<
         String,
@@ -351,13 +327,6 @@ fn load_sources(
     > = std::collections::BTreeMap::new();
     // Per assembled rank: the alias of the set it came from.
     let mut rank_sources: Vec<String> = Vec::new();
-    let mut console_order: std::collections::BTreeMap<String, Vec<String>> =
-        std::collections::BTreeMap::new();
-    let mut console_layout: std::collections::BTreeMap<String, instrument::PanelPos> =
-        std::collections::BTreeMap::new();
-    let mut console_coupled_keys = true;
-    let mut coupler_key_modes: std::collections::BTreeMap<String, String> =
-        std::collections::BTreeMap::new();
 
     let mut sources: Vec<(String, Organ)> = Vec::new();
     let mut sidecars = Vec::new();
@@ -392,19 +361,9 @@ fn load_sources(
                     .enumerate()
                     .map(|(index, prov)| (StopId(index as u32), prov))
                     .collect();
-                stop_labels = assembled
-                    .pitch_labels
-                    .into_iter()
-                    .enumerate()
-                    .filter_map(|(index, label)| Some((StopId(index as u32), label?)))
-                    .collect();
                 manual_tuning_defs = assembled.manual_tuning;
                 source_tuning_defs = assembled.source_tuning;
                 rank_sources = assembled.rank_sources;
-                console_layout = assembled.console_layout;
-                console_order = assembled.console_order;
-                console_coupled_keys = assembled.console_coupled_keys.unwrap_or(true);
-                coupler_key_modes = assembled.console_coupler_keys;
             } else if !assembled.midi.inputs.is_empty()
                 || !assembled.midi.controls.is_empty()
                 || !assembled.manual_tuning.is_empty()
@@ -458,14 +417,9 @@ fn load_sources(
         sidecars,
         composite_midi,
         single_provenance,
-        stop_labels,
         manual_tuning_defs,
         source_tuning_defs,
         rank_sources,
-        console_order,
-        console_layout,
-        console_coupled_keys,
-        coupler_key_modes,
     })
 }
 
@@ -503,7 +457,6 @@ fn register_and_suggest(
 struct SourceExtras<'a> {
     rank_sources: &'a mut Vec<String>,
     single_provenance: &'a mut std::collections::HashMap<StopId, instrument::StopProvenance>,
-    stop_labels: &'a mut std::collections::HashMap<StopId, String>,
 }
 
 /// One source stands as itself; several become an implicit composite
@@ -607,13 +560,6 @@ fn assemble_organ(
             .cloned()
             .enumerate()
             .map(|(index, prov)| (StopId(index as u32), prov))
-            .collect();
-        *extras.stop_labels = assembled
-            .pitch_labels
-            .iter()
-            .cloned()
-            .enumerate()
-            .filter_map(|(index, label)| Some((StopId(index as u32), label?)))
             .collect();
         let stop_map = &assembled.stop_map;
         let drawn = if stops.is_empty() {
@@ -1658,14 +1604,9 @@ pub fn prepare_with(
         sidecars,
         composite_midi,
         mut single_provenance,
-        mut stop_labels,
         manual_tuning_defs,
         source_tuning_defs,
         mut rank_sources,
-        console_order,
-        console_layout,
-        console_coupled_keys,
-        coupler_key_modes,
     } = load_sources(paths, progress, &mut setup, &mut load_warnings)?;
 
     let (per_source_drawn, per_source_suggested) =
@@ -1683,7 +1624,6 @@ pub fn prepare_with(
         &mut SourceExtras {
             rank_sources: &mut rank_sources,
             single_provenance: &mut single_provenance,
-            stop_labels: &mut stop_labels,
         },
         &mut load_warnings,
     )?;
@@ -1762,11 +1702,6 @@ pub fn prepare_with(
         provenance: single_provenance,
         stop_voicing,
         pipe_voicing,
-        stop_labels,
-        stop_order: console_order,
-        layout: console_layout,
-        coupled_keys: console_coupled_keys,
-        coupler_key_modes,
         buses,
         warnings: load_warnings,
     })
@@ -2023,7 +1958,6 @@ mod tests {
         assert!(prepared.bank.streamed_bytes() > 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
-
 
     /// A set tuned apart in its `[sources]` entry, a stop pinned past
     /// it, a stop with a tuning of its own, and a rank tuned apart

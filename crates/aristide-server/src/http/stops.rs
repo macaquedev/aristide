@@ -268,32 +268,6 @@ pub(super) fn voicing(state: &Mutex<State>, query: &str) -> Reply {
     }
 }
 
-// A stop's knob engraving: `label=` is the footage line the
-// drawknob face shows (empty = engrave nothing), `auto=1` goes
-// back to showing the footage the stop actually speaks at.
-// A label, so it lands live — no rebuild.
-pub(super) fn label(state: &Mutex<State>, query: &str) -> Reply {
-    let mut state = state.lock().expect("state poisoned");
-    if state.is_loading() {
-        return bad_request("an organ is already loading");
-    }
-    let Some(stop) = param(query, "stop").and_then(|v| v.parse::<u32>().ok()) else {
-        return bad_request("missing stop");
-    };
-    let label = if param(query, "auto").is_some_and(|v| v != "0") {
-        None
-    } else {
-        match param(query, "label").map(unescape) {
-            Some(label) => Some(label),
-            None => return bad_request("missing label (or auto=1)"),
-        }
-    };
-    match state.set_stop_pitch_label(aristide_model::StopId(stop), label) {
-        Ok(()) => json(state_json_locked(&state)),
-        Err(err) => bad_request(&err),
-    }
-}
-
 // Whether a stop speaks pipes of its own (`own=1` doubles
 // pipes other stops already sound) or shares them (`own=0`,
 // the default and what a real unit action does). Lands live —
@@ -341,63 +315,6 @@ pub(super) fn source(state: &Mutex<State>, query: &str) -> Reply {
             }
         }
         _ => bad_request("missing stop/from/manual/source_stop"),
-    }
-}
-
-// A division's drawknob order, top of the jamb first — display
-// only, so it lands live like panel placement: no rebuild, no
-// ids moved, just the snapshot dealing the rank out anew.
-// `items=` is the full vocabulary (`s<id>` stops, `c<idx>`
-// couplers seated in the jamb); `stops=` is the older
-// stops-only spelling and still accepted.
-pub(super) fn order(state: &Mutex<State>, query: &str) -> Reply {
-    let mut state = state.lock().expect("state poisoned");
-    if state.is_loading() {
-        return bad_request("an organ is already loading");
-    }
-    let items: Option<Result<Vec<crate::RankItem>, ()>> = match (
-        param(query, "items"),
-        param(query, "stops"),
-    ) {
-        (Some(list), _) => Some(
-            list.split(',')
-                .filter(|part| !part.is_empty())
-                .map(|part| match part.split_at(1) {
-                    ("s", id) => id
-                        .parse::<u32>()
-                        .map(|id| crate::RankItem::Stop(aristide_model::StopId(id)))
-                        .map_err(|_| ()),
-                    ("c", index) => index
-                        .parse::<usize>()
-                        .map(crate::RankItem::Coupler)
-                        .map_err(|_| ()),
-                    _ => Err(()),
-                })
-                .collect(),
-        ),
-        (None, Some(list)) => Some(
-            list.split(',')
-                .filter(|part| !part.is_empty())
-                .map(|part| {
-                    part.parse::<u32>()
-                        .map(|id| crate::RankItem::Stop(aristide_model::StopId(id)))
-                        .map_err(|_| ())
-                })
-                .collect(),
-        ),
-        (None, None) => None,
-    };
-    match (
-        param(query, "manual").and_then(|v| v.parse::<usize>().ok()),
-        items,
-    ) {
-        (Some(manual), Some(Ok(items))) => {
-            match state.set_rank_order(manual, &items) {
-                Ok(()) => json(state_json_locked(&state)),
-                Err(err) => bad_request(&err),
-            }
-        }
-        _ => bad_request("missing manual/items (comma-separated s<id>/c<idx>)"),
     }
 }
 

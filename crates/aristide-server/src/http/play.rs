@@ -1,10 +1,6 @@
-//! The playing surface: keys pressed on screen, the combination action
-//! (generals, divisionals, the stepper, the crescendo), cancel and
-//! panic.
-//!
-//! Every endpoint here is the on-screen twin of a binding action, and
-//! both land on the same `State` method — a piston under a thumb and a
-//! piston under a mouse must never come to mean different things.
+//! Performance controls: notes, combinations (generals, divisionals,
+//! stepper and crescendo), cancel and panic. API commands and MIDI
+//! bindings share the same musical state and engine command queue.
 
 use std::sync::Mutex;
 

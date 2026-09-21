@@ -316,48 +316,6 @@ pub(super) fn enclosure_assign(state: &Mutex<State>, query: &str) -> Reply {
     }
 }
 
-// Move — and with `w`/`h`, size — a console panel on the
-// canvas: all four are normalized fractions, clamped rather
-// than refused (a sized jamb wraps its stops into columns).
-// Size left out keeps whatever the panel has on record.
-// Cosmetic — this writes the file but, unlike the edits above,
-// never queues a rebuild.
-pub(super) fn panel_place(state: &Mutex<State>, query: &str) -> Reply {
-    let mut state = state.lock().expect("state poisoned");
-    if state.is_loading() {
-        return bad_request("an organ is already loading");
-    }
-    if param(query, "reset") == Some("1") {
-        return match state.reset_panel_layout() {
-            Ok(()) => json(state_json_locked(&state)),
-            Err(err) => bad_request(&err),
-        };
-    }
-    let size = match (
-        param(query, "w").map(|v| v.parse::<f32>()),
-        param(query, "h").map(|v| v.parse::<f32>()),
-    ) {
-        (Some(Ok(w)), Some(Ok(h))) if w.is_finite() && h.is_finite() => {
-            Some((w, h))
-        }
-        (None, None) => None,
-        _ => return bad_request("w and h must be fractions, both or neither"),
-    };
-    match (
-        param(query, "panel").map(unescape),
-        param(query, "x").and_then(|v| v.parse::<f32>().ok()),
-        param(query, "y").and_then(|v| v.parse::<f32>().ok()),
-    ) {
-        (Some(panel), Some(x), Some(y)) => {
-            match state.place_panel(&panel, x, y, size) {
-                Ok(()) => json(state_json_locked(&state)),
-                Err(err) => bad_request(&err),
-            }
-        }
-        _ => bad_request("missing panel/x/y"),
-    }
-}
-
 // What every source of this organ offers, for the pane's
 // source browser: manuals, stops, and what is already pulled.
 // Sources are parsed on demand (an ODF parse, no samples).

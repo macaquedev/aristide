@@ -13,7 +13,6 @@ use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 use aristide_model::units::ratio_to_cents;
-use serde::ser::SerializeMap;
 use serde::{Serialize, Serializer};
 
 use crate::State;
@@ -143,17 +142,11 @@ struct Snapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     keyboard: Option<KeyboardView>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    coupled_keys: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     coupler_repitch: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     noises: Option<NoisesView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     enclosures: Option<Vec<EnclosureView>>,
-    /// Only panels a player has explicitly placed; anything absent
-    /// auto-layouts on the canvas.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    layout: Option<BTreeMap<String, PanelView>>,
     /// How this instrument was put together: the setup dialog opens on
     /// `implicit` (combined on the CLI, nothing on disk yet), the Organ
     /// preferences edit compasses, and saving writes it all to a file.
@@ -251,10 +244,6 @@ struct StopView {
     #[serde(skip_serializing_if = "Option::is_none")]
     src: Option<SourceView>,
     pitch: PitchView,
-    /// The declared knob engraving, only when one is declared — absent
-    /// means "engrave the footage the stop speaks at".
-    #[serde(skip_serializing_if = "Option::is_none")]
-    label: Option<String>,
     /// Present only when the stop speaks pipes of its own — shared
     /// (absent) is the default and the organ norm.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -358,15 +347,8 @@ struct CouplerView {
     name: String,
     on: bool,
     routes: Vec<RouteView>,
-    /// A jamb seat, linked partners, a coupled-keys override and
-    /// `hidden` are all present only when they exist, so the common
-    /// snapshot stays small and old clients stay right.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    midx: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     linked: Option<Vec<usize>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    keys: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     hidden: Option<bool>,
 }
@@ -400,23 +382,11 @@ struct ManualView {
     key_count: u16,
     pedal: bool,
     kind: &'static str,
-    /// Microtonal manuals carry their effective hex layout — declared
-    /// or derived, the console just draws it.
+    /// Microtonal manuals carry their effective key mapping, also used
+    /// by the computer-key input API.
     #[serde(skip_serializing_if = "Option::is_none")]
     hex: Option<HexView>,
-    /// When a Lumatone map routes to this manual, the map's key
-    /// colours in the same extended-key numbering the notes land in.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    colors: Option<KeyColors>,
     held: Vec<u16>,
-    /// The division's display rank: stop and seated-coupler tokens in
-    /// jamb order — what the console deals the drawknobs out from.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    rank: Option<Vec<String>>,
-    /// The keys engaged couplers are pulling down (absent when none),
-    /// the mechanical-action view beside `held`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    coupled: Option<Vec<u16>>,
 }
 
 #[derive(Serialize)]
@@ -426,20 +396,6 @@ struct HexView {
     right: i16,
     upright: i16,
     anchor: u16,
-}
-
-/// A hex board's key colours as a JSON object keyed by key number,
-/// written in key order rather than sorted as text.
-struct KeyColors(Vec<(u16, u32)>);
-
-impl Serialize for KeyColors {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let mut map = serializer.serialize_map(Some(self.0.len()))?;
-        for (key, colour) in &self.0 {
-            map.serialize_entry(&key.to_string(), &format!("#{colour:06x}"))?;
-        }
-        map.end()
-    }
 }
 
 /// A synth tremulant carries its live shape (depth back in the file's
@@ -682,18 +638,6 @@ struct EnclosureView {
     displayed: bool,
 }
 
-/// Size only when the player set one — absent means the panel hugs its
-/// content, and old clients never look.
-#[derive(Serialize)]
-struct PanelView {
-    x: F32,
-    y: F32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    w: Option<F32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    h: Option<F32>,
-}
-
 #[derive(Serialize)]
 struct SetupView {
     implicit: bool,
@@ -717,100 +661,9 @@ struct CompassView {
 
 fn snapshot(state: &State) -> Snapshot {
     let console = state.console();
-    // Precomputed for the couplers and manuals arrays below: where
-    // each coupler is seated (a [console.order] `coupler:` entry puts
-    // it in that division's jamb), each division's display rank —
-    // stops in dealt order with seated couplers interleaved — and the
-    // keys engaged couplers are pulling down, filtered through the
-    // organ's coupled-keys default and per-coupler overrides.
-    let mut coupler_seats: Vec<Option<usize>> = Vec::new();
-    let mut division_ranks: Vec<Vec<String>> = Vec::new();
-    let mut coupled_keys: Vec<Vec<u16>> = Vec::new();
-    if let Some(console) = console {
-        let manuals: Vec<(usize, String)> = console
-            .manual_states()
-            .into_iter()
-            .map(|(idx, name, ..)| (idx, name.to_string()))
-            .collect();
-        let listed_at = |manual: &str, name: &str| -> Option<usize> {
-            state
-                .stop_order
-                .iter()
-                .find(|(listed, _)| listed.eq_ignore_ascii_case(manual))
-                .and_then(|(_, order)| {
-                    order.iter().position(|entry| entry.eq_ignore_ascii_case(name))
-                })
-        };
-        // (listed position, tiebreak) → token; couplers tiebreak 0 so
-        // they sit exactly where listed, stops keep dealt order.
-        let mut ranks: Vec<Vec<((usize, usize), String)>> = vec![Vec::new(); manuals.len()];
-        for (seq, (id, name, manual, manual_index, _)) in
-            console.stop_states().into_iter().enumerate()
-        {
-            let Some(rank) = ranks.get_mut(manual_index) else { continue };
-            let pos = listed_at(manual, name).unwrap_or(usize::MAX);
-            rank.push(((pos, seq + 1), format!("s{}", id.0)));
-        }
-        let couplers = console.coupler_states();
-        coupler_seats = vec![None; couplers.len()];
-        for (index, name, _, available) in couplers {
-            if !available {
-                continue;
-            }
-            let token = format!("coupler:{name}");
-            for (midx, manual) in &manuals {
-                if let Some(pos) = listed_at(manual, &token) {
-                    coupler_seats[index] = Some(*midx);
-                    if let Some(rank) = ranks.get_mut(*midx) {
-                        rank.push(((pos, 0), format!("c{index}")));
-                    }
-                    break;
-                }
-            }
-        }
-        division_ranks = ranks
-            .into_iter()
-            .map(|mut rank| {
-                rank.sort_by_key(|(key, _)| *key);
-                rank.into_iter().map(|(_, token)| token).collect()
-            })
-            .collect();
-        let show: Vec<bool> = console
-            .coupler_states()
-            .iter()
-            .map(|(_, name, _, _)| {
-                let mode = state
-                    .coupler_key_modes
-                    .iter()
-                    .find(|(key, _)| key.eq_ignore_ascii_case(name))
-                    .map(|(_, mode)| mode.as_str());
-                match mode {
-                    Some("never") => false,
-                    Some("always") => true,
-                    _ => state.coupled_keys,
-                }
-            })
-            .collect();
-        coupled_keys =
-            console.coupled_display_keys(&|index| show.get(index).copied().unwrap_or(false));
-    }
-
     let stops = console.map(|console| {
-        // The player's drawknob order ([console.order]): listed stops
-        // first in their listed order, the rest after in assembled
-        // order — a stable sort per manual, so a stale name simply
-        // has no effect. The console renders the array as dealt.
-        let mut states = console.stop_states();
-        states.sort_by_key(|(_, name, manual, ..)| {
-            state
-                .stop_order
-                .get(*manual)
-                .and_then(|order| {
-                    order.iter().position(|listed| listed.eq_ignore_ascii_case(name))
-                })
-                .unwrap_or(usize::MAX)
-        });
-        states
+        console
+            .stop_states()
             .into_iter()
             .map(|(id, name, manual, manual_index, drawn)| {
                 let voicing = state.stop_voicing.get(&id).copied().unwrap_or_default();
@@ -846,7 +699,6 @@ fn snapshot(state: &State) -> Snapshot {
                         brightness: F64(voicing.brightness_db),
                         own: state.stop_voicing.contains_key(&id),
                     },
-                    label: state.stop_labels.get(&id).cloned(),
                     own_pipes: console.stop_own_pipes(id).then_some(true),
                     tuning: StopScopeView {
                         scope: scope.name(),
@@ -900,13 +752,7 @@ fn snapshot(state: &State) -> Snapshot {
                             own_pipes: route.own_pipes.then_some(true),
                         })
                         .collect(),
-                    midx: coupler_seats.get(index).copied().flatten(),
                     linked: (!linked.is_empty()).then_some(linked),
-                    keys: state
-                        .coupler_key_modes
-                        .iter()
-                        .find(|(key, _)| key.eq_ignore_ascii_case(name))
-                        .map(|(_, mode)| mode.clone()),
                     // Present only when off the console, so the common
                     // snapshot stays small and old clients stay right.
                     hidden: (!available).then_some(true),
@@ -921,16 +767,6 @@ fn snapshot(state: &State) -> Snapshot {
             .into_iter()
             .map(|(idx, name, first_key, key_count, held)| {
                 let hex = console.manual_hex(idx);
-                let colors = hex.and_then(|_| {
-                    let mut colors: Vec<(u16, u32)> = state
-                        .midi_ports
-                        .iter()
-                        .flat_map(|port| port.map_colors(idx))
-                        .collect();
-                    colors.sort_unstable();
-                    colors.dedup_by_key(|(key, _)| *key);
-                    (!colors.is_empty()).then_some(KeyColors(colors))
-                });
                 ManualView {
                     idx,
                     name: name.to_string(),
@@ -945,13 +781,7 @@ fn snapshot(state: &State) -> Snapshot {
                         upright: hex.upright,
                         anchor: hex.anchor,
                     }),
-                    colors,
                     held,
-                    rank: division_ranks.get(idx).cloned(),
-                    coupled: coupled_keys
-                        .get(idx)
-                        .filter(|keys| !keys.is_empty())
-                        .cloned(),
                 }
             })
             .collect()
@@ -1225,10 +1055,6 @@ fn snapshot(state: &State) -> Snapshot {
             low: keyboard.compass.0,
             high: keyboard.compass.1,
         }),
-        // The organ-wide coupled-keys default, for the console's own
-        // organ-scoped settings (per-coupler overrides ride each
-        // coupler's `keys` field).
-        coupled_keys: console.map(|_| state.coupled_keys),
         coupler_repitch: console.map(|console| console.coupler_repitch()),
         noises: console.map(|console| {
             let (enabled, volume) = console.noises();
@@ -1246,27 +1072,6 @@ fn snapshot(state: &State) -> Snapshot {
                     name,
                     value: F32(position),
                     displayed,
-                })
-                .collect()
-        }),
-        layout: console.map(|_| {
-            state
-                .layout
-                .iter()
-                .map(|(panel, pos)| {
-                    let (w, h) = match (pos.w, pos.h) {
-                        (Some(w), Some(h)) => (Some(F32(w)), Some(F32(h))),
-                        _ => (None, None),
-                    };
-                    (
-                        panel.clone(),
-                        PanelView {
-                            x: F32(pos.x),
-                            y: F32(pos.y),
-                            w,
-                            h,
-                        },
-                    )
                 })
                 .collect()
         }),

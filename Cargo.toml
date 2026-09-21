@@ -5,7 +5,6 @@ members = [
     "crates/aristide-formats",
     "crates/aristide-engine",
     "crates/aristide-server",
-    "crates/aristide-console",
 ]
 
 [workspace.package]
@@ -24,8 +23,7 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 serde = { version = "1", features = ["derive"] }
-# Test-only: the state snapshot is hand-written JSON, and nothing else
-# would catch a field landing inside the wrong object.
+# The headless control API serializes state snapshots as JSON.
 serde_json = "1"
 toml = "0.9"
 quick-xml = "0.41"
