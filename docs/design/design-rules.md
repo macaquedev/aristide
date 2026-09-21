@@ -56,7 +56,7 @@ it. Never design one screen for both.
 | Library   | Desk      | Install, browse and load organs |
 | Build     | Desk      | Create and edit organs: divisions, stops, couplers, console layout, MIDI assignment |
 | Voice     | Desk      | Per-rank and per-pipe level, tuning, temperament, tremulant, acoustics |
-| Record    | Desk      | Capture, edit and play back performances, including registration changes |
+| Record (when implemented) | Desk | Capture, edit and play back performances, including registration changes |
 | Setup     | Desk      | Sound output, MIDI devices, screens, performance |
 
 Workspaces share the visual system below. Only Play follows the console
@@ -128,7 +128,8 @@ rules in section 6; the others follow desk rules in section 7.
   pressed · unavailable (samples not loaded: faint text, dashed outline) ·
   loading (progress within the control) · error (icon plus plain reason).
 - Pistons show which is current. The sequencer shows current and next.
-- Loading an organ shows real progress and lets already-loaded stops play.
+- Loading an organ shows real progress. Never allow a partially loaded organ
+  to be played: the entire organ must finish loading before it becomes playable.
 
 ## 7. Desk workspace rules
 
