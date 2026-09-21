@@ -47,6 +47,7 @@ export function App() {
       {['Build', 'Route', 'Tuning'].includes(panel) && <Stack p="lg">
         <Text fw={600}>{panel === 'Build' && selected ? selected.name : panel}</Text>
         <Text c="dimmed">{panel === 'Build' ? 'The new voice editor is being designed. Editing will become available after the layout studies and audio integration.' : `${panel} is not connected in this first increment.`}</Text>
+        {(panel === 'Build' || panel === 'Tuning') && <Button component="a" href={`/?study=1&panel=${panel.toLowerCase()}`} variant="default" w="fit-content">Compare four design studies</Button>}
         <Button variant="default" w="fit-content" onClick={() => setPanel('Play')}>Back to Play</Button>
       </Stack>}
     </main>

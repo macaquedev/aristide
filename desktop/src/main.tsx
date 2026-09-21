@@ -4,6 +4,7 @@ import { MantineProvider, createTheme } from '@mantine/core';
 import '@mantine/core/styles.css';
 import './style.css';
 import { App } from './App';
+const Study = React.lazy(() => import('./design/Study').then(module => ({ default: module.Study })));
 
 const theme = createTheme({
   fontFamily: 'Arial, sans-serif',
@@ -13,5 +14,5 @@ const theme = createTheme({
 });
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
-  <React.StrictMode><MantineProvider theme={theme} defaultColorScheme="dark"><App /></MantineProvider></React.StrictMode>,
+  <React.StrictMode><MantineProvider theme={theme} defaultColorScheme="dark"><React.Suspense fallback={null}>{new URLSearchParams(location.search).has('study') ? <Study/> : <App />}</React.Suspense></MantineProvider></React.StrictMode>,
 );

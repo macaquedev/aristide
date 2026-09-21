@@ -32,9 +32,9 @@ Alex confirmed Tauri for the desktop shell and Bun for frontend tooling.
 | Layers | Automatic layer creation on first edit, global deep undo, snapshots, migration of existing sidecars |
 | Play | Stop drag/order, custom marks/variants, rename/hide/delete, division context menu, MIDI record/playback |
 | Combinations | Stop on/off only; migrate legacy coupler/trem storage, separate named sets, Sequence sheet and labels, piston learn gestures |
-| Build | Four clickable structural studies, Alex's choice, four mutations; final connected voice editor and per-key mode |
+| Build | [Four studies ready](../design/editor-studies.md); awaiting Alex's choice, then four mutations and the connected voice editor |
 | Route | Named output groups, hierarchical level matrix, inheritance, pipe patterns and live shared routing data |
-| Tuning | Four clickable structural studies, Alex's choice, four mutations; final inheritance card, per-pipe scope, custom scale editing |
+| Tuning | [Four studies ready](../design/editor-studies.md); awaiting Alex's choice, then four mutations and the connected tuning editor |
 | Library | Discovery, rich metadata, snapshots, automatic last-instrument restore, bundled organ |
 | Loading | Accurate memory preflight, lighter/rank-selection choices, rank progress, cancellation, remembered choices |
 | Setup | First-run learn flow, device/buffer/rate controls, speaker groups and screen assignment |
