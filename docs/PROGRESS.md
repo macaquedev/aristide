@@ -2,8 +2,9 @@
 
 Newest first. One entry per work session; keep entries factual and short.
 Milestones refer to DESIGN.md. Older UI entries are historical; the current
-headless scope is described by the latest cleanup note.
+implementation scope is described by the newest notes.
 
+- [2026-09-21 — Tauri and Bun foundation, initial Play](progress/2026-09-21-tauri-foundation.md)
 - [2026-09-21 — establish Alex's new UI and flow specification](progress/2026-09-21-ui-flow-spec.md)
 - [2026-09-21 — remove the UI and retain headless audio](progress/2026-09-21-headless-cleanup.md)
 

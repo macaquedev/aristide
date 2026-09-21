@@ -11,7 +11,9 @@ architecture and roadmap.
 
 The new UI will be built incrementally from Alex's
 [UI and flow spec](docs/design/ui-flow-spec.md). It replaces all earlier UI
-design guidance. The current runnable application is still the headless server.
+design guidance. The first new Tauri desktop increment is in `desktop/`;
+the full spec is not yet implemented. See the
+[implementation status](docs/progress/2026-09-21-tauri-foundation.md).
 
 ## Sample sets
 
@@ -49,9 +51,22 @@ can save the combination as an organ file.
 
 ## Building and running
 
-Aristide is headless. The desktop shell and browser UI have been removed.
-The workspace contains the audio engine, organ model, sample loaders, and the
-server that owns audio/MIDI devices and exposes a localhost JSON control API.
+The Tauri desktop shell hosts the existing Rust audio runtime on a dedicated
+thread. It connects through native commands, without opening a network port.
+The standalone server still exposes the localhost JSON control API.
+
+For the desktop app, install Bun and Tauri's platform prerequisites (GTK 3 and
+WebKitGTK 4.1 development packages on Linux), then:
+
+```sh
+cd desktop
+bun install --frozen-lockfile
+bun run desktop
+```
+
+This runs the audio engine in release mode. `bun run desktop:build` builds the
+standalone executable. `bun run dev` is a browser development preview; it needs
+the separate server on port 9669. Use Bun for all frontend dependencies and scripts.
 
 Build dependencies: Rust, `libwavpack`, and ALSA development headers on Linux
 (`libasound2-dev` on Debian/Ubuntu, `alsa-lib` on Arch).
@@ -101,6 +116,9 @@ when editing those files, but no longer drives runtime state or UI endpoints.
 ```sh
 cargo test --workspace
 cargo clippy --workspace --all-targets
+cd desktop
+bun run build
+bun run test
 ```
 
 Tests render audio without needing an output device. Sample-set integration

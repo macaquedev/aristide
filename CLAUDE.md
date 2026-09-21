@@ -23,7 +23,8 @@ new UI, built slowly and incrementally from `docs/design/ui-flow-spec.md`.
 screens, navigation, styling and workflows are not a starting point. The old
 `docs/design/design-rules.md` is only a redirect to the new specification.
 
-The current implementation is still headless. Reuse the audio engine, model,
+The new Tauri shell and initial Play surface live in `desktop/`; the headless
+server remains available. Reuse the audio engine, model,
 sample loaders, MIDI/device I/O and JSON sound-control API where they support the
 new requirements. Do not assume that the backend already implements every feature
 in the spec, or change the spec to fit an old endpoint.
@@ -34,6 +35,8 @@ settings. Imported organs and samples remain untouched; customisation lives in l
 
 ## UI implementation workflow
 
+- Use **Tauri** for the native desktop shell and **Bun** for frontend dependency
+  installation, scripts and the lockfile (Alex, 2026-09-21). Do not use npm.
 - Work in small, coherent, reviewable increments. State the scope and the relevant
   spec sections before implementing; avoid building every panel at once.
 - The seven Control flow rules outrank individual screen designs. Play is home;

@@ -1,0 +1,38 @@
+:root { font-synthesis: none; --stop-height: 72px; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+button { font-family: inherit; }
+.app { min-height: 100dvh; display: flex; flex-direction: column; }
+.topbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px 16px; border-bottom: 1px solid var(--mantine-color-default-border); }
+.instrument { flex: 1 1 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.topbar nav { display: flex; gap: 2px; }
+.meters { white-space: nowrap; line-height: 1.25; }
+main { flex: 1; min-width: 0; }
+.play { display: flex; flex-direction: column; min-height: calc(100dvh - 80px); }
+.divisions { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(210px, 1fr); overflow-x: auto; flex: 1; padding: 20px 16px; gap: 20px; align-items: start; }
+.division { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.division-heading { min-height: 44px; }
+.stops { display: flex; flex-direction: column; gap: 8px; }
+.stop { min-height: var(--stop-height); width: 100%; display: flex; flex-direction: column; justify-content: center; align-items: flex-start; gap: 2px; padding: 10px 14px; background: transparent; border: 1px solid var(--mantine-color-default-border); border-radius: var(--mantine-radius-default); color: var(--mantine-color-text); text-align: left; cursor: pointer; touch-action: pan-y; user-select: none; }
+.stop[aria-pressed="true"] { background: var(--mantine-primary-color-filled); border-color: var(--mantine-primary-color-filled); color: white; }
+.stop:focus-visible { outline: 2px solid var(--mantine-primary-color-filled); outline-offset: 3px; }
+.stop-name { font-size: 1.25rem; font-weight: 600; line-height: 1.2; overflow-wrap: anywhere; }
+.stop-pitch { font-size: .8rem; }
+.coupler { min-height: 60px; white-space: normal; }
+.pistons { display: flex; flex-wrap: wrap; gap: 8px; padding: 16px; background: var(--mantine-color-body); border-top: 1px solid var(--mantine-color-default-border); position: sticky; bottom: 0; z-index: 1; }
+.pistons button, .divisionals button { min-height: 60px; min-width: 60px; }
+.spacer { flex: 1; }
+.library-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 16px; }
+.library-card { text-align: left; cursor: pointer; min-height: 120px; }
+[data-density="compact"] { --stop-height: 48px; }
+[data-density="compact"] .stops { gap: 4px; }
+[data-density="compact"] .pistons button { min-height: 44px; }
+@media (max-width: 700px) {
+  .topbar { padding: 8px; gap: 6px; }
+  .topbar nav { order: 2; flex-basis: 100%; overflow-x: auto; }
+  .topbar nav button { flex: 1; padding-inline: 10px; }
+  .instrument { flex-basis: 100px; }
+  .meters { display: none; }
+  .divisions { grid-auto-columns: minmax(220px, 80vw); gap: 12px; }
+  .mantine-Drawer-content { flex-basis: 100%; max-width: 100%; }
+}

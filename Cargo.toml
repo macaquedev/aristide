@@ -5,6 +5,13 @@ members = [
     "crates/aristide-formats",
     "crates/aristide-engine",
     "crates/aristide-server",
+    "desktop/src-tauri",
+]
+default-members = [
+    "crates/aristide-model",
+    "crates/aristide-formats",
+    "crates/aristide-engine",
+    "crates/aristide-server",
 ]
 
 [workspace.package]

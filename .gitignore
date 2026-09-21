@@ -1,5 +1,10 @@
 /target
 /reference
+/desktop/node_modules
+/desktop/dist
+/desktop/test-results
+/desktop/playwright-report
+/desktop/src-tauri/gen
 
 # Sample sets are large and externally sourced — ignored. But Aristide
 # sidecar files are small, hand-written config: those we do version.

@@ -14,7 +14,8 @@ available screens. See [cleanup notes](docs/progress/2026-09-21-headless-cleanup
 UI, user flows and target instrument model. It supersedes the old design rules
 and any conflicting product/model decisions below. Rebuild incrementally from
 that specification; do not restore or reskin the deleted UI. The implementation
-is still headless. This document records the engine architecture and existing
+now includes an initial Tauri shell and Play surface in `desktop/`, using Bun.
+This document records the engine architecture and existing
 behaviour, not proof that the new spec's features already work. Preserve real-time
 audio safety, imported source files and compatibility while implementing the
 required model and persistence changes.
@@ -30,12 +31,12 @@ MIDI/audio routing. Free forever, GPLv3.
 |---|---|---|
 | Language | Rust | RT-safe concurrency without GC, SIMD, modern tooling |
 | Shape | Headless engine + clients | Console PCs, tablet remotes, future CLAP wrapper |
-| GUI | None (removed 2026-09-21) | Headless audio server controlled by MIDI, CLI and JSON API |
+| GUI | New Tauri shell, React/Mantine, Bun (2026-09-21) | Native control bridge to an independent Rust audio runtime; the old UI remains removed |
 | License | GPLv3 | Nobody takes it proprietary; ecosystem norm |
 | Formats | GO `.organ` + unencrypted Hauptwerk read **directly**; Aristide features live in **sidecar files** | Sound quality is engine-side; sidecars add superpowers to every existing free set with no conversion |
 | Native standalone format | Deferred | Only needed for future multi-mic/spatial recordings |
 | Effects | Internal RT-safe modular node graph | Taps at pipe/stop/division/output level; per-pipe delays |
-| New UI | Incremental rebuild under `docs/design/ui-flow-spec.md` | New specification; no graphical interface is currently shipped |
+| New UI | Incremental rebuild under `docs/design/ui-flow-spec.md` | Initial Play surface; see `docs/progress/2026-09-21-tauri-foundation.md` for incomplete requirements |
 | Multi-organ | **Compose at load** (`aristide-formats::instrument`): composite TOML files and multi-set launches assemble N sources into one `Organ`; engine/console/UI stay single-instrument | One playable instrument from any sources is the organ-native abstraction (a console with three builders' ranks is one organ); cross-set couplers become plain routes; no organ tag threads through every API forever |
 
 **Legal boundary:** encrypted Hauptwerk sample sets (HW5+-era commercial sets) are
@@ -196,6 +197,13 @@ audible impact:
                                    ▲ HTTP/JSON
                        External scripts and control clients
 ```
+
+The desktop binary embeds `aristide-server` as a library. One dedicated runtime
+thread owns the audio device, stream and instrument load loop. Tauri's native
+commands call the same control handlers as HTTP; desktop mode opens no HTTP port.
+Closing the application requests shutdown; switching panels or webviews does not.
+The standalone `aristide-server` binary remains a thin CLI entry point to the same
+runtime. No real-time engine code changed for this integration.
 
 - The **audio thread never allocates, locks, or touches disk**. Control → RT communication
   is lock-free SPSC queues. Attacks and sustain loops are RAM-resident (16-bit by default,

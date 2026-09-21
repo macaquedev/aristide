@@ -1,0 +1,38 @@
+import { invoke, isTauri } from '@tauri-apps/api/core';
+
+export type Stop = {
+  id: number; name: string; midx: number; manual: string; on: boolean;
+  pitch: { native: number | null; footage: number | null; cents: number; gain: number; own: boolean };
+  ranks: { id: number; name: string }[];
+};
+export type Snapshot = {
+  organ?: string; loading?: string; load_error?: string;
+  stops: Stop[];
+  manuals: { idx: number; name: string; pedal: boolean; held: number[] }[];
+  couplers: { idx: number; name: string; on: boolean; hidden?: boolean; routes: { from: number; to: number }[] }[];
+  trems: { idx: number; name: string; on: boolean }[];
+  generals: number[]; setter: boolean; gain: number;
+  combinations?: { matching_generals: number[]; divisionals: Record<string, number[]>; matching_divisionals: Record<string, number[]>; frame: number; frames: number };
+  library: { name: string; path: string }[];
+  memory?: { resident_mb: number; samples: number };
+  manual_tuning?: { idx: number; temperament: string; reference: { hz: number } }[];
+  midi: { ports: { id: number; name: string }[]; manuals: { idx: number; name: string; inputs: { device: string; connected: boolean }[] }[]; learning?: { manual: number; slot: number; step: string } };
+  keyboard?: { manual: number };
+};
+
+export type Browse = { dir: string; parent: string | null; entries: { name: string; path: string; dir: boolean }[] };
+export const native = isTauri();
+export const endpoint = (path: string, values: Record<string, string | number> = {}) =>
+  `/api/${path}${Object.keys(values).length ? `?${new URLSearchParams(Object.entries(values).map(([k, v]) => [k, String(v)]))}` : ''}`;
+
+export async function request<T>(method: 'GET' | 'POST', url: string): Promise<T> {
+  const reply = native
+    ? await invoke<{ status: number; body: T }>('api_request', { method, url })
+    : await fetch(url, { method, signal: AbortSignal.timeout(10_000) }).then(async r => ({ status: r.status, body: await r.json() as T }));
+  if (reply.status >= 400) throw new Error(`request-${reply.status}`);
+  return reply.body;
+}
+
+export async function status() {
+  return native ? invoke<{ ready: boolean; error: string | null }>('runtime_status') : { ready: true, error: null };
+}

@@ -1,0 +1,17 @@
+[package]
+name = "aristide-desktop"
+description = "Aristide native desktop console"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+aristide-server = { path = "../../crates/aristide-server" }
+tracing-subscriber.workspace = true
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]

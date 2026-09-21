@@ -64,7 +64,7 @@ pub fn spawn(state: Arc<Mutex<State>>, port: u16) -> std::io::Result<()> {
     Ok(())
 }
 
-fn respond(
+pub(crate) fn respond(
     state: &Mutex<State>,
     method: &Method,
     url: &str,
