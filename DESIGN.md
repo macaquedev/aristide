@@ -480,9 +480,11 @@ never swaps pointers), so a load builds the new musical console and bank off-thr
 then replaces engine and stream together on the main thread. A failed load reports
 through the API and leaves the running organ untouched.
 
-The new client's everyday flow will restore the last instrument automatically,
-as specified in `docs/design/ui-flow-spec.md`. The server behaviour above is not
-a reason to require a fresh Library pick on every launch.
+The desktop runtime restores `last_instrument` automatically. It records only
+successfully loaded paths (including an entire multi-source session), and selecting
+a saved copy updates that session without reloading audio. Old configs fall back
+to their most recent library entry. A failed restore leaves the runtime and Library
+available. The standalone CLI still loads only explicitly supplied paths.
 
 ## Milestones
 

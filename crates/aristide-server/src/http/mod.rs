@@ -1344,6 +1344,8 @@ mod tests {
             let state = state.lock().expect("state");
             assert_eq!(state.organ_key, "My Demo", "wiring is keyed by the new name");
             assert_eq!(state.midi_config.library[0].name, "My Demo", "the library learned it");
+            assert_eq!(state.midi_config.last_instrument, vec![copy.clone()],
+                "desktop startup must restore the selected copy, not its imported base");
             assert!(!state.setup.adopted);
         }
 

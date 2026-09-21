@@ -82,6 +82,8 @@ const HEADER: &str = "\
 # console's picker lists them as Recent, most recent first. Removing
 # one only removes it from that list; the organ's file and its
 # assignments below are kept.
+# `last_instrument` remembers the exact successful session for desktop startup,
+# including all source paths when the instrument has not yet been named.
 #
 # [samples] is how this machine holds a set's audio — a fact about the
 # box, not the organ, which is why it lives here and not in an organ
@@ -106,6 +108,10 @@ const HEADER: &str = "\
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct MidiConfig {
+    /// The exact paths of the last successfully loaded instrument. Separate
+    /// from the library: a multi-source instrument is not its last source.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub last_instrument: Vec<PathBuf>,
     /// How this machine holds sample audio: residency, streaming, the
     /// load cache. Per machine because whether a set fits is a fact
     /// about the box's RAM, not about the set.
@@ -206,6 +212,17 @@ pub struct LibraryEntry {
 }
 
 impl MidiConfig {
+    /// Old configs did not keep an explicit session; their most recent library
+    /// entry is the best available migration. Keep missing paths so startup can
+    /// report the moved organ instead of silently choosing a different one.
+    pub fn last_instrument_paths(&self) -> Vec<PathBuf> {
+        if self.last_instrument.is_empty() {
+            self.library.first().map(|entry| vec![entry.path.clone()]).unwrap_or_default()
+        } else {
+            self.last_instrument.clone()
+        }
+    }
+
     /// Put an organ at the top of the library, replacing any entry
     /// that already names its path.
     pub fn remember(&mut self, name: &str, path: &Path) {

@@ -256,13 +256,8 @@ fn run_server(args: Args, ready: Option<desktop::Ready>) -> Result<()> {
             Default::default()
         }
     };
-    // CLI paths are an explicit selection, queued like any picker
-    // request; without them nothing loads until the console asks.
-    let pending_load = (!args.sets.is_empty()).then(|| LoadRequest {
-        paths: args.sets.clone(),
-        stops: args.stops.clone(),
-        initial: true,
-    });
+    let desktop = ready.is_some();
+    let pending_load = startup_load(&args, &midi_config, desktop);
     if pending_load.is_none() {
         tracing::info!("no organ loaded — pick one in the console");
     }
@@ -276,7 +271,6 @@ fn run_server(args: Args, ready: Option<desktop::Ready>) -> Result<()> {
     // Assignments exist before any hardware does: the computer
     // keyboard and every binding are live from the first note.
     state.lock().expect("state poisoned").resolve_routes();
-    let desktop = ready.is_some();
     if let Some(ready) = ready {
         ready(Arc::clone(&state));
     } else if let Err(err) = http::spawn(Arc::clone(&state), args.http_port) {
@@ -667,6 +661,13 @@ fn perform_load(
     };
     let mut state = state.lock().expect("state poisoned");
     state.memory = Some(memory);
+    // Only a successful load replaces the remembered session. `install` saves
+    // this alongside the library and wiring; imports themselves stay untouched.
+    state.midi_config.last_instrument = request
+        .paths
+        .iter()
+        .map(|path| path.canonicalize().unwrap_or_else(|_| path.clone()))
+        .collect();
     state.install(state::Installed {
         engine: handle,
         console,
@@ -691,4 +692,70 @@ pub(crate) static SHUTDOWN: std::sync::atomic::AtomicBool =
 #[cfg(unix)]
 extern "C" fn handle_sigint(_signal: libc::c_int) {
     SHUTDOWN.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn startup_load(args: &Args, config: &config::MidiConfig, desktop: bool) -> Option<LoadRequest> {
+    if !args.sets.is_empty() {
+        return Some(LoadRequest {
+            paths: args.sets.clone(),
+            stops: args.stops.clone(),
+            initial: true,
+        });
+    }
+    let paths = config.last_instrument_paths();
+    (desktop && !paths.is_empty()).then_some(LoadRequest {
+        paths,
+        stops: Vec::new(),
+        // An unavailable remembered organ is recoverable through Library. It
+        // must not terminate the runtime (unlike an explicit failed CLI load).
+        initial: false,
+    })
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+
+    #[test]
+    fn desktop_restores_the_whole_session_but_cli_stays_explicit() {
+        let mut config = config::MidiConfig::default();
+        config.remember("Other", std::path::Path::new("/other.organ"));
+        config.last_instrument = vec!["/first.organ".into(), "/second.organ".into()];
+        let request = startup_load(&Args::default(), &config, true).unwrap();
+        assert_eq!(request.paths, config.last_instrument);
+        assert!(
+            !request.initial,
+            "restore failure must leave Library usable"
+        );
+        assert!(startup_load(&Args::default(), &config, false).is_none());
+        let explicit = Args {
+            sets: vec!["/chosen.organ".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            startup_load(&explicit, &config, true).unwrap().paths,
+            explicit.sets
+        );
+    }
+
+    #[test]
+    fn old_configs_migrate_without_silently_skipping_a_missing_organ() {
+        let config: config::MidiConfig =
+            toml::from_str("[[library]]\nname = 'Last played'\npath = '/missing.organ'\n").unwrap();
+        assert_eq!(
+            startup_load(&Args::default(), &config, true).unwrap().paths,
+            vec![PathBuf::from("/missing.organ")]
+        );
+        assert!(startup_load(&Args::default(), &config::MidiConfig::default(), true).is_none());
+        let saved = toml::to_string(&config::MidiConfig {
+            last_instrument: vec!["/instrument.toml".into()],
+            ..config
+        })
+        .unwrap();
+        let restored: config::MidiConfig = toml::from_str(&saved).unwrap();
+        assert_eq!(
+            restored.last_instrument_paths(),
+            vec![PathBuf::from("/instrument.toml")]
+        );
+    }
 }

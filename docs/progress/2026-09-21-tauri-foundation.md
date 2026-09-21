@@ -35,7 +35,7 @@ Alex confirmed Tauri for the desktop shell and Bun for frontend tooling.
 | Build | [Four studies ready](../design/editor-studies.md); awaiting Alex's choice, then four mutations and the connected voice editor |
 | Route | Named output groups, hierarchical level matrix, inheritance, pipe patterns and live shared routing data |
 | Tuning | [Four studies ready](../design/editor-studies.md); awaiting Alex's choice, then four mutations and the connected tuning editor |
-| Library | Discovery, rich metadata, snapshots, automatic last-instrument restore, bundled organ |
+| Library | Discovery, rich metadata, snapshots, bundled organ; automatic last-instrument restore is implemented |
 | Loading | Accurate memory preflight, lighter/rank-selection choices, rank progress, cancellation, remembered choices |
 | Setup | First-run learn flow, device/buffer/rate controls, speaker groups and screen assignment |
 | Shell | Real CPU telemetry, multiple screen placement/side-by-side panels, shared numeric gestures and assign-control sheet |

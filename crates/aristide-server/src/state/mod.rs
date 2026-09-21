@@ -553,6 +553,7 @@ impl State {
         // The file is now the way to load this organ again.
         let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
         self.midi_config.remember(&self.organ_key, &canonical);
+        self.midi_config.last_instrument = vec![canonical];
         self.composite_path = Some(path);
         self.setup.implicit = false;
         // The new file owns the wiring from here on; write it in.
@@ -657,6 +658,7 @@ impl State {
         }
         console.set_organ_name(name.to_string());
         self.midi_config.remember(name, &file);
+        self.midi_config.last_instrument = vec![file.clone()];
         for (label, path) in &mut self.setup.sources {
             if *path == old_file {
                 *label = name.to_string();

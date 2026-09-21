@@ -4,6 +4,7 @@ Newest first. One entry per work session; keep entries factual and short.
 Milestones refer to DESIGN.md. Older UI entries are historical; the current
 implementation scope is described by the newest notes.
 
+- [2026-09-21 — restore the last instrument on desktop launch](progress/2026-09-21-session-restore.md)
 - [2026-09-21 — eight clickable Build and Tuning studies](design/editor-studies.md)
 - [2026-09-21 — Tauri and Bun foundation, initial Play](progress/2026-09-21-tauri-foundation.md)
 - [2026-09-21 — establish Alex's new UI and flow specification](progress/2026-09-21-ui-flow-spec.md)
