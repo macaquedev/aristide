@@ -6,6 +6,14 @@ Codex and Claude. Read this file in full at the start of every task.
 Read `DESIGN.md` first before implementation work: it holds the architecture, all locked decisions, and the
 milestone plan (M0–M7). Do not re-litigate locked decisions without the user.
 
+For any UI work, read [`docs/design/design-rules.md`](docs/design/design-rules.md)
+in full before designing or implementing. It is the authoritative product and
+visual design brief. The user requested a full redesign around it on 2026-09-21;
+its Play/desk separation and visual rules supersede earlier UI styling and menu
+placement decisions in `DESIGN.md`. Architecture, audio safety and persistence
+contracts still apply. Document unsupported capabilities and any rule exceptions
+in the implementation progress note; do not present future features as working.
+
 ## Ground rules
 
 - **RT invariants** (aristide-engine audio path): never allocate, lock, or do I/O on

@@ -2,6 +2,12 @@
 
 *An open-source virtual pipe organ. Named for Aristide Cavaillé-Coll.*
 
+**UI redesign (2026-09-21):** [Design rules](docs/design/design-rules.md) now
+govern product design, workspace separation, typography and visual styling.
+The earlier UI descriptions below record implementation history; their menu
+placement, unlocked-console behavior and rocker styling are superseded by the
+new brief. Audio, model, storage and tuning contracts remain in force.
+
 Aristide aims to (a) render existing sample sets **better than Hauptwerk** and far better
 than GrandOrgue, and (b) be the first VPO built for **contemporary music**: microtonality,
 per-pipe addressing, delays and live processing (Orgelpark-style), arbitrary many-to-many
