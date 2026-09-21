@@ -1,5 +1,8 @@
 # Console design studies
 
+[Aristide design rules](design-rules.md) contain the user-provided UI and
+product design guidance. The studies below document earlier design work.
+
 Open `stop-concepts.html` directly in a browser, or serve this directory with a
 static HTTP server. It is a self-contained HTML/CSS/JavaScript prototype with no
 network dependencies and no connection to the audio engine.
