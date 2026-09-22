@@ -63,3 +63,20 @@ test('channel strip handles non-octave periods and finite collections', async ({
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 });
+
+test('historical temperaments follow the root note', async ({ page }) => {
+  await page.goto('/?study=1&panel=tuning&layout=channel');
+  const choose = async (label: string, value: string) => {
+    await page.getByRole('combobox', { name: label, exact: true }).click();
+    await page.getByRole('option', { name: value, exact: true }).click();
+  };
+  await choose('Temperament', 'Quarter-comma meantone');
+  for (let i = 0; i < 4; i++) await page.getByRole('button', { name: 'Next note' }).click();
+  await expect(page.getByRole('button', { name: 'E deviation: -13.7 ¢', exact: true })).toBeDisabled();
+  await choose('Root note', 'D');
+  for (let i = 0; i < 2; i++) await page.getByRole('button', { name: 'Next note' }).click();
+  await expect(page.getByRole('button', { name: 'E deviation: -6.8 ¢', exact: true })).toBeVisible();
+  await choose('Temperament', 'Custom');
+  await expect(page.getByRole('button', { name: 'E deviation: -6.8 ¢', exact: true })).toBeEnabled();
+  await page.screenshot({ path: 'test-results/tuning-meantone.png', fullPage: true });
+});

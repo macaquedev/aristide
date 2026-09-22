@@ -4,6 +4,7 @@ import { ChevronDown, ChevronRight, Search } from 'lucide-react';
 import { NumberControl } from './NumberControl';
 import { initialScopes, resolve, noteName, type Scope, type Tuning } from './model';
 import { formatCents, pitchNames, TuningGraph } from './TuningGraph';
+import { rootedDeviations, temperamentNames } from './temperaments';
 import { mappedPitch, ratioToCents, scaleIntervals, scalePeriod } from './tuningScale';
 import './tuning-desk.css';
 
@@ -65,8 +66,8 @@ export function TuningDeskStudy({ layout, assign }: { layout: string; assign: (n
   const periodChoice = period === null ? 'none' : period === 1200 ? 'octave' : period === ratioToCents(3) ? 'triple' : 'custom';
   const scale = module('Scale', <Stack gap="xs">
     <Select label="Tuning system" value={tuning.system} disabled={inherited} allowDeselect={false} data={['Twelve-note', 'Equal division', 'Pitch collection']} onChange={value => { if (value) { setSelectedStep(0); update({ system: value, ...(value === 'Pitch collection' ? { period: null } : value === 'Equal division' && tuning.period === null ? { period: 1200 } : {}) }); } }}/>
-    {conventional ? <><Select label="Temperament" data={['Equal', 'Custom']} value={tuning.temperament} disabled={inherited} allowDeselect={false} onChange={value => value && update({ temperament: value, deviations: value === 'Equal' ? Array(12).fill(0) : tuning.deviations })}/>
-      <Select label="Root note" data={pitchNames} value={tuning.root} disabled={inherited} allowDeselect={false} onChange={value => { if (value) { setSelectedStep(0); update({ root: value }); } }}/></> : <>
+    {conventional ? <><Select label="Temperament" data={temperamentNames} value={tuning.temperament} disabled={inherited} allowDeselect={false} onChange={value => value && update({ temperament: value, deviations: value === 'Custom' ? tuning.deviations : rootedDeviations(value, root) })}/>
+      <Select label="Root note" data={pitchNames} value={tuning.root} disabled={inherited} allowDeselect={false} onChange={value => { if (value) { setSelectedStep(0); update({ root: value, ...(tuning.temperament === 'Custom' ? {} : { deviations: rootedDeviations(tuning.temperament, pitchNames.indexOf(value)) }) }); } }}/></> : <>
       <Select label="Repeat interval" value={periodChoice} disabled={inherited} allowDeselect={false} data={[...(collection ? [{ value: 'none', label: 'None · no repetition' }] : []), { value: 'octave', label: '2:1 · 1200 ¢' }, { value: 'triple', label: '3:1 · 1901.96 ¢' }, { value: 'custom', label: 'Custom interval' }]} onChange={value => value && update({ period: value === 'none' ? null : value === 'octave' ? 1200 : value === 'triple' ? ratioToCents(3) : 1300 })}/>
       {equalDivision ? <div><Text size="xs" c="dimmed">Steps per repeat</Text>{number('steps', 'Steps per repeat', '')}</div> : <Group gap="xs"><Text size="xs">{count} steps</Text><Button size="compact-sm" variant="default" disabled={inherited || count >= 128} onClick={() => { update({ intervals: [...tuning.intervals, tuning.intervals.at(-1)! + 100] }); setSelectedStep(count); }}>Add step</Button><Button size="compact-sm" variant="subtle" color="red" disabled={inherited || count <= 1} onClick={() => { update({ intervals: tuning.intervals.slice(0, -1) }); setSelectedStep(Math.min(step, count - 2)); }}>Remove last</Button></Group>}
       {periodChoice === 'custom' && <div><Text size="xs" c="dimmed">Repeat size</Text><NumberControl label="Repeat size" value={period!} unit="¢" min={.01} step={.1} disabled={inherited} change={value => update({ period: value })} assign={() => assign(`tuning/${selected}/period`)}/></div>}
