@@ -241,6 +241,13 @@ pub struct ManualDef {
     pub offsets: Option<[f32; 12]>,
     /// A fine offset in cents — see `[tuning] offset_cents`.
     pub offset_cents: Option<f64>,
+    /// The equal division's or steps collection's repeat interval —
+    /// see `[tuning] period`.
+    pub period: Option<f64>,
+    /// An inline pitch collection — see `[tuning] steps`.
+    pub steps: Option<Vec<f64>>,
+    /// The key that plays step 1 of `steps` — see `[tuning] start_key`.
+    pub start_key: Option<KeySpec>,
     /// A microtonal manual's hex-field layout (`hex = { rows = 5,
     /// right = 2, upright = 1, ... }`). Fields left out follow the
     /// derived default; the whole table left out means the default.
@@ -2081,6 +2088,9 @@ mod tests {
             temperament_root: None,
             offsets: None,
             offset_cents: None,
+            period: None,
+            steps: None,
+            start_key: None,
             hex: None,
         }
     }

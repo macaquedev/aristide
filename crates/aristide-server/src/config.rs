@@ -1181,6 +1181,19 @@ pub struct ManualTuningFields {
     pub offsets: Option<[f32; 12]>,
     /// A fine offset in cents; 0 writes as absence.
     pub offset_cents: f64,
+    /// The equal division's repeat interval, cents; 1200 (the
+    /// default) writes as absence. Meaningless with a scale or steps.
+    pub period: f64,
+    /// An inline pitch collection, cents from step 1; presence writes
+    /// `steps` and supersedes the temperament and division count, the
+    /// same way `scale` does.
+    pub steps: Option<Vec<f64>>,
+    /// The steps collection's own repeat interval; `None` writes as
+    /// absence (no repetition).
+    pub steps_period: Option<f64>,
+    /// The key that plays step 1 of `steps`; 60 (middle C, the
+    /// default) writes as absence.
+    pub start_key: u8,
 }
 
 /// One manual as `save_composite` writes it: name, compass, and any
@@ -1320,6 +1333,9 @@ pub fn write_composite_manual_tuning(
                 "temperament_root",
                 "offsets",
                 "offset_cents",
+                "period",
+                "steps",
+                "start_key",
             ] {
                 table.remove(field);
             }
@@ -1331,17 +1347,18 @@ pub fn write_composite_manual_tuning(
 /// temperament line (a Scala scale IS the temperament); absent fields
 /// are removed so the file never says two things at once.
 fn write_tuning_fields(table: &mut toml_edit::Table, fields: &ManualTuningFields, transpose: bool) {
-    // A scale supersedes both the temperament and the division count;
-    // and at 12 divisions — the file's default — the edo line goes,
-    // while the temperament line goes at any other count (twelve-class
-    // vocabulary means nothing there). The file never says two things
-    // at once.
-    if fields.scale.is_some() || fields.edo != 12 {
+    let system_active = fields.scale.is_some() || fields.steps.is_some();
+    // A scale or a steps collection supersedes both the temperament
+    // and the division count; and at 12 divisions — the file's
+    // default — the edo line goes, while the temperament line goes at
+    // any other count (twelve-class vocabulary means nothing there).
+    // The file never says two things at once.
+    if system_active || fields.edo != 12 {
         table.remove("temperament");
     } else {
         table["temperament"] = toml_edit::value(fields.temperament.as_str());
     }
-    if fields.scale.is_some() || fields.edo == 12 {
+    if system_active || fields.edo == 12 {
         table.remove("edo");
     } else {
         table["edo"] = toml_edit::value(fields.edo as i64);
@@ -1374,16 +1391,17 @@ fn write_tuning_fields(table: &mut toml_edit::Table, fields: &ManualTuningFields
             table.remove("pipes");
         }
     }
-    // The root is dormant with a scale or away from 12-EDO, same as
-    // the temperament line, and C (0) writes as the default absence.
-    if fields.temperament_root != 0 && fields.scale.is_none() && fields.edo == 12 {
+    // The root is dormant with a scale, steps, or away from 12-EDO,
+    // same as the temperament line, and C (0) writes as the default
+    // absence.
+    if fields.temperament_root != 0 && !system_active && fields.edo == 12 {
         table["temperament_root"] = toml_edit::value(aristide_formats::sidecar::pitch_class_name(
             fields.temperament_root,
         ));
     } else {
         table.remove("temperament_root");
     }
-    match (&fields.offsets, fields.temperament == "custom") {
+    match (&fields.offsets, fields.temperament == "custom" && !system_active) {
         (Some(offsets), true) => {
             let array: toml_edit::Array = offsets.iter().map(|c| *c as f64).collect();
             table["offsets"] = toml_edit::value(array);
@@ -1396,6 +1414,40 @@ fn write_tuning_fields(table: &mut toml_edit::Table, fields: &ManualTuningFields
         table["offset_cents"] = toml_edit::value(fields.offset_cents);
     } else {
         table.remove("offset_cents");
+    }
+    // `period` is shared between the equal-division and steps systems
+    // (see the sidecar field's own doc comment): with steps present it
+    // writes the collection's own repeat interval (absent = no
+    // repetition, the same absence a bare `period` would write under
+    // equal division); without steps it writes the equal division's
+    // period only away from the 1200-cent default.
+    match &fields.steps {
+        Some(steps) => {
+            let array: toml_edit::Array = steps.iter().copied().collect();
+            table["steps"] = toml_edit::value(array);
+            if fields.start_key != 60 {
+                table["start_key"] = toml_edit::value(aristide_formats::sidecar::note_name(
+                    fields.start_key,
+                ));
+            } else {
+                table.remove("start_key");
+            }
+            match fields.steps_period {
+                Some(period) => table["period"] = toml_edit::value(period),
+                None => {
+                    table.remove("period");
+                }
+            }
+        }
+        None => {
+            table.remove("steps");
+            table.remove("start_key");
+            if fields.scale.is_none() && fields.edo != 12 && fields.period != 1200.0 {
+                table["period"] = toml_edit::value(fields.period);
+            } else {
+                table.remove("period");
+            }
+        }
     }
 }
 
@@ -1470,7 +1522,7 @@ pub fn write_composite_tuning(path: &Path, fields: &ManualTuningFields) -> Resul
 /// The tuning lines every scope's own tuning is written with — no
 /// transpose — minus nothing: the same fields, so a scope's table
 /// reads like `[tuning]` itself.
-const TUNING_FIELD_KEYS: [&str; 12] = [
+const TUNING_FIELD_KEYS: [&str; 15] = [
     "temperament",
     "edo",
     "reference_key",
@@ -1483,6 +1535,9 @@ const TUNING_FIELD_KEYS: [&str; 12] = [
     "temperament_root",
     "offsets",
     "offset_cents",
+    "period",
+    "steps",
+    "start_key",
 ];
 
 /// Update (or with `None` remove) one source set's own tuning — its
@@ -4167,6 +4222,10 @@ mod tests {
             temperament_root: 0,
             offsets: None,
             offset_cents: 0.0,
+            period: 1200.0,
+            steps: None,
+            steps_period: None,
+            start_key: 60,
         };
         assert!(
             write_composite_manual_tuning(&path, "Grand orgue", Some(tuned("equal", Some("19edo.scl"))))
@@ -4240,6 +4299,44 @@ mod tests {
         assert!(!text.contains("temperament_root"), "C is absence: {text}");
         assert!(!text.contains("offsets ="), "{text}");
         assert!(!text.contains("offset_cents"), "{text}");
+
+        // An inline steps collection writes `steps`, its own repeat
+        // interval (absent = no repetition) and a non-default start
+        // key; it supersedes the temperament and edo lines, and going
+        // back to a plain temperament clears all three.
+        let mut with_steps = tuned("equal", None);
+        with_steps.steps = Some(vec![0.0, 150.0, 350.0]);
+        with_steps.start_key = 72;
+        assert!(write_composite_manual_tuning(&path, "Grand orgue", Some(with_steps)).expect("tuning"));
+        let text = std::fs::read_to_string(&path).expect("reads");
+        assert!(text.contains("steps = ["), "{text}");
+        assert!(text.contains("start_key = \"C5\""), "{text}");
+        assert!(!text.contains("period"), "no repetition writes no period line: {text}");
+        assert!(!text.contains("temperament ="), "steps supersede the temperament: {text}");
+        let parsed = def(&path);
+        assert_eq!(parsed.manuals[0].steps, Some(vec![0.0, 150.0, 350.0]));
+        assert_eq!(
+            parsed.manuals[0].start_key,
+            Some(aristide_formats::sidecar::KeySpec::Name("C5".into()))
+        );
+        assert_eq!(parsed.manuals[0].period, None);
+
+        let mut with_period = tuned("equal", None);
+        with_period.steps = Some(vec![0.0, 150.0, 350.0]);
+        with_period.steps_period = Some(1200.0);
+        assert!(write_composite_manual_tuning(&path, "Grand orgue", Some(with_period)).expect("tuning"));
+        let text = std::fs::read_to_string(&path).expect("reads");
+        assert!(text.contains("period = 1200"), "{text}");
+        let parsed = def(&path);
+        assert_eq!(parsed.manuals[0].period, Some(1200.0));
+
+        assert!(
+            write_composite_manual_tuning(&path, "Grand orgue", Some(tuned("meantone4", None)))
+                .expect("tuning")
+        );
+        let text = std::fs::read_to_string(&path).expect("reads");
+        assert!(!text.contains("steps"), "back at a temperament: {text}");
+        assert!(!text.contains("start_key"), "{text}");
 
         // A declared drawknob order rides [console.order], keyed by
         // manual name — so a manual rename must carry the key.
@@ -4857,6 +4954,10 @@ device = "Keys"
             temperament_root: 0,
             offsets: None,
             offset_cents: 0.0,
+            period: 1200.0,
+            steps: None,
+            steps_period: None,
+            start_key: 60,
         };
         write_composite_tuning(&path, &fields(crate::tuning::PipeRetune::Exact)).expect("exact");
         let text = std::fs::read_to_string(&path).expect("reads");
@@ -4912,6 +5013,10 @@ device = "Keys"
             temperament_root: 0,
             offsets: None,
             offset_cents: 0.0,
+            period: 1200.0,
+            steps: None,
+            steps_period: None,
+            start_key: 60,
         };
 
         assert!(write_composite_source_tuning(&path, "positif", Some(&fields("meantone4"))).expect("set"));
@@ -5001,6 +5106,10 @@ device = "Keys"
                 temperament_root: 0,
                 offsets: None,
                 offset_cents: 0.0,
+                period: 1200.0,
+                steps: None,
+                steps_period: None,
+                start_key: 60,
             },
         )
         .expect("tuning");
@@ -5035,6 +5144,10 @@ device = "Keys"
                 temperament_root: 0,
                 offsets: None,
                 offset_cents: 0.0,
+                period: 1200.0,
+                steps: None,
+                steps_period: None,
+                start_key: 60,
             },
         )
         .expect("tuning");
@@ -5057,6 +5170,10 @@ device = "Keys"
                 temperament_root: 0,
                 offsets: None,
                 offset_cents: 0.0,
+                period: 1200.0,
+                steps: None,
+                steps_period: None,
+                start_key: 60,
             },
         )
         .expect("tuning");
@@ -5130,6 +5247,10 @@ volume = 0.7
                 temperament_root: 0,
                 offsets: None,
                 offset_cents: 0.0,
+                period: 1200.0,
+                steps: None,
+                steps_period: None,
+                start_key: 60,
             },
         )
         .expect("tuning");

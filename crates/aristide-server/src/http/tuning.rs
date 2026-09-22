@@ -61,9 +61,11 @@ pub(super) fn set(state: &Mutex<State>, query: &str) -> Reply {
                 param(query, "temperament").and_then(crate::tuning::Temperament::parse)
             {
                 tuning.temperament = t;
-                // Naming a temperament is leaving the scale,
-                // and temperaments are twelve-class vocabulary.
+                // Naming a temperament is leaving the scale and
+                // any steps collection, and temperaments are
+                // twelve-class vocabulary.
                 tuning.scale = None;
+                tuning.steps = None;
                 tuning.edo = 12;
                 if !tuning.corrects_pipes() && !anchor_given {
                     tuning.reference = tuning.home_reference(tuning.reference.key);
@@ -94,6 +96,7 @@ pub(super) fn set(state: &Mutex<State>, query: &str) -> Reply {
                     a, b, c, d, e, f, g, h, i, j, k, l,
                 ]);
                 tuning.scale = None;
+                tuning.steps = None;
                 tuning.edo = 12;
             }
             if let Some(offset) = param(query, "offset_cents") {
@@ -110,9 +113,67 @@ pub(super) fn set(state: &Mutex<State>, query: &str) -> Reply {
                     ));
                 }
                 // Choosing a division count is leaving the
-                // scale, the same way naming a temperament is.
+                // scale and any steps collection, the same way
+                // naming a temperament is.
                 tuning.edo = edo;
                 tuning.scale = None;
+                tuning.steps = None;
+            }
+            // `period=<cents|none>`: under equal division, the
+            // repeat interval (a plain number, default 1200); under
+            // a steps collection, its own repeat interval (`none`
+            // clears it — no repetition).
+            if let Some(spec) = param(query, "period") {
+                if let Some(steps) = &tuning.steps {
+                    let mut updated = (**steps).clone();
+                    updated.period = match spec {
+                        "" | "none" | "off" => None,
+                        _ => Some(spec.parse::<f64>().map_err(|_| {
+                            format!("period {spec:?} is not a number of cents or \"none\"")
+                        })?),
+                    };
+                    tuning.steps = Some(std::sync::Arc::new(updated));
+                } else {
+                    let period = spec
+                        .parse::<f64>()
+                        .map_err(|_| format!("period {spec:?} is not a number of cents"))?;
+                    if !(period.is_finite() && period > 0.0) {
+                        return Err("period must be a positive number of cents".into());
+                    }
+                    tuning.period = period;
+                }
+            }
+            // `steps=<comma-separated cents>`: an inline pitch
+            // collection, replacing the temperament/division and the
+            // scale. Its repeat interval and start key keep whatever
+            // this tuning already had (or the defaults) unless this
+            // same request also names `period=`/`start_key=`.
+            if let Some(spec) = param(query, "steps") {
+                let values: Result<Vec<f64>, _> =
+                    spec.split(',').map(|v| v.trim().parse::<f64>()).collect();
+                let steps =
+                    values.map_err(|_| format!("steps {spec:?} is not comma-separated cents"))?;
+                if steps.is_empty() {
+                    return Err("steps needs at least one value".into());
+                }
+                let period = tuning.steps.as_ref().and_then(|s| s.period);
+                let start_key = tuning.steps.as_ref().map_or(60, |s| s.start_key);
+                tuning.steps = Some(std::sync::Arc::new(crate::tuning::StepsTuning {
+                    steps,
+                    period,
+                    start_key,
+                }));
+                tuning.scale = None;
+            }
+            if let Some(spec) = param(query, "start_key").map(unescape) {
+                let key = parse_reference_key(&spec)
+                    .ok_or_else(|| format!("start_key {spec:?} names no key"))?;
+                let Some(steps) = &tuning.steps else {
+                    return Err("start_key only applies to a steps tuning".into());
+                };
+                let mut updated = (**steps).clone();
+                updated.start_key = key;
+                tuning.steps = Some(std::sync::Arc::new(updated));
             }
             // The anchor: `reference_key` (a note name or MIDI
             // number) and `reference_hz`, either alone keeping
@@ -160,11 +221,26 @@ pub(super) fn set(state: &Mutex<State>, query: &str) -> Reply {
                         scale_base.as_deref(),
                     )?;
                     tuning.scale = Some(std::sync::Arc::new(scale));
+                    // Naming a Scala file is leaving any steps
+                    // collection, same as it leaves the temperament.
+                    tuning.steps = None;
                 }
                 None => {}
             }
             // An a′ change re-anchors a linear-mapped scale.
             tuning.refresh_scale_reference();
+            // A non-repeating steps collection has no pitch to give a
+            // reference key outside its range — reject rather than
+            // silently play nothing.
+            if let Some(steps) = &tuning.steps
+                && steps.period.is_none()
+                && steps.cents_for(tuning.reference.key as u16).is_none()
+            {
+                return Err(format!(
+                    "reference_key {} falls outside the non-repeating steps collection",
+                    aristide_formats::sidecar::note_name(tuning.reference.key)
+                ));
+            }
             Ok(tuning)
         };
         match (stop, source, manual) {

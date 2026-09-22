@@ -854,6 +854,24 @@ pub struct TuningConfig {
     /// of whatever the temperament (or `original`) already gives it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offset_cents: Option<f64>,
+    /// The repeat interval, cents — meaning depends on which system
+    /// governs: with `edo` and no `steps`, the equal division's period
+    /// (absent = the default 1200, a 2:1 octave); with `steps`, the
+    /// inline collection's own repeat interval (absent = the
+    /// collection does not repeat at all — a key outside it sounds
+    /// nothing).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub period: Option<f64>,
+    /// An inline pitch collection standing in for the temperament and
+    /// the equal division — cents from step 1 (the first entry is
+    /// always 0). Presence selects the "steps" system, the same way
+    /// `scale` selects the Scala-file system.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steps: Option<Vec<f64>>,
+    /// The key that plays step 1 of `steps`; omitted, key 60 (middle
+    /// C) does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_key: Option<KeySpec>,
     /// Stops (and ranks within stops) tuned apart from what they would
     /// otherwise follow — `[[tuning.stop]]` rows.
     #[serde(default, rename = "stop", skip_serializing_if = "Vec::is_empty")]
@@ -889,6 +907,12 @@ pub struct TuningOverride {
     pub offsets: Option<[f32; 12]>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offset_cents: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub period: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steps: Option<Vec<f64>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_key: Option<KeySpec>,
 }
 
 impl TuningOverride {
@@ -937,6 +961,12 @@ pub struct StopTuningDef {
     pub offsets: Option<[f32; 12]>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offset_cents: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub period: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steps: Option<Vec<f64>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_key: Option<KeySpec>,
 }
 
 impl StopTuningDef {
@@ -953,6 +983,9 @@ impl StopTuningDef {
             temperament_root: self.temperament_root.clone(),
             offsets: self.offsets,
             offset_cents: self.offset_cents,
+            period: self.period,
+            steps: self.steps.clone(),
+            start_key: self.start_key.clone(),
         }
     }
 }
@@ -987,6 +1020,9 @@ impl Default for TuningConfig {
             temperament_root: None,
             offsets: None,
             offset_cents: None,
+            period: None,
+            steps: None,
+            start_key: None,
             stops: Vec::new(),
         }
     }
@@ -1409,6 +1445,35 @@ offset_cents = 3.5
             ..TuningOverride::default()
         };
         assert!(!with_root.is_empty());
+    }
+
+    #[test]
+    fn period_steps_and_start_key_round_trip() {
+        let bare: TuningConfig = toml::from_str("").expect("parses");
+        assert_eq!(bare.period, None);
+        assert_eq!(bare.steps, None);
+        assert_eq!(bare.start_key, None);
+
+        let text = r#"
+edo = 13
+period = 1901.955
+"#;
+        let equal: TuningConfig = toml::from_str(text).expect("parses");
+        assert_eq!(equal.period, Some(1901.955));
+
+        let text = r#"
+steps = [0.0, 150.0, 350.0]
+start_key = "C4"
+"#;
+        let steps: TuningConfig = toml::from_str(text).expect("parses");
+        assert_eq!(steps.steps, Some(vec![0.0, 150.0, 350.0]));
+        assert_eq!(steps.start_key, Some(KeySpec::Name("C4".into())));
+        assert_eq!(steps.period, None, "absent period on steps means no repetition");
+
+        let round_tripped: TuningConfig =
+            toml::from_str(&toml::to_string(&steps).expect("serializes")).expect("parses");
+        assert_eq!(round_tripped.steps, steps.steps);
+        assert_eq!(round_tripped.start_key, steps.start_key);
     }
 
     #[test]

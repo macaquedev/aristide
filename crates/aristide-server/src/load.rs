@@ -953,6 +953,9 @@ fn apply_manual_tuning(
             temperament_root: None,
             offsets: None,
             offset_cents: None,
+            period: None,
+            steps: None,
+            start_key: None,
         };
         let mut own = override_tuning(live_tuning, &fields, None, "manual tuning");
         own.transpose = def.transpose.unwrap_or(live_tuning.transpose).clamp(-12, 12);
@@ -1131,8 +1134,8 @@ fn configure_tuning(
     // 415.3", not a 440 it never sounded), the equal ladder's under a
     // target.
     let anchor_key = reference_key(&sidecar.tuning.reference_key, None);
-    let unsaid_reference = |temperament: tuning::Temperament, edo: u16, scale: bool| {
-        let as_recorded = temperament == tuning::Temperament::Original && edo == 12 && !scale;
+    let unsaid_reference = |temperament: tuning::Temperament, edo: u16, system_named: bool| {
+        let as_recorded = temperament == tuning::Temperament::Original && edo == 12 && !system_named;
         match &home {
             Some(home) if as_recorded => home.reference(anchor_key),
             _ => tuning::PitchReference {
@@ -1141,13 +1144,16 @@ fn configure_tuning(
             },
         }
     };
+    let system_named = sidecar.tuning.scale.is_some() || sidecar.tuning.steps.is_some();
     let mut live_tuning = tuning::Tuning {
         temperament,
         edo,
+        period: sidecar.tuning.period.unwrap_or(1200.0),
+        steps: None,
         scale: None,
         reference: match sidecar.tuning.reference_hz {
             Some(hz) => tuning::PitchReference { key: anchor_key, hz },
-            None => unsaid_reference(temperament, edo, sidecar.tuning.scale.is_some()),
+            None => unsaid_reference(temperament, edo, system_named),
         }
         .clamped(),
         transpose: sidecar.tuning.transpose.clamp(-12, 12),
@@ -1162,6 +1168,31 @@ fn configure_tuning(
             sidecar.tuning.keymap.as_deref(),
             live_tuning.reference,
         );
+    } else if let Some(steps) = &sidecar.tuning.steps {
+        let start_key = sidecar
+            .tuning
+            .start_key
+            .as_ref()
+            .map(|k| reference_key(k, None))
+            .unwrap_or(60);
+        if steps.is_empty() {
+            tracing::warn!("sidecar tuning: steps is empty, ignoring");
+        } else if sidecar.tuning.period.is_none()
+            && !(start_key as i64..start_key as i64 + steps.len() as i64)
+                .contains(&(live_tuning.reference.key as i64))
+        {
+            tracing::warn!(
+                "sidecar tuning: reference key {} falls outside the non-repeating steps \
+                 collection — keeping the temperament",
+                aristide_formats::sidecar::note_name(live_tuning.reference.key)
+            );
+        } else {
+            live_tuning.steps = Some(std::sync::Arc::new(tuning::StepsTuning {
+                steps: steps.clone(),
+                period: sidecar.tuning.period,
+                start_key,
+            }));
+        }
     }
     console.set_tuning(live_tuning.clone());
     // A scope's own tuning from its file fields: every missing field
@@ -1206,8 +1237,18 @@ fn configure_tuning(
             .edo
             .unwrap_or(base.edo)
             .clamp(*tuning::EDO_RANGE.start(), *tuning::EDO_RANGE.end());
-        let scale_named = def.scale.is_some() || (def.temperament.is_none() && def.edo.is_none() && base.scale.is_some());
-        let as_recorded = temperament == tuning::Temperament::Original && edo == 12 && !scale_named;
+        let scale_named = def.scale.is_some()
+            || (def.temperament.is_none()
+                && def.edo.is_none()
+                && def.steps.is_none()
+                && base.scale.is_some());
+        let steps_named = def.steps.is_some()
+            || (def.temperament.is_none()
+                && def.edo.is_none()
+                && def.scale.is_none()
+                && base.steps.is_some());
+        let as_recorded =
+            temperament == tuning::Temperament::Original && edo == 12 && !scale_named && !steps_named;
         let key = def
             .reference_key
             .as_ref()
@@ -1216,9 +1257,14 @@ fn configure_tuning(
             (Some(home), true) => home.reference(key).hz,
             _ => base.reference.hz,
         });
+        // `period` is shared between the equal-division and steps
+        // systems; which one it feeds depends on which is named here.
+        let period = if def.steps.is_some() { base.period } else { def.period.unwrap_or(base.period) };
         let mut own = tuning::Tuning {
             temperament,
             edo,
+            period,
+            steps: None,
             scale: None,
             reference: tuning::PitchReference { key, hz }.clamped(),
             transpose: base.transpose,
@@ -1229,9 +1275,31 @@ fn configure_tuning(
         };
         match &def.scale {
             Some(scl) => own.scale = load_scale(scl, def.keymap.as_deref(), own.reference),
-            // Naming a temperament or a count leaves the scale above.
-            None if def.temperament.is_none() && def.edo.is_none() => {
+            // Naming a temperament, a count or steps leaves the scale
+            // above.
+            None if def.temperament.is_none() && def.edo.is_none() && def.steps.is_none() => {
                 own.scale = base.scale.clone();
+            }
+            None => {}
+        }
+        match &def.steps {
+            Some(steps) if !steps.is_empty() => {
+                let start_key = def
+                    .start_key
+                    .as_ref()
+                    .map(|k| reference_key(k, Some(60)))
+                    .unwrap_or(60);
+                own.steps = Some(std::sync::Arc::new(tuning::StepsTuning {
+                    steps: steps.clone(),
+                    period: def.period,
+                    start_key,
+                }));
+            }
+            Some(_) => tracing::warn!("{what}: steps is empty, ignoring"),
+            // Naming a temperament, a count or a scale leaves the
+            // steps collection above.
+            None if def.temperament.is_none() && def.edo.is_none() && def.scale.is_none() => {
+                own.steps = base.steps.clone();
             }
             None => {}
         }

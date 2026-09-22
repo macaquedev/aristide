@@ -848,6 +848,58 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// The equal-division, steps and Scala systems are mutually
+    /// exclusive, `period=` means different things for each, and a
+    /// reference key outside a non-repeating steps collection is
+    /// refused.
+    #[test]
+    fn equal_division_and_steps_systems_via_the_api() {
+        let Some(state) = demo_state() else { return };
+
+        // 13 steps to a 3:1 tritave: an arbitrary period, not an
+        // octave, and the snapshot reports it as the "equal" system.
+        respond(
+            &state,
+            &Method::Post,
+            "/api/tuning?edo=13&period=1901.955&reference_key=C4&reference_hz=256",
+        );
+        let body = state_json(&state);
+        assert!(body.contains("\"system\":\"equal\""), "{body}");
+        assert!(body.contains("\"period\":1901.955"), "{body}");
+        assert!(body.contains("\"steps\":[0.0"), "the equal ladder is resolved: {body}");
+
+        // An inline steps collection replaces it, and start_key names
+        // middle C.
+        respond(&state, &Method::Post, "/api/tuning?steps=0,150,350&start_key=C4");
+        let body = state_json(&state);
+        assert!(body.contains("\"system\":\"steps\""), "{body}");
+        assert!(body.contains("\"steps\":[0.0,150.0,350.0]"), "{body}");
+        assert!(body.contains("\"start_key\":60"), "{body}");
+        assert!(body.contains("\"period\":null"), "no repetition named yet: {body}");
+
+        // A repeat interval names it, and "none" clears it again.
+        respond(&state, &Method::Post, "/api/tuning?period=1200");
+        assert!(state_json(&state).contains("\"period\":1200.0"));
+        respond(&state, &Method::Post, "/api/tuning?period=none");
+        assert!(state_json(&state).contains("\"period\":null"));
+
+        // A reference key past the last step of a non-repeating
+        // collection is refused outright (the collection has 3
+        // steps, keys 60..62; E4 = 64 is past it).
+        let response = respond(&state, &Method::Post, "/api/tuning?reference_key=E4");
+        assert_eq!(response.status_code().0, 400);
+
+        // Naming a temperament leaves the steps collection.
+        respond(&state, &Method::Post, "/api/tuning?temperament=equal");
+        let body = state_json(&state);
+        assert!(body.contains("\"system\":\"temperament\""), "{body}");
+        assert!(!body.contains("\"steps\":["), "{body}");
+
+        // An unknown temperament name 400s instead of being ignored.
+        let response = respond(&state, &Method::Post, "/api/tuning?temperament=nonsense");
+        assert_eq!(response.status_code().0, 400);
+    }
+
     #[test]
     fn api_toggles_stops_and_tremulant() {
         let Some(state) = demo_state() else { return };
@@ -2538,20 +2590,27 @@ mod tests {
         ] {
             std::fs::write(dir.join(name), "").expect("fixture file");
         }
-        let body = organ::browse_json(&dir).expect("browses");
+        let body = organ::browse_json(&dir, organ::BrowseKind::Organs).expect("browses");
         assert!(body.contains("\"sub\""), "subdirectory listed: {body}");
         assert!(body.contains("set.organ"), "sample set listed");
         assert!(body.contains("combo.toml"), "composite listed");
         assert!(body.contains("hw.Organ_Hauptwerk_xml"), "Hauptwerk listed");
-        assert!(body.contains("19edo.scl"), "Scala scale listed");
-        assert!(body.contains("white.kbm"), "keyboard mapping listed");
+        assert!(!body.contains("19edo.scl"), "the organ listing excludes Scala files");
+        assert!(!body.contains("white.kbm"), "the organ listing excludes Scala files");
         assert!(!body.contains("readme.txt"), "other files are noise");
         assert!(!body.contains(".hidden.organ"), "dotfiles skipped");
         assert!(
             body.find("\"sub\"").unwrap() < body.find("combo.toml").unwrap(),
             "directories come first"
         );
-        assert!(organ::browse_json(&dir.join("nowhere")).is_err());
+        assert!(organ::browse_json(&dir.join("nowhere"), organ::BrowseKind::Organs).is_err());
+
+        let scala = organ::browse_json(&dir, organ::BrowseKind::Scala).expect("browses");
+        assert!(scala.contains("\"sub\""), "subdirectory listed: {scala}");
+        assert!(scala.contains("19edo.scl"), "Scala scale listed");
+        assert!(scala.contains("white.kbm"), "keyboard mapping listed");
+        assert!(!scala.contains("set.organ"), "the scala listing excludes organs");
+        assert!(!scala.contains("combo.toml"), "the scala listing excludes organs");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -28,6 +28,10 @@ impl State {
                 _ => None,
             },
             offset_cents: tuning.offset_cents,
+            period: tuning.period,
+            steps: tuning.steps.as_ref().map(|steps| steps.steps.clone()),
+            steps_period: tuning.steps.as_ref().and_then(|steps| steps.period),
+            start_key: tuning.steps.as_ref().map_or(60, |steps| steps.start_key),
         }
     }
 

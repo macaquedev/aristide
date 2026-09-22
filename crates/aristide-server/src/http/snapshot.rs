@@ -445,6 +445,26 @@ struct TuningView {
     #[serde(skip_serializing_if = "Option::is_none")]
     offsets: Option<Vec<Fixed>>,
     offset_cents: Fixed,
+    /// Which of the four mutually exclusive systems governs:
+    /// "temperament" (a twelve-class table), "equal" (an arbitrary
+    /// division), "steps" (an inline collection), or "scale" (a Scala
+    /// file).
+    system: &'static str,
+    /// The repeat interval, cents: the equal division's or the steps
+    /// collection's (`null` when steps do not repeat); omitted (never
+    /// under this contract — always present) — `null` under a
+    /// non-repeating steps tuning.
+    period: Option<Fixed>,
+    /// Resolved step intervals in cents from step 1: the equal
+    /// division's own ladder, the steps collection verbatim, or — for
+    /// a Scala scale — 0 then its degrees before the period. Omitted
+    /// under a plain twelve-class temperament.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    steps: Option<Vec<Fixed>>,
+    /// The key that plays step 1 — a steps tuning's own, or a Scala
+    /// scale's effective mapping middle key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    start_key: Option<u8>,
 }
 
 #[derive(Serialize)]
@@ -459,6 +479,11 @@ struct ScaleView {
     kbm: Option<String>,
     name: String,
     notes: usize,
+    /// The effective mapping's middle key and reference — the
+    /// `.kbm`'s own when one is loaded, else the tuning's reference
+    /// key at its Hz (the linear default mapping's anchor).
+    middle_key: u8,
+    reference: ReferenceView,
 }
 
 /// What the samples were recorded in, as measured at load — the truth
@@ -1135,22 +1160,57 @@ fn snapshot(state: &State) -> Snapshot {
 
 fn tuning_view(tuning: &crate::tuning::Tuning) -> TuningView {
     // The 12 deviations actually in effect: dormant away from 12-EDO
-    // or under a scale (no twelve-class table governs either); under
-    // `original` the measured home table stands in, else the rooted
-    // (or custom) temperament table.
-    let offsets = (tuning.scale.is_none() && tuning.edo == 12).then(|| {
-        let table = if !tuning.corrects_pipes() {
-            tuning
-                .home
-                .as_ref()
-                .map(|home| home.offsets_cents)
-                .unwrap_or([0.0; 12])
-        } else {
-            let rooted = tuning.rooted_offsets_cents();
-            std::array::from_fn(|pc| rooted[pc] as f64)
-        };
-        table.iter().map(|c| Fixed::new(*c, 3)).collect()
-    });
+    // or under a scale or steps tuning (no twelve-class table governs
+    // either); under `original` the measured home table stands in,
+    // else the rooted (or custom) temperament table.
+    let offsets = (tuning.scale.is_none() && tuning.steps.is_none() && tuning.edo == 12).then(
+        || {
+            let table = if !tuning.corrects_pipes() {
+                tuning
+                    .home
+                    .as_ref()
+                    .map(|home| home.offsets_cents)
+                    .unwrap_or([0.0; 12])
+            } else {
+                let rooted = tuning.rooted_offsets_cents();
+                std::array::from_fn(|pc| rooted[pc] as f64)
+            };
+            table.iter().map(|c| Fixed::new(*c, 3)).collect()
+        },
+    );
+    let system = if tuning.scale.is_some() {
+        "scale"
+    } else if tuning.steps.is_some() {
+        "steps"
+    } else if tuning.edo != 12 {
+        "equal"
+    } else {
+        "temperament"
+    };
+    let period = match (&tuning.scale, &tuning.steps) {
+        (Some(scale), _) => Some(Fixed::new(scale.scale.period_cents(), 3)),
+        (None, Some(steps)) => steps.period.map(|p| Fixed::new(p, 3)),
+        (None, None) => Some(Fixed::new(tuning.period, 3)),
+    };
+    let steps_view: Option<Vec<Fixed>> = match (&tuning.scale, &tuning.steps) {
+        (Some(scale), _) => {
+            let degrees = &scale.scale.degrees;
+            let mut v = vec![0.0];
+            v.extend(degrees.iter().take(degrees.len().saturating_sub(1)).copied());
+            Some(v.iter().map(|c| Fixed::new(*c, 3)).collect())
+        }
+        (None, Some(steps)) => Some(steps.steps.iter().map(|c| Fixed::new(*c, 3)).collect()),
+        (None, None) if tuning.edo != 12 => {
+            let step_size = tuning.period / tuning.edo.max(1) as f64;
+            Some((0..tuning.edo).map(|i| Fixed::new(i as f64 * step_size, 3)).collect())
+        }
+        (None, None) => None,
+    };
+    let start_key = match (&tuning.scale, &tuning.steps) {
+        (Some(scale), _) => Some(scale.mapping.middle_key.clamp(0, 127) as u8),
+        (None, Some(steps)) => Some(steps.start_key),
+        (None, None) => None,
+    };
     TuningView {
         temperament: tuning.temperament.name().to_string(),
         edo: tuning.edo,
@@ -1165,10 +1225,19 @@ fn tuning_view(tuning: &crate::tuning::Tuning) -> TuningView {
             kbm: scale.kbm.clone(),
             name: scale.name().to_string(),
             notes: scale.scale.len(),
+            middle_key: scale.mapping.middle_key.clamp(0, 127) as u8,
+            reference: ReferenceView {
+                key: scale.mapping.reference_key.clamp(0, 127) as u8,
+                hz: F64(scale.mapping.reference_hz),
+            },
         }),
         root: tuning.temperament_root,
         offsets,
         offset_cents: Fixed::new(tuning.offset_cents, 3),
+        system,
+        period,
+        steps: steps_view,
+        start_key,
     }
 }
 

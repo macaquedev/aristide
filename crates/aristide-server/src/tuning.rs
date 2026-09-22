@@ -21,6 +21,9 @@ use aristide_model::units::{cents_between, cents_to_ratio, equal_ladder_hz, rati
 /// this is the catalogue commit's whole point.
 struct FifthsDef {
     id: &'static str,
+    /// Read only by the `temperaments.json` golden-catalogue test
+    /// outside a `cfg(test)` build.
+    #[cfg_attr(not(test), allow(dead_code))]
     name: &'static str,
     root: usize,
     fifths: [f64; 11],
@@ -592,6 +595,48 @@ impl ScaleTuning {
     }
 }
 
+/// An inline pitch collection: intervals in cents from step 1 (index
+/// 0, always 0 — the tuning's own [`Tuning::reference`] anchors it),
+/// entries may be negative, unsorted, or exceed 1200 — nothing here
+/// assumes an octave or any monotonic order. [`StepsTuning::period`]
+/// is the repeat interval; `None` means the collection does not repeat
+/// at all, and a key outside it sounds nothing — no wrapping, no
+/// extrapolation. `start_key` is the key that plays step 1; keys walk
+/// consecutive steps on consecutive keys from there.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StepsTuning {
+    pub steps: Vec<f64>,
+    pub period: Option<f64>,
+    pub start_key: u8,
+}
+
+impl StepsTuning {
+    /// The cents this collection puts on `key`, relative to step 1 —
+    /// `None` when `key` falls outside a non-repeating collection, or
+    /// the collection is empty.
+    pub fn cents_for(&self, key: u16) -> Option<f64> {
+        if self.steps.is_empty() {
+            return None;
+        }
+        let offset = key as i64 - self.start_key as i64;
+        let n = self.steps.len() as i64;
+        match self.period {
+            Some(period) => {
+                let within = offset.rem_euclid(n);
+                let periods = offset.div_euclid(n);
+                Some(periods as f64 * period + self.steps[within as usize])
+            }
+            None => {
+                if offset < 0 || offset >= n {
+                    None
+                } else {
+                    Some(self.steps[offset as usize])
+                }
+            }
+        }
+    }
+}
+
 /// The pitch anchor of a tuning: one piano key and what it sounds.
 /// "a′ = 440 Hz" is the familiar instance, but it presumes the tuning
 /// has an a′ — under 15-EDO or a Bohlen–Pierce scale the only thing
@@ -656,12 +701,24 @@ impl Default for PitchReference {
 #[derive(Debug, Clone)]
 pub struct Tuning {
     pub temperament: Temperament,
-    /// Equal divisions of the octave the keys walk: 12 is the common
-    /// case and the only one where the temperament tables below mean
-    /// anything — they are twelve-class vocabulary, dormant at any
-    /// other count. Away from 12, every key is one step of
-    /// `1200/edo` cents, anchored so the reference key sounds its Hz.
+    /// Equal divisions of [`Tuning::period`] the keys walk: 12 is the
+    /// common case and the only one where the temperament tables above
+    /// mean anything — they are twelve-class vocabulary, dormant at
+    /// any other count. Away from 12, every key is one step of
+    /// `period/edo` cents, anchored so the reference key sounds its
+    /// Hz. Dormant under [`Tuning::steps`] or [`Tuning::scale`].
     pub edo: u16,
+    /// The interval the equal division above repeats at, cents; 1200
+    /// (a 2:1 octave) is the default, but nothing requires it — 13
+    /// steps to a 3:1 "tritave" is `edo = 13, period = 1901.955`.
+    /// Meaningless once `edo` doesn't govern (a scale or `steps`
+    /// tuning has its own period).
+    pub period: f64,
+    /// An inline pitch collection standing in for the equal division
+    /// and the temperament, the same way [`Tuning::scale`] does — the
+    /// four systems (temperament, equal division, steps, Scala file)
+    /// are mutually exclusive. `None` when no such collection plays.
+    pub steps: Option<std::sync::Arc<StepsTuning>>,
     /// When present, the scale supplies every key's pitch and the
     /// temperament and division count above are dormant — a Scala
     /// scale IS a tuning, with its own degree count and period.
@@ -704,6 +761,8 @@ impl Default for Tuning {
         Tuning {
             temperament: Temperament::Original,
             edo: 12,
+            period: 1200.0,
+            steps: None,
             scale: None,
             reference: PitchReference::A440,
             transpose: 0,
@@ -749,12 +808,23 @@ impl Tuning {
         }
         let anchor = self.reference.anchor_cents();
         let reference_key = self.reference.key as u16;
+        if let Some(steps) = &self.steps {
+            // An inline collection: consecutive keys play consecutive
+            // steps from `start_key`; a key outside a non-repeating
+            // collection sounds nothing. Priced the same way a scale
+            // is: an absolute target Hz, bent from *that key's own*
+            // 12-EDO pitch — not the reference key's.
+            let key_cents = steps.cents_for(key)?;
+            let reference_cents = steps.cents_for(reference_key)?;
+            let target_hz = self.reference.hz * cents_to_ratio(key_cents - reference_cents);
+            return Some(cents_between(equal_ladder_hz(key as f64), target_hz));
+        }
         if self.edo != 12 {
-            // Equal steps of 1200/edo cents out from the reference key:
-            // the same ladder a generated N-EDO scale with the linear
-            // mapping would give, without the ceremony of a file.
+            // Equal steps of `period`/edo cents out from the reference
+            // key: the same ladder a generated N-EDO scale with the
+            // linear mapping would give, without the ceremony of a file.
             let from_reference = key as f64 - reference_key as f64;
-            return Some(from_reference * (1200.0 / self.edo.max(1) as f64 - 100.0) + anchor);
+            return Some(from_reference * (self.period / self.edo.max(1) as f64 - 100.0) + anchor);
         }
         // A temperament table is offsets from equal, rotated onto
         // `temperament_root`; the reference key's own offset is what
@@ -785,7 +855,10 @@ impl Tuning {
     /// console leaves every pipe's own pitch alone and
     /// [`Tuning::deviation_cents`] is one whole-instrument shift.
     pub fn corrects_pipes(&self) -> bool {
-        !(self.temperament == Temperament::Original && self.scale.is_none() && self.edo == 12)
+        !(self.temperament == Temperament::Original
+            && self.scale.is_none()
+            && self.steps.is_none()
+            && self.edo == 12)
     }
 
     /// What a target subtracts from its deviation for one pipe: the
@@ -826,10 +899,18 @@ impl Tuning {
     /// degree count when one is loaded, else the declared divisions
     /// per octave. What layout presets and anything else that thinks
     /// in "steps" should ask, instead of assuming 12.
-    pub fn steps_per_octave(&self) -> u16 {
-        match &self.scale {
-            Some(scale) => scale.scale.len().max(1) as u16,
-            None => self.edo.max(1),
+    /// How many keys this tuning repeats over — the scale's degree
+    /// count, the steps collection's length, or the declared equal
+    /// division, whichever governs. Named for what it actually is:
+    /// **not** necessarily an octave (see [`Tuning::period`] and
+    /// [`ScaleTuning::scale`]'s own period, which may be any interval).
+    /// What layout presets and anything else that thinks in "steps"
+    /// should ask, instead of assuming a fixed 12 or an octave.
+    pub fn steps_per_period(&self) -> u16 {
+        match (&self.scale, &self.steps) {
+            (Some(scale), _) => scale.scale.len().max(1) as u16,
+            (None, Some(steps)) => steps.steps.len().max(1) as u16,
+            (None, None) => self.edo.max(1),
         }
     }
 
@@ -964,14 +1045,82 @@ mod tests {
         assert_eq!(tuning.deviation_cents(70), Some(-50.0), "one 24-EDO step = 50 cents");
         assert_eq!(tuning.deviation_cents(68), Some(50.0));
         assert_eq!(tuning.deviation_cents(69 + 24), Some(-1200.0), "24 steps = the octave");
-        assert_eq!(tuning.steps_per_octave(), 24);
+        assert_eq!(tuning.steps_per_period(), 24);
         tuning.edo = 12;
         assert_ne!(
             tuning.deviation_cents(70),
             Some(0.0),
             "back at 12 the meantone tables speak again"
         );
-        assert_eq!(tuning.steps_per_octave(), 12);
+        assert_eq!(tuning.steps_per_period(), 12);
+    }
+
+    /// An equal division of an arbitrary period, not an octave: 13
+    /// steps to a 3:1 "tritave" (Bohlen–Pierce-like).
+    #[test]
+    fn equal_division_walks_an_arbitrary_period() {
+        let tuning = Tuning {
+            edo: 13,
+            period: 1200.0 * 3f64.log2(), // 1901.955..., the 3:1 tritave
+            temperament: Temperament::Equal,
+            reference: PitchReference::A440,
+            ..Tuning::default()
+        };
+        assert_eq!(tuning.deviation_cents(69), Some(0.0));
+        // deviation_cents is distance from the *12-EDO* ladder, which
+        // already advances 13*100 cents over 13 keys; the true target
+        // is one full period (1901.955¢), so the deviation is the
+        // difference between the two.
+        let up13 = tuning.deviation_cents(69 + 13).unwrap();
+        let expected = tuning.period - 13.0 * 100.0;
+        assert!((up13 - expected).abs() < 1e-9, "13 steps = the tritave: {up13} vs {expected}");
+        // The actual sounding pitch is exactly the tritave above.
+        let hz = equal_ladder_hz(82.0) * cents_to_ratio(up13);
+        assert!((hz / 440.0 - 3.0).abs() < 1e-9, "hz ratio {}", hz / 440.0);
+        assert_eq!(tuning.steps_per_period(), 13);
+    }
+
+    /// An inline steps collection: consecutive keys play consecutive
+    /// entries from the start key, repeating at the given period.
+    #[test]
+    fn repeating_steps_collection_plays_consecutive_keys() {
+        let steps = std::sync::Arc::new(StepsTuning {
+            steps: vec![0.0, 150.0, 350.0],
+            period: Some(1200.0),
+            start_key: 60,
+        });
+        let tuning = Tuning {
+            steps: Some(steps),
+            reference: PitchReference { key: 60, hz: equal_ladder_hz(60.0) },
+            ..Tuning::default()
+        };
+        let close = |a: Option<f64>, b: f64| assert!((a.unwrap() - b).abs() < 1e-6, "{a:?} vs {b}");
+        close(tuning.deviation_cents(60), 0.0);
+        close(tuning.deviation_cents(61), 150.0 - 100.0);
+        close(tuning.deviation_cents(62), 350.0 - 200.0);
+        // One period up: back to step 1, plus the period.
+        close(tuning.deviation_cents(63), 1200.0 - 300.0);
+        assert_eq!(tuning.steps_per_period(), 3);
+    }
+
+    /// Without a period, a non-repeating collection plays nothing
+    /// outside its own keys — no wrapping, no extrapolation.
+    #[test]
+    fn non_repeating_steps_collection_is_silent_outside_its_range() {
+        let steps = std::sync::Arc::new(StepsTuning {
+            steps: vec![0.0, 100.0, 250.0],
+            period: None,
+            start_key: 60,
+        });
+        let tuning = Tuning {
+            steps: Some(steps),
+            reference: PitchReference { key: 60, hz: equal_ladder_hz(60.0) },
+            ..Tuning::default()
+        };
+        assert!((tuning.deviation_cents(60).unwrap()).abs() < 1e-6);
+        assert!((tuning.deviation_cents(62).unwrap() - (250.0 - 200.0)).abs() < 1e-6);
+        assert_eq!(tuning.deviation_cents(63), None, "past the last step");
+        assert_eq!(tuning.deviation_cents(59), None, "before the start key");
     }
 
     /// A synthetic organ recorded at a′ = 415 in ¼-comma meantone,

@@ -135,7 +135,7 @@ pub(super) fn manual_hex(state: &Mutex<State>, query: &str) -> Reply {
         let steps = console
             .manual_tuning(manual)
             .unwrap_or(console.tuning())
-            .steps_per_octave();
+            .steps_per_period();
         let Some((right, upright)) =
             aristide_model::HexLayout::preset_steps(preset, steps)
         else {
@@ -435,10 +435,23 @@ pub(super) fn browse(_state: &Mutex<State>, query: &str) -> Reply {
         .map(std::path::PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(std::path::PathBuf::from))
         .unwrap_or_else(|| std::path::PathBuf::from("/"));
-    match browse_json(&dir) {
+    let kind = match param(query, "kind") {
+        None => BrowseKind::Organs,
+        Some("scala") => BrowseKind::Scala,
+        Some(other) => return bad_request(&format!("kind {other:?} is neither unset nor \"scala\"")),
+    };
+    match browse_json(&dir, kind) {
         Ok(body) => json(body),
         Err(err) => bad_request(&err),
     }
+}
+
+/// What [`browse_json`] lists files as, alongside directories:
+/// loadable organs (the default, unchanged) or Scala tuning files.
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum BrowseKind {
+    Organs,
+    Scala,
 }
 
 // Write the loaded combination to a composite organ file —
@@ -477,7 +490,7 @@ pub(super) fn save_as(state: &Mutex<State>, query: &str) -> Reply {
 /// loadable organ files (`.organ` sample sets, `.toml` composites,
 /// unencrypted Hauptwerk definitions), dotfiles skipped, directories
 /// first.
-pub(super) fn browse_json(dir: &std::path::Path) -> Result<String, String> {
+pub(super) fn browse_json(dir: &std::path::Path, kind: BrowseKind) -> Result<String, String> {
     let dir = dir
         .canonicalize()
         .map_err(|err| format!("{}: {err}", dir.display()))?;
@@ -493,14 +506,15 @@ pub(super) fn browse_json(dir: &std::path::Path) -> Result<String, String> {
             dirs.push(name);
         } else {
             let lower = name.to_lowercase();
-            // Loadable organs plus Scala tuning files; each picker
-            // filters client-side to the extensions it means.
-            if lower.ends_with(".organ")
-                || lower.ends_with(".toml")
-                || lower.ends_with(".organ_hauptwerk_xml")
-                || lower.ends_with(".scl")
-                || lower.ends_with(".kbm")
-            {
+            let matches = match kind {
+                BrowseKind::Organs => {
+                    lower.ends_with(".organ")
+                        || lower.ends_with(".toml")
+                        || lower.ends_with(".organ_hauptwerk_xml")
+                }
+                BrowseKind::Scala => lower.ends_with(".scl") || lower.ends_with(".kbm"),
+            };
+            if matches {
                 files.push(name);
             }
         }
