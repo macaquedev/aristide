@@ -27,6 +27,9 @@ key-up notes always receive a finite ending, adding a timestamp if necessary.
 key-up; Undo returns to the previous data. All edits survive layout switches.
 
 Drag a note to change pitch and onset; drag its right edge to choose an ending.
+Right-click a note to delete it. Delete removes the hovered note, or the selected
+note when none is hovered. Deleting either continuation half removes the whole
+event; Undo restores it. Delete keeps its usual text-editing behaviour in fields.
 The event fields also support precise keyboard entry. Add timestamps with either
 roll's **+ Timestamp** button; click a ruler marker to edit it. Attached onsets and
 endings move together. Zoom Time and Pitch separately, scroll either axis, drag

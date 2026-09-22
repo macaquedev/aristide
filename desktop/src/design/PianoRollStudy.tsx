@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Badge, Button, Checkbox, Drawer, Group, NumberInput, SegmentedControl, Select, Stack, Text } from '@mantine/core';
 import { NumberControl } from './NumberControl';
 import { RollCanvas } from './RollCanvas';
@@ -14,6 +14,8 @@ export const rollLayouts = [
 const home: RollView = { time: 0, center: 0, span: 120, pitchSpan: 3600 };
 
 export function PianoRollStudy({ layout, compact, assign }: { layout: string; compact: boolean; assign: (name: string) => void }) {
+  const root = useRef<HTMLDivElement>(null);
+  const pointer = useRef<{ x: number; y: number } | null>(null);
   const [model, setModel] = useState<RollModel>(initialRoll);
   const [history, setHistory] = useState<RollModel[]>([]);
   const [selected, setSelected] = useState('flute');
@@ -34,6 +36,28 @@ export function PianoRollStudy({ layout, compact, assign }: { layout: string; co
   const end = model.stamps.find(s => s.id === note?.end);
   const edit = (next: RollModel) => { setHistory(h => [...h, model]); setModel(next); };
   const update = (next: RollNote) => { if (validNote(next, model.stamps)) edit({ ...model, notes: model.notes.map(n => n.id === next.id ? next : n) }); };
+  const remove = (id: string) => {
+    if (!model.notes.some(n => n.id === id)) return;
+    edit({ ...model, notes: model.notes.filter(n => n.id !== id) });
+    if (note?.id === id) setInspectorOpen(false);
+  };
+  useEffect(() => {
+    const keydown = (event: KeyboardEvent) => {
+      if (event.key !== 'Delete' || event.repeat || event.isComposing || event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey) return;
+      if (!root.current?.getClientRects().length) return;
+      const target = event.target instanceof Element ? event.target : null;
+      if (target?.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="textbox"], [role="combobox"]')) return;
+      // Portalled source/assignment/number sheets own their keyboard input.
+      if ([...document.querySelectorAll('[role="dialog"]')].some(dialog => dialog.getClientRects().length && !dialog.matches('.roll-event-inspector'))) return;
+      const hovered = pointer.current && document.elementFromPoint(pointer.current.x, pointer.current.y)?.closest('[data-note]');
+      const id = hovered && root.current.contains(hovered) ? hovered.getAttribute('data-note') : note?.id;
+      if (!id) return;
+      event.preventDefault();
+      remove(id);
+    };
+    document.addEventListener('keydown', keydown);
+    return () => document.removeEventListener('keydown', keydown);
+  });
   const select = (id: string) => { setSelected(id); if (layout === 'focus' || layout === 'lanes') setInspectorOpen(true); };
   const editStamp = (stamp: Stamp) => { setStampError(''); setStampEditor(stamp); };
   const addStamp = (anchor: Anchor) => {
@@ -74,15 +98,15 @@ export function PianoRollStudy({ layout, compact, assign }: { layout: string; co
     {end && <Select label="Ends at" value={end.id} allowDeselect={false} data={endings.filter(option => mode === 'after' ? model.stamps.find(s => s.id === option.value)!.anchor === 'up' : model.stamps.find(s => s.id === option.value)!.anchor === start.anchor)} onChange={value => value && update({ ...note, end: value })}/>}
     {end?.anchor === start.anchor && <Text size="xs" c="dimmed">{end.ms - start.ms} ms duration</Text>}
     {source.kind === 'Stop' && <div className="reference-summary"><Text size="xs" c="dimmed">Live stop reference · {source.organ}</Text><Text size="xs">Source offset {cents(source.transpose)} · combined {cents(note.pitch + source.transpose)}</Text></div>}
-    <Group grow><Button variant="default" onClick={() => { const copy = { ...note, id: crypto.randomUUID() }; edit({ ...model, notes: [...model.notes, copy] }); setSelected(copy.id); }}>Duplicate</Button><Button variant="subtle" color="red" onClick={() => { edit({ ...model, notes: model.notes.filter(n => n.id !== note.id) }); setInspectorOpen(false); }}>Delete</Button></Group>
+    <Group grow><Button variant="default" onClick={() => { const copy = { ...note, id: crypto.randomUUID() }; edit({ ...model, notes: [...model.notes, copy] }); setSelected(copy.id); }}>Duplicate</Button><Button variant="subtle" color="red" onClick={() => remove(note.id)}>Delete</Button></Group>
   </Stack> : <Text c="dimmed">Click the roll to add an event.</Text>;
   const canvas = (anchor: Anchor, height: number, sourceId?: string) => <RollCanvas key={`${anchor}-${sourceId ?? 'all'}`} anchor={anchor} model={model} selected={note?.id ?? ''} source={sourceId} height={height}
     view={views[anchor]} setView={view => setViews(v => ({ ...v, [anchor]: view }))} snap={snap} steps={steps} grid={grid} pan={tool === 'pan'}
-    select={setSelected} inspect={select} update={update} add={add} editStamp={editStamp} addStamp={addStamp}/>;
+    select={setSelected} inspect={select} remove={remove} update={update} add={add} editStamp={editStamp} addStamp={addStamp}/>;
   const zoom = (axis: 'span' | 'pitchSpan', factor: number) => setViews(v => Object.fromEntries(Object.entries(v).map(([key, value]) => [key, { ...value, [axis]: Math.max(axis === 'span' ? 10 : 8, Math.min(axis === 'span' ? 10000 : 19200, value[axis] * factor)) }])) as Record<Anchor, RollView>);
   const sourceIds = [...new Set(model.notes.map(n => n.source))];
 
-  return <Stack className={`piano-study ${compact ? 'compact-roll' : ''}`} gap="md">
+  return <Stack ref={root} onPointerMoveCapture={e => { pointer.current = e.pointerType === 'touch' ? null : { x: e.clientX, y: e.clientY }; }} onPointerLeave={() => { pointer.current = null; }} className={`piano-study ${compact ? 'compact-roll' : ''}`} gap="md">
     <Group justify="space-between" align="center"><div><Text className="roll-stop-name" fw={600}>Titanique <span className="modified">◇</span></Text><Text c="dimmed" size="xs">Grand-orgue · {model.notes.length} events · Follow division</Text></div>
       <Group gap="xs"><Button variant="subtle" onClick={() => {
         const example = { ...initialRoll, notes: [...initialRoll.notes.map(n => n.id === 'theorbe' ? { ...n, end: 'u50' } : n), { id: 'release-example', source: 'bourdon', pitch: 700, start: 'u50', end: 'u150', level: -6 }] };
@@ -104,8 +128,8 @@ export function PianoRollStudy({ layout, compact, assign }: { layout: string; co
       {layout === 'focus' && <div className="roll-focus"><Group justify="space-between" mb="sm"><SegmentedControl aria-label="Timeline" value={focus} onChange={v => setFocus(v as Anchor)} data={[{ value: 'down', label: 'Key down' }, { value: 'up', label: 'Key up' }]}/><Button variant="default" disabled={!note} onClick={() => setInspectorOpen(true)}>Edit event</Button></Group>{canvas(focus, 480)}<div className="roll-other-events">{model.notes.filter(n => { const s = model.stamps.find(s => s.id === n.start)!; const e = model.stamps.find(s => s.id === n.end); return s.anchor !== focus || (e !== undefined && e.anchor !== focus); }).map(n => <Button key={n.id} variant="subtle" onClick={() => { setSelected(n.id); setFocus(focus === 'down' ? 'up' : 'down'); }}>{model.sources.find(s => s.id === n.source)!.name} · {focus === 'down' ? 'Key up' : 'Key down'} ↗</Button>)}</div></div>}
       {layout === 'lanes' && <div className="roll-lanes">{sourceIds.map(id => <section key={id} className="roll-source-lane"><Group justify="space-between" mb="xs"><Text fw={600}>{model.sources.find(s => s.id === id)!.name}</Text><Badge color="gray" variant="outline">{model.sources.find(s => s.id === id)!.kind}</Badge></Group><div className="roll-pair">{canvas('down', 230, id)}{canvas('up', 230, id)}</div></section>)}{!sourceIds.length && canvas('down', 400)}</div>}
     </div>
-    <Group justify="space-between" className="roll-footer"><Text size="xs" c="dimmed">→ Until release · → / ← Hold after release</Text><Text size="xs" c="dimmed">Click to draw · Drag to move · Middle-drag to pan</Text></Group>
-    <Drawer closeButtonProps={{ 'aria-label': 'Close' }} opened={inspectorOpen && (layout === 'focus' || layout === 'lanes')} onClose={() => setInspectorOpen(false)} title="Event" position="right">{inspector}</Drawer>
+    <Group justify="space-between" className="roll-footer"><Text size="xs" c="dimmed">→ Until release · → / ← Hold after release</Text><Text size="xs" c="dimmed">Right-click / Delete to remove · Middle-drag to pan</Text></Group>
+    <Drawer closeButtonProps={{ 'aria-label': 'Close' }} classNames={{ content: 'roll-event-inspector' }} opened={inspectorOpen && (layout === 'focus' || layout === 'lanes')} onClose={() => setInspectorOpen(false)} title="Event" position="right">{inspector}</Drawer>
     <Drawer closeButtonProps={{ 'aria-label': 'Close' }} opened={sourceOpen} onClose={() => setSourceOpen(false)} title="Source · prototype" position="right" size="md"><Stack>
       <SegmentedControl value={sourceKind} onChange={setSourceKind} data={['Stop', 'Rank']}/>
       {model.sources.filter(s => s.kind === sourceKind).map(s => <Button key={s.id} variant={s.id === note?.source ? 'light' : 'default'} justify="space-between" onClick={() => { if (note) update({ ...note, source: s.id }); setSourceOpen(false); }}>{s.name}<Text component="span" size="xs" c="dimmed">{s.organ}</Text></Button>)}

@@ -7,7 +7,7 @@ export type RollView = { time: number; center: number; span: number; pitchSpan: 
 type Props = {
   anchor: Anchor; model: RollModel; selected: string; source?: string; height: number;
   view: RollView; setView: (view: RollView) => void; snap: boolean; steps: number; grid: boolean; pan: boolean;
-  select: (id: string) => void; inspect: (id: string) => void; update: (note: RollNote) => void;
+  select: (id: string) => void; inspect: (id: string) => void; remove: (id: string) => void; update: (note: RollNote) => void;
   add: (anchor: Anchor, stamp: string, pitch: number, source?: string) => void;
   editStamp: (stamp: Stamp) => void; addStamp: (anchor: Anchor) => void;
 };
@@ -97,7 +97,11 @@ export function RollCanvas(p: Props) {
     <div ref={host} className="roll-surface">
       <svg ref={svg} width="100%" height={p.height} className={p.pan ? 'roll-canvas panning' : 'roll-canvas'}
         aria-label={`${anchorName(p.anchor)} piano roll`} role="group"
-        onContextMenu={e => e.preventDefault()}
+        onContextMenu={e => {
+          e.preventDefault();
+          const id = (e.target as Element).closest('[data-note]')?.getAttribute('data-note');
+          if (id) { gesture.current = null; setDraft(undefined); p.remove(id); }
+        }}
         onPointerDown={e => {
           if (e.button !== 0 && e.button !== 1) return;
           const pos = point(e);

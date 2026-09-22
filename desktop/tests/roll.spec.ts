@@ -183,3 +183,51 @@ test('source references share source edits and ranks remain selectable', async (
   await page.getByRole('button', { name: 'Salicional 8′ Second organ', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Salicional 8′ ↗', exact: true })).toBeVisible();
 });
+
+for (const layout of ['split', 'stacked', 'focus', 'lanes']) {
+  test(`${layout}: right-click deletes the pointed event and Undo restores it`, async ({ page }) => {
+    await page.goto(`/?study=1&layout=${layout}`);
+    const event = page.locator('[data-note="theorbe"]');
+    await event.locator('.note-body').click({ button: 'right' });
+    await expect(event).toHaveCount(0);
+    await expect(page.getByText('Grand-orgue · 2 events · Follow division')).toBeVisible();
+    await expect(page.locator('[data-note="flute"]')).toHaveCount(1);
+    await page.getByRole('button', { name: 'Undo', exact: true }).click();
+    await expect(event).toHaveCount(1);
+  });
+}
+
+test('Delete prefers hovered notes, then selection, and ignores typing and hidden Build', async ({ page }) => {
+  await page.goto('/?study=1&layout=split');
+  await page.locator('[data-note="theorbe"] .note-body').hover();
+  await page.keyboard.press('Delete');
+  await expect(page.locator('[data-note="theorbe"]')).toHaveCount(0);
+  await expect(page.locator('[data-note="flute"]')).toHaveCount(1);
+  await page.getByRole('button', { name: 'Undo', exact: true }).click();
+  await page.getByText('Titanique', { exact: false }).first().hover();
+  await page.keyboard.press('Delete');
+  await expect(page.locator('[data-note="flute"]')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Undo', exact: true }).click();
+  await page.getByRole('button', { name: 'Pitch: 1250 ¢', exact: true }).click();
+  await page.getByRole('textbox', { name: 'Pitch', exact: true }).press('Delete');
+  await expect(page.getByText('Grand-orgue · 3 events · Follow division')).toBeVisible();
+  await page.getByRole('button', { name: 'Done', exact: true }).click();
+  await page.getByRole('radiogroup', { name: 'Study panel' }).getByText('Tuning', { exact: true }).click();
+  await page.keyboard.press('Delete');
+  await page.getByRole('radiogroup', { name: 'Study panel' }).getByText('Build', { exact: true }).click();
+  await expect(page.getByText('Grand-orgue · 3 events · Follow division')).toBeVisible();
+});
+
+test('deleting a continuation removes both halves; empty roll right-click does nothing', async ({ page }) => {
+  await page.goto('/?study=1&layout=split');
+  await page.getByRole('button', { name: 'Try release example' }).click();
+  const release = page.getByRole('group', { name: 'Key up piano roll', exact: true });
+  await release.locator('[data-note="theorbe"] .note-body').click({ button: 'right' });
+  await expect(page.locator('[data-note="theorbe"]')).toHaveCount(0);
+  await expect(page.getByText('Grand-orgue · 3 events · Follow division')).toBeVisible();
+  await release.click({ button: 'right', position: { x: 90, y: 330 } });
+  await expect(page.getByText('Grand-orgue · 3 events · Follow division')).toBeVisible();
+  await page.getByRole('button', { name: 'Undo', exact: true }).click();
+  await expect(page.locator('[data-note="theorbe"]')).toHaveCount(2);
+  await page.screenshot({ path: 'test-results/roll-delete-undo.png', fullPage: true });
+});
