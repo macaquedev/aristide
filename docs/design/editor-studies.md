@@ -47,6 +47,31 @@ autosave, MIDI and playback are **not connected** in these studies.
 
 Navigation/zoom reference: [Image-Line piano-roll manual](https://www.image-line.com/fl-studio-learning/fl-studio-online-manual/html/pianoroll.htm).
 
+## Selected Tuning direction: scope and card
+
+Alex chose scope and card and requested DAW-like control arrangement. The default
+Tuning comparison now offers four mutations with one shared editable fixture:
+
+| Arrangement | Try it |
+|---|---|
+| Channel strip: reference, scale and fine offset above the graph | [Open channel strip](http://localhost:1420/?study=1&panel=tuning&layout=channel) |
+| Device rack: adjacent modules, with selected-note controls beside scale | [Open device rack](http://localhost:1420/?study=1&panel=tuning&layout=rack) |
+| Editor + inspector: graph and note dock beside a properties column | [Open inspector](http://localhost:1420/?study=1&panel=tuning&layout=inspector) |
+| Tabbed device: Pitch, Scale and Note pages inside one card | [Open tabbed device](http://localhost:1420/?study=1&panel=tuning&layout=tabbed) |
+
+The scope browser searches and expands down to the example pipe. Inherited
+controls are disabled; turn Follow off to seed an override from the current
+values, or use the link to edit the governing scope. Reference presets sit beside
+the Hz control. Custom deviation bars drag by mouse or touch, with one Undo per
+graph drag. Select a bar to edit its exact cents below; arrow keys navigate and
+adjust it. Root changes the graph's starting pitch class. Equal divisions show
+numbered intervals, with up to 128 steps. Switching arrangements keeps edits.
+
+This is an arrangement study, not the complete tuning catalogue. As-recorded,
+historical presets, just intonation, Scala import, key mapping and an editable
+reference-key anchor remain for the connected implementation. No MIDI bar
+lighting or audio audition is simulated.
+
 ## Earlier structural studies
 
 Retained at their explicit links for comparison; they are not the default Build.
@@ -66,10 +91,10 @@ or right-click for the assignment sheet. Assignment is explicitly a UI preview.
 
 | Tuning direction | Try it |
 |---|---|
-| 1. Scope list and one tuning card | [Open scope/card](http://localhost:1420/?study=1&panel=tuning&layout=tree) |
-| 2. Scope table with reference/fine offsets visible across the instrument | [Open table](http://localhost:1420/?study=1&panel=tuning&layout=table) |
-| 3. Inheritance columns: instrument, divisions, stops, pipes | [Open columns](http://localhost:1420/?study=1&panel=tuning&layout=cascade) |
-| 4. Keyboard and deviation bars first, scope controls below | [Open keyboard focus](http://localhost:1420/?study=1&panel=tuning&layout=keyboard) |
+| 1. Scope list and one tuning card | [Open scope/card](http://localhost:1420/?study=1&panel=tuning&layout=tree&legacy=1) |
+| 2. Scope table with reference/fine offsets visible across the instrument | [Open table](http://localhost:1420/?study=1&panel=tuning&layout=table&legacy=1) |
+| 3. Inheritance columns: instrument, divisions, stops, pipes | [Open columns](http://localhost:1420/?study=1&panel=tuning&layout=cascade&legacy=1) |
+| 4. Keyboard and deviation bars first, scope controls below | [Open keyboard focus](http://localhost:1420/?study=1&panel=tuning&layout=keyboard&legacy=1) |
 
 Try selecting Grand-orgue, turning off Follow, changing 440 to 415, and selecting
 Bourdon to see its inherited pitch. Select Custom to drag deviation bars. More
@@ -77,8 +102,8 @@ tuning controls exposes the root, fine offset and arbitrary equal divisions
 (up to 128 in this study). These are interaction examples, not a historical
 temperament catalogue or a complete tuning implementation.
 
-Build awaits Alex’s choice among the four piano-roll variations. Tuning still
-awaits a choice among its four original structural directions.
+Alex selected Split desk for Build. Tuning now awaits a choice among the four
+scope-and-card arrangements above.
 
 Validation: frontend production build, mouse/touch browser tests, two-finger
 per-pipe editing, inheritance and screenshot inspection. A scrolling/focus bug

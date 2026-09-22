@@ -143,7 +143,8 @@ Each voice row has:
 ### Selected direction: piano roll (22 Sept 2026 · Alex)
 
 Alex selected the piano-roll study. Build now proceeds through four clickable
-mutations of that direction before connecting the editor. The row/table language
+mutations of that direction before connecting the editor. Alex subsequently
+selected **Split desk**. The row/table language
 above describes the available event fields; it does not prescribe the chosen layout.
 
 - Pitch runs vertically in cents, with **0 cents initially centred**. Time runs
@@ -221,6 +222,16 @@ Tuning is set by inheritance across four levels: instrument, division, stop, pip
 - Below the fields: the twelve notes as bars showing each note's deviation in cents. Choosing Custom makes the bars draggable. Playing a key lights its bar. For non-twelve systems the picture shows the scale's steps with the key mapping beneath.
 
 What a normal user sees: "Whole instrument" is already selected, and the card shows pitch and temperament. Two controls.
+
+### Selected direction: scope and card (22 Sept 2026 · Alex)
+
+Alex selected the scope list and tuning card, and requested another iteration
+focused on arranging the controls more like a DAW. Keep the scope browser and
+one selected-scope card. Compare four clickable arrangements: a channel strip,
+a device rack, an editor with a docked inspector, and a tabbed device. Keep
+reference pitch, scale settings, fine offset and selected-note editing grouped
+consistently within each arrangement. These remain silent design studies until
+connected; they must not imply working MIDI, persistence or sound.
 
 ### Connections
 

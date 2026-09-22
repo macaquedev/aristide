@@ -4,6 +4,7 @@ export function LayoutPreview({ layout }: { layout: string }) {
     <rect key={`${x}-${y}`} x={x} y={y} width={w} height={h} rx="1" fill="currentColor" opacity={active ? .9 : .25}/>;
   const rows = [8, 24, 40];
   return <svg viewBox="0 0 160 56" aria-hidden="true">
+    {['channel', 'rack', 'inspector', 'tabbed'].includes(layout) && <>{box(4, 4, 32, 48)}{layout === 'channel' ? <>{box(42, 4, 114, 15, true)}{box(42, 24, 114, 28)}</> : layout === 'rack' ? <>{[42, 82, 122].map(x => box(x, 4, 34, 24, true))}{box(42, 33, 114, 19)}</> : layout === 'inspector' ? <>{box(42, 4, 74, 48)}{box(122, 4, 34, 48, true)}</> : <>{box(42, 4, 34, 8, true)}{box(82, 4, 34, 8)}{box(122, 4, 34, 8)}{box(42, 18, 114, 34)}</>}</>}
     {layout === 'split' && <>{box(4, 5, 54, 45)}{box(62, 5, 54, 45)}{box(122, 5, 34, 45)}{box(10, 18, 38, 5, true)}{box(22, 34, 30, 5, true)}{box(68, 34, 30, 5, true)}</>}
     {layout === 'stacked' && <>{box(4, 5, 110, 21)}{box(4, 30, 110, 21)}{box(122, 5, 34, 46)}{box(12, 12, 46, 5, true)}{box(12, 37, 70, 5, true)}</>}
     {layout === 'focus' && <>{box(4, 4, 42, 7, true)}{box(50, 4, 42, 7)}{box(4, 16, 152, 35)}{box(12, 24, 48, 5, true)}{box(48, 39, 96, 5, true)}</>}

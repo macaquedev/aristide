@@ -49,7 +49,7 @@ test('source selection and step cells change the study without engine requests',
 
 for (const layout of ['tree', 'table', 'cascade', 'keyboard']) {
   test(`Tuning ${layout}: inheritance is explicit and removable`, async ({ page }) => {
-    await page.goto(`/?study=1&panel=tuning&layout=${layout}`);
+    await page.goto(`/?study=1&panel=tuning&legacy=1&layout=${layout}`);
     await page.getByRole('button', { name: 'Grand-orgue', exact: true }).click();
     const follow = page.getByRole('switch', { name: 'Follow Whole instrument', exact: true });
     await expect(follow).toBeChecked();
