@@ -9,7 +9,7 @@ for (const layout of ['channel', 'rack', 'inspector', 'tabbed']) {
     await expect(page.getByRole('button', { name: 'Reference pitch: 415 Hz', exact: true })).toBeVisible();
     await page.getByRole('button', { name: 'Grand-orgue', exact: true }).click();
     await expect(page.getByRole('button', { name: 'Reference pitch: 415 Hz', exact: true })).toBeDisabled();
-    await page.getByRole('switch', { name: 'Follow Whole instrument' }).uncheck();
+    await page.getByRole('switch', { name: 'Pitch follows Whole instrument' }).uncheck();
     await expect(page.getByRole('button', { name: 'Reference pitch: 415 Hz', exact: true })).toBeEnabled();
     await page.getByRole('button', { name: '440', exact: true }).click();
     await page.getByRole('button', { name: 'Undo', exact: true }).click();
@@ -31,15 +31,15 @@ test('custom drag is one undo and layouts preserve edits', async ({ page }) => {
   await page.mouse.down();
   await page.mouse.move(bounds.x + bounds.width / 2, bounds.y + bounds.height * .3, { steps: 8 });
   await page.mouse.up();
-  await expect(page.getByRole('button', { name: 'C deviation: 20 ¢', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'C deviation: 12 ¢', exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Device rack', exact: true }).click();
-  await expect(page.getByRole('button', { name: 'C deviation: 20 ¢', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'C deviation: 12 ¢', exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Undo', exact: true }).click();
-  await expect(page.getByRole('button', { name: 'C deviation: 0 ¢', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'C deviation: -8 ¢', exact: true })).toBeVisible();
   await note.focus();
   await note.press('ArrowUp');
-  await expect(page.getByRole('button', { name: 'C deviation: 1 ¢', exact: true })).toBeVisible();
-  await page.getByRole('button', { name: 'C deviation: 1 ¢', exact: true }).click({ button: 'right' });
+  await expect(page.getByRole('button', { name: 'C deviation: -7 ¢', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'C deviation: -7 ¢', exact: true }).click({ button: 'right' });
   await expect(page.getByRole('dialog')).toContainText('Note deviation');
 });
 
@@ -57,7 +57,8 @@ test('tabbed scale supports non-twelve steps and scope search', async ({ page })
   await expect(page.getByText('Step 19', { exact: true })).toBeVisible();
   await page.getByRole('textbox', { name: 'Find scope' }).fill('C4');
   await page.getByRole('button', { name: 'Bourdon · C4 pipe', exact: true }).click();
-  await expect(page.getByRole('switch', { name: 'Follow Bourdon', exact: true })).toBeChecked();
+  await page.getByRole('tab', { name: 'Pitch', exact: true }).click();
+  await expect(page.getByRole('switch', { name: 'Pitch follows Bourdon', exact: true })).toBeChecked();
 });
 
 test('touch selects and drags custom tuning', async ({ browser }) => {
@@ -72,6 +73,6 @@ test('touch selects and drags custom tuning', async ({ browser }) => {
   await client.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [point] });
   await client.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ ...point, y: point.y - bounds.height * .1 }] });
   await client.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
-  await expect(page.getByRole('button', { name: 'C deviation: 10 ¢', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'C deviation: 2 ¢', exact: true })).toBeVisible();
   await context.close();
 });

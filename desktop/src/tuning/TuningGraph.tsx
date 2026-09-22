@@ -1,18 +1,16 @@
 import { useRef, useState } from 'react';
 import { Group, Text } from '@mantine/core';
-
-export const pitchNames = ['C', 'C♯', 'D', 'D♯', 'E', 'F', 'F♯', 'G', 'G♯', 'A', 'A♯', 'B'];
-export const formatCents = (value: number) => `${value > 0 ? '+' : ''}${Number(value.toFixed(2))}`;
+import { formatCents } from './model';
 
 /** A gesture commits once, so Undo restores a complete drag. */
-export function TuningGraph({ values, labels, selected, select, editable, intervals = false, lower = -50, upper = 50, anchorFirst = false, change }: {
+export function TuningGraph({ values, labels, selected, select, editable, intervals = false, lower = -50, upper = 50, fixed, caption, change }: {
   values: number[]; labels: string[]; selected: number; select: (index: number) => void;
-  editable: boolean; intervals?: boolean; lower?: number; upper?: number; anchorFirst?: boolean; change: (index: number, value: number) => void;
+  editable: boolean; intervals?: boolean; lower?: number; upper?: number; fixed?: number; caption?: string; change: (index: number, value: number) => void;
 }) {
   const [draft, setDraft] = useState<{ index: number; value: number }>();
   const drag = useRef<{ index: number; y: number; value: number; height: number; next: number; moved: boolean } | null>(null);
   return <section className={`tuning-graph ${intervals ? 'tuning-intervals' : ''}`} aria-label={intervals ? 'Scale intervals' : 'Pitch deviations'}>
-    <Group justify="space-between" className="tuning-graph-heading"><Text fw={600}>{intervals ? 'Scale intervals' : 'Pitch deviations'}</Text><Text size="xs" c="dimmed">{intervals ? `${Number(lower.toFixed(1))}–${Number(upper.toFixed(1))} ¢` : '±50 ¢'} · {editable ? 'Drag to tune' : 'Select a note'}</Text></Group>
+    <Group justify="space-between" className="tuning-graph-heading"><Text fw={600}>{intervals ? 'Scale intervals' : 'Pitch deviations'}</Text><Text size="xs" c="dimmed">{caption ?? (intervals ? `${Number(lower.toFixed(1))}–${Number(upper.toFixed(1))} ¢` : '±50 ¢')} · {editable ? 'Drag to tune' : 'Select a note'}</Text></Group>
     <div className="tuning-graph-body">
       <div className="tuning-ruler" aria-hidden="true"><span>{Number(upper.toFixed(1))}</span><span>{Number(((lower + upper) / 2).toFixed(1))}</span><span>{lower}</span></div>
       <div className="tuning-graph-scroll"><div className="tuning-columns" style={{ minWidth: values.length * 44 }}>
@@ -20,7 +18,7 @@ export function TuningGraph({ values, labels, selected, select, editable, interv
           const cents = draft?.index === index ? draft.value : value;
           const percent = (upper - cents) / (upper - lower) * 100;
           const zero = upper / (upper - lower) * 100;
-          const canEdit = editable && !(anchorFirst && index === 0);
+          const canEdit = editable && index !== fixed;
           return <div key={index} className={`tuning-column ${selected === index ? 'selected' : ''}`}>
             <button className="tuning-note-track" style={{ cursor: canEdit ? 'ns-resize' : 'pointer', touchAction: canEdit ? 'none' : 'pan-x' }} aria-label={`Select ${labels[index]}`} aria-pressed={selected === index}
               aria-description={`${formatCents(cents)} cents${canEdit ? '; drag or use up and down arrows to tune' : ''}`}

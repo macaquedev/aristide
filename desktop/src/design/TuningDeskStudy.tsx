@@ -1,123 +1,43 @@
-import { useState, type ReactNode } from 'react';
-import { ActionIcon, Badge, Button, Card, Group, Select, Stack, Switch, Tabs, Text, TextInput } from '@mantine/core';
-import { ChevronDown, ChevronRight, Search } from 'lucide-react';
-import { NumberControl } from './NumberControl';
-import { initialScopes, resolve, noteName, type Scope, type Tuning } from './model';
-import { formatCents, pitchNames, TuningGraph } from './TuningGraph';
-import { rootedDeviations, temperamentNames } from './temperaments';
-import { mappedPitch, ratioToCents, scaleIntervals, scalePeriod } from './tuningScale';
-import './tuning-desk.css';
+import { useState } from 'react';
+import { TuningDesk, type DeskScope, type Part } from '../tuning/TuningDesk';
+import { defaultAnchor, equalTemperament, type Anchor, type Shape } from '../tuning/model';
 
-export const tuningDeskLayouts = [
-  { value: 'channel', label: '1 · Channel strip' }, { value: 'rack', label: '2 · Device rack' },
-  { value: 'inspector', label: '3 · Editor + inspector' }, { value: 'tabbed', label: '4 · Tabbed device' },
+export { tuningDeskLayouts } from '../tuning/TuningDesk';
+
+type StudyScope = { id: string; name: string; parent?: string; anchor?: Anchor; shape?: Shape };
+
+const initialScopes: StudyScope[] = [
+  { id: 'instrument', name: 'Whole instrument', anchor: defaultAnchor, shape: equalTemperament },
+  { id: 'great', name: 'Grand-orgue', parent: 'instrument' },
+  { id: 'bourdon', name: 'Bourdon', parent: 'great' },
+  { id: 'bourdon-c4', name: 'Bourdon · C4 pipe', parent: 'bourdon' },
+  { id: 'recit', name: 'Récit', parent: 'instrument', anchor: { ...defaultAnchor, hz: 415 },
+    shape: { system: 'temperament', temperament: 'custom', root: 0, offsets: [0, -8, 4, -4, 8, 0, -8, 4, -4, 8, 0, -8] } },
+  { id: 'flute', name: 'Flûte', parent: 'recit' },
 ];
 
-export function TuningDeskStudy({ layout, assign }: { layout: string; assign: (name: string) => void }) {
-  const [scopes, setScopes] = useState<Scope[]>(initialScopes);
-  const [history, setHistory] = useState<Scope[][]>([]);
-  const [selected, setSelected] = useState('instrument');
-  const [selectedStep, setSelectedStep] = useState(0);
-  const [query, setQuery] = useState('');
-  const [collapsed, setCollapsed] = useState<string[]>(['bourdon']);
-  const [tab, setTab] = useState<string | null>('pitch');
-  const scope = scopes.find(s => s.id === selected)!;
-  const tuning = resolve(scopes, selected);
-  const inherited = !scope.own;
-  const parent = scopes.find(s => s.id === scope.parent);
-  const equalDivision = tuning.system === 'Equal division';
-  const conventional = tuning.system === 'Twelve-note';
-  const collection = tuning.system === 'Pitch collection';
-  const period = scalePeriod(tuning);
-  const count = conventional ? 12 : equalDivision ? tuning.steps : tuning.intervals.length;
-  const step = Math.min(selectedStep, count - 1);
-  const root = pitchNames.indexOf(tuning.root);
-  const indices = Array.from({ length: count }, (_, i) => conventional ? (i + root) % 12 : i);
-  const labels = indices.map(i => conventional ? pitchNames[i] : `${i + 1}`);
-  const values = conventional ? indices.map(i => tuning.deviations[i]) : scaleIntervals(tuning);
-  const lower = conventional ? -50 : Math.min(0, ...values) - (collection ? 100 : 0);
-  const upper = conventional ? 50 : Math.max(period ?? 0, ...values, 100) + (collection ? 100 : 0);
-  const path: Scope[] = [];
-  for (let current: Scope | undefined = scope; current; current = scopes.find(s => s.id === current?.parent)) path.unshift(current);
-  const governing = [...path].reverse().find(s => s.own)!;
-  const edit = (next: Scope[]) => { setHistory(h => [...h, scopes]); setScopes(next); };
-  const update = (change: Partial<Tuning>) => {
-    if (inherited) return;
-    edit(scopes.map(s => s.id === selected ? { ...s, own: { ...tuning, ...change } } : s));
+function resolved(scopes: StudyScope[], scope: StudyScope): DeskScope {
+  const inherit = <K extends 'anchor' | 'shape'>(key: K): NonNullable<StudyScope[K]> => {
+    let current: StudyScope | undefined = scope;
+    while (current && !current[key]) current = scopes.find(s => s.id === current!.parent);
+    return current![key]!;
   };
-  const changeNote = (index: number, value: number) => {
-    if (inherited || equalDivision) return;
-    if (collection) {
-      if (index === 0) return;
-      update({ intervals: tuning.intervals.map((cents, i) => i === index ? value : cents) }); return;
-    }
-    if (tuning.temperament !== 'Custom') return;
-    const deviations = [...tuning.deviations]; deviations[indices[index]] = value;
-    update({ deviations });
-  };
-  const number = (field: 'hz' | 'fine' | 'steps' | 'referenceKey', label: string, unit: string) => <NumberControl label={label} value={tuning[field]} unit={unit}
-    min={field === 'fine' ? -Infinity : field === 'referenceKey' ? 0 : 1} max={field === 'steps' ? 128 : field === 'referenceKey' ? 65535 : Infinity} step={field === 'fine' ? .1 : 1} disabled={inherited}
-    change={value => update({ [field]: field === 'steps' || field === 'referenceKey' ? Math.round(value) : value })} assign={() => assign(`tuning/${selected}/${field}`)}/>;
-  const module = (name: string, content: ReactNode, className = '') => <section className={`tuning-module ${className}`} aria-label={name}><Text className="tuning-module-title" size="xs" c="dimmed">{name}</Text>{content}</section>;
-  const reference = module('Reference', <Stack gap="xs"><div className="tuning-reference-number">{number('hz', 'Reference pitch', 'Hz')}</div>
-    <Group gap={4} grow>{[392, 415, 440, 466].map(hz => <Button key={hz} size="compact-sm" variant={tuning.hz === hz ? 'light' : 'default'} disabled={inherited} onClick={() => update({ hz })}>{hz}</Button>)}</Group>
-    {conventional ? <Text size="xs" c="dimmed">Reference note · {noteName(tuning.referenceKey)}</Text> : <div><Text size="xs" c="dimmed">Reference key → step 1</Text>{number('referenceKey', 'Reference key', `(${noteName(tuning.referenceKey)})`)}</div>}</Stack>, 'reference-module');
-  const fine = module('Fine offset', <Stack gap="xs">{number('fine', 'Fine offset', '¢')}<Button size="compact-sm" variant="subtle" disabled={inherited || tuning.fine === 0} onClick={() => update({ fine: 0 })}>Reset offset</Button></Stack>, 'fine-module');
-  const periodChoice = period === null ? 'none' : period === 1200 ? 'octave' : period === ratioToCents(3) ? 'triple' : 'custom';
-  const scale = module('Scale', <Stack gap="xs">
-    <Select label="Tuning system" value={tuning.system} disabled={inherited} allowDeselect={false} data={['Twelve-note', 'Equal division', 'Pitch collection']} onChange={value => { if (value) { setSelectedStep(0); update({ system: value, ...(value === 'Pitch collection' ? { period: null } : value === 'Equal division' && tuning.period === null ? { period: 1200 } : {}) }); } }}/>
-    {conventional ? <><Select label="Temperament" data={temperamentNames} value={tuning.temperament} disabled={inherited} allowDeselect={false} onChange={value => value && update({ temperament: value, deviations: value === 'Custom' ? tuning.deviations : rootedDeviations(value, root) })}/>
-      <Select label="Root note" data={pitchNames} value={tuning.root} disabled={inherited} allowDeselect={false} onChange={value => { if (value) { setSelectedStep(0); update({ root: value, ...(tuning.temperament === 'Custom' ? {} : { deviations: rootedDeviations(tuning.temperament, pitchNames.indexOf(value)) }) }); } }}/></> : <>
-      <Select label="Repeat interval" value={periodChoice} disabled={inherited} allowDeselect={false} data={[...(collection ? [{ value: 'none', label: 'None · no repetition' }] : []), { value: 'octave', label: '2:1 · 1200 ¢' }, { value: 'triple', label: '3:1 · 1901.96 ¢' }, { value: 'custom', label: 'Custom interval' }]} onChange={value => value && update({ period: value === 'none' ? null : value === 'octave' ? 1200 : value === 'triple' ? ratioToCents(3) : 1300 })}/>
-      {equalDivision ? <div><Text size="xs" c="dimmed">Steps per repeat</Text>{number('steps', 'Steps per repeat', '')}</div> : <Group gap="xs"><Text size="xs">{count} steps</Text><Button size="compact-sm" variant="default" disabled={inherited || count >= 128} onClick={() => { update({ intervals: [...tuning.intervals, tuning.intervals.at(-1)! + 100] }); setSelectedStep(count); }}>Add step</Button><Button size="compact-sm" variant="subtle" color="red" disabled={inherited || count <= 1} onClick={() => { update({ intervals: tuning.intervals.slice(0, -1) }); setSelectedStep(Math.min(step, count - 2)); }}>Remove last</Button></Group>}
-      {periodChoice === 'custom' && <div><Text size="xs" c="dimmed">Repeat size</Text><NumberControl label="Repeat size" value={period!} unit="¢" min={.01} step={.1} disabled={inherited} change={value => update({ period: value })} assign={() => assign(`tuning/${selected}/period`)}/></div>}
-    </>}
-  </Stack>, 'scale-module');
-  const noteEditor = module('Selected note', <Stack gap="xs"><Group justify="space-between"><Text className="tuning-selected-note" fw={600}>{conventional ? labels[step] : `Step ${step + 1}`}</Text><Group gap={4}>
-    <ActionIcon variant="default" size="lg" aria-label="Previous note" onClick={() => setSelectedStep((step + count - 1) % count)}><ChevronRight size={16} style={{ transform: 'rotate(180deg)' }}/></ActionIcon>
-    <ActionIcon variant="default" size="lg" aria-label="Next note" onClick={() => setSelectedStep((step + 1) % count)}><ChevronRight size={16}/></ActionIcon></Group></Group>
-    {equalDivision ? <><Text>{Number(values[step].toFixed(2))} ¢</Text><Text size="xs" c="dimmed">from first step · {Number((period! / count).toFixed(2))} ¢ spacing</Text></> : collection ? <><NumberControl label={`Step ${step + 1} interval`} value={values[step]} unit="¢" step={.1} disabled={inherited || step === 0} change={value => changeNote(step, value)} assign={() => assign(`tuning/${selected}/interval/${step}`)}/><Text size="xs" c="dimmed">{step === 0 ? 'Reference · 0 ¢' : 'From reference'}</Text></> : <>
-      <NumberControl label={`${labels[step]} deviation`} value={values[step]} unit="¢" min={-50} max={50} step={.1} disabled={inherited || tuning.temperament !== 'Custom'} change={value => changeNote(step, value)} assign={() => assign(`tuning/${selected}/deviation/${indices[step]}`)}/>
-      <Button variant="subtle" size="compact-sm" disabled={inherited || tuning.temperament !== 'Custom' || values[step] === 0} onClick={() => changeNote(step, 0)}>Reset note</Button></>}
-  </Stack>, 'note-module');
-  const graph = <TuningGraph key={`${selected}-${tuning.system}-${tuning.root}-${period}`} values={values} labels={labels} selected={step} select={setSelectedStep}
-    intervals={!conventional} lower={lower} upper={upper} anchorFirst={collection} editable={!inherited && (collection || conventional && tuning.temperament === 'Custom')} change={changeNote}/>;
-  const summary = <Group className="tuning-status" justify="space-between"><Text size="xs" c="dimmed">{conventional ? `${tuning.temperament} · root ${tuning.root}` : `${count} ${equalDivision ? 'equal ' : ''}steps · ${period === null ? 'No repetition' : `Repeat ${Number(period.toFixed(2))} ¢`}`}</Text><Text size="xs" c="dimmed">{tuning.hz} Hz · {formatCents(tuning.fine)} ¢ offset</Text></Group>;
-  const mapping = !conventional && <Group className="tuning-mapping" justify="space-between"><Text size="xs" c="dimmed">Key {tuning.referenceKey + step} → step {step + 1} · {Number(mappedPitch(tuning, tuning.referenceKey + step)!.toFixed(2))} Hz</Text><Text size="xs" c="dimmed">{period === null ? `Keys ${tuning.referenceKey}–${tuning.referenceKey + count - 1} only · outside unmapped` : `Consecutive keys · repeat every ${count} steps`}</Text></Group>;
-  const visible = (s: Scope): boolean => {
-    if (query) return s.name.toLocaleLowerCase().includes(query.toLocaleLowerCase());
-    const parent = scopes.find(p => p.id === s.parent);
-    return !parent || (!collapsed.includes(parent.id) && visible(parent));
-  };
-  const depth = (s: Scope): number => s.parent ? 1 + depth(scopes.find(p => p.id === s.parent)!) : 0;
+  return { id: scope.id, name: scope.name, parent: scope.parent, own: { anchor: Boolean(scope.anchor), scale: Boolean(scope.shape) }, anchor: inherit('anchor'), shape: inherit('shape') };
+}
 
-  return <div className={`tuning-desk tuning-${layout}`}>
-    <nav className="tuning-browser" aria-label="Tuning scopes">
-      <Text fw={600} mb="sm">Scopes</Text><TextInput aria-label="Find scope" placeholder="Find scope" leftSection={<Search size={14}/>} value={query} onChange={e => setQuery(e.currentTarget.value)} mb="sm"/>
-      <div className="tuning-scope-list">{scopes.filter(visible).map(s => {
-        const children = scopes.some(child => child.parent === s.id);
-        const resolved = resolve(scopes, s.id);
-        return <div key={s.id} className="tuning-scope-row" style={{ paddingLeft: query ? 0 : depth(s) * 10 }}>
-          {children ? <ActionIcon size="sm" variant="subtle" color="gray" aria-label={`${collapsed.includes(s.id) ? 'Expand' : 'Collapse'} ${s.name}`} onClick={() => setCollapsed(ids => ids.includes(s.id) ? ids.filter(id => id !== s.id) : [...ids, s.id])}>{collapsed.includes(s.id) ? <ChevronRight size={14}/> : <ChevronDown size={14}/>}</ActionIcon> : <span className="scope-indent"/>}
-          <Button variant={selected === s.id ? 'light' : 'subtle'} color={selected === s.id ? undefined : 'gray'} className="tuning-scope-button" aria-label={s.name} aria-pressed={selected === s.id} onClick={() => { setSelected(s.id); setSelectedStep(0); }}>
-            <span>{s.name}{s.parent && s.own && <span className="modified" aria-label="Tuning override"> ◇</span>}</span><span className="scope-detail">{resolved.hz} Hz · {s.parent ? s.own ? 'Own tuning' : 'Following' : 'Instrument'}</span>
-          </Button></div>;
-      })}{!scopes.some(visible) && <Text c="dimmed" size="xs">No matching scopes</Text>}</div>
-    </nav>
-    <Card withBorder padding={0} className="tuning-device">
-      <div className="tuning-device-header"><Group justify="space-between" gap="sm"><div><Group gap={4} className="tuning-path">{path.slice(0, -1).map(s => <Button key={s.id} variant="subtle" color="gray" size="compact-xs" onClick={() => setSelected(s.id)}>{s.name} ›</Button>)}</Group><Text fw={600} className="tuning-scope-name">{scope.name}</Text></div><Button variant="default" disabled={!history.length} onClick={() => { setScopes(history.at(-1)!); setHistory(history.slice(0, -1)); }}>Undo</Button></Group>
-        <Group justify="space-between" mt="xs" gap="xs">{parent ? <Switch label={`Follow ${parent.name}`} checked={inherited} onChange={e => { const follow = e.currentTarget.checked; edit(scopes.map(s => s.id === selected ? { ...s, own: follow ? undefined : structuredClone(tuning) } : s)); }}/> : <Badge variant="outline" color="gray">Instrument tuning</Badge>}
-          {inherited ? <Button variant="subtle" size="compact-sm" onClick={() => setSelected(governing.id)}>Edit {governing.name} ↗</Button> : parent && <Text size="xs" className="modified">Own tuning ◇</Text>}</Group>
-      </div>
-      {layout === 'channel' && <><div className="tuning-channel-controls">{reference}{scale}{fine}</div>{graph}<div className="tuning-note-dock">{noteEditor}</div></>}
-      {layout === 'rack' && <><div className="tuning-rack-controls">{reference}{scale}<div className="tuning-rack-trims">{fine}{noteEditor}</div></div>{graph}</>}
-      {layout === 'inspector' && <div className="tuning-editor-inspector"><div className="tuning-editor-main">{graph}<div className="tuning-note-dock">{noteEditor}</div></div><aside className="tuning-properties">{reference}{scale}{fine}</aside></div>}
-      {layout === 'tabbed' && <Tabs value={tab} onChange={setTab} keepMounted={false}><Tabs.List grow><Tabs.Tab value="pitch">Pitch</Tabs.Tab><Tabs.Tab value="scale">Scale</Tabs.Tab><Tabs.Tab value="note">Note</Tabs.Tab></Tabs.List>
-        <Tabs.Panel value="pitch"><div className="tuning-pitch-page">{reference}{fine}</div>{graph}</Tabs.Panel>
-        <Tabs.Panel value="scale"><div className="tuning-scale-page">{scale}{graph}</div></Tabs.Panel>
-        <Tabs.Panel value="note">{graph}<div className="tuning-note-dock">{noteEditor}</div></Tabs.Panel>
-      </Tabs>}
-      {mapping}{summary}
-    </Card>
-  </div>;
+/** Silent, unsaved study data behind the same desk the connected panel uses. */
+export function TuningDeskStudy({ layout, assign }: { layout: string; assign: (name: string) => void }) {
+  const [scopes, setScopes] = useState(initialScopes);
+  const [history, setHistory] = useState<StudyScope[][]>([]);
+  const [selected, setSelected] = useState('instrument');
+  const views = scopes.map(s => resolved(scopes, s));
+  const edit = (id: string, change: (scope: StudyScope, view: DeskScope) => StudyScope) => {
+    setHistory(h => [...h, scopes]);
+    setScopes(scopes.map((s, i) => s.id === id ? change(s, views[i]) : s));
+  };
+  const own = (id: string, part: Part, owned: boolean) => edit(id, (s, view) => part === 'anchor'
+    ? { ...s, anchor: owned ? view.anchor : undefined } : { ...s, shape: owned ? view.shape : undefined });
+  return <TuningDesk layout={layout} scopes={views} selected={selected} select={setSelected} assign={assign}
+    setAnchor={(id, anchor) => edit(id, s => ({ ...s, anchor }))} setShape={(id, shape) => edit(id, s => ({ ...s, shape }))} setOwn={own}
+    canUndo={history.length > 0} undo={() => { if (!history.length) return; setScopes(history.at(-1)!); setHistory(history.slice(0, -1)); }}/>;
 }
