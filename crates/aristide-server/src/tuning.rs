@@ -9,9 +9,166 @@
 //! cent-deviation tables (hpschd.nu/tech/tun/cents.html) and the
 //! tonalsoft encyclopedia entries for Werckmeister/Kirnberger.
 
-use aristide_model::units::{cents_between, cents_to_ratio, equal_ladder_hz};
+use aristide_model::units::{cents_between, cents_to_ratio, equal_ladder_hz, ratio_to_cents};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// One twelve-class temperament's definition: the size, in cents, of
+/// each of its 11 consecutive fifths starting from pitch class `root`
+/// (the 12th fifth, closing the circle, follows from whatever the
+/// other eleven leave — it is never itself needed to fill in pitch
+/// classes 0..11). Every entry but [`FifthsDef::PURE`] is a comma
+/// fraction narrowed from the pure 3/2 fifth; deviations from equal
+/// temperament are derived from this chain, never hand-transcribed —
+/// this is the catalogue commit's whole point.
+struct FifthsDef {
+    id: &'static str,
+    name: &'static str,
+    root: usize,
+    fifths: [f64; 11],
+}
+
+/// The pure 3/2 fifth, 701.955 cents: every "narrowed by a comma
+/// fraction" entry below subtracts from this, not from the equal
+/// 700-cent fifth (a fifth narrowed by a *quarter comma* still isn't
+/// the equal fifth — that would take a third of a comma more).
+fn pure_fifth_cents() -> f64 {
+    ratio_to_cents(1.5)
+}
+
+fn syntonic_comma_cents() -> f64 {
+    ratio_to_cents(81.0 / 80.0)
+}
+
+fn pythagorean_comma_cents() -> f64 {
+    ratio_to_cents(531_441.0 / 524_288.0)
+}
+
+fn schisma_cents() -> f64 {
+    pythagorean_comma_cents() - syntonic_comma_cents()
+}
+
+/// The full twelve-class catalogue, in menu order. `equal` sorts
+/// first since it is the common case and the identity of every other
+/// entry; `Original` and `Custom` are not tables and are not listed
+/// here (see [`Temperament::ALL`] and [`Temperament::CATALOGUE_IDS`]).
+fn catalogue() -> Vec<FifthsDef> {
+    let pure = pure_fifth_cents();
+    let q_syn = syntonic_comma_cents() / 4.0;
+    let s_syn = syntonic_comma_cents() / 6.0;
+    let q_pyth = pythagorean_comma_cents() / 4.0;
+    let s_pyth = pythagorean_comma_cents() / 6.0;
+    let schisma = schisma_cents();
+
+    let mut werckmeister3 = [pure; 11];
+    // C–G, G–D, D–A, B–F♯ narrowed ¼ Pythagorean comma; the rest pure.
+    for i in [0, 1, 2, 5] {
+        werckmeister3[i] = pure - q_pyth;
+    }
+
+    let mut kirnberger3 = [pure; 11];
+    // C–G–D–A–E narrowed ¼ syntonic comma, F♯–C♯ by the schisma.
+    for i in [0, 1, 2, 3] {
+        kirnberger3[i] = pure - q_syn;
+    }
+    kirnberger3[6] = pure - schisma;
+
+    let mut rameau1726 = [pure; 11];
+    // Bb–F–C–G–D–A–E–B: seven ¼-comma meantone fifths; B–F♯–C♯–G♯ pure;
+    // the remainder (G♯–E♭, and the E♭–B♭ that closes the circle) split
+    // equally, ≈709.045¢ each — only G♯–E♭ falls inside these eleven.
+    rameau1726[..7].fill(pure - q_syn);
+    rameau1726[10] = 709.045;
+
+    let mut vallotti = [pure; 11];
+    // F–C–G–D–A–E–B narrowed 1/6 Pythagorean comma; the rest pure.
+    vallotti[..6].fill(pure - s_pyth);
+
+    let mut young2 = [pure; 11];
+    // C–G–D–A–E–B–F♯ narrowed 1/6 Pythagorean comma; the rest pure.
+    young2[..6].fill(pure - s_pyth);
+
+    vec![
+        FifthsDef { id: "equal", name: "Equal", root: 0, fifths: [700.0; 11] },
+        FifthsDef {
+            id: "meantone4",
+            name: "Quarter-comma meantone",
+            root: 3, // E♭
+            fifths: [pure - q_syn; 11],
+        },
+        FifthsDef {
+            id: "meantone6",
+            name: "Sixth-comma meantone",
+            root: 3, // E♭
+            fifths: [pure - s_syn; 11],
+        },
+        FifthsDef { id: "pythagorean", name: "Pythagorean", root: 3, fifths: [pure; 11] },
+        FifthsDef {
+            id: "werckmeister3",
+            name: "Werckmeister III",
+            root: 0, // C
+            fifths: werckmeister3,
+        },
+        FifthsDef {
+            id: "kirnberger3",
+            name: "Kirnberger III",
+            root: 0, // C
+            fifths: kirnberger3,
+        },
+        FifthsDef {
+            id: "rameau1726",
+            name: "Rameau 1726",
+            root: 10, // B♭
+            fifths: rameau1726,
+        },
+        FifthsDef { id: "vallotti", name: "Vallotti", root: 5 /* F */, fifths: vallotti },
+        FifthsDef { id: "young2", name: "Young II", root: 0 /* C */, fifths: young2 },
+    ]
+}
+
+/// Walk `def`'s chain of fifths and return each pitch class's
+/// deviation from equal temperament, in cents, relative to whatever
+/// class the chain started from (i.e. not yet re-referenced to A or
+/// C — see [`a_referenced`] and [`c_rooted`]). Sound: each step is an
+/// *absolute*, un-octave-reduced cents position, so the deviation at
+/// step `k` is that position minus `k` equal-tempered fifths (`k *
+/// 700`); this only works because every real temperament's total
+/// drift stays far inside one octave, which it does for all of these.
+fn class_deviations(def: &FifthsDef) -> [f64; 12] {
+    let mut raw = [0.0f64; 12];
+    let mut k_of = [0usize; 12];
+    let mut pc = def.root;
+    let mut acc = 0.0;
+    for (i, fifth) in def.fifths.iter().enumerate() {
+        acc += fifth;
+        pc = (pc + 7) % 12;
+        raw[pc] = acc;
+        k_of[pc] = i + 1;
+    }
+    let mut dev = [0.0f64; 12];
+    for pc in 0..12 {
+        dev[pc] = raw[pc] - k_of[pc] as f64 * 700.0;
+    }
+    dev
+}
+
+/// `dev`, re-referenced so pitch class A (9) is 0 — the convention
+/// [`Temperament::offsets_cents`] has always returned (a′ keeps its
+/// frequency when the temperament changes, matching Carey Beebe's
+/// published tables).
+fn a_referenced(dev: [f64; 12]) -> [f32; 12] {
+    let a = dev[9];
+    std::array::from_fn(|pc| (dev[pc] - a) as f32)
+}
+
+/// `dev`, re-referenced so pitch class C (0) is 0 — used for the
+/// UI-facing catalogue (`temperaments.json`) and this module's own
+/// cross-checks against published C-referenced tables.
+#[cfg(test)]
+fn c_rooted(dev: [f64; 12]) -> [f64; 12] {
+    let c = dev[0];
+    std::array::from_fn(|pc| dev[pc] - c)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Temperament {
     /// The organ's own tuning, as recorded: every pipe plays exactly
     /// as the samples have it, whatever pitch standard and temperament
@@ -30,19 +187,44 @@ pub enum Temperament {
     /// Quarter-comma meantone (Aron 1523): pure major thirds, wolf at
     /// G♯–E♭ — the Renaissance/early-Baroque organ standard.
     Meantone4,
+    /// Sixth-comma meantone: the same construction at 1/6 comma, a
+    /// gentler wolf.
+    Meantone6,
     /// Pythagorean: pure fifths, ditone thirds — medieval organum.
     Pythagorean,
+    /// Claudi Meneghin's reading of Rameau's 1726 temperament.
+    Rameau1726,
+    /// Vallotti: F..B narrowed 1/6 Pythagorean comma, the rest pure.
+    Vallotti,
+    /// Young's second (1799): the same construction rooted on C.
+    Young2,
+    /// A player-supplied table: 12 deviations from equal temperament,
+    /// cents, indexed C..B as *absolute* pitch classes — unlike the
+    /// named tables above, [`Tuning::temperament_root`] does not
+    /// rotate this one; the caller already placed every class where
+    /// they want it.
+    Custom([f32; 12]),
 }
 
 impl Temperament {
     pub fn parse(name: &str) -> Option<Temperament> {
-        Some(match name.to_lowercase().replace(['-', '_', ' '], "").as_str() {
+        let key = name.to_lowercase().replace(['-', '_', ' '], "");
+        Some(match key.as_str() {
             "original" | "asrecorded" | "recorded" | "home" => Temperament::Original,
             "equal" | "et" | "12edo" => Temperament::Equal,
             "werckmeister3" | "werckmeisteriii" | "werckmeister" => Temperament::Werckmeister3,
             "kirnberger3" | "kirnbergeriii" | "kirnberger" => Temperament::Kirnberger3,
             "meantone4" | "meantone" | "quartercommameantone" => Temperament::Meantone4,
+            "meantone6" | "sixthcommameantone" => Temperament::Meantone6,
             "pythagorean" => Temperament::Pythagorean,
+            "rameau1726" | "rameau" => Temperament::Rameau1726,
+            "vallotti" => Temperament::Vallotti,
+            "young2" | "youngii" | "young" => Temperament::Young2,
+            // A bare "custom" is a placeholder the caller must fill
+            // with real deviations (the HTTP layer's `offsets=`, or
+            // the sidecar's `offsets` array) — parsing it alone never
+            // fabricates a table.
+            "custom" => Temperament::Custom([0.0; 12]),
             _ => return None,
         })
     }
@@ -54,41 +236,44 @@ impl Temperament {
             Temperament::Werckmeister3 => "werckmeister3",
             Temperament::Kirnberger3 => "kirnberger3",
             Temperament::Meantone4 => "meantone4",
+            Temperament::Meantone6 => "meantone6",
             Temperament::Pythagorean => "pythagorean",
+            Temperament::Rameau1726 => "rameau1726",
+            Temperament::Vallotti => "vallotti",
+            Temperament::Young2 => "young2",
+            Temperament::Custom(_) => "custom",
         }
     }
 
-    /// The twelve-class tables — every temperament that is a *target*.
-    pub const ALL: [Temperament; 5] = [
+    /// The twelve-class tables — every named temperament that is a
+    /// *target*, in menu order. Neither `Original` (no table of its
+    /// own) nor `Custom` (carries no fixed table) appears here.
+    pub const ALL: [Temperament; 9] = [
         Temperament::Equal,
+        Temperament::Meantone4,
+        Temperament::Meantone6,
+        Temperament::Pythagorean,
         Temperament::Werckmeister3,
         Temperament::Kirnberger3,
-        Temperament::Meantone4,
-        Temperament::Pythagorean,
+        Temperament::Rameau1726,
+        Temperament::Vallotti,
+        Temperament::Young2,
     ];
 
     /// Deviation from equal temperament per pitch class (C = index 0),
     /// in cents, normalized so A = 0. `Original` has no table of its
     /// own — the organ's measured one stands in (see [`HomeTuning`]).
+    /// `Custom` returns exactly its stored table, unreferenced (the
+    /// caller's deviations are already absolute).
     pub fn offsets_cents(&self) -> [f32; 12] {
         match self {
             Temperament::Original | Temperament::Equal => [0.0; 12],
-            Temperament::Werckmeister3 => [
-                11.730, 1.955, 3.910, 5.865, 1.955, 9.775, 0.000, 7.820, 3.910, 0.000, 7.820,
-                3.910,
-            ],
-            Temperament::Kirnberger3 => [
-                10.265, 0.490, 3.422, 4.400, -3.421, 8.310, 0.489, 6.843, 2.445, 0.000, 6.355,
-                -1.466,
-            ],
-            Temperament::Meantone4 => [
-                10.265, -13.686, 3.422, 20.530, -3.421, 13.687, -10.264, 6.843, -17.108, 0.000,
-                17.108, -6.843,
-            ],
-            Temperament::Pythagorean => [
-                -5.865, 7.820, -1.955, -11.730, 1.955, -7.820, 5.865, -3.910, 9.775, 0.000,
-                -9.775, 3.910,
-            ],
+            Temperament::Custom(offsets) => *offsets,
+            _ => catalogue()
+                .into_iter()
+                .find(|def| def.id == self.name())
+                .map(|def| a_referenced(class_deviations(&def)))
+                .unwrap_or([0.0; 12]),
         }
     }
 }
@@ -497,6 +682,17 @@ pub struct Tuning {
     /// `Original` it is what the reference is measured against; under
     /// a target it only names the starting point.
     pub home: Option<std::sync::Arc<HomeTuning>>,
+    /// The pitch class (0 = C .. 11 = B) a named temperament is
+    /// centred on: the table rotates so this class plays what the
+    /// table calls class 0, moving the wolf and every other interval
+    /// to a different key without changing which key sounds what
+    /// reference pitch. Dormant under `Original`, `Custom` (which
+    /// carries its own absolute classes) and away from 12-EDO.
+    pub temperament_root: u8,
+    /// A fine offset, cents, added to every key's deviation — on top
+    /// of a temperament table, an equal division, a scale, or even
+    /// `Original`.
+    pub offset_cents: f64,
 }
 
 /// The one legal range for a divisions-per-octave count: 1 (octaves
@@ -513,6 +709,8 @@ impl Default for Tuning {
             transpose: 0,
             pipes: PipeRetune::Original,
             home: None,
+            temperament_root: 0,
+            offset_cents: 0.0,
         }
     }
 }
@@ -529,6 +727,13 @@ impl Tuning {
     /// temperament says that, but a Scala keyboard mapping's unmapped
     /// keys will.
     pub fn deviation_cents(&self, key: u16) -> Option<f64> {
+        self.deviation_cents_core(key).map(|d| d + self.offset_cents)
+    }
+
+    /// [`Tuning::deviation_cents`] before the fine offset is added —
+    /// split out so the offset applies exactly once, on every branch,
+    /// without duplicating it at each early return.
+    fn deviation_cents_core(&self, key: u16) -> Option<f64> {
         if !self.corrects_pipes() {
             // As recorded: every key is its own pipe as the samples
             // have it, moved only by how far the reference was pulled
@@ -551,12 +756,27 @@ impl Tuning {
             let from_reference = key as f64 - reference_key as f64;
             return Some(from_reference * (1200.0 / self.edo.max(1) as f64 - 100.0) + anchor);
         }
-        // A temperament table is offsets from equal; the reference
-        // key's own offset is what the anchor already accounts for.
-        let offsets = self.temperament.offsets_cents();
+        // A temperament table is offsets from equal, rotated onto
+        // `temperament_root`; the reference key's own offset is what
+        // the anchor already accounts for.
+        let offsets = self.rooted_offsets_cents();
         let class = (key % 12) as usize;
         let reference_class = (reference_key % 12) as usize;
         Some(offsets[class] as f64 - offsets[reference_class] as f64 + anchor)
+    }
+
+    /// The temperament's table rotated onto [`Tuning::temperament_root`]:
+    /// `deviation[pc] = table[(pc - root) mod 12]`, so root 0 (C, the
+    /// default) is the identity and leaves every table exactly as
+    /// published. `Custom` is exempt — its 12 deviations are already
+    /// absolute pitch classes, per its own doc comment.
+    pub fn rooted_offsets_cents(&self) -> [f32; 12] {
+        let table = self.temperament.offsets_cents();
+        if matches!(self.temperament, Temperament::Custom(_)) {
+            return table;
+        }
+        let root = (self.temperament_root % 12) as usize;
+        std::array::from_fn(|pc| table[(pc + 12 - root) % 12])
     }
 
     /// Whether this tuning is a *target* that retunes each pipe from
@@ -824,6 +1044,159 @@ mod tests {
         assert_eq!(Temperament::parse("meantone"), Some(Temperament::Meantone4));
         assert_eq!(Temperament::parse("Original"), Some(Temperament::Original));
         assert_eq!(Temperament::parse("as recorded"), Some(Temperament::Original));
+        assert_eq!(Temperament::parse("Young II"), Some(Temperament::Young2));
+        assert_eq!(Temperament::parse("Rameau"), Some(Temperament::Rameau1726));
+        assert_eq!(
+            Temperament::parse("sixth comma meantone"),
+            Some(Temperament::Meantone6)
+        );
+        assert_eq!(Temperament::parse("vallotti"), Some(Temperament::Vallotti));
         assert_eq!(Temperament::parse("nonsense"), None);
+        assert_eq!(Temperament::parse("custom"), Some(Temperament::Custom([0.0; 12])));
+    }
+
+    /// Every catalogue entry's fifths-derived, C-rooted table (C..B,
+    /// C=0) against Alex's cross-check figures, within 0.05 cents —
+    /// the point of building temperaments from their fifths instead of
+    /// hand-transcribing deviation tables.
+    #[test]
+    fn catalogue_cross_checks_against_c_rooted_reference() {
+        let expected: &[(&str, [f64; 12])] = &[
+            (
+                "meantone4",
+                [0.0, -24.0, -6.8, 10.3, -13.7, 3.4, -20.5, -3.4, -27.4, -10.3, 6.8, -17.1],
+            ),
+            (
+                "meantone6",
+                [0.0, -11.4, -3.3, 4.9, -6.5, 1.6, -9.8, -1.6, -13.0, -4.9, 3.3, -8.1],
+            ),
+            (
+                "rameau1726",
+                [0.0, -13.2, -6.8, -2.2, -13.7, 3.4, -15.2, -3.4, -11.2, -10.3, 6.8, -17.1],
+            ),
+            (
+                "werckmeister3",
+                [0.0, -9.8, -7.8, -5.9, -9.8, -2.0, -11.7, -3.9, -7.8, -11.7, -3.9, -7.8],
+            ),
+            (
+                "kirnberger3",
+                [0.0, -9.8, -6.8, -5.9, -13.7, -2.0, -9.8, -3.4, -7.8, -10.3, -3.9, -11.7],
+            ),
+            (
+                "vallotti",
+                [0.0, -5.9, -3.9, -2.0, -7.8, 2.0, -7.8, -2.0, -3.9, -5.9, 0.0, -9.8],
+            ),
+            (
+                "young2",
+                [0.0, -9.8, -3.9, -5.9, -7.8, -2.0, -11.7, -2.0, -7.8, -5.9, -3.9, -9.8],
+            ),
+        ];
+        let catalogue = catalogue();
+        for (id, table) in expected {
+            let def = catalogue.iter().find(|def| def.id == *id).expect(id);
+            let cr = c_rooted(class_deviations(def));
+            for pc in 0..12 {
+                assert!(
+                    (cr[pc] - table[pc]).abs() < 0.05,
+                    "{id} class {pc}: {} vs {}",
+                    cr[pc],
+                    table[pc]
+                );
+            }
+        }
+    }
+
+    /// `temperament_root` rotates the table without moving the
+    /// reference key: any key can anchor, and the root only decides
+    /// which key gets which comma-tempered position.
+    #[test]
+    fn root_rotates_the_table_without_moving_the_reference() {
+        let mut tuning = Tuning {
+            temperament: Temperament::Meantone4,
+            reference: PitchReference::A440,
+            ..Tuning::default()
+        };
+        // A4 stays exactly 440 whatever the root.
+        for root in 0..12u8 {
+            tuning.temperament_root = root;
+            assert!(
+                (tuning.rate_multiplier(69) - 1.0).abs() < 1e-6,
+                "root {root}: a′ moved"
+            );
+        }
+        // Rooting on E (4) shifts the wolf and every other interval:
+        // C's deviation under root E differs from root C (0).
+        tuning.temperament_root = 0;
+        let c_at_root_c = tuning.deviation_cents(60).unwrap();
+        tuning.temperament_root = 4;
+        let c_at_root_e = tuning.deviation_cents(60).unwrap();
+        assert!(
+            (c_at_root_c - c_at_root_e).abs() > 1.0,
+            "rooting on E should move C's deviation: {c_at_root_c} vs {c_at_root_e}"
+        );
+    }
+
+    /// The fine offset lands on every key, including under `Original`.
+    #[test]
+    fn fine_offset_shifts_every_key_including_original() {
+        let mut tuning = Tuning { offset_cents: 25.0, ..Tuning::default() };
+        assert_eq!(tuning.deviation_cents(60), Some(25.0), "original + offset");
+        tuning.temperament = Temperament::Equal;
+        assert_eq!(tuning.deviation_cents(60), Some(25.0), "equal + offset");
+        tuning.temperament = Temperament::Meantone4;
+        let base = Tuning { temperament: Temperament::Meantone4, ..Tuning::default() }
+            .deviation_cents(60)
+            .unwrap();
+        assert!((tuning.deviation_cents(60).unwrap() - (base + 25.0)).abs() < 1e-9);
+    }
+
+    /// The UI-facing catalogue (`desktop/src/tuning/temperaments.json`)
+    /// is generated from this module, not hand-maintained: this test
+    /// is that generator, and the checked-in file its golden output.
+    /// Run with `UPDATE_GOLDEN=1 cargo test -p aristide-server` after
+    /// a catalogue change to regenerate it.
+    #[test]
+    fn temperament_catalogue_matches_the_generated_json() {
+        let entries: Vec<serde_json::Value> = catalogue()
+            .iter()
+            .map(|def| {
+                let offsets: Vec<f64> = c_rooted(class_deviations(def))
+                    .iter()
+                    .map(|c| (c * 1000.0).round() / 1000.0)
+                    .collect();
+                serde_json::json!({"id": def.id, "name": def.name, "offsets": offsets})
+            })
+            .collect();
+        let json = serde_json::to_string_pretty(&entries).expect("serializes") + "\n";
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../desktop/src/tuning/temperaments.json");
+        if std::env::var("UPDATE_GOLDEN").as_deref() == Ok("1") {
+            std::fs::write(&path, &json).expect("writes the golden catalogue");
+        } else {
+            let existing = std::fs::read_to_string(&path)
+                .unwrap_or_else(|err| panic!("{}: {err}", path.display()));
+            assert_eq!(
+                existing, json,
+                "temperaments.json is stale — regenerate with \
+                 `UPDATE_GOLDEN=1 cargo test -p aristide-server temperament_catalogue`"
+            );
+        }
+    }
+
+    /// A custom table plays exactly the deviations it was given,
+    /// unrotated by any root.
+    #[test]
+    fn custom_temperament_plays_its_own_table_unrotated() {
+        let mut offsets = [0.0f32; 12];
+        offsets[1] = 17.0; // C#
+        let tuning = Tuning {
+            temperament: Temperament::Custom(offsets),
+            temperament_root: 5, // must not rotate a custom table
+            reference: PitchReference::A440,
+            ..Tuning::default()
+        };
+        let c = tuning.deviation_cents(60).unwrap();
+        let c_sharp = tuning.deviation_cents(61).unwrap();
+        assert!((c_sharp - c - 17.0).abs() < 1e-6, "c={c} c#={c_sharp}");
     }
 }

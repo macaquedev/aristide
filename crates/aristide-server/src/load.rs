@@ -950,6 +950,9 @@ fn apply_manual_tuning(
             scale: def.scale.clone(),
             keymap: def.keymap.clone(),
             pipes: def.pipes.clone(),
+            temperament_root: None,
+            offsets: None,
+            offset_cents: None,
         };
         let mut own = override_tuning(live_tuning, &fields, None, "manual tuning");
         own.transpose = def.transpose.unwrap_or(live_tuning.transpose).clamp(-12, 12);
@@ -1084,7 +1087,7 @@ fn configure_tuning(
     source_tuning_defs: &std::collections::BTreeMap<String, aristide_formats::sidecar::TuningOverride>,
     load_warnings: &mut Vec<String>,
 ) -> tuning::Tuning {
-    let temperament = tuning::Temperament::parse(&sidecar.tuning.temperament)
+    let mut temperament = tuning::Temperament::parse(&sidecar.tuning.temperament)
         .unwrap_or_else(|| {
             tracing::warn!(
                 "sidecar tuning: unknown temperament {:?}, playing as recorded",
@@ -1092,6 +1095,20 @@ fn configure_tuning(
             );
             tuning::Temperament::Original
         });
+    if let tuning::Temperament::Custom(_) = temperament {
+        if let Some(offsets) = sidecar.tuning.offsets {
+            temperament = tuning::Temperament::Custom(offsets);
+        } else {
+            tracing::warn!("sidecar tuning: temperament = \"custom\" with no offsets, playing equal");
+            temperament = tuning::Temperament::Equal;
+        }
+    }
+    let temperament_root = sidecar
+        .tuning
+        .temperament_root
+        .as_deref()
+        .and_then(aristide_formats::sidecar::parse_pitch_class)
+        .unwrap_or(0);
     // Scale files resolve against the organ's own directory: the file
     // that names them. A scale that fails to load warns and leaves the
     // temperament standing — a missing .scl must not brick the organ.
@@ -1136,6 +1153,8 @@ fn configure_tuning(
         transpose: sidecar.tuning.transpose.clamp(-12, 12),
         pipes: parse_pipes(&sidecar.tuning.pipes).unwrap_or_default(),
         home: home.clone(),
+        temperament_root,
+        offset_cents: sidecar.tuning.offset_cents.unwrap_or(0.0),
     };
     if let Some(scl) = &sidecar.tuning.scale {
         live_tuning.scale = load_scale(
@@ -1155,7 +1174,7 @@ fn configure_tuning(
                            def: &aristide_formats::sidecar::TuningOverride,
                            scope_home: Option<Arc<tuning::HomeTuning>>,
                            what: &str| {
-        let temperament = def
+        let mut temperament = def
             .temperament
             .as_deref()
             .map(|name| {
@@ -1165,6 +1184,24 @@ fn configure_tuning(
                 })
             })
             .unwrap_or(base.temperament);
+        if let tuning::Temperament::Custom(_) = temperament {
+            if let Some(offsets) = def.offsets {
+                temperament = tuning::Temperament::Custom(offsets);
+            } else if let tuning::Temperament::Custom(offsets) = base.temperament {
+                // "custom" named again without new offsets: keep the
+                // ones already in effect.
+                temperament = tuning::Temperament::Custom(offsets);
+            } else {
+                tracing::warn!("{what}: temperament = \"custom\" with no offsets, playing equal");
+                temperament = tuning::Temperament::Equal;
+            }
+        }
+        let temperament_root = def
+            .temperament_root
+            .as_deref()
+            .and_then(aristide_formats::sidecar::parse_pitch_class)
+            .unwrap_or(base.temperament_root);
+        let offset_cents = def.offset_cents.unwrap_or(base.offset_cents);
         let edo = def
             .edo
             .unwrap_or(base.edo)
@@ -1187,6 +1224,8 @@ fn configure_tuning(
             transpose: base.transpose,
             pipes: def.pipes.as_deref().and_then(parse_pipes).unwrap_or(base.pipes),
             home: scope_home.or_else(|| home.clone()),
+            temperament_root,
+            offset_cents,
         };
         match &def.scale {
             Some(scl) => own.scale = load_scale(scl, def.keymap.as_deref(), own.reference),

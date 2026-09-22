@@ -22,6 +22,12 @@ impl State {
             scale: tuning.scale.as_ref().map(|scale| scale.scl.clone()),
             keymap: tuning.scale.as_ref().and_then(|scale| scale.kbm.clone()),
             pipes: tuning.pipes,
+            temperament_root: tuning.temperament_root,
+            offsets: match tuning.temperament {
+                tuning::Temperament::Custom(offsets) => Some(offsets),
+                _ => None,
+            },
+            offset_cents: tuning.offset_cents,
         }
     }
 

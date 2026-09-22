@@ -4727,6 +4727,8 @@ mod tests {
             transpose: 0,
             pipes: crate::tuning::PipeRetune::Original,
             home: None,
+            temperament_root: 0,
+            offset_cents: 0.0,
         });
         let meantone_c = console.note_on_manual(0, 60, 127).0[0].spec.rate;
         let expected = (10.265f32 / 1200.0).exp2();
@@ -4746,6 +4748,8 @@ mod tests {
             transpose: 2,
             pipes: crate::tuning::PipeRetune::Original,
             home: None,
+            temperament_root: 0,
+            offset_cents: 0.0,
         });
         let (transposed, _) = console.note_on_manual(0, 60, 127);
         assert_eq!(transposed.len(), 2, "both drawn stops sound");
@@ -4773,6 +4777,8 @@ mod tests {
                 transpose: 0,
                 pipes: crate::tuning::PipeRetune::Original,
                 home: None,
+                temperament_root: 0,
+                offset_cents: 0.0,
             }),
         );
         console.set_coupler(0, true); // II/I: playing the Great adds the Swell
@@ -4799,6 +4805,8 @@ mod tests {
                 transpose: 2,
                 pipes: crate::tuning::PipeRetune::Original,
                 home: None,
+                temperament_root: 0,
+                offset_cents: 0.0,
             }),
         );
         assert!(console.note_on_manual(0, 96, 127).0.is_empty(), "96+2 runs off the Great");
@@ -4952,6 +4960,8 @@ mod tests {
             transpose: 0,
             pipes: crate::tuning::PipeRetune::Original,
             home: None,
+            temperament_root: 0,
+            offset_cents: 0.0,
         };
         let mut console = coupled_console();
         console.set_manual_tuning(0, Some(tuning));
@@ -5047,6 +5057,8 @@ mod tests {
             transpose: 0,
             pipes: crate::tuning::PipeRetune::Original,
             home: None,
+            temperament_root: 0,
+            offset_cents: 0.0,
         };
         let mut console = coupled_console();
         let (starts, _) = console.note_on_manual(0, 74, 127);
@@ -5127,6 +5139,8 @@ mod tests {
             transpose: 0,
             pipes: crate::tuning::PipeRetune::Original,
             home: None,
+            temperament_root: 0,
+            offset_cents: 0.0,
         };
         let mut console = coupled_console();
         console.set_manual_tuning(0, Some(tuning));

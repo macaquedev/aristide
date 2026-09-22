@@ -504,10 +504,46 @@ impl KeySpec {
 /// the console spells keys (sharps and flats as an organist reads
 /// them: C#, Eb, F#, Ab, Bb) so the file and the screen agree.
 pub fn note_name(key: u8) -> String {
-    const NAMES: [&str; 12] = [
-        "C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B",
-    ];
-    format!("{}{}", NAMES[(key % 12) as usize], (key / 12) as i32 - 1)
+    format!("{}{}", pitch_class_name(key), (key / 12) as i32 - 1)
+}
+
+/// Pitch-class names, index 0 = C, as [`note_name`] spells them but
+/// without an octave — the spelling `temperament_root` uses.
+const PITCH_CLASS_NAMES: [&str; 12] = [
+    "C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B",
+];
+
+/// 0 → "C", 6 → "F#": a temperament root's pitch class, spelled the
+/// way the sidecar and console read it.
+pub fn pitch_class_name(pc: u8) -> &'static str {
+    PITCH_CLASS_NAMES[(pc % 12) as usize]
+}
+
+/// "D", "F#", "Bb" → a pitch class 0..11, any number of `#`/`b`
+/// accidentals (no octave digit — that's [`parse_note_name`]).
+pub fn parse_pitch_class(name: &str) -> Option<u8> {
+    let name = name.trim();
+    let mut chars = name.chars();
+    let letter = chars.next()?.to_ascii_uppercase();
+    let semitone: i32 = match letter {
+        'C' => 0,
+        'D' => 2,
+        'E' => 4,
+        'F' => 5,
+        'G' => 7,
+        'A' => 9,
+        'B' => 11,
+        _ => return None,
+    };
+    let mut offset = 0i32;
+    for c in chars {
+        match c {
+            '#' | '♯' => offset += 1,
+            'b' | '♭' => offset -= 1,
+            _ => return None,
+        }
+    }
+    Some((semitone + offset).rem_euclid(12) as u8)
 }
 
 /// "C4" → 60 (middle C), scientific pitch notation, any number of
@@ -805,6 +841,19 @@ pub struct TuningConfig {
     /// `exact` lands each pipe on the target from its measured pitch.
     #[serde(default = "default_pipes")]
     pub pipes: String,
+    /// The pitch class (a name like "D", "F#", "Bb") a named
+    /// temperament is centred on; omitted when C, the default. Dormant
+    /// under `original`, `custom` and away from `edo = 12`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperament_root: Option<String>,
+    /// The 12 deviations from equal temperament, cents, C..B, that
+    /// `temperament = "custom"` plays — required only then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offsets: Option<[f32; 12]>,
+    /// A fine offset in cents, added to every key's deviation on top
+    /// of whatever the temperament (or `original`) already gives it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset_cents: Option<f64>,
     /// Stops (and ranks within stops) tuned apart from what they would
     /// otherwise follow — `[[tuning.stop]]` rows.
     #[serde(default, rename = "stop", skip_serializing_if = "Vec::is_empty")]
@@ -834,6 +883,12 @@ pub struct TuningOverride {
     pub keymap: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pipes: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperament_root: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offsets: Option<[f32; 12]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset_cents: Option<f64>,
 }
 
 impl TuningOverride {
@@ -876,6 +931,12 @@ pub struct StopTuningDef {
     pub keymap: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pipes: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperament_root: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offsets: Option<[f32; 12]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset_cents: Option<f64>,
 }
 
 impl StopTuningDef {
@@ -889,6 +950,9 @@ impl StopTuningDef {
             scale: self.scale.clone(),
             keymap: self.keymap.clone(),
             pipes: self.pipes.clone(),
+            temperament_root: self.temperament_root.clone(),
+            offsets: self.offsets,
+            offset_cents: self.offset_cents,
         }
     }
 }
@@ -920,6 +984,9 @@ impl Default for TuningConfig {
             scale: None,
             keymap: None,
             pipes: default_pipes(),
+            temperament_root: None,
+            offsets: None,
+            offset_cents: None,
             stops: Vec::new(),
         }
     }
@@ -1308,6 +1375,51 @@ default = ["Bourdon 16'", "Montre 8'", "Prestant 4'", "Plein jeu III"]
         assert_eq!(anchored.reference_hz, Some(256.0));
         let numbered: TuningConfig = toml::from_str("reference_key = 60").expect("parses");
         assert_eq!(numbered.reference_key.midi_note(), Some(60));
+    }
+
+    #[test]
+    fn tuning_root_offsets_and_fine_offset_round_trip() {
+        let bare: TuningConfig = toml::from_str("").expect("parses");
+        assert_eq!(bare.temperament_root, None, "C is the unsaid default");
+        assert_eq!(bare.offsets, None);
+        assert_eq!(bare.offset_cents, None);
+
+        let text = r#"
+temperament = "custom"
+temperament_root = "F#"
+offsets = [0.0, 10.0, -5.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+offset_cents = 3.5
+"#;
+        let full: TuningConfig = toml::from_str(text).expect("parses");
+        assert_eq!(full.temperament_root.as_deref(), Some("F#"));
+        assert_eq!(full.offsets, Some([0.0, 10.0, -5.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]));
+        assert_eq!(full.offset_cents, Some(3.5));
+
+        let round_tripped: TuningConfig =
+            toml::from_str(&toml::to_string(&full).expect("serializes")).expect("parses");
+        assert_eq!(round_tripped.temperament_root, full.temperament_root);
+        assert_eq!(round_tripped.offsets, full.offsets);
+        assert_eq!(round_tripped.offset_cents, full.offset_cents);
+
+        // A field-less override round-trips to exactly nothing.
+        let empty = TuningOverride::default();
+        assert!(empty.is_empty());
+        let with_root = TuningOverride {
+            temperament_root: Some("D".into()),
+            ..TuningOverride::default()
+        };
+        assert!(!with_root.is_empty());
+    }
+
+    #[test]
+    fn pitch_class_names_round_trip() {
+        for pc in 0u8..12 {
+            let name = pitch_class_name(pc);
+            assert_eq!(parse_pitch_class(name), Some(pc), "{name}");
+        }
+        assert_eq!(parse_pitch_class("Bb"), Some(10));
+        assert_eq!(parse_pitch_class("F#"), Some(6));
+        assert_eq!(parse_pitch_class("H"), None);
     }
 
     #[test]

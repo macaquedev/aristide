@@ -1173,6 +1173,14 @@ pub struct ManualTuningFields {
     pub scale: Option<String>,
     pub keymap: Option<String>,
     pub pipes: crate::tuning::PipeRetune,
+    /// The pitch class a named temperament is centred on; 0 (C) writes
+    /// as absence.
+    pub temperament_root: u8,
+    /// The 12 custom deviations, only meaningful (and only written)
+    /// when `temperament == "custom"`.
+    pub offsets: Option<[f32; 12]>,
+    /// A fine offset in cents; 0 writes as absence.
+    pub offset_cents: f64,
 }
 
 /// One manual as `save_composite` writes it: name, compass, and any
@@ -1309,6 +1317,9 @@ pub fn write_composite_manual_tuning(
                 "scale",
                 "keymap",
                 "pipes",
+                "temperament_root",
+                "offsets",
+                "offset_cents",
             ] {
                 table.remove(field);
             }
@@ -1362,6 +1373,29 @@ fn write_tuning_fields(table: &mut toml_edit::Table, fields: &ManualTuningFields
         crate::tuning::PipeRetune::Original => {
             table.remove("pipes");
         }
+    }
+    // The root is dormant with a scale or away from 12-EDO, same as
+    // the temperament line, and C (0) writes as the default absence.
+    if fields.temperament_root != 0 && fields.scale.is_none() && fields.edo == 12 {
+        table["temperament_root"] = toml_edit::value(aristide_formats::sidecar::pitch_class_name(
+            fields.temperament_root,
+        ));
+    } else {
+        table.remove("temperament_root");
+    }
+    match (&fields.offsets, fields.temperament == "custom") {
+        (Some(offsets), true) => {
+            let array: toml_edit::Array = offsets.iter().map(|c| *c as f64).collect();
+            table["offsets"] = toml_edit::value(array);
+        }
+        _ => {
+            table.remove("offsets");
+        }
+    }
+    if fields.offset_cents != 0.0 {
+        table["offset_cents"] = toml_edit::value(fields.offset_cents);
+    } else {
+        table.remove("offset_cents");
     }
 }
 
@@ -1436,7 +1470,7 @@ pub fn write_composite_tuning(path: &Path, fields: &ManualTuningFields) -> Resul
 /// The tuning lines every scope's own tuning is written with — no
 /// transpose — minus nothing: the same fields, so a scope's table
 /// reads like `[tuning]` itself.
-const TUNING_FIELD_KEYS: [&str; 9] = [
+const TUNING_FIELD_KEYS: [&str; 12] = [
     "temperament",
     "edo",
     "reference_key",
@@ -1446,6 +1480,9 @@ const TUNING_FIELD_KEYS: [&str; 9] = [
     "scale",
     "keymap",
     "pipes",
+    "temperament_root",
+    "offsets",
+    "offset_cents",
 ];
 
 /// Update (or with `None` remove) one source set's own tuning — its
@@ -4127,6 +4164,9 @@ mod tests {
             scale: scale.map(str::to_string),
             keymap: None,
             pipes: crate::tuning::PipeRetune::Original,
+            temperament_root: 0,
+            offsets: None,
+            offset_cents: 0.0,
         };
         assert!(
             write_composite_manual_tuning(&path, "Grand orgue", Some(tuned("equal", Some("19edo.scl"))))
@@ -4173,6 +4213,33 @@ mod tests {
         assert!(write_composite_manual_tuning(&path, "Grand orgue", None).expect("tuning"));
         assert_eq!(def(&path).manuals[0].reference_hz, None);
         assert_eq!(def(&path).manuals[0].reference_key, None);
+
+        // A root away from C, a custom table, and a fine offset all
+        // write and round-trip; back at defaults they disappear.
+        let mut custom = tuned("custom", None);
+        custom.temperament_root = 6; // F#
+        custom.offsets = Some([0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0]);
+        custom.offset_cents = 2.5;
+        assert!(write_composite_manual_tuning(&path, "Grand orgue", Some(custom)).expect("tuning"));
+        let text = std::fs::read_to_string(&path).expect("reads");
+        assert!(text.contains("temperament_root = \"F#\""), "{text}");
+        assert!(text.contains("offset_cents = 2.5"), "{text}");
+        let parsed = def(&path);
+        assert_eq!(parsed.manuals[0].temperament.as_deref(), Some("custom"));
+        assert_eq!(parsed.manuals[0].temperament_root.as_deref(), Some("F#"));
+        assert_eq!(
+            parsed.manuals[0].offsets,
+            Some([0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0])
+        );
+        assert_eq!(parsed.manuals[0].offset_cents, Some(2.5));
+        assert!(
+            write_composite_manual_tuning(&path, "Grand orgue", Some(tuned("meantone4", None)))
+                .expect("tuning")
+        );
+        let text = std::fs::read_to_string(&path).expect("reads");
+        assert!(!text.contains("temperament_root"), "C is absence: {text}");
+        assert!(!text.contains("offsets ="), "{text}");
+        assert!(!text.contains("offset_cents"), "{text}");
 
         // A declared drawknob order rides [console.order], keyed by
         // manual name — so a manual rename must carry the key.
@@ -4787,6 +4854,9 @@ device = "Keys"
             scale: None,
             keymap: None,
             pipes,
+            temperament_root: 0,
+            offsets: None,
+            offset_cents: 0.0,
         };
         write_composite_tuning(&path, &fields(crate::tuning::PipeRetune::Exact)).expect("exact");
         let text = std::fs::read_to_string(&path).expect("reads");
@@ -4839,6 +4909,9 @@ device = "Keys"
             scale: None,
             keymap: None,
             pipes: crate::tuning::PipeRetune::Original,
+            temperament_root: 0,
+            offsets: None,
+            offset_cents: 0.0,
         };
 
         assert!(write_composite_source_tuning(&path, "positif", Some(&fields("meantone4"))).expect("set"));
@@ -4925,6 +4998,9 @@ device = "Keys"
                 scale: None,
                 keymap: None,
                 pipes: crate::tuning::PipeRetune::Original,
+                temperament_root: 0,
+                offsets: None,
+                offset_cents: 0.0,
             },
         )
         .expect("tuning");
@@ -4956,6 +5032,9 @@ device = "Keys"
                 scale: Some("19edo.scl".into()),
                 keymap: Some("19edo.kbm".into()),
                 pipes: crate::tuning::PipeRetune::Original,
+                temperament_root: 0,
+                offsets: None,
+                offset_cents: 0.0,
             },
         )
         .expect("tuning");
@@ -4975,6 +5054,9 @@ device = "Keys"
                 scale: None,
                 keymap: None,
                 pipes: crate::tuning::PipeRetune::Original,
+                temperament_root: 0,
+                offsets: None,
+                offset_cents: 0.0,
             },
         )
         .expect("tuning");
@@ -5045,6 +5127,9 @@ volume = 0.7
                 scale: None,
                 keymap: None,
                 pipes: crate::tuning::PipeRetune::Original,
+                temperament_root: 0,
+                offsets: None,
+                offset_cents: 0.0,
             },
         )
         .expect("tuning");

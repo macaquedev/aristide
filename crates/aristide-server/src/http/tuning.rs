@@ -68,6 +68,38 @@ pub(super) fn set(state: &Mutex<State>, query: &str) -> Reply {
                 if !tuning.corrects_pipes() && !anchor_given {
                     tuning.reference = tuning.home_reference(tuning.reference.key);
                 }
+            } else if let Some(name) = param(query, "temperament") {
+                return Err(format!("temperament {name:?} names no known temperament"));
+            }
+            // The root a named temperament is centred on: a pitch-class
+            // name ("D", "F#", "Bb") or a bare 0..11 number.
+            if let Some(spec) = param(query, "root").map(unescape) {
+                tuning.temperament_root = parse_pitch_class(&spec)
+                    .ok_or_else(|| format!("root {spec:?} names no pitch class"))?;
+            }
+            // `offsets=` names 12 comma-separated cent deviations and
+            // implies a custom temperament, replacing whichever table
+            // (or scale) was playing.
+            if let Some(spec) = param(query, "offsets") {
+                let values: Result<Vec<f32>, _> =
+                    spec.split(',').map(|v| v.trim().parse::<f32>()).collect();
+                let values = values.map_err(|_| format!("offsets {spec:?} is not 12 numbers"))?;
+                let &[a, b, c, d, e, f, g, h, i, j, k, l] = values.as_slice() else {
+                    return Err(format!(
+                        "offsets needs exactly 12 comma-separated cents, got {}",
+                        values.len()
+                    ));
+                };
+                tuning.temperament = crate::tuning::Temperament::Custom([
+                    a, b, c, d, e, f, g, h, i, j, k, l,
+                ]);
+                tuning.scale = None;
+                tuning.edo = 12;
+            }
+            if let Some(offset) = param(query, "offset_cents") {
+                tuning.offset_cents = offset
+                    .parse::<f64>()
+                    .map_err(|_| format!("offset_cents {offset:?} is not a number"))?;
             }
             if let Some(edo) = param(query, "edo").and_then(|v| v.parse::<u16>().ok()) {
                 if !crate::tuning::EDO_RANGE.contains(&edo) {
@@ -245,4 +277,14 @@ fn parse_reference_key(spec: &str) -> Option<u8> {
         .ok()
         .filter(|&key| key <= 127)
         .or_else(|| aristide_formats::sidecar::parse_note_name(spec))
+}
+
+/// A temperament root as the API takes it: a pitch-class name ("D",
+/// "F#", "Bb") or a bare 0..11 number.
+fn parse_pitch_class(spec: &str) -> Option<u8> {
+    let spec = spec.trim();
+    spec.parse::<u8>()
+        .ok()
+        .filter(|&pc| pc <= 11)
+        .or_else(|| aristide_formats::sidecar::parse_pitch_class(spec))
 }

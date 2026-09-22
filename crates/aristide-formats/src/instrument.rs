@@ -234,6 +234,13 @@ pub struct ManualDef {
     pub keymap: Option<String>,
     /// `original` | `exact` — see `[tuning] pipes`.
     pub pipes: Option<String>,
+    /// The pitch class a named temperament is centred on — see
+    /// `[tuning] temperament_root`.
+    pub temperament_root: Option<String>,
+    /// The 12 custom deviations — see `[tuning] offsets`.
+    pub offsets: Option<[f32; 12]>,
+    /// A fine offset in cents — see `[tuning] offset_cents`.
+    pub offset_cents: Option<f64>,
     /// A microtonal manual's hex-field layout (`hex = { rows = 5,
     /// right = 2, upright = 1, ... }`). Fields left out follow the
     /// derived default; the whole table left out means the default.
@@ -2071,6 +2078,9 @@ mod tests {
             scale: None,
             keymap: None,
             pipes: None,
+            temperament_root: None,
+            offsets: None,
+            offset_cents: None,
             hex: None,
         }
     }

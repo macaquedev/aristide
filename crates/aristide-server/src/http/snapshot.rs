@@ -435,6 +435,16 @@ struct TuningView {
     pipes: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     scale: Option<ScaleView>,
+    /// The pitch class (0 = C .. 11 = B) a named temperament is
+    /// centred on.
+    root: u8,
+    /// The 12 deviations from equal actually in effect (C..B, cents):
+    /// the rotated table, the custom table, or the measured home
+    /// table under `original`. Omitted away from 12-EDO or under a
+    /// scale, where no twelve-class table governs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    offsets: Option<Vec<Fixed>>,
+    offset_cents: Fixed,
 }
 
 #[derive(Serialize)]
@@ -1124,6 +1134,23 @@ fn snapshot(state: &State) -> Snapshot {
 }
 
 fn tuning_view(tuning: &crate::tuning::Tuning) -> TuningView {
+    // The 12 deviations actually in effect: dormant away from 12-EDO
+    // or under a scale (no twelve-class table governs either); under
+    // `original` the measured home table stands in, else the rooted
+    // (or custom) temperament table.
+    let offsets = (tuning.scale.is_none() && tuning.edo == 12).then(|| {
+        let table = if !tuning.corrects_pipes() {
+            tuning
+                .home
+                .as_ref()
+                .map(|home| home.offsets_cents)
+                .unwrap_or([0.0; 12])
+        } else {
+            let rooted = tuning.rooted_offsets_cents();
+            std::array::from_fn(|pc| rooted[pc] as f64)
+        };
+        table.iter().map(|c| Fixed::new(*c, 3)).collect()
+    });
     TuningView {
         temperament: tuning.temperament.name().to_string(),
         edo: tuning.edo,
@@ -1139,6 +1166,9 @@ fn tuning_view(tuning: &crate::tuning::Tuning) -> TuningView {
             name: scale.name().to_string(),
             notes: scale.scale.len(),
         }),
+        root: tuning.temperament_root,
+        offsets,
+        offset_cents: Fixed::new(tuning.offset_cents, 3),
     }
 }
 
