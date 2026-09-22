@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { defaultTuning } from '../src/design/model';
 import { mappedPitch, ratioToCents, scaleIntervals } from '../src/design/tuningScale';
+import { temperaments } from '../src/design/temperaments';
 
 test('repeat count and interval are independent, in both directions', () => {
   const nineteen = { ...defaultTuning, system: 'Equal division', steps: 19 };
@@ -79,4 +80,13 @@ test('historical temperaments follow the root note', async ({ page }) => {
   await choose('Temperament', 'Custom');
   await expect(page.getByRole('button', { name: 'E deviation: -6.8 ¢', exact: true })).toBeEnabled();
   await page.screenshot({ path: 'test-results/tuning-meantone.png', fullPage: true });
+});
+
+test('Rameau keeps seven meantone fifths and splits the wolf', () => {
+  const pitch = temperaments['Rameau 1726'].map((cents, i) => i * 100 + cents);
+  const fifth = (from: number) => ((pitch[(from + 7) % 12] - pitch[from]) % 1200 + 1200) % 1200;
+  for (const from of [10, 5, 0, 7, 2, 9, 4]) expect(fifth(from)).toBeCloseTo(696.6, 0);
+  for (const from of [11, 6, 1]) expect(fifth(from)).toBeCloseTo(702, 0);
+  expect(fifth(8)).toBeCloseTo(fifth(3), 0);
+  expect(fifth(8)).toBeCloseTo(709, 0);
 });
