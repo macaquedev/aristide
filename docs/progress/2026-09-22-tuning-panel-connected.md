@@ -2,7 +2,9 @@
 
 The Tuning tab now opens the Channel strip desk on the live engine
 (`desktop/src/tuning/TuningPanel.tsx`) instead of a placeholder. It lists the
-whole instrument, each division and, collapsed under it, each stop, from
+whole instrument, each division and, collapsed under it, each stop — and,
+under a stop sounding more than one rank (a mixture), each rank; a
+single-rank stop is its rank, so its rank is not listed — from
 `GET /api/tuning`, which resolves every scope and says which halves it owns.
 Each edit is one `POST /api/tuning` for that scope, heard from the next note
 (held notes glide) and saved by the engine; there is no save button. The
@@ -27,7 +29,7 @@ is open, by re-sending each scope's previous state. It is not yet the spec's
 global, persistent undo. Long-pressing a tuning number explains that control
 assignment is not available yet instead of doing nothing.
 
-Gaps: sets and ranks are tunable in the engine but not listed; a stop that
+Gaps: sets are tunable in the engine but not listed; a stop that
 resolves through its set is still linked to its division in the header;
 dragging a number sends a request per step; the Play division tag shows the
 engine's temperament id. Audible behaviour is covered by the engine's tests

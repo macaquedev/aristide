@@ -48,6 +48,20 @@ test('the connected Tuning panel edits the engine', async ({ page }) => {
   await page.getByRole('switch', { name: 'Scale follows Whole instrument' }).click();
   await expect(page.getByRole('switch', { name: 'Scale follows Whole instrument' })).toBeChecked();
   await expect(page.getByRole('button', { name, exact: true })).toContainText('Quarter-comma meantone');
+  await page.getByRole('button', { name: `Expand ${name}`, exact: true }).click();
+  await expect(page.getByRole('button', { name: "Expand Montre 8'", exact: true })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Expand Plein jeu III', exact: true }).click();
+  const rank = page.getByRole('button', { name: 'Plein jeu 2nd rank', exact: true });
+  await rank.click();
+  await expect(page.getByRole('switch', { name: 'Scale follows Plein jeu III' })).toBeChecked();
+  await page.getByRole('switch', { name: 'Scale follows Plein jeu III' }).click();
+  await expect(page.getByRole('switch', { name: 'Scale follows Plein jeu III' })).not.toBeChecked();
+  await choose('Temperament', 'Pythagorean');
+  await expect(rank).toContainText('Pythagorean');
+  await expect(page.getByRole('button', { name: 'Plein jeu 1st rank', exact: true })).toContainText('Quarter-comma meantone');
+  await expect(page.getByRole('button', { name: 'Plein jeu III', exact: true })).toContainText('Quarter-comma meantone');
+  await page.screenshot({ path: 'test-results/live-rank.png', fullPage: true });
+
   await page.getByRole('button', { name: 'Whole instrument', exact: true }).click();
   await choose('Temperament', 'As recorded');
   await page.getByRole('button', { name: 'Edit', exact: true }).click();

@@ -14,7 +14,7 @@ type Own = { anchor: boolean; scale: boolean };
 type Scopes = {
   instrument: TuningView;
   manuals: { idx: number; name: string; own: Own; tuning: TuningView }[];
-  stops: { id: number; name: string; midx: number; own: Own; tuning: TuningView }[];
+  stops: { id: number; name: string; midx: number; own: Own; tuning: TuningView; ranks: { id: number; name: string; own: Own; tuning: TuningView }[] }[];
 };
 type Params = Record<string, string | number>;
 
@@ -27,7 +27,10 @@ function toShape(view: TuningView): Shape {
   return { system: 'temperament', temperament: view.temperament, root: view.root, offsets: view.offsets ?? Array(12).fill(0) };
 }
 
-const scopeParams = (id: string): Params => id.startsWith('manual:') ? { manual: id.slice(7) } : id.startsWith('stop:') ? { stop: id.slice(5) } : {};
+function scopeParams(id: string): Params {
+  const [kind, stop, rank] = id.split(':');
+  return kind === 'manual' ? { manual: stop } : kind === 'stop' ? { stop } : kind === 'rank' ? { stop, rank } : {};
+}
 const anchorParams = (anchor: Anchor): Params => ({ reference_key: anchor.key, reference_hz: anchor.hz, offset_cents: anchor.offset });
 const cents = (values: number[]) => values.map(v => Number(v.toFixed(3))).join(',');
 function shapeParams(shape: Shape): Params {
@@ -80,8 +83,12 @@ export function TuningPanel({ edit, organ, offerUndo }: { edit: boolean; organ: 
     { id: 'instrument', name: 'Whole instrument', own: { anchor: true, scale: true }, anchor: toAnchor(scopes.instrument), shape: toShape(scopes.instrument) },
     ...scopes.manuals.flatMap(manual => [
       { id: `manual:${manual.idx}`, name: manual.name, parent: 'instrument', own: manual.own, anchor: toAnchor(manual.tuning), shape: toShape(manual.tuning) },
-      ...scopes.stops.filter(stop => stop.midx === manual.idx).map(stop => ({
-        id: `stop:${stop.id}`, name: stop.name, parent: `manual:${manual.idx}`, own: stop.own, anchor: toAnchor(stop.tuning), shape: toShape(stop.tuning) })),
+      ...scopes.stops.filter(stop => stop.midx === manual.idx).flatMap(stop => [
+        { id: `stop:${stop.id}`, name: stop.name, parent: `manual:${manual.idx}`, own: stop.own, anchor: toAnchor(stop.tuning), shape: toShape(stop.tuning) },
+        // A single-rank stop is its rank: only a mixture's ranks are listed.
+        ...(stop.ranks.length > 1 ? stop.ranks.map(rank => ({
+          id: `rank:${stop.id}:${rank.id}`, name: rank.name || `Rank ${rank.id}`, parent: `stop:${stop.id}`, own: rank.own, anchor: toAnchor(rank.tuning), shape: toShape(rank.tuning) })) : []),
+      ]),
     ]),
   ] : [];
   const remember = (id: string) => {

@@ -148,7 +148,8 @@ division instead of silently falling back to the temperament.
 
 **`GET /api/tuning`** returns every scope the Tuning panel edits, resolved:
 `{instrument: TuningView, manuals: [{idx, name, own, tuning}], stops: [{id,
-name, midx, own, follow, scope, tuning}]}` where `own` is `{anchor, scale}`.
+name, midx, own, follow, scope, tuning, ranks: [{id, name, own, tuning}]}]}`
+where `own` is `{anchor, scale}`.
 `TuningView` itself gained `own`.
 
 Validation: a console test drives a division owning only its scale through an
@@ -159,7 +160,7 @@ field, `own=`/`follow=`, what the file keeps, steps with no repetition,
 twelve steps to a 3:1, and a stop owning only a fine offset; a unit test
 prices 12 steps to a tritave.
 
-Remaining gaps: sources and ranks have no UI; transposition is still one
+Remaining gaps: sources have no UI; transposition is still one
 field on a division's tuning rather than its own control; `.kbm` files carry
 their own reference, which overrides the inherited anchor (as before).
 

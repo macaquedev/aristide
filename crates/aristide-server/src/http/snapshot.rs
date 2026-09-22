@@ -1358,6 +1358,16 @@ struct StopScopeTuningView {
     follow: &'static str,
     scope: &'static str,
     tuning: TuningView,
+    /// The ranks the stop sounds, each tunable apart within it.
+    ranks: Vec<RankScopeView>,
+}
+
+#[derive(Serialize)]
+struct RankScopeView {
+    id: u32,
+    name: String,
+    own: OwnView,
+    tuning: TuningView,
 }
 
 pub(super) fn tuning_scopes_json(state: &State) -> Option<String> {
@@ -1392,6 +1402,16 @@ pub(super) fn tuning_scopes_json(state: &State) -> Option<String> {
                     follow: console.stop_follow(*id).name(),
                     scope: scope.name(),
                     tuning: tuning_view(&resolved),
+                    ranks: console
+                        .stop_ranks(*id)
+                        .into_iter()
+                        .map(|(rank, name)| RankScopeView {
+                            id: rank.0,
+                            name: name.to_string(),
+                            own: owns(console.rank_tuning(*id, rank)),
+                            tuning: tuning_view(&console.rank_tuning_resolved(*id, rank)),
+                        })
+                        .collect(),
                 }
             })
             .collect(),
