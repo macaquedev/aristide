@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { ActionIcon, Button, Card, Drawer, Group, Loader, Modal, SegmentedControl, Stack, Text, TextInput, Tooltip, useMantineColorScheme } from '@mantine/core';
 import { ArrowLeft, ChevronLeft, ChevronRight, Folder, LockKeyhole, Settings, Undo2, UnlockKeyhole } from 'lucide-react';
 import { endpoint, request, native, type Browse, type Snapshot, type Stop } from './api';
 import { useEngine } from './engine';
+import { TuningPanel } from './tuning/TuningPanel';
 
 const panels = ['Play', 'Build', 'Route', 'Tuning', 'Library'] as const;
 type Panel = typeof panels[number] | 'Setup';
@@ -16,6 +17,8 @@ export function App() {
   const [selected, setSelected] = useState<Stop>();
   const [density, setDensity] = useState(() => localStorage.getItem('aristide-density') ?? 'comfortable');
   const [dismissedLoadError, setDismissedLoadError] = useState<string>();
+  const [undo, setUndo] = useState<() => void>();
+  const offerUndo = useCallback((action?: () => void) => setUndo(() => action), []);
   const loading = useRef(false);
   useEffect(() => {
     if (state?.loading) loading.current = true;
@@ -41,7 +44,7 @@ export function App() {
         disabled={name === 'Build' && !edit} onClick={() => setPanel(name)} aria-current={panel === name ? 'page' : undefined}>{name}</Button>)}</nav>
       <Tooltip label={edit ? 'Lock for performance' : 'Unlock to edit'}><Button variant="default" leftSection={edit ? <UnlockKeyhole size={18}/> : <LockKeyhole size={18}/>}
         onClick={() => { setEdit(!edit); if (edit && panel === 'Build') setPanel('Play'); }}>{edit ? 'Edit' : 'Perform'}</Button></Tooltip>
-      <Tooltip label="Undo will be available with layer editing"><ActionIcon variant="default" size="lg" disabled aria-label="Undo"><Undo2 size={18}/></ActionIcon></Tooltip>
+      <Tooltip label={undo ? 'Undo' : 'Nothing to undo'}><ActionIcon variant="default" size="lg" disabled={!undo || !edit} aria-label="Undo" onClick={() => undo?.()}><Undo2 size={18}/></ActionIcon></Tooltip>
       <Text className="meters" c="dimmed" size="xs">CPU —<br/>{state?.memory ? `${state.memory.resident_mb} MB` : 'Memory —'}</Text>
       <Button color="red" variant="filled" disabled={!engine.ready} onClick={() => command('panic')}>Panic</Button>
       <ActionIcon size="lg" variant={panel === 'Setup' ? 'filled' : 'default'} aria-label="Setup" onClick={() => setPanel('Setup')}><Settings size={20}/></ActionIcon>
@@ -55,10 +58,11 @@ export function App() {
       {panel === 'Setup' && <Stack p="lg"><Group><Button variant="subtle" leftSection={<ArrowLeft size={18}/>} onClick={() => setPanel('Play')}>Play</Button><Text fw={600}>Setup</Text></Group>
         <Appearance edit={edit} density={density} changeDensity={value => { setDensity(value); localStorage.setItem('aristide-density', value); }}/>
         {state && <ConsoleSetup state={state} command={command} edit={edit}/>}</Stack>}
-      {['Build', 'Route', 'Tuning'].includes(panel) && <Stack p="lg">
+      {panel === 'Tuning' && (state?.organ ? <TuningPanel edit={edit} organ={state.organ} offerUndo={offerUndo}/> : <Stack align="center" p="xl"><Text>Choose an organ to tune.</Text><Button onClick={() => setPanel('Library')}>Open Library</Button></Stack>)}
+      {['Build', 'Route'].includes(panel) && <Stack p="lg">
         <Text fw={600}>{panel === 'Build' && selected ? selected.name : panel}</Text>
         <Text c="dimmed">{panel === 'Build' ? 'Editor preview' : `${panel} unavailable`}</Text>
-        {(panel === 'Build' || panel === 'Tuning') && <Button component="a" href={`/?study=1&panel=${panel.toLowerCase()}`} variant="default" w="fit-content">Compare layouts</Button>}
+        {panel === 'Build' && <Button component="a" href="/?study=1&panel=build" variant="default" w="fit-content">Compare layouts</Button>}
         <Button variant="default" w="fit-content" onClick={() => setPanel('Play')}>Back to Play</Button>
       </Stack>}
     </main>

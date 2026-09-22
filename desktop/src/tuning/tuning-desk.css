@@ -94,3 +94,4 @@
 .tuning-mapping { padding: 10px 16px; border-top: 1px solid var(--mantine-color-default-border); }
 
 .tuning-intervals .tuning-ruler { width: 60px; }
+.tuning-panel { padding: 16px; }

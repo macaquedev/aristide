@@ -28,7 +28,7 @@ export const endpoint = (path: string, values: Record<string, string | number> =
 export async function request<T>(method: 'GET' | 'POST', url: string): Promise<T> {
   const reply = native
     ? await invoke<{ status: number; body: T }>('api_request', { method, url })
-    : await fetch(url, { method, signal: AbortSignal.timeout(10_000) }).then(async r => ({ status: r.status, body: await r.json() as T }));
+    : await fetch(url, { method, signal: AbortSignal.timeout(10_000) }).then(async r => ({ status: r.status, body: (r.ok ? await r.json() : undefined) as T }));
   if (reply.status >= 400) throw new Error(`request-${reply.status}`);
   return reply.body;
 }

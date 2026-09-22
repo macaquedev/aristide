@@ -31,7 +31,7 @@ const keyLabel = (key: number) => `(${noteName(key)})`;
 export function TuningDesk({ layout, scopes, selected, select, setAnchor, setShape, setOwn, assign, recorded = false, undo, canUndo = false, importScala, readOnly = false }: DeskProps) {
   const [selectedStep, setSelectedStep] = useState(0);
   const [query, setQuery] = useState('');
-  const [collapsed, setCollapsed] = useState<string[]>([]);
+  const [collapsed, setCollapsed] = useState(() => scopes.filter(s => s.parent && scopes.some(child => child.parent === s.id)).map(s => s.id));
   const [tab, setTab] = useState<string | null>('pitch');
   const scope = scopes.find(s => s.id === selected) ?? scopes[0];
   const { anchor, shape } = scope;
@@ -85,7 +85,7 @@ export function TuningDesk({ layout, scopes, selected, select, setAnchor, setSha
     min={finite ? keyRange![0] : 0} max={finite ? keyRange![1] : 127} disabled={anchorLocked}
     change={value => changeAnchor({ key: Math.round(value) })} assign={() => assign(`tuning/${scope.id}/referenceKey`)}/></div>;
   const reference = module('Reference', <Stack gap="xs">
-    <div className="tuning-reference-number"><NumberControl label="Reference pitch" value={anchor.hz} unit="Hz" min={1} disabled={anchorLocked} change={hz => changeAnchor({ hz })} assign={() => assign(`tuning/${scope.id}/hz`)}/></div>
+    <div className="tuning-reference-number"><NumberControl label="Reference pitch" value={Number(anchor.hz.toFixed(2))} unit="Hz" min={1} disabled={anchorLocked} change={hz => changeAnchor({ hz })} assign={() => assign(`tuning/${scope.id}/hz`)}/></div>
     <Group gap={4} grow>{[392, 415, 440, 466].map(hz => <Button key={hz} size="compact-sm" variant={anchor.hz === hz ? 'light' : 'default'} disabled={anchorLocked} onClick={() => changeAnchor({ hz })}>{hz}</Button>)}</Group>
     {referenceKey}</Stack>, 'reference-module', 'anchor');
   const fine = module('Fine offset', <Stack gap="xs"><NumberControl label="Fine offset" value={anchor.offset} unit="¢" step={.1} disabled={anchorLocked} change={offset => changeAnchor({ offset })} assign={() => assign(`tuning/${scope.id}/fine`)}/>
@@ -146,7 +146,7 @@ export function TuningDesk({ layout, scopes, selected, select, setAnchor, setSha
   const mapping = !twelve && <Group className="tuning-mapping" justify="space-between"><Text size="xs" c="dimmed">Key {mappingKey} {keyLabel(mappingKey)} → step {step + 1} · {mappingHz === undefined ? 'silent' : `${Number(mappingHz.toFixed(2))} Hz`}</Text>
     <Text size="xs" c="dimmed">{finite ? `Keys ${keyRange![0]}–${keyRange![1]} only · outside unmapped` : shape.system === 'scale' && shape.kbm ? 'Mapped by keyboard file' : `Consecutive keys · repeat every ${count} steps`}</Text></Group>;
   const summary = <Group className="tuning-status" justify="space-between"><Text size="xs" c="dimmed">{twelve ? `${temperamentName(shape.temperament)}${shape.temperament === RECORDED || shape.temperament === CUSTOM ? '' : ` · root ${pitchNames[shape.root]}`}` : `${count} ${shape.system === 'equal' ? 'equal ' : ''}steps · ${period === null ? 'No repetition' : `Repeat ${Number(period.toFixed(2))} ¢`}`}</Text>
-    <Text size="xs" c="dimmed">{noteName(anchor.key)} = {anchor.hz} Hz · {formatCents(anchor.offset)} ¢ offset</Text></Group>;
+    <Text size="xs" c="dimmed">{noteName(anchor.key)} = {Number(anchor.hz.toFixed(2))} Hz · {formatCents(anchor.offset)} ¢ offset</Text></Group>;
 
   const visible = (s: DeskScope): boolean => {
     if (query) return s.name.toLocaleLowerCase().includes(query.toLocaleLowerCase());
