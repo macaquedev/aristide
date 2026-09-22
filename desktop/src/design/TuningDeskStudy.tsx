@@ -60,7 +60,7 @@ export function TuningDeskStudy({ layout, assign }: { layout: string; assign: (n
   const module = (name: string, content: ReactNode, className = '') => <section className={`tuning-module ${className}`} aria-label={name}><Text className="tuning-module-title" size="xs" c="dimmed">{name}</Text>{content}</section>;
   const reference = module('Reference', <Stack gap="xs"><div className="tuning-reference-number">{number('hz', 'Reference pitch', 'Hz')}</div>
     <Group gap={4} grow>{[392, 415, 440, 466].map(hz => <Button key={hz} size="compact-sm" variant={tuning.hz === hz ? 'light' : 'default'} disabled={inherited} onClick={() => update({ hz })}>{hz}</Button>)}</Group>
-    {conventional ? <Text size="xs" c="dimmed">Reference note · {noteName(tuning.referenceKey)}</Text> : <div><Text size="xs" c="dimmed">Reference key → step 1</Text>{number('referenceKey', 'Reference key', '')}</div>}</Stack>, 'reference-module');
+    {conventional ? <Text size="xs" c="dimmed">Reference note · {noteName(tuning.referenceKey)}</Text> : <div><Text size="xs" c="dimmed">Reference key → step 1</Text>{number('referenceKey', 'Reference key', `(${noteName(tuning.referenceKey)})`)}</div>}</Stack>, 'reference-module');
   const fine = module('Fine offset', <Stack gap="xs">{number('fine', 'Fine offset', '¢')}<Button size="compact-sm" variant="subtle" disabled={inherited || tuning.fine === 0} onClick={() => update({ fine: 0 })}>Reset offset</Button></Stack>, 'fine-module');
   const periodChoice = period === null ? 'none' : period === 1200 ? 'octave' : period === ratioToCents(3) ? 'triple' : 'custom';
   const scale = module('Scale', <Stack gap="xs">

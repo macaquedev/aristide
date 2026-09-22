@@ -35,6 +35,7 @@ test('channel strip handles non-octave periods and finite collections', async ({
   await expect(page.locator('.tuning-note-track')).toHaveCount(13);
   await expect(page.getByText('13 equal steps · Repeat 1901.96 ¢', { exact: true })).toBeVisible();
   await expect(page.getByRole('combobox', { name: 'Root note' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Reference key: 69 (A4)', exact: true })).toBeVisible();
   await page.screenshot({ path: 'test-results/tuning-triple-period.png', fullPage: true });
   await choose('Tuning system', 'Pitch collection');
   await expect(page.getByRole('combobox', { name: 'Repeat interval' })).toHaveValue('None · no repetition');
