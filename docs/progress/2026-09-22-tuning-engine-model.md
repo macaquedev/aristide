@@ -1,8 +1,8 @@
 # Tuning engine model: fifths-derived temperaments, periods and steps
 
-Two of the three planned commits landed; the third (independent anchor/scale
-inheritance per scope) did not, and is described below as a gap rather than
-claimed done.
+Three commits: temperaments from their fifths, periods and inline steps, and
+independent anchor/scale inheritance per scope (the last written separately,
+after the first two).
 
 ## Commit 1 — temperaments from their fifths
 
@@ -102,46 +102,66 @@ period is an octave, it just wants a step count.
 **Migration**: none required; same as commit 1, every field is additive and
 optional.
 
-## Commit 3 — not implemented
+## Commit 3 — anchor and scale inherit separately
 
-The spec's third commit — splitting each scope's tuning into an
-independently-inherited **anchor** (reference key, Hz, `offset_cents`) and
-**scale** (everything else: system, temperament, root, offsets, edo, period,
-steps, start_key, scale/keymap, pipes) — was not built. Reporting this
-honestly rather than shipping a partial or untested version of it: `Console`
-currently stores one `Option<Tuning>` per scope (`manual_tuning`,
-`source_tuning`, `stop_tuning`, `rank_tuning`) and a `Follow` enum for stops:
-whole-tuning ownership, not split ownership. Making the anchor and the scale
-independently resolved (a Récit that keeps the instrument's 415 Hz while
-holding its own meantone) needs:
+Every scope's tuning (instrument, set, division, stop, rank) is now two
+halves: the **anchor** (reference key, reference Hz, `offset_cents`) and the
+**scale** (temperament, root, offsets, edo, period, steps, start key,
+scale/keymap, pipes). `Tuning::owns: Owns { anchor, scale }` records which
+halves the holding scope owns; the instrument owns both. Storage stays one
+`Option<Tuning>` per scope — the flags, not a second map, carry the split.
 
-- `Console`'s per-scope storage split into two independently-`Option`al
-  halves (or the equivalent), each resolved by walking the existing
-  precedence separately.
-- Every setter (`set_manual_tuning`, `set_source_tuning`, `set_stop_tuning`/
-  `set_stop_follow`, `set_rank_tuning`) reworked to own one part, both, or
-  neither, plus `retune_held`'s landing walk kept allocation/lock-free.
-- `TuningOverride`'s file partiality preserved through `load.rs` instead of
-  flattened into one resolved `Tuning` per scope (today's
-  `override_tuning` closure already treats `None` fields as "follow", but
-  discards *which* fields were named once it builds the resolved `Tuning` —
-  the owned-parts distinction needs to survive past that point).
-- `config.rs` writers split to write only the owned part's fields.
-- `POST /api/tuning` gains `own=anchor|scale|both` and `follow=anchor|scale`
-  without breaking the existing whole-scope `follow=`/`reset=` semantics
-  (`Follow::Auto/Division/Source/Organ` and the rank/source-specific
-  `follow=stop`/`follow=organ` shortcuts).
-- The snapshot's per-scope `own: {"anchor": bool, "scale": bool}`, plus
-  reporting the instrument's and every manual's *resolved* tuning (not just
-  overrides) — needed so the connected desktop Tuning panel (currently a
-  silent, unsaved design study at `desktop/src/tuning/`, see
-  `docs/progress/2026-09-22-tuning-shape-anchor.md`) can show inherited
-  values greyed out while following.
+Resolution (`console.rs`, `resolve_owned`) walks the existing precedence
+chain nearest first — rank, stop, then per the stop's pin/auto: division,
+set; then the instrument — and takes the nearest scope owning the scale for
+the intervals and the nearest owning the anchor for the pitch
+(`Tuning::with_anchor_of`, which re-anchors a linear Scala mapping). One
+owner of both is borrowed as before; a merge clones control-side only. The
+reported scope is the nearest that owns either half. A division that owns
+neither but transposes keeps its tuning for the transposer, as before.
 
-None of this touches the RT audio thread (tuning resolution is control-side
-today and would stay that way), but it is a genuine rearchitecture of
-`Console`'s tuning storage and every layer built on it, with real risk to the
-~40 existing tuning tests if rushed. It should be its own careful pass.
+**File.** A scope's fields decide what it owns at load: reference/offset
+fields own the anchor, any scale field the scale. Writers write only the
+owned half, so a Récit with its own meantone reads `temperament =
+"meantone4"` and nothing about pitch, and keeps following the instrument's.
+Existing files that name both kinds of field load as owning both: no
+behaviour change. A scope that names only fields of one kind used to copy
+the other half at load time; it now follows it live, which is the intended
+semantics. Naming a temperament in a scope's table now also means 12 steps
+to the octave, whatever division the scopes above play. `[[manual]]` now
+carries root, offsets, offset, period, steps and start key through to the
+loader (they were parsed but dropped).
+
+**API.** `POST /api/tuning`: an anchor field makes the scope own its anchor,
+a scale field its scale; `own=anchor|scale|both` adopts a half as it stands;
+`follow=anchor|scale` returns one to the scopes above (owning neither
+removes the scope's tuning). A bare scope request still takes the whole
+tuning, and the existing `follow=` pins and `reset=1` are unchanged.
+`start_key` now also places a Scala scale without a `.kbm` (its linear
+mapping's middle key, kept when the reference changes). Choosing a
+temperament resets the repeat to 1200 ¢, and `steps=` takes a `period=` in
+the same request.
+
+**Equal division.** `Tuning::equal_division()` is true for any count but 12
+*or* for 12 steps to anything but 1200 ¢, so twelve steps to a 3:1 play as a
+division instead of silently falling back to the temperament.
+
+**`GET /api/tuning`** returns every scope the Tuning panel edits, resolved:
+`{instrument: TuningView, manuals: [{idx, name, own, tuning}], stops: [{id,
+name, midx, own, follow, scope, tuning}]}` where `own` is `{anchor, scale}`.
+`TuningView` itself gained `own`.
+
+Validation: a console test drives a division owning only its scale through an
+instrument pitch change, a division owning only its pitch, and a stop owning
+only its scale at the division's pitch, comparing each against the same
+tuning installed whole; an HTTP test on the demo organ covers ownership by
+field, `own=`/`follow=`, what the file keeps, steps with no repetition,
+twelve steps to a 3:1, and a stop owning only a fine offset; a unit test
+prices 12 steps to a tritave.
+
+Remaining gaps: sources and ranks have no UI; transposition is still one
+field on a division's tuning rather than its own control; `.kbm` files carry
+their own reference, which overrides the inherited anchor (as before).
 
 ## Summary of file fields (commits 1 and 2)
 

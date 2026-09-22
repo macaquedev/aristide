@@ -3,6 +3,7 @@
 //! registration, couplers, and (later) microtonal key mappings all live
 //! at this layer, where allocation and locking are fine.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use aristide_model::{
@@ -985,11 +986,19 @@ impl Console {
     /// and a keyboard silently playing the wrong scale on some of its
     /// stops is the worse failure; the pin is there for the set that
     /// must not be retuned whatever its keyboard does.
-    pub fn stop_tuning_resolved(&self, stop: StopId) -> (&Tuning, crate::tuning::TuningScope) {
+    pub fn stop_tuning_resolved(&self, stop: StopId) -> (Cow<'_, Tuning>, crate::tuning::TuningScope) {
+        resolve_owned(self.stop_chain(stop, None))
+    }
+
+    /// The scopes a stop's tuning resolves through, nearest first: the
+    /// rank's own (when pricing one rank), the stop's own, what its pin
+    /// or automatic precedence names, then the instrument's.
+    fn stop_chain(&self, stop: StopId, rank: Option<RankId>) -> [Option<(&Tuning, crate::tuning::TuningScope)>; 5] {
         use crate::tuning::{Follow, TuningScope};
-        if let Some(own) = self.stop_tuning.get(&stop) {
-            return (own, TuningScope::Stop);
-        }
+        let rank = rank
+            .and_then(|rank| self.rank_tuning.get(&(stop, rank)))
+            .map(|tuning| (tuning, TuningScope::Rank));
+        let own = self.stop_tuning.get(&stop).map(|tuning| (tuning, TuningScope::Stop));
         let division = self
             .organ
             .stops
@@ -1004,22 +1013,42 @@ impl Console {
             .get(&stop)
             .and_then(|alias| self.source_tuning.get(alias))
             .map(|tuning| (tuning, TuningScope::Source));
-        let organ = (&self.tuning, TuningScope::Organ);
+        let organ = Some((&self.tuning, TuningScope::Organ));
         match self.stop_follow(stop) {
-            Follow::Auto => division.or(source).unwrap_or(organ),
-            Follow::Division => division.unwrap_or(organ),
-            Follow::Source => source.unwrap_or(organ),
-            Follow::Organ => organ,
+            Follow::Auto => [rank, own, division, source, organ],
+            Follow::Division => [rank, own, division, None, organ],
+            Follow::Source => [rank, own, source, None, organ],
+            Follow::Organ => [rank, own, None, None, organ],
         }
     }
 
     /// The tuning one voice is priced under: the rank's own within
     /// this stop, else the stop's resolution.
-    fn voice_tuning(&self, stop: StopId, rank: RankId) -> (&Tuning, crate::tuning::TuningScope) {
-        match self.rank_tuning.get(&(stop, rank)) {
-            Some(own) => (own, crate::tuning::TuningScope::Rank),
-            None => self.stop_tuning_resolved(stop),
-        }
+    fn voice_tuning(&self, stop: StopId, rank: RankId) -> (Cow<'_, Tuning>, crate::tuning::TuningScope) {
+        resolve_owned(self.stop_chain(stop, Some(rank)))
+    }
+
+    /// What one rank of a stop plays, resolved.
+    pub fn rank_tuning_resolved(&self, stop: StopId, rank: RankId) -> Tuning {
+        self.voice_tuning(stop, rank).0.into_owned()
+    }
+
+    /// What a sample set's stops play by default, resolved: the set's
+    /// own halves, the instrument's for the rest.
+    pub fn source_tuning_resolved(&self, alias: &str) -> Tuning {
+        let own = self.source_tuning.get(alias).map(|tuning| (tuning, crate::tuning::TuningScope::Source));
+        resolve_owned([own, Some((&self.tuning, crate::tuning::TuningScope::Organ))]).0.into_owned()
+    }
+
+    /// What a division plays, resolved: its own halves, the
+    /// instrument's for the rest.
+    pub fn manual_tuning_resolved(&self, manual_index: usize) -> Tuning {
+        let own = self
+            .manual_tuning
+            .get(manual_index)
+            .and_then(|tuning| tuning.as_ref())
+            .map(|tuning| (tuning, crate::tuning::TuningScope::Division));
+        resolve_owned([own, Some((&self.tuning, crate::tuning::TuningScope::Organ))]).0.into_owned()
     }
 
     pub fn tuning(&self) -> Tuning {
@@ -1120,8 +1149,7 @@ impl Console {
     /// GO AcceptsRetuning disables per-key temperament changes, not the
     /// declared recording-to-pipe conversion or the reference pitch.
     fn pipe_tuning(&self, stop: StopId, rank: RankId, pipe: u16) -> Tuning {
-        let (tuning, _) = self.voice_tuning(stop, rank);
-        let mut tuning = tuning.clone();
+        let mut tuning = self.voice_tuning(stop, rank).0.into_owned();
         if tuning.corrects_pipes()
             && self
                 .organ
@@ -1132,6 +1160,7 @@ impl Console {
             tuning.temperament = crate::tuning::Temperament::Equal;
             tuning.edo = 12;
             tuning.scale = None;
+            tuning.steps = None;
         }
         tuning
     }
@@ -3067,6 +3096,35 @@ fn name_match_score(noise: &str, candidate: &str) -> f32 {
     matched as f32 / ta.len().max(tb.len()) as f32
 }
 
+/// Resolve a chain of scopes, nearest first, into the tuning they play:
+/// the nearest scope owning the scale supplies the intervals, the
+/// nearest owning the anchor supplies the pitch, and the reported scope
+/// is the nearest owning either. The chain ends at the instrument,
+/// which owns both. Borrowed when one scope supplies both halves.
+fn resolve_owned<'a, const N: usize>(
+    chain: [Option<(&'a Tuning, crate::tuning::TuningScope)>; N],
+) -> (Cow<'a, Tuning>, crate::tuning::TuningScope) {
+    let mut owners = chain.into_iter().flatten().filter(|(tuning, _)| tuning.owns.any()).peekable();
+    let (nearest, scope) = *owners.peek().expect("the instrument owns its tuning");
+    let mut scale = None;
+    let mut anchor = None;
+    for (tuning, _) in owners {
+        if scale.is_none() && tuning.owns.scale {
+            scale = Some(tuning);
+        }
+        if anchor.is_none() && tuning.owns.anchor {
+            anchor = Some(tuning);
+        }
+    }
+    let scale = scale.unwrap_or(nearest);
+    let anchor = anchor.unwrap_or(nearest);
+    if std::ptr::eq(scale, anchor) {
+        (Cow::Borrowed(scale), scope)
+    } else {
+        (Cow::Owned(scale.with_anchor_of(anchor)), scope)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4731,6 +4789,7 @@ mod tests {
             offset_cents: 0.0,
             period: 1200.0,
             steps: None,
+            owns: crate::tuning::Owns::BOTH,
         });
         let meantone_c = console.note_on_manual(0, 60, 127).0[0].spec.rate;
         let expected = (10.265f32 / 1200.0).exp2();
@@ -4754,6 +4813,7 @@ mod tests {
             offset_cents: 0.0,
             period: 1200.0,
             steps: None,
+            owns: crate::tuning::Owns::BOTH,
         });
         let (transposed, _) = console.note_on_manual(0, 60, 127);
         assert_eq!(transposed.len(), 2, "both drawn stops sound");
@@ -4785,6 +4845,7 @@ mod tests {
                 offset_cents: 0.0,
                 period: 1200.0,
                 steps: None,
+                owns: crate::tuning::Owns::BOTH,
             }),
         );
         console.set_coupler(0, true); // II/I: playing the Great adds the Swell
@@ -4815,6 +4876,7 @@ mod tests {
                 offset_cents: 0.0,
                 period: 1200.0,
                 steps: None,
+                owns: crate::tuning::Owns::BOTH,
             }),
         );
         assert!(console.note_on_manual(0, 96, 127).0.is_empty(), "96+2 runs off the Great");
@@ -4838,6 +4900,52 @@ mod tests {
         let rate = starts[0].spec.rate;
         console.note_off_manual(0, 60);
         rate
+    }
+
+    /// The anchor and the scale resolve separately: a division that
+    /// owns only its temperament follows every later change of the
+    /// instrument's pitch, and one that owns only its pitch plays the
+    /// instrument's temperament there.
+    #[test]
+    fn anchor_and_scale_inherit_separately() {
+        use crate::tuning::{Owns, PitchReference, Temperament, Tuning, TuningScope};
+        let mut console = coupled_console();
+        let at = |hz: f64| PitchReference { key: 69, hz };
+        let whole = |temperament, hz| Tuning { temperament, reference: at(hz), ..Tuning::default() };
+        let scale_only = Owns { anchor: false, scale: true };
+        let anchor_only = Owns { anchor: true, scale: false };
+        // What the Great's C speaks with one whole tuning on the division.
+        let expected = |console: &mut Console, tuning: Tuning| {
+            let kept = console.manual_tuning(0);
+            let stop = console.stop_own_tuning(StopId(1));
+            console.set_stop_tuning(StopId(1), None);
+            console.set_manual_tuning(0, Some(tuning));
+            let rate = great_c_rate(console);
+            console.set_manual_tuning(0, kept);
+            console.set_stop_tuning(StopId(1), stop);
+            rate
+        };
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-5;
+
+        console.set_tuning(whole(Temperament::Equal, 440.0));
+        console.set_manual_tuning(0, Some(Tuning { owns: scale_only, ..whole(Temperament::Meantone4, 440.0) }));
+        let want = expected(&mut console, whole(Temperament::Meantone4, 440.0));
+        assert!(near(great_c_rate(&mut console), want));
+        console.set_tuning(whole(Temperament::Equal, 415.0));
+        let want = expected(&mut console, whole(Temperament::Meantone4, 415.0));
+        assert!(near(great_c_rate(&mut console), want), "the division follows the new pitch");
+
+        console.set_tuning(whole(Temperament::Meantone4, 415.0));
+        console.set_manual_tuning(0, Some(Tuning { owns: anchor_only, ..whole(Temperament::Equal, 466.0) }));
+        let want = expected(&mut console, whole(Temperament::Meantone4, 466.0));
+        assert!(near(great_c_rate(&mut console), want), "own pitch, the instrument's meantone");
+        assert_eq!(console.stop_tuning_resolved(StopId(1)).1, TuningScope::Division);
+        assert!((console.manual_tuning_resolved(0).reference.hz - 466.0).abs() < 1e-9);
+
+        console.set_stop_tuning(StopId(1), Some(Tuning { owns: scale_only, ..whole(Temperament::Pythagorean, 440.0) }));
+        let want = expected(&mut console, whole(Temperament::Pythagorean, 466.0));
+        assert!(near(great_c_rate(&mut console), want), "the stop's scale at the division's pitch");
+        assert_eq!(console.stop_tuning_resolved(StopId(1)).1, TuningScope::Stop);
     }
 
     /// A stop plays its own tuning; else what its pin names; else its
@@ -4972,6 +5080,7 @@ mod tests {
             offset_cents: 0.0,
             period: 1200.0,
             steps: None,
+            owns: crate::tuning::Owns::BOTH,
         };
         let mut console = coupled_console();
         console.set_manual_tuning(0, Some(tuning));
@@ -5071,6 +5180,7 @@ mod tests {
             offset_cents: 0.0,
             period: 1200.0,
             steps: None,
+            owns: crate::tuning::Owns::BOTH,
         };
         let mut console = coupled_console();
         let (starts, _) = console.note_on_manual(0, 74, 127);
@@ -5155,6 +5265,7 @@ mod tests {
             offset_cents: 0.0,
             period: 1200.0,
             steps: None,
+            owns: crate::tuning::Owns::BOTH,
         };
         let mut console = coupled_console();
         console.set_manual_tuning(0, Some(tuning));

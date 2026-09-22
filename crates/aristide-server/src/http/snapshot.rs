@@ -465,6 +465,15 @@ struct TuningView {
     /// scale's effective mapping middle key.
     #[serde(skip_serializing_if = "Option::is_none")]
     start_key: Option<u8>,
+    /// Which halves the scope holding this tuning owns; resolved
+    /// tunings are whole, so they read both.
+    own: OwnView,
+}
+
+#[derive(Serialize)]
+struct OwnView {
+    anchor: bool,
+    scale: bool,
 }
 
 #[derive(Serialize)]
@@ -524,7 +533,7 @@ enum StopTuningView {
         stop: u32,
         follow: &'static str,
         #[serde(flatten)]
-        tuning: TuningView,
+        tuning: Box<TuningView>,
     },
     Follows {
         stop: u32,
@@ -1040,7 +1049,7 @@ fn snapshot(state: &State) -> Snapshot {
                         Some(tuning) => StopTuningView::Own {
                             stop: stop.0,
                             follow: "own",
-                            tuning: tuning_view(tuning),
+                            tuning: Box::new(tuning_view(tuning)),
                         },
                         None => StopTuningView::Follows {
                             stop: stop.0,
@@ -1163,7 +1172,7 @@ fn tuning_view(tuning: &crate::tuning::Tuning) -> TuningView {
     // or under a scale or steps tuning (no twelve-class table governs
     // either); under `original` the measured home table stands in,
     // else the rooted (or custom) temperament table.
-    let offsets = (tuning.scale.is_none() && tuning.steps.is_none() && tuning.edo == 12).then(
+    let offsets = (tuning.scale.is_none() && tuning.steps.is_none() && !tuning.equal_division()).then(
         || {
             let table = if !tuning.corrects_pipes() {
                 tuning
@@ -1182,7 +1191,7 @@ fn tuning_view(tuning: &crate::tuning::Tuning) -> TuningView {
         "scale"
     } else if tuning.steps.is_some() {
         "steps"
-    } else if tuning.edo != 12 {
+    } else if tuning.equal_division() {
         "equal"
     } else {
         "temperament"
@@ -1200,7 +1209,7 @@ fn tuning_view(tuning: &crate::tuning::Tuning) -> TuningView {
             Some(v.iter().map(|c| Fixed::new(*c, 3)).collect())
         }
         (None, Some(steps)) => Some(steps.steps.iter().map(|c| Fixed::new(*c, 3)).collect()),
-        (None, None) if tuning.edo != 12 => {
+        (None, None) if tuning.equal_division() => {
             let step_size = tuning.period / tuning.edo.max(1) as f64;
             Some((0..tuning.edo).map(|i| Fixed::new(i as f64 * step_size, 3)).collect())
         }
@@ -1238,6 +1247,7 @@ fn tuning_view(tuning: &crate::tuning::Tuning) -> TuningView {
         period,
         steps: steps_view,
         start_key,
+        own: OwnView { anchor: tuning.owns.anchor, scale: tuning.owns.scale },
     }
 }
 
@@ -1319,4 +1329,72 @@ mod tests {
             "15.0"
         );
     }
+}
+
+/// Every scope the Tuning panel edits, resolved: the instrument, each
+/// division and each stop, with the tuning it plays and which halves
+/// it owns (`GET /api/tuning`).
+#[derive(Serialize)]
+struct ScopesView {
+    instrument: TuningView,
+    manuals: Vec<ManualScopeView>,
+    stops: Vec<StopScopeTuningView>,
+}
+
+#[derive(Serialize)]
+struct ManualScopeView {
+    idx: usize,
+    name: String,
+    own: OwnView,
+    tuning: TuningView,
+}
+
+#[derive(Serialize)]
+struct StopScopeTuningView {
+    id: u32,
+    name: String,
+    midx: usize,
+    own: OwnView,
+    follow: &'static str,
+    scope: &'static str,
+    tuning: TuningView,
+}
+
+pub(super) fn tuning_scopes_json(state: &State) -> Option<String> {
+    let console = state.console()?;
+    let owns = |tuning: Option<crate::tuning::Tuning>| {
+        let owns = tuning.map_or(crate::tuning::Owns::NONE, |t| t.owns);
+        OwnView { anchor: owns.anchor, scale: owns.scale }
+    };
+    let view = ScopesView {
+        instrument: tuning_view(&console.tuning()),
+        manuals: console
+            .manual_states()
+            .iter()
+            .enumerate()
+            .map(|(idx, (_, name, ..))| ManualScopeView {
+                idx,
+                name: name.to_string(),
+                own: owns(console.manual_tuning(idx)),
+                tuning: tuning_view(&console.manual_tuning_resolved(idx)),
+            })
+            .collect(),
+        stops: console
+            .stop_states()
+            .iter()
+            .map(|(id, name, _, midx, _)| {
+                let (resolved, scope) = console.stop_tuning_resolved(*id);
+                StopScopeTuningView {
+                    id: id.0,
+                    name: name.to_string(),
+                    midx: *midx,
+                    own: owns(console.stop_own_tuning(*id)),
+                    follow: console.stop_follow(*id).name(),
+                    scope: scope.name(),
+                    tuning: tuning_view(&resolved),
+                }
+            })
+            .collect(),
+    };
+    Some(serde_json::to_string(&view).expect("tuning scopes serialize"))
 }

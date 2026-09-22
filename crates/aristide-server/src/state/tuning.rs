@@ -31,7 +31,12 @@ impl State {
             period: tuning.period,
             steps: tuning.steps.as_ref().map(|steps| steps.steps.clone()),
             steps_period: tuning.steps.as_ref().and_then(|steps| steps.period),
-            start_key: tuning.steps.as_ref().map_or(60, |steps| steps.start_key),
+            start_key: match (&tuning.steps, &tuning.scale) {
+                (Some(steps), _) => steps.start_key,
+                (None, Some(scale)) if scale.kbm.is_none() => scale.mapping.middle_key.clamp(0, 127) as u8,
+                _ => 60,
+            },
+            owns: tuning.owns,
         }
     }
 

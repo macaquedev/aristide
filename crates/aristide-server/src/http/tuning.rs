@@ -6,9 +6,18 @@ use std::sync::Mutex;
 use aristide_engine::Command;
 
 use super::{bad_request, json, param, unescape, Reply};
-use super::snapshot::state_json;
+use super::snapshot::{state_json, tuning_scopes_json};
 use crate::console::Console;
 use crate::State;
+
+/// `GET /api/tuning`: every scope the Tuning panel edits, resolved.
+pub(super) fn scopes(state: &Mutex<State>, _query: &str) -> Reply {
+    let state = state.lock().expect("state poisoned");
+    match tuning_scopes_json(&state) {
+        Some(body) => json(body),
+        None => bad_request("no organ is loaded"),
+    }
+}
 
 pub(super) fn set(state: &Mutex<State>, query: &str) -> Reply {
     {
@@ -67,6 +76,7 @@ pub(super) fn set(state: &Mutex<State>, query: &str) -> Reply {
                 tuning.scale = None;
                 tuning.steps = None;
                 tuning.edo = 12;
+                tuning.period = 1200.0;
                 if !tuning.corrects_pipes() && !anchor_given {
                     tuning.reference = tuning.home_reference(tuning.reference.key);
                 }
@@ -98,6 +108,7 @@ pub(super) fn set(state: &Mutex<State>, query: &str) -> Reply {
                 tuning.scale = None;
                 tuning.steps = None;
                 tuning.edo = 12;
+                tuning.period = 1200.0;
             }
             if let Some(offset) = param(query, "offset_cents") {
                 tuning.offset_cents = offset
@@ -123,7 +134,9 @@ pub(super) fn set(state: &Mutex<State>, query: &str) -> Reply {
             // repeat interval (a plain number, default 1200); under
             // a steps collection, its own repeat interval (`none`
             // clears it — no repetition).
-            if let Some(spec) = param(query, "period") {
+            // A request naming `steps=` gives its period to the new
+            // collection below instead.
+            if let Some(spec) = param(query, "period").filter(|_| param(query, "steps").is_none()) {
                 if let Some(steps) = &tuning.steps {
                     let mut updated = (**steps).clone();
                     updated.period = match spec {
@@ -156,7 +169,15 @@ pub(super) fn set(state: &Mutex<State>, query: &str) -> Reply {
                 if steps.is_empty() {
                     return Err("steps needs at least one value".into());
                 }
-                let period = tuning.steps.as_ref().and_then(|s| s.period);
+                // A `period=` in the same request is this collection's;
+                // otherwise it keeps the repeat it had (none, if new).
+                let period = match param(query, "period") {
+                    Some("" | "none" | "off") => None,
+                    Some(spec) => Some(spec.parse::<f64>().map_err(|_| {
+                        format!("period {spec:?} is not a number of cents or \"none\"")
+                    })?),
+                    None => tuning.steps.as_ref().and_then(|s| s.period),
+                };
                 let start_key = tuning.steps.as_ref().map_or(60, |s| s.start_key);
                 tuning.steps = Some(std::sync::Arc::new(crate::tuning::StepsTuning {
                     steps,
@@ -168,12 +189,13 @@ pub(super) fn set(state: &Mutex<State>, query: &str) -> Reply {
             if let Some(spec) = param(query, "start_key").map(unescape) {
                 let key = parse_reference_key(&spec)
                     .ok_or_else(|| format!("start_key {spec:?} names no key"))?;
-                let Some(steps) = &tuning.steps else {
-                    return Err("start_key only applies to a steps tuning".into());
-                };
-                let mut updated = (**steps).clone();
-                updated.start_key = key;
-                tuning.steps = Some(std::sync::Arc::new(updated));
+                if let Some(steps) = &tuning.steps {
+                    let mut updated = (**steps).clone();
+                    updated.start_key = key;
+                    tuning.steps = Some(std::sync::Arc::new(updated));
+                } else if !tuning.set_scale_start(key) {
+                    return Err("start_key only applies to steps or a scale without a keymap".into());
+                }
             }
             // The anchor: `reference_key` (a note name or MIDI
             // number) and `reference_hz`, either alone keeping
@@ -243,6 +265,50 @@ pub(super) fn set(state: &Mutex<State>, query: &str) -> Reply {
             }
             Ok(tuning)
         };
+        // Which halves the request edits: anchor fields make the scope
+        // own its pitch, scale fields its intervals. `own=anchor|scale|
+        // both` adopts a half as it stands (audibly a no-op) and
+        // `follow=anchor|scale` returns one to the scopes above. A bare
+        // request, as before, takes the whole tuning as the scope's own.
+        let touches = |fields: &[&str]| fields.iter().any(|field| param(query, field).is_some());
+        let anchor_touched = touches(&["a4", "reference_key", "reference_hz", "offset_cents"]);
+        let scale_touched = touches(&[
+            "temperament", "root", "offsets", "edo", "period", "steps", "start_key", "scale",
+            "keymap", "pipes",
+        ]);
+        let own_param = param(query, "own");
+        let part_follow = follow.as_deref().filter(|f| matches!(*f, "anchor" | "scale"));
+        let owns_after = |before: crate::tuning::Owns| -> Result<crate::tuning::Owns, String> {
+            let mut owns = before;
+            owns.anchor |= anchor_touched;
+            owns.scale |= scale_touched;
+            match own_param {
+                Some("anchor") => owns.anchor = true,
+                Some("scale") => owns.scale = true,
+                Some("both") => owns = crate::tuning::Owns::BOTH,
+                Some(other) => return Err(format!("own must be anchor, scale or both, not {other:?}")),
+                None => {}
+            }
+            match part_follow {
+                Some("anchor") => owns.anchor = false,
+                Some("scale") => owns.scale = false,
+                _ => {}
+            }
+            if !anchor_touched && !scale_touched && own_param.is_none() && part_follow.is_none() {
+                owns = crate::tuning::Owns::BOTH;
+            }
+            Ok(owns)
+        };
+        // A scope's new own tuning, patched from what it resolves to
+        // now, or `None` when it ends up owning neither half.
+        let own_tuning = |resolved: crate::tuning::Tuning,
+                          before: Option<crate::tuning::Owns>|
+         -> Result<Option<crate::tuning::Tuning>, String> {
+            let owns = owns_after(before.unwrap_or(crate::tuning::Owns::NONE))?;
+            let mut tuning = patched(resolved)?;
+            tuning.owns = owns;
+            Ok(owns.any().then_some(tuning))
+        };
         match (stop, source, manual) {
             (Some(stop), _, _) => {
                 let Some(console) = state.console() else {
@@ -250,24 +316,25 @@ pub(super) fn set(state: &Mutex<State>, query: &str) -> Reply {
                 };
                 if let Some(rank) = rank {
                     let back = reset || follow.as_deref() == Some("stop");
-                    let current = console
-                        .rank_tuning(stop, rank)
-                        .unwrap_or_else(|| console.stop_tuning_resolved(stop).0.clone());
-                    let tuning = match (!back).then(|| patched(current)).transpose() {
-                        Ok(tuning) => tuning,
+                    let before = console.rank_tuning(stop, rank).map(|t| t.owns);
+                    let resolved = console.rank_tuning_resolved(stop, rank);
+                    let tuning = match (!back).then(|| own_tuning(resolved, before)).transpose() {
+                        Ok(tuning) => tuning.flatten(),
                         Err(err) => return bad_request(&err),
                     };
                     if let Err(err) = state.tune_rank(stop, rank, tuning) {
                         return bad_request(&err);
                     }
                 } else {
-                    let change = match follow.as_deref() {
-                        Some("own") | None if !reset => {
-                            let current = console
-                                .stop_own_tuning(stop)
-                                .unwrap_or_else(|| console.stop_tuning_resolved(stop).0.clone());
-                            match patched(current) {
-                                Ok(tuning) => Err(tuning),
+                    let whole_follow = follow.as_deref().filter(|f| !matches!(*f, "anchor" | "scale" | "own"));
+                    let change = match whole_follow {
+                        None if !reset => {
+                            let before = console.stop_own_tuning(stop).map(|t| t.owns);
+                            let resolved = console.stop_tuning_resolved(stop).0.into_owned();
+                            let pinned = console.stop_follow(stop);
+                            match own_tuning(resolved, before) {
+                                Ok(Some(tuning)) => Err(tuning),
+                                Ok(None) => Ok(pinned),
                                 Err(err) => return bad_request(&err),
                             }
                         }
@@ -276,7 +343,7 @@ pub(super) fn set(state: &Mutex<State>, query: &str) -> Reply {
                             Some(follow) => Ok(follow),
                             None => {
                                 return bad_request(
-                                    "follow must be auto, division, source, organ or own",
+                                    "follow must be auto, division, source, organ, own, anchor or scale",
                                 )
                             }
                         },
@@ -291,9 +358,10 @@ pub(super) fn set(state: &Mutex<State>, query: &str) -> Reply {
                     return bad_request("no organ is loaded");
                 };
                 let back = reset || follow.as_deref() == Some("organ");
-                let current = console.source_tuning(&alias).unwrap_or(console.tuning());
-                let tuning = match (!back).then(|| patched(current)).transpose() {
-                    Ok(tuning) => tuning,
+                let before = console.source_tuning(&alias).map(|t| t.owns);
+                let resolved = console.source_tuning_resolved(&alias);
+                let tuning = match (!back).then(|| own_tuning(resolved, before)).transpose() {
+                    Ok(tuning) => tuning.flatten(),
                     Err(err) => return bad_request(&err),
                 };
                 if let Err(err) = state.tune_source(&alias, tuning) {
@@ -302,13 +370,30 @@ pub(super) fn set(state: &Mutex<State>, query: &str) -> Reply {
             }
             (None, None, Some(manual)) => {
                 let reset = reset || follow.as_deref() == Some("organ");
-                let current = state
-                    .console()
-                    .map(|console| console.manual_tuning(manual).unwrap_or(console.tuning()));
-                if let Some(current) = current {
-                    let tuning = match (!reset).then(|| patched(current)).transpose() {
-                        Ok(tuning) => tuning,
-                        Err(err) => return bad_request(&err),
+                let current = state.console().map(|console| {
+                    (console.manual_tuning(manual), console.manual_tuning_resolved(manual))
+                });
+                if let Some((own, mut resolved)) = current {
+                    let before = own.as_ref().map(|t| t.owns);
+                    if let Some(own) = &own {
+                        resolved.transpose = own.transpose;
+                    }
+                    let tuning = if reset {
+                        None
+                    } else {
+                        // A division's transposer lives with its tuning,
+                        // so a division owning neither half still keeps
+                        // one while it transposes.
+                        let owns = match owns_after(before.unwrap_or(crate::tuning::Owns::NONE)) {
+                            Ok(owns) => owns,
+                            Err(err) => return bad_request(&err),
+                        };
+                        let mut tuning = match patched(resolved) {
+                            Ok(tuning) => tuning,
+                            Err(err) => return bad_request(&err),
+                        };
+                        tuning.owns = owns;
+                        (owns.any() || tuning.transpose != 0).then_some(tuning)
                     };
                     state.tune_manual(manual, tuning);
                 }

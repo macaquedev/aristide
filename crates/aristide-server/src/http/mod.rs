@@ -78,6 +78,7 @@ pub(crate) fn respond(
         (Method::Post, "/api/noises") => room::noises,
         (Method::Post, "/api/bus") => room::bus,
         (Method::Post, "/api/reverb") => room::reverb,
+        (Method::Get, "/api/tuning") => tuning::scopes,
         (Method::Post, "/api/tuning") => tuning::set,
         (Method::Post, "/api/organ/move") => stops::move_to_manual,
         (Method::Post, "/api/organ/coupler") => couplers::keep,
@@ -596,6 +597,12 @@ mod tests {
                 scale: None,
                 keymap: None,
                 pipes: None,
+                temperament_root: None,
+                offsets: None,
+                offset_cents: None,
+                period: None,
+                steps: None,
+                start_key: None,
             }]
         );
         assert_eq!(saved.sidecar.couplers.drop.len(), 1);
@@ -745,6 +752,101 @@ mod tests {
     /// before. Reverb also proves the "no [reverb] table, no write"
     /// rule at the endpoint, not just the writer: the demo set's own
     /// sidecar keeps reverb off, so its saved file never grows one.
+    #[test]
+    fn a_division_owns_its_scale_and_follows_the_pitch() {
+        let Some(state) = demo_state() else { return };
+        let path = std::env::temp_dir().join("aristide-split-tuning-endpoint-test.toml");
+        let _ = std::fs::remove_file(&path);
+        {
+            let mut state = state.lock().expect("state poisoned");
+            let names: Vec<String> = state.manual_names();
+            state.setup.sources = vec![(
+                "Demo".into(),
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../testsets/grandorgue-demo/demo.organ"),
+            )];
+            state.setup.pulls = names
+                .iter()
+                .enumerate()
+                .map(|(index, name)| (0, name.clone(), index))
+                .collect();
+            state.setup.implicit = true;
+        }
+        respond(
+            &state,
+            &Method::Post,
+            &format!("/api/organ/save?path={}", path.display().to_string().replace('/', "%2F")),
+        );
+        let scopes = || -> serde_json::Value {
+            let response = respond(&state, &Method::Get, "/api/tuning");
+            assert_eq!(response.status_code().0, 200);
+            let mut body = String::new();
+            std::io::Read::read_to_string(&mut response.into_reader(), &mut body).expect("reads");
+            serde_json::from_str(&body).expect("json")
+        };
+        let manual = |scopes: &serde_json::Value| scopes["manuals"][1].clone();
+        let own = |view: &serde_json::Value| (view["own"]["anchor"].as_bool().unwrap(), view["own"]["scale"].as_bool().unwrap());
+        let saved_manual = || {
+            aristide_formats::instrument::load(&path)
+                .expect("reloads")
+                .manual_tuning
+                .into_iter()
+                .find(|def| def.manual == 1)
+        };
+
+        respond(&state, &Method::Post, "/api/tuning?manual=1&temperament=meantone4&root=D");
+        let view = manual(&scopes());
+        assert_eq!(own(&view), (false, true), "naming a temperament owns the scale only");
+        assert_eq!(view["tuning"]["temperament"], "meantone4");
+        assert_eq!(view["tuning"]["root"], 2);
+        let def = saved_manual().expect("the division is written");
+        assert_eq!(def.temperament.as_deref(), Some("meantone4"));
+        assert_eq!(def.temperament_root.as_deref(), Some("D"));
+        assert_eq!((def.reference_key.as_ref(), def.reference_hz), (None, None), "the pitch is left to follow");
+
+        respond(&state, &Method::Post, "/api/tuning?reference_hz=415");
+        let view = manual(&scopes());
+        assert_eq!(view["tuning"]["reference"]["hz"], 415.0, "the division follows the instrument's pitch");
+        assert_eq!(view["tuning"]["temperament"], "meantone4");
+
+        respond(&state, &Method::Post, "/api/tuning?manual=1&own=anchor");
+        assert_eq!(own(&manual(&scopes())), (true, true));
+        assert_eq!(saved_manual().expect("written").reference_hz, Some(415.0));
+        respond(&state, &Method::Post, "/api/tuning?reference_hz=440");
+        assert_eq!(manual(&scopes())["tuning"]["reference"]["hz"], 415.0, "an owned pitch stays");
+
+        respond(&state, &Method::Post, "/api/tuning?manual=1&follow=anchor");
+        let view = manual(&scopes());
+        assert_eq!(own(&view), (false, true));
+        assert_eq!(view["tuning"]["reference"]["hz"], 440.0);
+        respond(&state, &Method::Post, "/api/tuning?manual=1&follow=scale");
+        let view = manual(&scopes());
+        assert_eq!(own(&view), (false, false), "owning neither half follows the instrument");
+        assert!(saved_manual().is_none(), "and leaves nothing in the file");
+        let response = respond(&state, &Method::Post, "/api/tuning?manual=1&own=everything");
+        assert_eq!(response.status_code().0, 400);
+
+        respond(&state, &Method::Post, "/api/tuning?manual=1&steps=0,137,311&period=none&start_key=69");
+        let view = manual(&scopes());
+        assert_eq!(view["tuning"]["system"], "steps", "{view}");
+        assert!(view["tuning"]["period"].is_null(), "no repetition: {view}");
+        respond(&state, &Method::Post, "/api/tuning?manual=1&edo=12&period=1901.955");
+        let view = manual(&scopes());
+        assert_eq!(view["tuning"]["system"], "equal", "twelve steps to a 3:1 are a division: {view}");
+        respond(&state, &Method::Post, "/api/tuning?manual=1&temperament=vallotti");
+        let view = manual(&scopes());
+        assert_eq!((view["tuning"]["system"].as_str(), view["tuning"]["period"].as_f64()), (Some("temperament"), Some(1200.0)));
+        respond(&state, &Method::Post, "/api/tuning?manual=1&follow=scale");
+
+        let stop = scopes()["stops"][0]["id"].as_u64().expect("a stop");
+        respond(&state, &Method::Post, &format!("/api/tuning?stop={stop}&offset_cents=5"));
+        let view = scopes()["stops"][0].clone();
+        assert_eq!(own(&view), (true, false), "a fine offset owns the pitch only");
+        assert_eq!(view["scope"], "stop");
+        assert_eq!(view["tuning"]["offset_cents"], 5.0);
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[test]
     fn tuning_reverb_and_noises_persist_when_the_organ_has_a_file() {
         let Some(state) = demo_state() else { return };

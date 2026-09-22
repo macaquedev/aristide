@@ -1191,9 +1191,13 @@ pub struct ManualTuningFields {
     /// The steps collection's own repeat interval; `None` writes as
     /// absence (no repetition).
     pub steps_period: Option<f64>,
-    /// The key that plays step 1 of `steps`; 60 (middle C, the
-    /// default) writes as absence.
+    /// The key that plays step 1 of `steps`, or the first degree of a
+    /// scale without a `.kbm`; 60 (middle C, the default) writes as
+    /// absence.
     pub start_key: u8,
+    /// Which halves the scope owns: the other half's fields are not
+    /// written, so they keep following the scopes above.
+    pub owns: crate::tuning::Owns,
 }
 
 /// One manual as `save_composite` writes it: name, compass, and any
@@ -1348,12 +1352,13 @@ pub fn write_composite_manual_tuning(
 /// are removed so the file never says two things at once.
 fn write_tuning_fields(table: &mut toml_edit::Table, fields: &ManualTuningFields, transpose: bool) {
     let system_active = fields.scale.is_some() || fields.steps.is_some();
+    let equal = fields.edo != 12 || fields.period != 1200.0;
     // A scale or a steps collection supersedes both the temperament
     // and the division count; and at 12 divisions — the file's
     // default — the edo line goes, while the temperament line goes at
     // any other count (twelve-class vocabulary means nothing there).
     // The file never says two things at once.
-    if system_active || fields.edo != 12 {
+    if system_active || equal {
         table.remove("temperament");
     } else {
         table["temperament"] = toml_edit::value(fields.temperament.as_str());
@@ -1394,7 +1399,7 @@ fn write_tuning_fields(table: &mut toml_edit::Table, fields: &ManualTuningFields
     // The root is dormant with a scale, steps, or away from 12-EDO,
     // same as the temperament line, and C (0) writes as the default
     // absence.
-    if fields.temperament_root != 0 && !system_active && fields.edo == 12 {
+    if fields.temperament_root != 0 && !system_active && !equal {
         table["temperament_root"] = toml_edit::value(aristide_formats::sidecar::pitch_class_name(
             fields.temperament_root,
         ));
@@ -1441,12 +1446,39 @@ fn write_tuning_fields(table: &mut toml_edit::Table, fields: &ManualTuningFields
         }
         None => {
             table.remove("steps");
-            table.remove("start_key");
-            if fields.scale.is_none() && fields.edo != 12 && fields.period != 1200.0 {
+            if fields.scale.is_some() && fields.keymap.is_none() && fields.start_key != 60 {
+                table["start_key"] = toml_edit::value(aristide_formats::sidecar::note_name(
+                    fields.start_key,
+                ));
+            } else {
+                table.remove("start_key");
+            }
+            if fields.scale.is_none() && fields.period != 1200.0 {
                 table["period"] = toml_edit::value(fields.period);
             } else {
                 table.remove("period");
             }
+        }
+    }
+    if !fields.owns.anchor {
+        for key in ["reference_key", "reference_hz", "a4_hz", "offset_cents"] {
+            table.remove(key);
+        }
+    }
+    if !fields.owns.scale {
+        for key in [
+            "temperament",
+            "edo",
+            "scale",
+            "keymap",
+            "pipes",
+            "temperament_root",
+            "offsets",
+            "period",
+            "steps",
+            "start_key",
+        ] {
+            table.remove(key);
         }
     }
 }
@@ -4226,6 +4258,7 @@ mod tests {
             steps: None,
             steps_period: None,
             start_key: 60,
+            owns: crate::tuning::Owns::BOTH,
         };
         assert!(
             write_composite_manual_tuning(&path, "Grand orgue", Some(tuned("equal", Some("19edo.scl"))))
@@ -4958,6 +4991,7 @@ device = "Keys"
             steps: None,
             steps_period: None,
             start_key: 60,
+            owns: crate::tuning::Owns::BOTH,
         };
         write_composite_tuning(&path, &fields(crate::tuning::PipeRetune::Exact)).expect("exact");
         let text = std::fs::read_to_string(&path).expect("reads");
@@ -5017,6 +5051,7 @@ device = "Keys"
             steps: None,
             steps_period: None,
             start_key: 60,
+            owns: crate::tuning::Owns::BOTH,
         };
 
         assert!(write_composite_source_tuning(&path, "positif", Some(&fields("meantone4"))).expect("set"));
@@ -5110,6 +5145,7 @@ device = "Keys"
                 steps: None,
                 steps_period: None,
                 start_key: 60,
+                owns: crate::tuning::Owns::BOTH,
             },
         )
         .expect("tuning");
@@ -5148,6 +5184,7 @@ device = "Keys"
                 steps: None,
                 steps_period: None,
                 start_key: 60,
+                owns: crate::tuning::Owns::BOTH,
             },
         )
         .expect("tuning");
@@ -5174,6 +5211,7 @@ device = "Keys"
                 steps: None,
                 steps_period: None,
                 start_key: 60,
+                owns: crate::tuning::Owns::BOTH,
             },
         )
         .expect("tuning");
@@ -5251,6 +5289,7 @@ volume = 0.7
                 steps: None,
                 steps_period: None,
                 start_key: 60,
+                owns: crate::tuning::Owns::BOTH,
             },
         )
         .expect("tuning");

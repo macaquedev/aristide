@@ -666,6 +666,12 @@ pub struct ManualTuningDef {
     pub scale: Option<String>,
     pub keymap: Option<String>,
     pub pipes: Option<String>,
+    pub temperament_root: Option<String>,
+    pub offsets: Option<[f32; 12]>,
+    pub offset_cents: Option<f64>,
+    pub period: Option<f64>,
+    pub steps: Option<Vec<f64>>,
+    pub start_key: Option<KeySpec>,
 }
 
 /// Where an assembled stop came from — the coordinates every per-stop
@@ -1209,6 +1215,12 @@ fn manual_tuning_defs(def: &Definition) -> Vec<ManualTuningDef> {
                 || manual.transpose.is_some()
                 || manual.scale.is_some()
                 || manual.pipes.is_some()
+                || manual.temperament_root.is_some()
+                || manual.offsets.is_some()
+                || manual.offset_cents.is_some()
+                || manual.period.is_some()
+                || manual.steps.is_some()
+                || manual.start_key.is_some()
         })
         .map(|(index, manual)| ManualTuningDef {
             manual: index,
@@ -1220,6 +1232,12 @@ fn manual_tuning_defs(def: &Definition) -> Vec<ManualTuningDef> {
             scale: manual.scale.clone(),
             keymap: manual.keymap.clone(),
             pipes: manual.pipes.clone(),
+            temperament_root: manual.temperament_root.clone(),
+            offsets: manual.offsets,
+            offset_cents: manual.offset_cents,
+            period: manual.period,
+            steps: manual.steps.clone(),
+            start_key: manual.start_key.clone(),
         })
         .collect()
 }
@@ -2756,6 +2774,12 @@ drop = ["Swell to Great"]
                 scale: None,
                 keymap: None,
                 pipes: None,
+                temperament_root: None,
+                offsets: None,
+                offset_cents: None,
+                period: None,
+                steps: None,
+                start_key: None,
             }]
         );
         assert_eq!(built.sidecar.couplers.drop, ["Swell to Great"]);

@@ -950,12 +950,12 @@ fn apply_manual_tuning(
             scale: def.scale.clone(),
             keymap: def.keymap.clone(),
             pipes: def.pipes.clone(),
-            temperament_root: None,
-            offsets: None,
-            offset_cents: None,
-            period: None,
-            steps: None,
-            start_key: None,
+            temperament_root: def.temperament_root.clone(),
+            offsets: def.offsets,
+            offset_cents: def.offset_cents,
+            period: def.period,
+            steps: def.steps.clone(),
+            start_key: def.start_key.clone(),
         };
         let mut own = override_tuning(live_tuning, &fields, None, "manual tuning");
         own.transpose = def.transpose.unwrap_or(live_tuning.transpose).clamp(-12, 12);
@@ -1037,7 +1037,7 @@ fn apply_stop_tuning(
                     load_warnings.push(note);
                     continue;
                 };
-                let base = console.stop_tuning_resolved(stop).0.clone();
+                let base = console.stop_tuning_resolved(stop).0.into_owned();
                 let own = override_tuning(
                     &base,
                     &fields,
@@ -1062,7 +1062,7 @@ fn apply_stop_tuning(
                     }
                 },
                 None => {
-                    let base = console.stop_tuning_resolved(stop).0.clone();
+                    let base = console.stop_tuning_resolved(stop).0.into_owned();
                     let own = override_tuning(
                         &base,
                         &fields,
@@ -1161,6 +1161,7 @@ fn configure_tuning(
         home: home.clone(),
         temperament_root,
         offset_cents: sidecar.tuning.offset_cents.unwrap_or(0.0),
+        owns: tuning::Owns::BOTH,
     };
     if let Some(scl) = &sidecar.tuning.scale {
         live_tuning.scale = load_scale(
@@ -1168,6 +1169,9 @@ fn configure_tuning(
             sidecar.tuning.keymap.as_deref(),
             live_tuning.reference,
         );
+        if let Some(key) = &sidecar.tuning.start_key {
+            live_tuning.set_scale_start(reference_key(key, None));
+        }
     } else if let Some(steps) = &sidecar.tuning.steps {
         let start_key = sidecar
             .tuning
@@ -1233,9 +1237,12 @@ fn configure_tuning(
             .and_then(aristide_formats::sidecar::parse_pitch_class)
             .unwrap_or(base.temperament_root);
         let offset_cents = def.offset_cents.unwrap_or(base.offset_cents);
+        // Naming a twelve-class temperament is naming twelve steps to
+        // the octave, whatever division the scopes above play.
+        let temperament_named = def.temperament.is_some() || def.offsets.is_some();
         let edo = def
             .edo
-            .unwrap_or(base.edo)
+            .unwrap_or(if temperament_named { 12 } else { base.edo })
             .clamp(*tuning::EDO_RANGE.start(), *tuning::EDO_RANGE.end());
         let scale_named = def.scale.is_some()
             || (def.temperament.is_none()
@@ -1259,7 +1266,12 @@ fn configure_tuning(
         });
         // `period` is shared between the equal-division and steps
         // systems; which one it feeds depends on which is named here.
-        let period = if def.steps.is_some() { base.period } else { def.period.unwrap_or(base.period) };
+        let period = match (def.steps.is_some(), def.period) {
+            (true, _) => base.period,
+            (false, Some(period)) => period,
+            (false, None) if temperament_named && def.edo.is_none() => 1200.0,
+            (false, None) => base.period,
+        };
         let mut own = tuning::Tuning {
             temperament,
             edo,
@@ -1272,9 +1284,29 @@ fn configure_tuning(
             home: scope_home.or_else(|| home.clone()),
             temperament_root,
             offset_cents,
+            // The fields a scope names are the half it owns; the other
+            // half keeps following the scopes above it.
+            owns: tuning::Owns {
+                anchor: def.reference_key.is_some() || def.reference_hz.is_some() || def.offset_cents.is_some(),
+                scale: def.temperament.is_some()
+                    || def.edo.is_some()
+                    || def.period.is_some()
+                    || def.steps.is_some()
+                    || def.start_key.is_some()
+                    || def.scale.is_some()
+                    || def.keymap.is_some()
+                    || def.pipes.is_some()
+                    || def.temperament_root.is_some()
+                    || def.offsets.is_some(),
+            },
         };
         match &def.scale {
-            Some(scl) => own.scale = load_scale(scl, def.keymap.as_deref(), own.reference),
+            Some(scl) => {
+                own.scale = load_scale(scl, def.keymap.as_deref(), own.reference);
+                if let Some(key) = &def.start_key {
+                    own.set_scale_start(reference_key(key, Some(60)));
+                }
+            }
             // Naming a temperament, a count or steps leaves the scale
             // above.
             None if def.temperament.is_none() && def.edo.is_none() && def.steps.is_none() => {

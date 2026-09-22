@@ -750,6 +750,35 @@ pub struct Tuning {
     /// of a temperament table, an equal division, a scale, or even
     /// `Original`.
     pub offset_cents: f64,
+    /// Which halves of this tuning the scope holding it owns; the rest
+    /// is resolved from the scopes above. The instrument owns both.
+    pub owns: Owns,
+}
+
+/// A scope's tuning is two independently inherited halves: the
+/// *anchor* (reference key, reference Hz and fine offset — which pitch
+/// the instrument stands at) and the *scale* (everything else — which
+/// intervals it plays). A Récit can keep the instrument's 415 Hz while
+/// playing its own meantone, and still follow a later change of pitch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Owns {
+    pub anchor: bool,
+    pub scale: bool,
+}
+
+impl Owns {
+    pub const BOTH: Owns = Owns { anchor: true, scale: true };
+    pub const NONE: Owns = Owns { anchor: false, scale: false };
+
+    pub fn any(self) -> bool {
+        self.anchor || self.scale
+    }
+}
+
+impl Default for Owns {
+    fn default() -> Self {
+        Owns::BOTH
+    }
 }
 
 /// The one legal range for a divisions-per-octave count: 1 (octaves
@@ -770,6 +799,7 @@ impl Default for Tuning {
             home: None,
             temperament_root: 0,
             offset_cents: 0.0,
+            owns: Owns::BOTH,
         }
     }
 }
@@ -819,7 +849,7 @@ impl Tuning {
             let target_hz = self.reference.hz * cents_to_ratio(key_cents - reference_cents);
             return Some(cents_between(equal_ladder_hz(key as f64), target_hz));
         }
-        if self.edo != 12 {
+        if self.equal_division() {
             // Equal steps of `period`/edo cents out from the reference
             // key: the same ladder a generated N-EDO scale with the
             // linear mapping would give, without the ceremony of a file.
@@ -858,7 +888,7 @@ impl Tuning {
         !(self.temperament == Temperament::Original
             && self.scale.is_none()
             && self.steps.is_none()
-            && self.edo == 12)
+            && !self.equal_division())
     }
 
     /// What a target subtracts from its deviation for one pipe: the
@@ -923,9 +953,43 @@ impl Tuning {
                 || scale.mapping.reference_key != self.reference.key as i32)
         {
             let mut refreshed = (**scale).clone();
+            let middle_key = refreshed.mapping.middle_key;
             refreshed.mapping = self.reference.linear_mapping();
+            refreshed.mapping.middle_key = middle_key;
             self.scale = Some(std::sync::Arc::new(refreshed));
         }
+    }
+
+    /// Whether an equal division governs (absent a scale or steps):
+    /// any count other than 12, or 12 steps to anything but a 2:1
+    /// octave — the one case a twelve-class temperament table covers.
+    pub fn equal_division(&self) -> bool {
+        self.edo != 12 || (self.period - 1200.0).abs() > 1e-9
+    }
+
+    /// Put a Scala scale's first degree on `key` (its linear mapping's
+    /// middle key). A `.kbm` places the scale itself, so `false` then.
+    pub fn set_scale_start(&mut self, key: u8) -> bool {
+        let Some(scale) = &self.scale else { return false };
+        if scale.kbm.is_some() {
+            return false;
+        }
+        let mut placed = (**scale).clone();
+        placed.mapping.middle_key = key as i32;
+        self.scale = Some(std::sync::Arc::new(placed));
+        true
+    }
+
+    /// This tuning's scale under `anchor`'s pitch: what a scope plays
+    /// when one scope above supplies its intervals and another its
+    /// reference.
+    pub fn with_anchor_of(&self, anchor: &Tuning) -> Tuning {
+        let mut merged = self.clone();
+        merged.reference = anchor.reference;
+        merged.offset_cents = anchor.offset_cents;
+        merged.owns = Owns::BOTH;
+        merged.refresh_scale_reference();
+        merged
     }
 
     /// Rate multiplier for a pipe sounding MIDI note `key` (applied on
@@ -940,6 +1004,19 @@ impl Tuning {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn twelve_steps_to_a_tritave_are_an_equal_division() {
+        let tuning = Tuning {
+            temperament: Temperament::Meantone4,
+            edo: 12,
+            period: 1200.0 * 3f64.log2(),
+            ..Tuning::default()
+        };
+        assert!(tuning.equal_division() && tuning.corrects_pipes());
+        let hz = equal_ladder_hz(81.0) * cents_to_ratio(tuning.deviation_cents(81).expect("sounds"));
+        assert!((hz - 1320.0).abs() < 1e-6, "A4 + 12 steps is 3 × 440: {hz}");
+    }
 
     #[test]
     fn tables_match_the_cbh_reference() {
