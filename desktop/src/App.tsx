@@ -20,6 +20,13 @@ export function App() {
   const [undo, setUndo] = useState<() => void>();
   const offerUndo = useCallback((action?: () => void) => setUndo(() => action), []);
   const loading = useRef(false);
+  // Nothing loads at startup: with no organ, the app opens on the Library.
+  const started = useRef(false);
+  useEffect(() => {
+    if (!state || started.current) return;
+    started.current = true;
+    if (!state.organ && !state.loading) setPanel('Library');
+  }, [state]);
   useEffect(() => {
     if (state?.loading) loading.current = true;
     else if (loading.current) {

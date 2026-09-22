@@ -90,7 +90,7 @@ Target: sound within two minutes of first launch, with no settings dialog seen.
 3. **Test sound.** The audio device is chosen automatically and a test note plays. Change it only if it's wrong.
 4. **Pick an organ.** The Library shows what was found. Tap one, it loads, and the user lands in Play in perform mode.
 
-Every day after: open the app, the last instrument loads, Play appears. Zero taps.
+Every day after: open the app and the Library appears. Nothing loads until an organ is chosen (Alex, 22 Sept 2026; this replaces restoring the last instrument).
 
 ## Play
 

@@ -134,3 +134,13 @@ test('dismissed connection error stays closed until a new outage', async ({ page
   offline = true;
   await expect(page.getByRole('dialog')).toContainText('Aristide is not connected');
 });
+
+test('with no organ loaded the app opens on the Library', async ({ page }) => {
+  await page.route('**/api/**', route => route.fulfill({ json: {
+    stops: [], manuals: [], couplers: [], trems: [], generals: [], setter: false, gain: 0.178,
+    library: [{ name: 'Test organ', path: '/fixtures/demo.organ' }], midi: { ports: [], manuals: [] },
+  } }));
+  await page.goto('/');
+  await expect(page.getByRole('button', { name: 'Library', exact: true })).toHaveAttribute('aria-current', 'page');
+  await expect(page.getByRole('button', { name: /Test organ/ })).toBeVisible();
+});

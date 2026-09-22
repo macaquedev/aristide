@@ -257,7 +257,7 @@ fn run_server(args: Args, ready: Option<desktop::Ready>) -> Result<()> {
         }
     };
     let desktop = ready.is_some();
-    let pending_load = startup_load(&args, &midi_config, desktop);
+    let pending_load = startup_load(&args);
     if pending_load.is_none() {
         tracing::info!("no organ loaded — pick one in the console");
     }
@@ -694,21 +694,14 @@ extern "C" fn handle_sigint(_signal: libc::c_int) {
     SHUTDOWN.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
-fn startup_load(args: &Args, config: &config::MidiConfig, desktop: bool) -> Option<LoadRequest> {
-    if !args.sets.is_empty() {
-        return Some(LoadRequest {
-            paths: args.sets.clone(),
-            stops: args.stops.clone(),
-            initial: true,
-        });
-    }
-    let paths = config.last_instrument_paths();
-    (desktop && !paths.is_empty()).then_some(LoadRequest {
-        paths,
-        stops: Vec::new(),
-        // An unavailable remembered organ is recoverable through Library. It
-        // must not terminate the runtime (unlike an explicit failed CLI load).
-        initial: false,
+/// Only an organ named on the command line loads at startup. The desktop
+/// app opens on the Library with nothing loaded, so no organ speaks until
+/// the player chooses one (Alex, 2026-09-22).
+fn startup_load(args: &Args) -> Option<LoadRequest> {
+    (!args.sets.is_empty()).then(|| LoadRequest {
+        paths: args.sets.clone(),
+        stops: args.stops.clone(),
+        initial: true,
     })
 }
 
@@ -717,45 +710,12 @@ mod startup_tests {
     use super::*;
 
     #[test]
-    fn desktop_restores_the_whole_session_but_cli_stays_explicit() {
-        let mut config = config::MidiConfig::default();
-        config.remember("Other", std::path::Path::new("/other.organ"));
-        config.last_instrument = vec!["/first.organ".into(), "/second.organ".into()];
-        let request = startup_load(&Args::default(), &config, true).unwrap();
-        assert_eq!(request.paths, config.last_instrument);
-        assert!(
-            !request.initial,
-            "restore failure must leave Library usable"
-        );
-        assert!(startup_load(&Args::default(), &config, false).is_none());
+    fn only_an_organ_named_on_the_command_line_loads_at_startup() {
+        assert!(startup_load(&Args::default()).is_none(), "the desktop opens on the Library");
         let explicit = Args {
             sets: vec!["/chosen.organ".into()],
             ..Default::default()
         };
-        assert_eq!(
-            startup_load(&explicit, &config, true).unwrap().paths,
-            explicit.sets
-        );
-    }
-
-    #[test]
-    fn old_configs_migrate_without_silently_skipping_a_missing_organ() {
-        let config: config::MidiConfig =
-            toml::from_str("[[library]]\nname = 'Last played'\npath = '/missing.organ'\n").unwrap();
-        assert_eq!(
-            startup_load(&Args::default(), &config, true).unwrap().paths,
-            vec![PathBuf::from("/missing.organ")]
-        );
-        assert!(startup_load(&Args::default(), &config::MidiConfig::default(), true).is_none());
-        let saved = toml::to_string(&config::MidiConfig {
-            last_instrument: vec!["/instrument.toml".into()],
-            ..config
-        })
-        .unwrap();
-        let restored: config::MidiConfig = toml::from_str(&saved).unwrap();
-        assert_eq!(
-            restored.last_instrument_paths(),
-            vec![PathBuf::from("/instrument.toml")]
-        );
+        assert_eq!(startup_load(&explicit).unwrap().paths, explicit.sets);
     }
 }
