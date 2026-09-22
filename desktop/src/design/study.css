@@ -37,3 +37,12 @@
   .scope-and-card > .mantine-Stack-root:first-child > div { padding-left: 0 !important; }
   .scope-and-card > .mantine-Stack-root:first-child button { min-width: 170px; }
 }
+.study-header { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; }
+.study-header .mantine-Text-root { display: flex; align-items: center; gap: 6px; }
+.study-layouts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; padding-bottom: 16px; border-bottom: 1px solid var(--mantine-color-default-border); }
+.layout-choice { height: 96px; padding: 8px 12px; }
+.layout-choice .mantine-Button-label { flex-direction: column; gap: 4px; width: 100%; }
+.layout-choice svg { width: 100%; max-width: 180px; height: 48px; flex-shrink: 0; }
+@media (max-width: 760px) {
+  .study-layouts { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+}

@@ -42,9 +42,9 @@ export function BuildStudy({ layout, compact, assign }: { layout: string; compac
   const inspector = voice && <Card withBorder><Group mb="md" justify="space-between"><Text fw={600}>Voice {voices.indexOf(voice) + 1}</Text><Button color="red" variant="subtle" disabled={voices.length === 1} onClick={() => { edit({ ...model, voices: model.voices.filter(v => v.id !== voice.id) }); setSelected(voices.find(v => v.id !== voice.id)!.id); }}>Remove voice</Button></Group><div className="voice-fields">{fields(voice)}</div></Card>;
   return <Stack className={compact ? 'study-compact' : ''}>
     <Group justify="space-between"><div><Text fw={600}>Bourdon variation <span className="modified">◇</span></Text><Text c="dimmed">Grand-orgue · {voices.length} voices per key</Text></div><Group><Select aria-label="Stop tuning" defaultValue="Follow division" data={['Follow division', 'Override']}/>
-      <Button variant="default" disabled={!history.length} onClick={() => { setModel(history.at(-1)!); setHistory(history.slice(0, -1)); }}>Undo study edit</Button>
+      <Button variant="default" disabled={!history.length} onClick={() => { setModel(history.at(-1)!); setHistory(history.slice(0, -1)); }}>Undo</Button>
       <Button onClick={() => { const added = { ...voice, id: crypto.randomUUID() }; edit({ ...model, voices: [...model.voices, added] }); setSelected(added.id); }}>Add voice</Button></Group></Group>
-    <Text c={held === undefined ? 'dimmed' : 'violet'}>{held === undefined ? 'Editing the whole stop · hold a key below to edit that pipe' : `Editing ${noteName(held)} only · release the key to return to the whole stop`}</Text>
+    <Group justify="space-between"><Text c={held === undefined ? 'dimmed' : 'violet'}>{held === undefined ? 'All keys' : `${noteName(held)} only`}</Text><Text c="dimmed" size="sm">Hold key to isolate</Text></Group>
     <Keyboard held={held} overrides={Object.keys(model.keys).map(Number)} change={setHeld}/>
     {layout === 'rows' && (compact ? <Table.ScrollContainer minWidth={1100}><Table withTableBorder withColumnBorders><Table.Thead><Table.Tr>{['Select', 'Source', 'Pitch', 'Delay', 'Level', 'Output', 'Keys', 'Tuning'].map(label => <Table.Th key={label}>{label}</Table.Th>)}</Table.Tr></Table.Thead>
       <Table.Tbody>{voices.map(v => <Table.Tr key={v.id}><Table.Td><Checkbox aria-label={`Select voice ${voices.indexOf(v) + 1}`} checked={selection.includes(v.id)} onChange={e => setSelection(e.currentTarget.checked ? [...selection, v.id] : selection.filter(id => id !== v.id))}/></Table.Td>
@@ -58,7 +58,7 @@ export function BuildStudy({ layout, compact, assign }: { layout: string; compac
       <div className="roll-row"><span/>{Array.from({ length: 9 }, (_, i) => <Text c="dimmed" key={i}>{i * 120} ms</Text>)}</div>
     </div>{inspector}</>}
     {layout === 'keys' && <div className="key-editor"><Card withBorder><Text fw={600} mb="md">{held === undefined ? 'Whole-stop rule' : `${noteName(held)} pipe rule`}</Text><Stack>{voices.map((v, index) => <Button key={v.id} variant={voice.id === v.id ? 'filled' : 'default'} onClick={() => setSelected(v.id)}>Voice {index + 1} · {v.pitch} ¢ · {v.delay} ms</Button>)}</Stack></Card>{inspector}</div>}
-    <Drawer opened={Boolean(sourceFor)} onClose={() => setSourceFor(undefined)} title="Source picker · study ranks" position="right" size="lg"><Stack><Text c="dimmed">These are example sources. Selecting one changes the study only.</Text>{sources.map(source => <Button variant="default" key={source} justify="start" onClick={() => { if (sourceFor) update(sourceFor, { source }); setSourceFor(undefined); }}>{source}</Button>)}</Stack></Drawer>
+    <Drawer opened={Boolean(sourceFor)} onClose={() => setSourceFor(undefined)} title="Source" position="right" size="lg"><Stack>{sources.map(source => <Button variant="default" key={source} justify="start" onClick={() => { if (sourceFor) update(sourceFor, { source }); setSourceFor(undefined); }}>{source}</Button>)}</Stack></Drawer>
   </Stack>;
 }
 

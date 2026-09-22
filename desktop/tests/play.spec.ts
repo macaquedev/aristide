@@ -49,7 +49,7 @@ test('editing a stop requires Edit; relocking returns from Build to Play', async
   await rig(page);
   await page.getByRole('button', { name: 'Perform', exact: true }).click();
   await page.getByRole('button', { name: 'Bourdon' }).click({ button: 'right' });
-  await expect(page.getByText('The new voice editor is being designed.', { exact: false })).toBeVisible();
+  await expect(page.getByText('Editor preview', { exact: false })).toBeVisible();
   await page.getByRole('button', { name: 'Edit', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Bourdon' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Build', exact: true })).toBeDisabled();
@@ -77,7 +77,7 @@ test('touch hold is harmless while locked and opens Build when unlocked', async 
   await expect(stop).toHaveAttribute('aria-pressed', 'false');
   await page.getByRole('button', { name: 'Perform', exact: true }).tap();
   await stop.dispatchEvent('pointerdown', { pointerType: 'touch', pointerId: 2, button: 0 });
-  await expect(page.getByText('The new voice editor is being designed.', { exact: false })).toBeVisible();
+  await expect(page.getByText('Editor preview', { exact: false })).toBeVisible();
   expect(requests.filter(url => url.startsWith('/api/stop'))).toHaveLength(0);
   await page.close();
 });
@@ -107,7 +107,7 @@ test('offline browser offers previews without blaming the audio device', async (
   await expect(dialog).toHaveCSS('opacity', '1');
   await page.screenshot({ path: 'test-results/connection-unavailable.png', fullPage: true });
   await dialog.getByRole('link', { name: 'Preview Build' }).click();
-  await expect(page.getByText('Prototype data only.', { exact: false })).toBeVisible();
+  await expect(page.getByText('Not saved', { exact: false })).toBeVisible();
   await expect(page.getByRole('dialog')).toHaveCount(0);
 });
 

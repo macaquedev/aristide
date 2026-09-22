@@ -5,11 +5,15 @@ for (const layout of ['rows', 'steps', 'roll', 'keys']) {
     const requests: string[] = [];
     page.on('request', request => { if (request.url().includes('/api/')) requests.push(request.url()); });
     await page.goto(`/?study=1&panel=build&layout=${layout}`);
-    await expect(page.getByText('Prototype data only.', { exact: false })).toBeVisible();
+    await expect(page.getByText('Not saved', { exact: false })).toBeVisible();
     await page.getByRole('button', { name: 'Add voice', exact: true }).click();
     await expect(page.getByText('Grand-orgue · 4 voices per key')).toBeVisible();
-    await page.getByRole('button', { name: 'Undo study edit', exact: true }).first().click();
+    await page.getByRole('button', { name: 'Undo', exact: true }).first().click();
     await expect(page.getByText('Grand-orgue · 3 voices per key')).toBeVisible();
+    await page.getByRole('button', { name: 'Step grid', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'Step grid', exact: true })).toHaveAttribute('aria-pressed', 'true');
+    await expect(page.getByText('Grand-orgue · 3 voices per key')).toBeVisible();
+    await page.getByRole('button', { name: ({ rows: 'Voice rows', steps: 'Step grid', roll: 'Piano roll', keys: 'Per-key view' })[layout], exact: true }).click();
     await page.screenshot({ path: `test-results/build-${layout}.png`, fullPage: true });
     expect(requests).toEqual([]);
   });
@@ -30,7 +34,7 @@ test('number tap, typing, drag and hold use one consistent control', async ({ pa
   await expect(page.getByRole('button', { name: 'Voice 1 pitch: 550 ¢', exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Voice 1 pitch: 550 ¢', exact: true }).click({ button: 'right' });
   await expect(page.getByText('Assign control · prototype', { exact: true })).toBeVisible();
-  await expect(page.getByText('This study does not listen to hardware.', { exact: false })).toBeVisible();
+  await expect(page.getByText('MIDI unavailable in prototype', { exact: false })).toBeVisible();
 });
 
 test('source selection and step cells change the study without engine requests', async ({ page }) => {
@@ -63,9 +67,11 @@ for (const layout of ['tree', 'table', 'cascade', 'keyboard']) {
 test('study sheets and controls fit a narrow touchscreen', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto('/?study=1');
+  await expect(page.getByRole('button', { name: 'Voice rows', exact: true })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+  await page.screenshot({ path: 'test-results/study-small.png', fullPage: true });
   await page.getByRole('button', { name: 'Study organ · Bourdon', exact: true }).click();
-  await expect(page.getByText('Source picker · study ranks', { exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Source', exact: true })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
 });
 
@@ -77,7 +83,7 @@ test('two-finger editing changes only the held pipe and marks its override', asy
   const cdp = await page.context().newCDPSession(page);
   const first = { id: 1, x: key.x + key.width / 2, y: key.y + key.height / 2 };
   await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [first] });
-  await expect(page.getByText('Editing C4 only', { exact: false })).toBeVisible();
+  await expect(page.getByText('C4 only', { exact: false })).toBeVisible();
   const number = (await page.getByRole('button', { name: 'Voice 1 pitch: 0 ¢', exact: true }).boundingBox())!;
   const second = { id: 2, x: number.x + number.width / 2, y: number.y + number.height / 2 };
   await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [first, second] });

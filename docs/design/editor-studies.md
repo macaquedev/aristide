@@ -5,8 +5,7 @@ These are clickable prototypes for Alex to compare by feel, as required by the
 listen to MIDI or generate sound.** The connected Play surface is separate.
 
 Run `bun run dev` from `desktop/`, then open the links below. The studies also
-ship inside Tauri: unlock Edit, open Build, and choose **Compare four design
-studies**. Switching variants retains the study data, so the same experiment
+ship inside Tauri: unlock Edit, open Build, and choose **Compare layouts**. Switching variants retains the study data, so the same experiment
 can be compared across layouts. Reloading resets it.
 
 | Build direction | Try it |

@@ -48,7 +48,7 @@ export function App() {
     </header>
     <main>
       {!state && <Stack align="center" p="xl"><Group><Loader size="sm"/><Text>Connecting to the sound engine…</Text></Group>
-        {!native && <><Text c="dimmed">Design previews work without audio.</Text><PreviewLinks/></>}
+        {!native && <><Text c="dimmed">Prototypes · no audio</Text><PreviewLinks/></>}
       </Stack>}
       {panel === 'Play' && state && <Play state={state} command={command} edit={edit} openLibrary={() => setPanel('Library')} openStop={stop => { setSelected(stop); setPanel('Build'); }}/>} 
       {panel === 'Library' && <Library state={state} command={command}/>}
@@ -57,8 +57,8 @@ export function App() {
         {state && <ConsoleSetup state={state} command={command} edit={edit}/>}</Stack>}
       {['Build', 'Route', 'Tuning'].includes(panel) && <Stack p="lg">
         <Text fw={600}>{panel === 'Build' && selected ? selected.name : panel}</Text>
-        <Text c="dimmed">{panel === 'Build' ? 'The new voice editor is being designed. Editing will become available after the layout studies and audio integration.' : `${panel} is not connected in this first increment.`}</Text>
-        {(panel === 'Build' || panel === 'Tuning') && <Button component="a" href={`/?study=1&panel=${panel.toLowerCase()}`} variant="default" w="fit-content">Compare four design studies</Button>}
+        <Text c="dimmed">{panel === 'Build' ? 'Editor preview' : `${panel} unavailable`}</Text>
+        {(panel === 'Build' || panel === 'Tuning') && <Button component="a" href={`/?study=1&panel=${panel.toLowerCase()}`} variant="default" w="fit-content">Compare layouts</Button>}
         <Button variant="default" w="fit-content" onClick={() => setPanel('Play')}>Back to Play</Button>
       </Stack>}
     </main>
@@ -123,7 +123,7 @@ function Library({ state, command }: { state?: Snapshot; command: Command }) {
     {state?.loading && <Group><Loader size="sm"/><Text>{state.loading}</Text></Group>}
     <div className="library-grid">{state?.library.map(organ => <Card key={organ.path} withBorder component="button" className="library-card" onClick={() => command('organ/load', { path: organ.path })}>
       <Text fw={600}>{organ.name}</Text><Text c="dimmed">Open organ</Text></Card>)}</div>
-    {!state?.library.length && <Text c="dimmed">Add a GrandOrgue or unencrypted Hauptwerk organ from your computer.</Text>}
+    {!state?.library.length && <Text c="dimmed">GrandOrgue · Unencrypted Hauptwerk</Text>}
     <Drawer opened={opened} onClose={() => setOpened(false)} title="Add an organ" position="right" size="lg"><Stack>
       <form onSubmit={e => { e.preventDefault(); void visit(path); }}><Group wrap="nowrap"><TextInput aria-label="Folder" value={path} onChange={e => setPath(e.currentTarget.value)} style={{ flex: 1 }}/><Button type="submit">Go</Button></Group></form>
       {failure && <Text>That folder could not be opened. Choose another folder.</Text>}
@@ -143,7 +143,7 @@ function Appearance({ edit, density, changeDensity }: { edit: boolean; density: 
 
 function ConsoleSetup({ state, command, edit }: { state: Snapshot; command: Command; edit: boolean }) {
   return <Card withBorder><Stack><Group justify="space-between"><Text fw={600}>Console</Text><Button variant="default" disabled={!edit} onClick={() => command('midi/rescan')}>Rescan MIDI</Button></Group>
-    {!edit && <Text c="dimmed">Unlock Edit to change your console.</Text>}
+    {!edit && <Text c="dimmed">Console locked</Text>}
     {state.midi.manuals.map(manual => <Group key={manual.idx} justify="space-between"><Stack gap={0}><Text>{manual.name}</Text><Text size="xs" c="dimmed">{manual.inputs.map(i => `${i.device}${i.connected ? '' : ' (disconnected)'}`).join(', ') || 'No console assigned'}</Text></Stack>
       <Group><Button disabled={!edit} variant="default" onClick={() => command('midi/learn', { manual: manual.idx, slot: 0 })}>Learn keys</Button>
         <Button disabled={!edit} variant="default" onClick={() => command('midi/bind', { manual: manual.idx, slot: manual.inputs.length, device: 'Computer keyboard' })}>Use computer keyboard</Button></Group>

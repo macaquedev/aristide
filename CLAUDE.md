@@ -55,6 +55,10 @@ settings. Imported organs and samples remain untouched; customisation lives in l
   Do not choose a winner on Alex's behalf or implement the old editor by default.
 - Design for one medium touchscreen first, with touch and mouse working throughout;
   account for the spec's small-screen sheets and multiple-screen arrangements.
+- Show through layout, controls and visible state; do not fill screens with
+  explanatory prose. Use short labels, group related controls, and keep help
+  contextual. Apply this to design studies as well as connected screens
+  (Alex, 2026-09-22).
 - Keep prototype behaviour distinct from connected functionality. Record backend
   gaps, incomplete requirements and validation in a progress note. Never present
   dummy controls, fake progress or an unimplemented feature as working.
