@@ -90,3 +90,7 @@
 @media (min-width: 1001px) {
   .tuning-inspector .tuning-note-track, .tuning-inspector .tuning-ruler { height: 360px; }
 }
+
+.tuning-mapping { padding: 10px 16px; border-top: 1px solid var(--mantine-color-default-border); }
+
+.tuning-intervals .tuning-ruler { width: 60px; }

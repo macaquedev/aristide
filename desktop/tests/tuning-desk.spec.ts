@@ -48,8 +48,8 @@ test('tabbed scale supports non-twelve steps and scope search', async ({ page })
   await page.getByRole('tab', { name: 'Scale', exact: true }).click();
   await page.getByRole('combobox', { name: 'Tuning system', exact: true }).click();
   await page.getByRole('option', { name: 'Equal division', exact: true }).click();
-  await page.getByRole('button', { name: /^Steps per octave:/ }).click();
-  await page.getByRole('textbox', { name: 'Steps per octave', exact: true }).fill('19');
+  await page.getByRole('button', { name: /^Steps per repeat:/ }).click();
+  await page.getByRole('textbox', { name: 'Steps per repeat', exact: true }).fill('19');
   await page.getByRole('button', { name: 'Done', exact: true }).click();
   await expect(page.locator('.tuning-note-track')).toHaveCount(19);
   await page.getByRole('tab', { name: 'Note', exact: true }).click();

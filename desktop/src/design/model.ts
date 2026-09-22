@@ -10,9 +10,9 @@ export const initialBuild: BuildState = {
 export const noteName = (key: number) => `${['C', 'C♯', 'D', 'D♯', 'E', 'F', 'F♯', 'G', 'G♯', 'A', 'A♯', 'B'][((key % 12) + 12) % 12]}${Math.floor(key / 12) - 1}`;
 export const sources = ['Study organ · Bourdon', 'Study organ · Flute', 'Study organ · Trompette', 'Second organ · Principal', 'Second organ · String'];
 export const outputs = ['Follow stop', 'Front L+R', 'Rear', 'Sub'];
-export type Tuning = { hz: number; temperament: string; system: string; steps: number; root: string; fine: number; deviations: number[] };
+export type Tuning = { hz: number; temperament: string; system: string; steps: number; root: string; fine: number; deviations: number[]; period: number | null; intervals: number[]; referenceKey: number };
 export type Scope = { id: string; name: string; parent?: string; own?: Tuning };
-export const defaultTuning: Tuning = { hz: 440, temperament: 'Equal', system: 'Twelve-note', steps: 12, root: 'C', fine: 0, deviations: Array(12).fill(0) };
+export const defaultTuning: Tuning = { hz: 440, temperament: 'Equal', system: 'Twelve-note', steps: 12, root: 'C', fine: 0, deviations: Array(12).fill(0), period: 1200, intervals: [0, 137, 311, 523, 887, 1460, 2107], referenceKey: 69 };
 export const initialScopes: Scope[] = [
   { id: 'instrument', name: 'Whole instrument', own: defaultTuning },
   { id: 'great', name: 'Grand-orgue', parent: 'instrument' },

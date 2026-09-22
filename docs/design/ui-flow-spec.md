@@ -208,10 +208,11 @@ Tuning is set by inheritance across four levels: instrument, division, stop, pip
 
 | Setting | Options |
 |---|---|
-| Reference pitch | A = 440, 415, 392, 466, or any value in Hz |
+| Reference pitch | A chosen key anchored to any frequency in Hz; A = 440, 415, 392 or 466 are conventional examples |
 | Temperament | Equal, as recorded (the sample set's own tuning), historical presets (quarter-comma meantone, Werckmeister, Vallotti, Kirnberger and others), custom |
 | Root note | The key the temperament is centred on |
-| Tuning system | Twelve-note, any equal division (19, 31 and so on), just intonation on a root, imported Scala file |
+| Tuning system | Any number of equal or unequal pitch steps, conventional twelve-note temperaments, just intonation, imported Scala file |
+| Repetition | Optional: 2:1, another ratio or interval, or no repetition at all |
 | Key mapping | How a non-twelve scale lands on the keyboard |
 | Fine offset | Cents |
 
@@ -232,6 +233,16 @@ a device rack, an editor with a docked inspector, and a tabbed device. Keep
 reference pitch, scale settings, fine offset and selected-note editing grouped
 consistently within each arrangement. These remain silent design studies until
 connected; they must not imply working MIDI, persistence or sound.
+
+Alex broadly preferred **Channel strip**, the first arrangement. He clarified
+that neither twelve tones nor octave equivalence may be assumed. A scale's step
+count, its optional repeat interval, and its key mapping are separate facts.
+2:1 repetition is one choice, not a universal container. Non-repeating pitch
+collections must not wrap or extrapolate at their boundaries. Use neutral step
+and key identifiers outside conventional note systems, and show intervals from
+the reference instead of deviations from twelve-tone equal temperament. Cents
+remain a logarithmic interval unit; using them does not imply octave equivalence.
+The selected arrangement must handle these cases without moving the main controls.
 
 ### Connections
 

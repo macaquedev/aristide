@@ -46,5 +46,5 @@ export function Study() {
 function parameterLabel(address: string) {
   const parts = address.split('/');
   const field = parts[0] === 'tuning' ? parts[2] : parts[4];
-  return ({ deviation: 'Note deviation', hz: 'Reference pitch', fine: 'Fine offset', steps: 'Steps per octave', pitch: 'Pitch', delay: 'Delay', level: 'Level', low: 'Low key', high: 'High key' } as Record<string, string>)[field] ?? field;
+  return ({ deviation: 'Note deviation', hz: 'Reference pitch', fine: 'Fine offset', steps: 'Step count', period: 'Repeat interval', interval: 'Step interval', referenceKey: 'Reference key', pitch: 'Pitch', delay: 'Delay', level: 'Level', low: 'Low key', high: 'High key' } as Record<string, string>)[field] ?? field;
 }

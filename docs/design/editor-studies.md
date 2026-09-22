@@ -67,9 +67,18 @@ graph drag. Select a bar to edit its exact cents below; arrow keys navigate and
 adjust it. Root changes the graph's starting pitch class. Equal divisions show
 numbered intervals, with up to 128 steps. Switching arrangements keeps edits.
 
+Alex broadly preferred Channel strip. Its Scale group now separates **Steps per
+repeat** from **Repeat interval** (2:1, 3:1 or custom cents). **Pitch collection**
+starts with seven illustrative unequal intervals and **None · no repetition**.
+Add/remove steps and edit their intervals directly, including negative intervals
+and pitches beyond 1200 cents. The first step is fixed at 0 cents and anchored
+by Reference key/Hz. The mapping readout shows consecutive key IDs; a finite
+collection leaves keys outside its range unmapped. Repeat size is optional, not
+inferred from the last pitch. The graph adapts its range to the collection.
+
 This is an arrangement study, not the complete tuning catalogue. As-recorded,
-historical presets, just intonation, Scala import, key mapping and an editable
-reference-key anchor remain for the connected implementation. No MIDI bar
+historical presets, just intonation, Scala import, arbitrary key mapping remain for the connected implementation. The key anchor
+and consecutive mapping currently operate only in the silent study. No MIDI bar
 lighting or audio audition is simulated.
 
 ## Earlier structural studies
@@ -102,8 +111,8 @@ tuning controls exposes the root, fine offset and arbitrary equal divisions
 (up to 128 in this study). These are interaction examples, not a historical
 temperament catalogue or a complete tuning implementation.
 
-Alex selected Split desk for Build. Tuning now awaits a choice among the four
-scope-and-card arrangements above.
+Alex selected Split desk for Build. Alex broadly preferred Channel strip for Tuning; the other
+arrangements remain available for comparison.
 
 Validation: frontend production build, mouse/touch browser tests, two-finger
 per-pipe editing, inheritance and screenshot inspection. A scrolling/focus bug
