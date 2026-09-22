@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Badge, Button, Drawer, Group, NumberInput, SegmentedControl, Select, Stack, Text } from '@mantine/core';
 import { BuildStudy, buildLayouts } from './BuildStudy';
+import { PianoRollStudy, rollLayouts } from './PianoRollStudy';
 import { TuningStudy, tuningLayouts } from './TuningStudy';
 import { ArrowLeft, VolumeOff } from 'lucide-react';
 import { LayoutPreview } from './LayoutPreview';
@@ -10,7 +11,9 @@ export function Study() {
   const params = new URLSearchParams(location.search);
   const [panel, setPanel] = useState(params.get('panel') === 'tuning' ? 'tuning' : 'build');
   const requested = params.get('layout');
-  const [build, setBuild] = useState(buildLayouts.some(l => l.value === requested) ? requested! : 'rows');
+  const [legacy] = useState(buildLayouts.some(l => l.value === requested) && (requested !== 'roll' || params.get('legacy') === '1'));
+  const choices = legacy ? buildLayouts : rollLayouts;
+  const [build, setBuild] = useState(choices.some(l => l.value === requested) ? requested! : 'split');
   const [tuning, setTuning] = useState(tuningLayouts.some(l => l.value === requested) ? requested! : 'tree');
   const [density, setDensity] = useState('comfortable');
   const [assignment, setAssignment] = useState<string>();
@@ -18,14 +21,15 @@ export function Study() {
   const [assigned, setAssigned] = useState<Record<string, string>>({});
   useEffect(() => {
     const query = new URLSearchParams({ study: '1', panel, layout: panel === 'build' ? build : tuning });
+    if (legacy) query.set('legacy', '1');
     history.replaceState(null, '', `?${query}`);
-  }, [panel, build, tuning]);
+  }, [panel, build, tuning, legacy]);
   return <div className={`study ${density === 'compact' ? 'study-compact' : ''}`}><Stack>
     <header className="study-header"><Group><Button component="a" href="/" variant="default" leftSection={<ArrowLeft size={16}/>}>Play</Button><Text fw={600}>Design studies</Text></Group><Group gap="xs"><Badge color="gray" variant="outline">Prototype</Badge><Text c="dimmed"><VolumeOff size={14} aria-hidden="true"/> No audio</Text><Text c="dimmed">Not saved</Text></Group></header>
     <Group justify="space-between"><SegmentedControl aria-label="Study panel" value={panel} onChange={setPanel} data={[{ value: 'build', label: 'Build' }, { value: 'tuning', label: 'Tuning' }]}/>
       <SegmentedControl aria-label="Density" value={density} onChange={setDensity} data={[{ value: 'comfortable', label: 'Comfortable' }, { value: 'compact', label: 'Compact' }]}/></Group>
-    <div className="study-layouts" role="group" aria-label="Layout">{(panel === 'build' ? buildLayouts : tuningLayouts).map(layout => <Button key={layout.value} className="layout-choice" variant={(panel === 'build' ? build : tuning) === layout.value ? 'filled' : 'default'} aria-pressed={(panel === 'build' ? build : tuning) === layout.value} onClick={() => (panel === 'build' ? setBuild : setTuning)(layout.value)}><LayoutPreview layout={layout.value}/><span>{layout.label.replace(/^\d · /, '')}</span></Button>)}</div>
-    <div hidden={panel !== 'build'}><BuildStudy layout={build} compact={density === 'compact'} assign={setAssignment}/></div>
+    <div className="study-layouts" role="group" aria-label="Layout">{(panel === 'build' ? choices : tuningLayouts).map(layout => <Button key={layout.value} className="layout-choice" variant={(panel === 'build' ? build : tuning) === layout.value ? 'filled' : 'default'} aria-pressed={(panel === 'build' ? build : tuning) === layout.value} onClick={() => (panel === 'build' ? setBuild : setTuning)(layout.value)}><LayoutPreview layout={layout.value}/><span>{layout.label.replace(/^\d · /, '')}</span></Button>)}</div>
+    <div hidden={panel !== 'build'}>{legacy ? <BuildStudy layout={build} compact={density === 'compact'} assign={setAssignment}/> : <PianoRollStudy layout={build} compact={density === 'compact'} assign={setAssignment}/>}</div>
     <div hidden={panel !== 'tuning'}><TuningStudy layout={tuning} assign={setAssignment}/></div>
     {Object.entries(assigned).map(([address, control]) => <Group key={address}><Badge color="violet" variant="light">{control}</Badge><Text>{parameterLabel(address)}</Text></Group>)}
     <Drawer opened={Boolean(assignment)} onClose={() => setAssignment(undefined)} title="Assign control · prototype" position="right" size="lg"><Stack><Text fw={600}>{parameterLabel(assignment ?? '')}</Text>

@@ -4,6 +4,10 @@ export function LayoutPreview({ layout }: { layout: string }) {
     <rect key={`${x}-${y}`} x={x} y={y} width={w} height={h} rx="1" fill="currentColor" opacity={active ? .9 : .25}/>;
   const rows = [8, 24, 40];
   return <svg viewBox="0 0 160 56" aria-hidden="true">
+    {layout === 'split' && <>{box(4, 5, 54, 45)}{box(62, 5, 54, 45)}{box(122, 5, 34, 45)}{box(10, 18, 38, 5, true)}{box(22, 34, 30, 5, true)}{box(68, 34, 30, 5, true)}</>}
+    {layout === 'stacked' && <>{box(4, 5, 110, 21)}{box(4, 30, 110, 21)}{box(122, 5, 34, 46)}{box(12, 12, 46, 5, true)}{box(12, 37, 70, 5, true)}</>}
+    {layout === 'focus' && <>{box(4, 4, 42, 7, true)}{box(50, 4, 42, 7)}{box(4, 16, 152, 35)}{box(12, 24, 48, 5, true)}{box(48, 39, 96, 5, true)}</>}
+    {layout === 'lanes' && <>{[5, 23, 41].flatMap(y => [box(4, y, 20, 12), box(29, y, 60, 12), box(94, y, 62, 12), box(34, y + 4, 42, 4, true), box(99, y + 4, 28, 4, true)])}</>}
     {layout === 'rows' && rows.flatMap(y => [box(4, y, 36, 10), ...[48, 76, 104, 132].map(x => box(x, y, 24, 10, x === 76))])}
     {layout === 'steps' && rows.flatMap((y, i) => [box(4, y, 20, 10), ...[32, 58, 84, 110, 136].map((x, j) => box(x, y, 20, 10, i === j))])}
     {layout === 'roll' && <>{[8, 20, 32, 44].map(y => <path key={y} d={`M4 ${y} H156`} stroke="currentColor" opacity=".2"/>)}{box(12, 36, 36, 7, true)}{box(56, 24, 36, 7, true)}{box(100, 12, 36, 7, true)}</>}

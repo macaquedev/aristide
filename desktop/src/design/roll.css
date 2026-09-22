@@ -1,0 +1,73 @@
+.piano-study { min-width: 0; }
+.roll-stop-name { font-size: 1.25rem; }
+.roll-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; padding: 12px; background: var(--mantine-color-dark-7); border: 1px solid var(--mantine-color-default-border); border-radius: 4px; }
+.roll-zoom { display: flex; align-items: center; gap: 4px; }
+.roll-zoom > p { margin-right: 4px; }
+.roll-zoom button { padding: 0; width: 34px; }
+.roll-tuning { width: 200px; margin-left: auto; }
+.roll-event-strip { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 2px; }
+.roll-event-strip button { flex-shrink: 0; }
+.event-chip-pitch { margin-left: 12px; opacity: .7; font-size: .8rem; }
+.roll-workspace { display: grid; gap: 16px; align-items: start; min-width: 0; }
+.variant-split, .variant-stacked { grid-template-columns: minmax(0, 1fr) 290px; }
+.roll-pair { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; min-width: 0; }
+.roll-stack, .roll-lanes { display: grid; gap: 16px; min-width: 0; }
+.roll-panel { min-width: 0; border: 1px solid var(--mantine-color-dark-4); border-radius: 4px; overflow: hidden; background: var(--mantine-color-dark-8); }
+.roll-panel-heading { padding: 10px 12px; border-bottom: 1px solid var(--mantine-color-dark-4); background: var(--mantine-color-dark-7); }
+.roll-surface { position: relative; min-width: 0; }
+.roll-canvas { display: block; touch-action: none; user-select: none; cursor: crosshair; }
+.roll-canvas.panning { cursor: grab; }
+.roll-canvas.panning:active { cursor: grabbing; }
+.roll-background { fill: var(--mantine-color-dark-8); }
+.roll-axis, .roll-ruler { fill: var(--mantine-color-dark-7); }
+.roll-guide { stroke: var(--mantine-color-dark-5); stroke-width: .5; }
+.roll-zero { stroke: var(--mantine-color-gray-5); stroke-width: 1; }
+.roll-time-grid { stroke: var(--mantine-color-dark-5); stroke-dasharray: 2 5; }
+.roll-stamp-line { stroke: var(--mantine-color-gray-6); stroke-width: 1; }
+.roll-axis-label, .roll-unit { fill: var(--mantine-color-gray-6); font-size: .8rem; }
+.roll-zero-label { fill: var(--mantine-color-gray-2); font-size: .8rem; font-weight: 600; }
+.stamp-marker { cursor: pointer; }
+.stamp-marker rect { fill: transparent; }
+.stamp-marker text { fill: var(--mantine-color-gray-4); font-size: .8rem; font-variant-numeric: tabular-nums; }
+.stamp-marker path { fill: var(--mantine-color-gray-5); }
+.stamp-marker:hover rect, .stamp-marker:focus rect { fill: var(--mantine-color-dark-5); }
+.note-body { fill: var(--mantine-color-blue-9); stroke: var(--mantine-color-blue-6); }
+.note-label { fill: var(--mantine-color-gray-1); font-size: .8rem; }
+.note-arrow, .note-end { fill: none; stroke: var(--mantine-color-blue-2); stroke-width: 1.5; }
+.note-leader { stroke: var(--mantine-color-blue-4); }
+.note-pitch-dot { fill: var(--mantine-color-blue-3); }
+.event-note { cursor: grab; outline: none; }
+.event-note:active { cursor: grabbing; }
+.event-note.is-selected .note-body, .event-note:focus .note-body { fill: var(--mantine-color-blue-7); stroke: var(--mantine-color-blue-2); stroke-width: 1.5; }
+.note-resize { fill: transparent; cursor: ew-resize; }
+.roll-scroll-row { display: flex; align-items: center; gap: 10px; padding: 6px 12px; border-top: 1px solid var(--mantine-color-dark-5); }
+.roll-scroll-row p { white-space: nowrap; min-width: 42px; }
+.roll-scroll { width: 100%; min-width: 0; accent-color: var(--mantine-color-gray-6); cursor: grab; height: 20px; margin: 0; }
+.roll-scroll.vertical { position: absolute; right: 0; top: 38px; height: calc(100% - 50px); width: 14px; writing-mode: vertical-lr; direction: rtl; }
+.roll-inspector { border: 1px solid var(--mantine-color-default-border); border-radius: 4px; padding: 16px; background: var(--mantine-color-dark-7); }
+.roll-inspector-fields .number-control { width: 100%; }
+.reference-summary, .reference-editor { border-top: 1px solid var(--mantine-color-default-border); padding-top: 12px; }
+.roll-other-events { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.roll-source-lane { padding: 12px; border: 1px solid var(--mantine-color-default-border); border-radius: 4px; }
+.roll-footer { padding-bottom: 8px; }
+.compact-roll .roll-toolbar { padding: 8px; gap: 10px; }
+.compact-roll .roll-panel-heading { padding: 6px 12px; }
+@media (max-width: 1100px) {
+  .variant-split { grid-template-columns: minmax(0, 1fr); }
+  .variant-split .roll-inspector-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: start; }
+}
+@media (max-width: 760px) {
+  .variant-stacked { grid-template-columns: minmax(0, 1fr); }
+  .roll-pair { grid-template-columns: minmax(0, 1fr); }
+  .variant-split .roll-inspector-fields { display: flex; }
+  .roll-toolbar { gap: 12px; }
+  .roll-tuning { margin-left: 0; flex-grow: 1; }
+  .roll-source-lane { padding: 8px; }
+}
+
+.roll-scroll { appearance: none; background: transparent; }
+.roll-scroll::-webkit-slider-runnable-track { height: 8px; border-radius: 3px; background: var(--mantine-color-dark-5); }
+.roll-scroll::-webkit-slider-thumb { appearance: none; width: 48px; height: 8px; border-radius: 3px; background: var(--mantine-color-gray-6); }
+.roll-scroll.vertical::-webkit-slider-runnable-track { width: 8px; height: 100%; }
+.roll-scroll.vertical::-webkit-slider-thumb { width: 8px; height: 48px; }
+.roll-inspector-fields > .mantine-Group-root:last-child button { padding-inline: 8px; }

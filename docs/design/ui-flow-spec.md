@@ -140,6 +140,38 @@ Each voice row has:
 | Key range | Which keys this voice responds to |
 | Tuning | Follow this stop's tuning (default) or keep the source's own |
 
+### Selected direction: piano roll (22 Sept 2026 · Alex)
+
+Alex selected the piano-roll study. Build now proceeds through four clickable
+mutations of that direction before connecting the editor. The row/table language
+above describes the available event fields; it does not prescribe the chosen layout.
+
+- Pitch runs vertically in cents, with **0 cents initially centred**. Time runs
+  horizontally. Both axes zoom and pan, with touch and mouse controls, following
+  professional DAW piano-roll behaviour.
+- There are two relative timelines: **Key down + ms** and **Key up + ms**. Each
+  begins with a fixed 0 ms timestamp. Additional shared timestamps are added with
+  a button and editable time. Every onset and finite ending references a timestamp;
+  moving it moves all attached events. Endings on the same timeline follow starts.
+- A new key-down event defaults to **until release**. Its bar points right at the
+  edge of the visible roll. A finite event spans its start and ending timestamps.
+  An early key-up stops ordinary key-down events and cancels their pending starts.
+- **Hold after release** has a right arrow on the key-down roll and a matching left
+  arrow on the key-up roll, extending to its finite ending timestamp. A continued
+  event must have started before key-up; it is not retriggered by release.
+- New events can start after key-up and retain the released key's pitch. All
+  release-triggered events and held continuations require a finite ending. These
+  programmed events are separate from the sample's ordinary recorded release tail.
+- Lines represent the global tuning system, without constraining pitch unless
+  **Snap pitch** is enabled. Continuous cents are the default. A regular time grid
+  is optional and off by default; timestamp constraints always apply.
+- An event can target a rank or a **live reference to another stop in the same
+  organ**, executing its complete rule regardless of its console on/off state.
+  References compose pitch and timing, reflect later source edits, and must reject
+  self-reference and indirect cycles. Rank borrowing across organs remains available.
+- The comparison fixture is **Titanique**: Théorbe at 0 ms / 0 cents, Flute 4′ at
+  0 ms / +1,250 cents ending at 50 ms, and Ophicleide 32′ at 50 ms / −2 cents.
+
 ### Behaviour
 
 - A normal stop is one row. Every new stop starts as a duplicate of an existing one, so there's always sound to modify.

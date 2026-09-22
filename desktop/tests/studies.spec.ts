@@ -4,7 +4,7 @@ for (const layout of ['rows', 'steps', 'roll', 'keys']) {
   test(`Build ${layout}: edits survive layout changes; add and undo work`, async ({ page }) => {
     const requests: string[] = [];
     page.on('request', request => { if (request.url().includes('/api/')) requests.push(request.url()); });
-    await page.goto(`/?study=1&panel=build&layout=${layout}`);
+    await page.goto(`/?study=1&panel=build&layout=${layout}&legacy=1`);
     await expect(page.getByText('Not saved', { exact: false })).toBeVisible();
     await page.getByRole('button', { name: 'Add voice', exact: true }).click();
     await expect(page.getByText('Grand-orgue · 4 voices per key')).toBeVisible();
@@ -20,7 +20,7 @@ for (const layout of ['rows', 'steps', 'roll', 'keys']) {
 }
 
 test('number tap, typing, drag and hold use one consistent control', async ({ page }) => {
-  await page.goto('/?study=1');
+  await page.goto('/?study=1&layout=rows');
   await page.getByRole('button', { name: 'Voice 1 pitch: 0 ¢', exact: true }).click();
   const input = page.getByRole('textbox', { name: 'Voice 1 pitch', exact: true });
   await input.fill('350');
@@ -66,7 +66,7 @@ for (const layout of ['tree', 'table', 'cascade', 'keyboard']) {
 
 test('study sheets and controls fit a narrow touchscreen', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto('/?study=1');
+  await page.goto('/?study=1&layout=rows');
   await expect(page.getByRole('button', { name: 'Voice rows', exact: true })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
   await page.screenshot({ path: 'test-results/study-small.png', fullPage: true });
@@ -77,7 +77,7 @@ test('study sheets and controls fit a narrow touchscreen', async ({ page }) => {
 
 test('two-finger editing changes only the held pipe and marks its override', async ({ browser }) => {
   const page = await browser.newPage({ hasTouch: true, viewport: { width: 1280, height: 1000 } });
-  await page.goto('/?study=1');
+  await page.goto('/?study=1&layout=rows');
   const keyboard = page.getByRole('button', { name: 'Hold C4', exact: true });
   const key = (await keyboard.boundingBox())!;
   const cdp = await page.context().newCDPSession(page);
