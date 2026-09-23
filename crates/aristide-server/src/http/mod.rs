@@ -13,6 +13,7 @@
 //! - [`tuning`] — every tuning scope, from instrument to rank
 //! - [`midi`] — ports, input bindings, learn and control bindings
 //! - [`room`] — reverb, noises, tremulants, swell and master gain
+//! - [`routing`] — speaker groups and what each source sends to them
 //! - [`play`] — performance controls: keys, pistons, cancel, panic
 
 use std::sync::{Arc, Mutex};
@@ -28,6 +29,7 @@ mod organ;
 mod play;
 mod prefs;
 mod room;
+mod routing;
 mod snapshot;
 mod stops;
 mod tuning;
@@ -78,6 +80,9 @@ pub(crate) fn respond(
         (Method::Post, "/api/noises") => room::noises,
         (Method::Post, "/api/bus") => room::bus,
         (Method::Post, "/api/reverb") => room::reverb,
+        (Method::Get, "/api/routing") => routing::matrix,
+        (Method::Post, "/api/routing") => routing::set,
+        (Method::Post, "/api/speakers") => routing::speakers,
         (Method::Get, "/api/tuning") => tuning::scopes,
         (Method::Post, "/api/tuning") => tuning::set,
         (Method::Post, "/api/organ/move") => stops::move_to_manual,
@@ -306,6 +311,9 @@ fn changes_instrument(path: &str, query: &str) -> bool {
             .iter()
             .any(|scope| param(query, scope).is_some()),
         "/api/trem/params" => true,
+        // Where a division or stop sounds is the instrument's; which
+        // channels a speaker group names is this machine's.
+        "/api/routing" => true,
         "/api/organ/load" | "/api/organ/new" | "/api/organ/save" | "/api/organ/save_as" => false,
         _ => path.starts_with("/api/organ/"),
     }
@@ -423,6 +431,8 @@ mod tests {
             load_error: None,
             load_warnings: Vec::new(),
             memory: None,
+            routing: Default::default(),
+            output_channels: 2,
         }));
         // As the server does once before it opens any device: routing,
         // bindings and the computer keyboard all come from this.
@@ -1412,6 +1422,78 @@ mod tests {
         assert_eq!(refused.status_code().0, 400, "wave tremulants have no shape");
     }
 
+    /// Route edits land live and in the organ file, stops follow their
+    /// division until they own sends, and the file loads back the same.
+    #[test]
+    fn routing_edits_are_live_saved_and_reload() {
+        let Some(state) = demo_state() else { return };
+        let demo = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testsets/grandorgue-demo/demo.organ");
+        let dir = std::env::temp_dir().join("aristide-routing-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let organ = aristide_formats::grandorgue::load(&demo).expect("demo parses").organ;
+        let canonical = demo.canonicalize().expect("canonicalizes");
+        let file = crate::config::create_wrapper_organ(&dir, "Routed", &canonical, &organ, None)
+            .expect("organ file written");
+        state.lock().expect("state").composite_path = Some(file.clone());
+
+        let routing = |body: String| -> serde_json::Value { serde_json::from_str(&body).expect("json") };
+        let body_of = |response: Response<std::io::Cursor<Vec<u8>>>| {
+            assert_eq!(response.status_code().0, 200);
+            let mut body = String::new();
+            std::io::Read::read_to_string(&mut response.into_reader(), &mut body).expect("reads");
+            body
+        };
+        let fresh = respond(&state, &Method::Get, "/api/routing");
+        let fresh = routing(body_of(fresh));
+        assert_eq!(fresh["speakers"].as_array().unwrap().len(), 1, "Main only");
+        assert_eq!(fresh["divisions"][0]["sends"]["Main"], 0.0);
+        assert_eq!(fresh["divisions"][0]["own"], false);
+
+        let made = respond(&state, &Method::Post, "/api/speakers?name=Rear&left=3&right=4");
+        assert_eq!(made.status_code().0, 200);
+        let refused = respond(&state, &Method::Post, "/api/speakers?name=main&left=5&right=6");
+        assert_eq!(refused.status_code().0, 400, "Main is fixed");
+
+        let sent = respond(&state, &Method::Post, "/api/routing?manual=0&speakers=Rear&level_db=-6");
+        assert_eq!(sent.status_code().0, 200);
+        let view = routing(body_of(sent));
+        assert_eq!(view["speakers"][1]["name"], "Rear");
+        assert_eq!(view["speakers"][1]["available"], false, "a stereo test stream has no 3/4");
+        assert_eq!(view["divisions"][0]["own"], true);
+        assert_eq!(view["divisions"][0]["sends"]["Main"], 0.0, "the division kept Main");
+        assert_eq!(view["divisions"][0]["sends"]["Rear"], -6.0);
+        let stop = view["stops"].as_array().unwrap().iter()
+            .find(|s| s["midx"] == 0).expect("a stop on the first division").clone();
+        assert_eq!(stop["own"], false);
+        assert_eq!(stop["sends"]["Rear"], -6.0, "the stop follows its division");
+
+        let id = stop["id"].as_u64().unwrap();
+        let off = respond(&state, &Method::Post, &format!("/api/routing?stop={id}&speakers=Main&off=1"));
+        let view = routing(body_of(off));
+        let owned = view["stops"].as_array().unwrap().iter().find(|s| s["id"] == id).unwrap().clone();
+        assert_eq!(owned["own"], true);
+        assert!(owned["sends"].get("Main").is_none(), "the stop left Main");
+
+        let text = std::fs::read_to_string(&file).expect("reads");
+        assert!(text.contains("[[routing.source]]"), "saved: {text}");
+        assert!(text.contains("Rear = -6.0"), "with its level: {text}");
+
+        let prepared = crate::load::prepare_with(&[file.clone()], &[], 48_000.0,
+            &crate::config::SamplePrefs::default(), &|_| {}).expect("reloads");
+        assert_eq!(prepared.routing.divisions[0].as_ref().and_then(|s| s.get("Rear")), Some(&-6.0));
+        assert_eq!(prepared.routing.stops.len(), 1, "the stop's own sends came back");
+        assert!(prepared.warnings.iter().all(|w| !w.starts_with("routing")), "{:?}", prepared.warnings);
+
+        let back = respond(&state, &Method::Post, &format!("/api/routing?stop={id}&follow=1"));
+        let view = routing(body_of(back));
+        let followed = view["stops"].as_array().unwrap().iter().find(|s| s["id"] == id).unwrap().clone();
+        assert_eq!(followed["own"], false);
+        assert_eq!(followed["sends"]["Rear"], -6.0);
+        let text = std::fs::read_to_string(&file).expect("reads");
+        assert_eq!(text.matches("[[routing.source]]").count(), 1, "the stop's row is gone: {text}");
+    }
+
     /// A sample set's own organ takes the player's settings — wiring,
     /// room, whole-instrument pitch — into its own file, and refuses
     /// every change to the instrument itself with 409: nothing touches
@@ -2266,6 +2348,8 @@ mod tests {
             load_error: None,
             load_warnings: Vec::new(),
             memory: None,
+            routing: Default::default(),
+            output_channels: 2,
         }))
     }
 

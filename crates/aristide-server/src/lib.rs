@@ -9,6 +9,7 @@ mod desktop;
 mod http;
 mod load;
 mod pitch;
+mod routing;
 mod spool;
 mod state;
 mod tuning;
@@ -494,6 +495,7 @@ fn perform_load(
         stop_voicing,
         pipe_voicing,
         buses,
+        routing,
         warnings,
     } = load::prepare_with(
         &request.paths,
@@ -507,9 +509,13 @@ fn perform_load(
     // try to reopen the device wide enough BEFORE the stream starts.
     // A device that can't (or a bus with no explicit output) is fine —
     // the engine folds unreachable pairs back onto the main output.
+    // Setup's speaker groups count too, so a group the Route panel
+    // sends to is reachable without reloading.
+    let speakers = state.lock().expect("state poisoned").speakers();
     let wanted_channels = buses
         .iter()
         .filter_map(|setup| setup.output)
+        .chain(speakers.iter().map(|s| (s.left, s.right)))
         .map(|(left, right)| left.max(right) as usize + 1)
         .max()
         .unwrap_or(0);
@@ -681,6 +687,8 @@ fn perform_load(
         stop_voicing,
         pipe_voicing,
         load_warnings: warnings,
+        routing,
+        output_channels: audio.channels,
     });
     tracing::info!("organ ready: {}", state.organ_key);
     Ok(())

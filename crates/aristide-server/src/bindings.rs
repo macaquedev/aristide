@@ -1295,6 +1295,8 @@ mod tests {
             load_error: None,
             load_warnings: Vec::new(),
             memory: None,
+            routing: Default::default(),
+            output_channels: 2,
         }));
         // Everything downstream reads the resolved tables, exactly as
         // the server does once before it opens any device.

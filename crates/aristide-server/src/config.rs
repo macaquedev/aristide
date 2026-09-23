@@ -101,6 +101,12 @@ const HEADER: &str = "\
 #
 # Changes apply the next time an organ loads.
 #
+# A [[speakers]] entry is a speaker group: a name and the 1-based
+# interface channel pair it plays through (output = [3, 4]). The Route
+# panel sends divisions and stops to them by name; `Main` is always the
+# first pair and needs no entry. An organ sending to a group this
+# machine doesn't define plays it through Main instead.
+#
 # Aristide rewrites this file whenever you change an assignment in
 # Preferences → MIDI or load an organ. Hand edits are read back on the
 # next start.
@@ -122,9 +128,30 @@ pub struct MidiConfig {
     /// console's picker offers when the server starts with nothing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub library: Vec<LibraryEntry>,
+    /// Speaker groups: named output pairs the Route panel sends to.
+    /// Per machine, because they name this machine's speakers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub speakers: Vec<SpeakerDef>,
     /// Organ name (as the loaded set reports it) → its assignments.
     #[serde(default)]
     pub organs: BTreeMap<String, OrganConfig>,
+}
+
+/// One speaker group: its name and 1-based interface channel pair.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpeakerDef {
+    pub name: String,
+    pub output: [u8; 2],
+}
+
+impl SpeakerDef {
+    pub fn speaker(&self) -> crate::routing::Speaker {
+        crate::routing::Speaker {
+            name: self.name.clone(),
+            left: self.output[0].saturating_sub(1),
+            right: self.output[1].saturating_sub(1),
+        }
+    }
 }
 
 /// Whether release tails play from the disk. Attacks and sustain loops
@@ -1718,6 +1745,80 @@ pub fn write_composite_stop_tuning(
             write_tuning_fields(table, &fields, false);
         }
     }
+    write_atomically(path, doc.to_string())
+}
+
+/// Set (or with `None` remove) one source's own sends in a composite
+/// file's `[[routing.source]]` rows: a division when `stop` is `None`,
+/// else that stop of the manual. Everything else is left as it is.
+pub fn write_composite_route(
+    path: &Path,
+    manual_name: &str,
+    stop_name: Option<&str>,
+    sends: Option<&crate::routing::Sends>,
+) -> Result<(), String> {
+    let mut doc = composite_doc(path)?;
+    let is_row = |table: &toml_edit::Table| {
+        let field = |key: &str| table.get(key).and_then(|v| v.as_str());
+        field("manual").is_some_and(|m| m.eq_ignore_ascii_case(manual_name))
+            && match (field("stop"), stop_name) {
+                (None, None) => true,
+                (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+                _ => false,
+            }
+    };
+    fn rows_of(doc: &mut toml_edit::DocumentMut) -> Option<&mut toml_edit::ArrayOfTables> {
+        doc.get_mut("routing")?
+            .as_table_mut()?
+            .get_mut("source")?
+            .as_array_of_tables_mut()
+    }
+    let Some(sends) = sends else {
+        if let Some(rows) = rows_of(&mut doc) {
+            rows.retain(|row| !is_row(row));
+            if rows.is_empty()
+                && let Some(routing) = doc.get_mut("routing").and_then(|t| t.as_table_mut())
+            {
+                routing.remove("source");
+                if routing.is_empty() {
+                    doc.remove("routing");
+                }
+            }
+        }
+        return write_atomically(path, doc.to_string());
+    };
+    let routing = doc
+        .entry("routing")
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+    let Some(routing) = routing.as_table_mut() else {
+        return Err("[routing] is not a table".into());
+    };
+    routing.set_implicit(true);
+    let rows = routing
+        .entry("source")
+        .or_insert(toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new()));
+    let Some(rows) = rows.as_array_of_tables_mut() else {
+        return Err("[[routing.source]] is not an array of tables".into());
+    };
+    let index = (0..rows.len()).find(|&i| rows.get(i).is_some_and(&is_row));
+    let table = match index {
+        Some(index) => rows.get_mut(index).expect("row just found"),
+        None => {
+            let mut table = toml_edit::Table::new();
+            table["manual"] = toml_edit::value(manual_name);
+            if let Some(stop) = stop_name {
+                table["stop"] = toml_edit::value(stop);
+            }
+            rows.push(table);
+            let last = rows.len() - 1;
+            rows.get_mut(last).expect("row just pushed")
+        }
+    };
+    let mut inline = toml_edit::InlineTable::new();
+    for (group, db) in sends {
+        inline.insert(group, ((db * 100.0).round() / 100.0).into());
+    }
+    table["sends"] = toml_edit::value(inline);
     write_atomically(path, doc.to_string())
 }
 

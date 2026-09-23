@@ -20,7 +20,10 @@ use crate::{config, load};
 
 mod edit;
 mod learn;
+mod routing;
 mod tuning;
+
+pub use routing::RouteChange;
 
 /// How many stages the crescendo pedal has above the heel.
 ///
@@ -222,6 +225,10 @@ pub struct State {
     /// streams, and under which preferences — so Preferences can say
     /// whether an edit is waiting on a reload.
     pub memory: Option<MemoryReport>,
+    /// The loaded organ's speaker routing, placed on buses.
+    pub routing: crate::routing::Routing,
+    /// Channels the running audio stream has.
+    pub output_channels: usize,
 }
 
 /// What the last load did with the set's bytes.
@@ -320,6 +327,8 @@ pub struct Installed {
     pub pipe_voicing:
         std::collections::HashMap<(StopId, load::VoicingScope), load::PipeVoicing>,
     pub load_warnings: Vec<String>,
+    pub routing: crate::routing::Routing,
+    pub output_channels: usize,
 }
 
 impl State {
@@ -369,6 +378,8 @@ impl State {
             load_error: None,
             load_warnings: Vec::new(),
             memory: None,
+            routing: Default::default(),
+            output_channels: 2,
         }
     }
 
@@ -436,6 +447,9 @@ impl State {
         }
         self.load_error = None;
         self.load_warnings = loaded.load_warnings;
+        self.routing = loaded.routing;
+        self.output_channels = loaded.output_channels;
+        self.send_bus_sends();
         self.resolve_routes();
         self.persist();
     }

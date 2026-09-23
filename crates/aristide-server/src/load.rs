@@ -125,6 +125,9 @@ pub struct PreparedInstrument {
     /// engine (bus 0, the main pair, is never listed). The per-stop
     /// half of the plan is already installed in the console.
     pub buses: Vec<BusSetup>,
+    /// Speaker routing, placed on buses; the per-stop half is already
+    /// installed in the console, the buses' sends wait for the engine.
+    pub routing: crate::routing::Routing,
     /// Everything this load skipped or ignored (dangling references
     /// healed over, sidecar lines that didn't resolve) — surfaced to
     /// the console, because "loaded, but emptier than the file says"
@@ -1437,14 +1440,16 @@ fn configure_couplers_and_noises(
 }
 
 /// Audio routing: stops onto buses, and their onset delays — resolved
-/// by the same name-pattern rules couplers use. A pattern that matches
-/// nothing warns to the console; it never fails the load.
+/// by the same name-pattern rules couplers use — plus the Route
+/// panel's per-division and per-stop sends, matched by exact name. A
+/// line that matches nothing warns to the console; it never fails the
+/// load.
 fn configure_buses(
     console: &mut Console,
     sidecar: &aristide_formats::sidecar::Sidecar,
     sample_rate: f32,
     load_warnings: &mut Vec<String>,
-) -> Vec<BusSetup> {
+) -> (Vec<BusSetup>, crate::routing::Routing) {
     let stop_ids: Vec<(aristide_model::StopId, String, usize)> = console
         .stop_states()
         .iter()
@@ -1457,8 +1462,8 @@ fn configure_buses(
         .map(|(_, name, _, _, _)| name.to_string())
         .collect();
     let manual_names: Vec<&str> = manual_names.iter().map(String::as_str).collect();
-    let mut plan: std::collections::HashMap<aristide_model::StopId, (u8, u32)> =
-        std::collections::HashMap::new();
+    let mut routing = crate::routing::Routing::default();
+    routing.divisions = vec![None; manual_names.len()];
     let mut buses = Vec::new();
     for (index, def) in sidecar.routing.buses.iter().enumerate() {
         if index + 1 >= aristide_engine::routing::MAX_BUSES {
@@ -1491,14 +1496,18 @@ fn configure_buses(
             );
         }
         for id in members {
-            let entry = plan.entry(id).or_insert((bus, 0));
-            if entry.0 != bus && entry.0 != 0 {
+            if routing.file_members.get(&id).is_some_and(|&table| table != index) {
                 load_warnings
                     .push("routing: a stop matched two buses; keeping the first".to_string());
             } else {
-                entry.0 = bus;
+                routing.file_members.insert(id, index);
             }
         }
+        routing.file_buses.push(if def.name.is_empty() {
+            format!("Bus {bus}")
+        } else {
+            def.name.clone()
+        });
         buses.push(BusSetup {
             bus,
             output: def
@@ -1523,14 +1532,53 @@ fn configure_buses(
                 load_warnings.push(format!("voicing.delay: {pattern:?} matches nothing"));
             }
             for at in matched {
-                plan.entry(stop_ids[at].0).or_insert((0, 0)).1 = frames;
+                routing.delays.insert(stop_ids[at].0, frames);
             }
         }
     }
-    if !plan.is_empty() {
-        console.set_stop_routing(plan);
+    let clamp = |sends: &std::collections::BTreeMap<String, f64>| -> crate::routing::Sends {
+        sends
+            .iter()
+            .map(|(group, db)| (group.clone(), db.clamp(*crate::routing::LEVEL_RANGE.start(), *crate::routing::LEVEL_RANGE.end())))
+            .collect()
+    };
+    for source in &sidecar.routing.sources {
+        let Some(manual) = manual_names
+            .iter()
+            .position(|name| name.eq_ignore_ascii_case(&source.manual))
+        else {
+            load_warnings.push(format!("routing: manual {:?} matches nothing", source.manual));
+            continue;
+        };
+        match &source.stop {
+            None => routing.divisions[manual] = Some(clamp(&source.sends)),
+            Some(stop) => match stop_ids
+                .iter()
+                .find(|(_, name, m)| *m == manual && name.eq_ignore_ascii_case(stop))
+            {
+                Some((id, ..)) => {
+                    routing.stops.insert(*id, clamp(&source.sends));
+                }
+                None => load_warnings.push(format!(
+                    "routing: stop {stop:?} on {:?} matches nothing",
+                    source.manual
+                )),
+            },
+        }
     }
-    buses
+    let placed: Vec<(aristide_model::StopId, usize)> =
+        stop_ids.iter().map(|(id, _, manual)| (*id, *manual)).collect();
+    let unplaced = routing.allocate(&placed);
+    if unplaced > 0 {
+        load_warnings.push(format!(
+            "routing: {unplaced} different speaker routings found no bus and play through Main"
+        ));
+    }
+    let table = routing.stop_table(&placed);
+    if !table.is_empty() {
+        console.set_stop_routing(table);
+    }
+    (buses, routing)
 }
 
 /// Voicing trims from `[[voicing.adjust]]`: level, cents, and footage
@@ -1816,7 +1864,7 @@ pub fn prepare_with(
         &mut load_warnings,
     );
     configure_couplers_and_noises(&mut console, &sidecar, &mut load_warnings);
-    let buses = configure_buses(&mut console, &sidecar, sample_rate, &mut load_warnings);
+    let (buses, routing) = configure_buses(&mut console, &sidecar, sample_rate, &mut load_warnings);
     let (stop_voicing, pipe_voicing) =
         configure_voicing_adjust(&mut console, &sidecar, &mut load_warnings);
     tracing::info!(
@@ -1842,6 +1890,7 @@ pub fn prepare_with(
         stop_voicing,
         pipe_voicing,
         buses,
+        routing,
         warnings: load_warnings,
     })
 }

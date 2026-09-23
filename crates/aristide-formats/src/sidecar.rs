@@ -83,6 +83,36 @@ pub struct Sidecar {
 pub struct RoutingConfig {
     #[serde(default, rename = "bus")]
     pub buses: Vec<BusDef>,
+    /// The Route panel's rows: a division's or a stop's own sends,
+    /// by speaker group. Anything not listed follows its division, and
+    /// a division not listed plays through the main group.
+    #[serde(default, rename = "source")]
+    pub sources: Vec<SourceRouteDef>,
+}
+
+/// One routed source. With `stop`, that stop of the named manual;
+/// without, the whole division. `sends` maps speaker-group names (the
+/// player's Setup defines them; `Main` is the first output pair) to a
+/// level in dB. An empty table is a source routed nowhere.
+///
+/// ```toml
+/// [[routing.source]]
+/// manual = "Positif"
+/// sends = { Main = 0.0, Rear = -6.0 }
+///
+/// [[routing.source]]
+/// manual = "Positif"
+/// stop = "Cornet V"
+/// sends = { Rear = 0.0 }
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceRouteDef {
+    pub manual: String,
+    #[serde(default)]
+    pub stop: Option<String>,
+    #[serde(default)]
+    pub sends: BTreeMap<String, f64>,
 }
 
 /// One routed bus: name patterns pick its members (stops directly, or
@@ -1283,7 +1313,29 @@ ms = 12.5
         // Absent tables cost nothing.
         let empty: Sidecar = toml::from_str("").expect("parses");
         assert!(empty.routing.buses.is_empty());
+        assert!(empty.routing.sources.is_empty());
         assert!(empty.voicing.delays.is_empty());
+    }
+
+    #[test]
+    fn routed_sources_parse() {
+        let text = r#"
+[[routing.source]]
+manual = "Positif"
+sends = { Main = 0.0, Rear = -6.0 }
+[[routing.source]]
+manual = "Positif"
+stop = "Cornet V"
+sends = {}
+"#;
+        let sidecar: Sidecar = toml::from_str(text).expect("parses");
+        let [division, stop] = sidecar.routing.sources.as_slice() else {
+            panic!("two sources");
+        };
+        assert_eq!(division.stop, None);
+        assert_eq!(division.sends.get("Rear"), Some(&-6.0));
+        assert_eq!(stop.stop.as_deref(), Some("Cornet V"));
+        assert!(stop.sends.is_empty(), "a source routed nowhere");
     }
 
     /// Key spans are how a voicing rule narrows to pipes. Names are
