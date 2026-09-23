@@ -30,7 +30,8 @@ spec (`docs/design/ui-flow-spec.md`, "Screens and shell", "Organ", "Sound",
 Adding a sample set as a new source uses the folder browser in the Add stop
 sheet. The sheet offers only playable stops: a set's control noises
 (drawstop thumps, blower, tremulant) belong to their controls and are left
-out, by the same name rule the console uses. Removals ask for confirmation. Failures show one sentence in a modal.
+out, by the same name rule the console uses. Removals ask for confirmation.
+Failures show one sentence in a modal.
 
 ## Backend fixes found on the way
 
