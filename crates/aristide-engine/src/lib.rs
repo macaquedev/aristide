@@ -559,6 +559,12 @@ impl Engine {
                     bus.set_output(left, right, gain);
                 }
             }
+            Command::SetBusSends { bus, sends, count } => {
+                if let Some(bus) = self.buses.get_mut(bus as usize) {
+                    let count = (count as usize).min(sends.len());
+                    bus.set_sends(&sends[..count]);
+                }
+            }
             Command::SetWind { group, params } => {
                 if let Some(wind) = self.wind.get_mut(group as usize) {
                     wind.set_params(params);

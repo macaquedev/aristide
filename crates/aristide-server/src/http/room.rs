@@ -61,7 +61,10 @@ pub(super) fn bus(state: &Mutex<State>, query: &str) -> Reply {
         .and_then(|v| v.parse::<u8>().ok())
         .filter(|b| (*b as usize) < aristide_engine::routing::MAX_BUSES)
     else {
-        return bad_request("bus must be 0-7");
+        return bad_request(&format!(
+            "bus must be 0-{}",
+            aristide_engine::routing::MAX_BUSES - 1
+        ));
     };
     let number = |name: &str, default: f32| {
         param(query, name)

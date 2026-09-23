@@ -1,6 +1,79 @@
 //! Output buses and the master limiter.
 
 use super::*;
+use crate::routing::{Send, MAX_SENDS};
+
+#[test]
+fn a_bus_with_two_sends_lands_on_both_pairs_at_their_own_gains() {
+    let (mut engine, mut handle) = Engine::new(100.0, test_bank());
+    engine.set_release_stagger(0.0);
+    let mut sends = [Send { left: 0, right: 1, gain: 0.0 }; MAX_SENDS];
+    sends[0] = Send { left: 0, right: 1, gain: 0.5 };
+    sends[1] = Send { left: 2, right: 3, gain: 0.25 };
+    handle.send(Command::SetBusSends { bus: 1, sends, count: 2 });
+    handle.send(Command::StartVoice {
+        handle: 1,
+        sample: 0,
+        rate: 1.0,
+        gain: 1.0,
+        group: 0,
+        wind_weight: 0.0,
+        brightness: 0.0,
+        voicing_tilt: 1.0,
+        enclosures: [ENCLOSURE_NONE; MAX_VOICE_ENCLOSURES],
+        bus: 1,
+        delay_frames: 0,
+        nominal_hz: 0.0,
+    });
+    // The send gains ramp across one whole `process()` call (it's one
+    // chunk here, well under MAX_CHUNK_FRAMES); let that first call
+    // settle, then measure a steady chunk.
+    let mut settle = vec![0.0f32; 8 * 4];
+    engine.process(&mut settle, 4);
+    let frames = 40;
+    let mut buffer = vec![0.0f32; frames * 4];
+    engine.process(&mut buffer, 4);
+    let channel = |n: usize| buffer.iter().skip(n).step_by(4);
+    let peak = |n: usize| channel(n).fold(0.0f32, |m, &v| m.max(v.abs()));
+    let peak_01 = peak(0).max(peak(1));
+    let peak_23 = peak(2).max(peak(3));
+    assert!(peak_01 > 0.0, "first send carries the voice");
+    assert!(peak_23 > 0.0, "second send carries the voice");
+    assert!(
+        (peak_23 / peak_01 - 0.5).abs() < 0.05,
+        "second send is half the level of the first: {peak_01} vs {peak_23}"
+    );
+}
+
+#[test]
+fn sends_count_zero_silences_the_bus() {
+    let (mut engine, mut handle) = Engine::new(100.0, test_bank());
+    engine.set_release_stagger(0.0);
+    let sends = [Send { left: 0, right: 1, gain: 1.0 }; MAX_SENDS];
+    handle.send(Command::SetBusSends { bus: 1, sends, count: 0 });
+    handle.send(Command::StartVoice {
+        handle: 1,
+        sample: 0,
+        rate: 1.0,
+        gain: 1.0,
+        group: 0,
+        wind_weight: 0.0,
+        brightness: 0.0,
+        voicing_tilt: 1.0,
+        enclosures: [ENCLOSURE_NONE; MAX_VOICE_ENCLOSURES],
+        bus: 1,
+        delay_frames: 0,
+        nominal_hz: 0.0,
+    });
+    // Let the ramp down to silence finish in its own chunk, then check
+    // a following chunk is exactly silent.
+    let mut settle = vec![0.0f32; 8 * 4];
+    engine.process(&mut settle, 4);
+    let frames = 40;
+    let mut buffer = vec![0.0f32; frames * 4];
+    engine.process(&mut buffer, 4);
+    assert!(buffer.iter().all(|&v| v == 0.0), "bus with count 0 is silent");
+}
 
 #[test]
 fn voices_route_to_their_buses_output_pairs() {

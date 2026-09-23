@@ -3,7 +3,7 @@
 use rtrb::Producer;
 
 use crate::enclosure::{EnclosureParams, MAX_VOICE_ENCLOSURES};
-use crate::routing;
+use crate::routing::{self, Send, MAX_SENDS};
 use crate::wind::{self, WindParams};
 
 pub(crate) const COMMAND_QUEUE_CAPACITY: usize = 8192;
@@ -125,11 +125,22 @@ pub enum Command {
     },
     /// Route one bus onto an output channel pair at a level. Channels
     /// the device hasn't got fall back to the main pair at render time.
+    /// Shorthand for `SetBusSends` with a single send.
     SetBusOutput {
         bus: u8,
         left: u8,
         right: u8,
         gain: f32,
+    },
+    /// Replace one bus's whole send list — the routing matrix's fan-out
+    /// of a bus onto several channel pairs at once, each at its own
+    /// level. `count` 0 silences the bus (its voices still run; its
+    /// delay ring still advances). Gain changes ramp across the next
+    /// chunk, so raising, lowering or (dis)connecting a send doesn't click.
+    SetBusSends {
+        bus: u8,
+        sends: [Send; MAX_SENDS],
+        count: u8,
     },
     /// Start/stop the built-in additive test tone (no-set mode).
     NoteOn { key: u8, freq_hz: f32 },
