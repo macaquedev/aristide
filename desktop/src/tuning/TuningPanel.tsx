@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Button, Loader, Modal, Stack, Text } from '@mantine/core';
-import { endpoint, request } from '../api';
+import { editInstrument, request } from '../api';
 import { TuningDesk, type DeskScope, type Part } from './TuningDesk';
 import { CUSTOM, RECORDED, type Anchor, type Shape } from './model';
 import { ScalaSheet } from './ScalaSheet';
@@ -61,16 +61,7 @@ export function TuningPanel({ edit, organ, offerUndo }: { edit: boolean; organ: 
     const timer = setInterval(() => void refresh(), 1000);
     return () => clearInterval(timer);
   }, [refresh]);
-  // A sample set's own organ stays as the set defines it: the first
-  // edit below the instrument makes the player's own copy, then retries.
-  const send = async (params: Params) => {
-    try { await request('POST', endpoint('tuning', params)); }
-    catch (error) {
-      if ((error as Error).message !== 'request-409') throw error;
-      await request('POST', endpoint('organ/save_as', { name: `${organ} (edited)` }));
-      await request('POST', endpoint('tuning', params));
-    }
-  };
+  const send = (params: Params) => editInstrument(organ, 'tuning', params);
   const post = (steps: Params[]) => {
     const task = queue.current.catch(() => {}).then(async () => {
       for (const params of steps) await send(params);

@@ -33,6 +33,17 @@ export async function request<T>(method: 'GET' | 'POST', url: string): Promise<T
   return reply.body;
 }
 
+/** An edit to the instrument itself. A sample set's own organ stays as the
+ * set defines it: the first such edit saves the player's own copy, then retries. */
+export async function editInstrument<T>(organ: string, path: string, values: Record<string, string | number>): Promise<T> {
+  try { return await request<T>('POST', endpoint(path, values)); }
+  catch (error) {
+    if ((error as Error).message !== 'request-409') throw error;
+    await request('POST', endpoint('organ/save_as', { name: `${organ} (edited)` }));
+    return request<T>('POST', endpoint(path, values));
+  }
+}
+
 export async function status() {
   return native ? invoke<{ ready: boolean; error: string | null }>('runtime_status') : { ready: true, error: null };
 }
