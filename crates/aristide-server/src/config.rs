@@ -1822,6 +1822,84 @@ pub fn write_composite_route(
     write_atomically(path, doc.to_string())
 }
 
+/// Set (or with `None` remove) one stop's `[[rule]]` in a composite
+/// file, found by its manual and stop names. Everything else is left
+/// as it is.
+pub fn write_composite_rule(
+    path: &Path,
+    manual_name: &str,
+    stop_name: &str,
+    rule: Option<&aristide_formats::sidecar::RuleDef>,
+) -> Result<(), String> {
+    let mut doc = composite_doc(path)?;
+    let is_row = |table: &toml_edit::Table| {
+        let field = |key: &str| table.get(key).and_then(|v| v.as_str());
+        field("manual").is_some_and(|m| m.eq_ignore_ascii_case(manual_name))
+            && field("stop").is_some_and(|s| s.eq_ignore_ascii_case(stop_name))
+    };
+    let replacement = match rule {
+        Some(rule) => {
+            #[derive(serde::Serialize)]
+            struct Wrapper<'a> {
+                rule: [&'a aristide_formats::sidecar::RuleDef; 1],
+            }
+            let text = toml::to_string(&Wrapper { rule: [rule] }).map_err(|err| err.to_string())?;
+            let parsed: toml_edit::DocumentMut = text.parse().map_err(|err| format!("{err}"))?;
+            let table = parsed
+                .get("rule")
+                .and_then(|item| item.as_array_of_tables())
+                .and_then(|rows| rows.get(0))
+                .cloned()
+                .ok_or("a rule did not serialize as a table")?;
+            Some(unplaced(table))
+        }
+        None => None,
+    };
+    if doc.get("rule").is_none() && replacement.is_none() {
+        return Ok(());
+    }
+    let rows = doc
+        .entry("rule")
+        .or_insert(toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new()));
+    let Some(rows) = rows.as_array_of_tables_mut() else {
+        return Err("[[rule]] is not an array of tables".into());
+    };
+    let index = (0..rows.len()).find(|&i| rows.get(i).is_some_and(&is_row));
+    match (index, replacement) {
+        (Some(index), Some(table)) => {
+            *rows.get_mut(index).expect("row just found") = table;
+        }
+        (None, Some(table)) => rows.push(table),
+        (Some(index), None) => {
+            rows.remove(index);
+        }
+        (None, None) => {}
+    }
+    if rows.is_empty() {
+        doc.remove("rule");
+    }
+    write_atomically(path, doc.to_string())
+}
+
+/// A table carried in from another document, stripped of that
+/// document's positions so it and its subtables print together where
+/// it lands instead of interleaving with this document's sections.
+fn unplaced(mut table: toml_edit::Table) -> toml_edit::Table {
+    table.set_position(None);
+    for (_, item) in table.iter_mut() {
+        match item {
+            toml_edit::Item::Table(sub) => *sub = unplaced(std::mem::take(sub)),
+            toml_edit::Item::ArrayOfTables(rows) => {
+                for row in rows.iter_mut() {
+                    *row = unplaced(std::mem::take(row));
+                }
+            }
+            _ => {}
+        }
+    }
+    table
+}
+
 /// Set `wet` in an existing `[reverb]` table. An organ file with none —
 /// no impulse response, nothing to wet — is left exactly as it is
 /// rather than growing a `[reverb]` section that would otherwise mean

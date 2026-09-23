@@ -60,6 +60,72 @@ pub struct Sidecar {
     pub routing: RoutingConfig,
     #[serde(default)]
     pub voicing: VoicingConfig,
+    /// Stop rules edited in Build, one per stop that is more than its
+    /// own pipes from key-down to release.
+    #[serde(default, rename = "rule", skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<RuleDef>,
+}
+
+/// One stop's rule: what a key press on it sounds. Stops are named as
+/// the console shows them, with their manual. `stamps` are the shared
+/// timestamps events start and end at, beside the fixed `down` and
+/// `up` (0 ms after key-down and key-up). An event without `end`
+/// sounds until release.
+///
+/// ```toml
+/// [[rule]]
+/// manual = "Grand-orgue"
+/// stop = "Théorbe"
+/// stamps = [{ id = "t1", anchor = "down", ms = 50.0 }]
+///
+/// [[rule.event]]
+/// manual = "Grand-orgue"
+/// stop = "Théorbe"
+/// start = "down"
+///
+/// [[rule.event]]
+/// manual = "Positif"
+/// stop = "Flûte 4'"
+/// rank = "Flûte"           # one rank of it; absent = all of them
+/// cents = 1250.0
+/// level_db = -3.0
+/// start = "down"
+/// end = "t1"
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuleDef {
+    pub manual: String,
+    pub stop: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stamps: Vec<RuleStampDef>,
+    #[serde(default, rename = "event")]
+    pub events: Vec<RuleEventDef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuleStampDef {
+    pub id: String,
+    /// `down` or `up`: which key edge the offset counts from.
+    pub anchor: String,
+    pub ms: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuleEventDef {
+    pub manual: String,
+    pub stop: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rank: Option<String>,
+    #[serde(default)]
+    pub cents: f64,
+    #[serde(default)]
+    pub level_db: f64,
+    pub start: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end: Option<String>,
 }
 
 /// Audio routing: which stops render onto which output bus, where each

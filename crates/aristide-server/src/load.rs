@@ -1581,6 +1581,25 @@ fn configure_buses(
     (buses, routing)
 }
 
+/// Stop rules from `[[rule]]`, resolved by exact names. A rule naming
+/// what the organ hasn't got warns and leaves its stop conventional.
+fn configure_rules(
+    console: &mut Console,
+    sidecar: &aristide_formats::sidecar::Sidecar,
+    load_warnings: &mut Vec<String>,
+) {
+    let mut rules = std::collections::HashMap::new();
+    for def in &sidecar.rules {
+        match crate::rule::from_def(console, def) {
+            Ok((stop, rule)) => {
+                rules.insert(stop, rule);
+            }
+            Err(why) => load_warnings.push(format!("rule for {:?}: {why}", def.stop)),
+        }
+    }
+    console.set_stop_rules(rules);
+}
+
 /// Voicing trims from `[[voicing.adjust]]`: level, cents, and footage
 /// per stop pattern. A `pitch` footage becomes a cents shift against
 /// the stop's own recorded footage, then rides the same fold as
@@ -1867,6 +1886,7 @@ pub fn prepare_with(
     let (buses, routing) = configure_buses(&mut console, &sidecar, sample_rate, &mut load_warnings);
     let (stop_voicing, pipe_voicing) =
         configure_voicing_adjust(&mut console, &sidecar, &mut load_warnings);
+    configure_rules(&mut console, &sidecar, &mut load_warnings);
     tracing::info!(
         "tuning: {} @ {}={} Hz, transpose {:+}",
         live_tuning.temperament.name(),

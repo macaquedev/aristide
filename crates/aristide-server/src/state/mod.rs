@@ -18,6 +18,7 @@ use crate::bindings::{Binding, ControlLearn, Learn, MidiPort};
 use crate::console::Console;
 use crate::{config, load};
 
+mod build;
 mod edit;
 mod learn;
 mod routing;

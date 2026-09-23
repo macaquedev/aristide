@@ -218,6 +218,33 @@ struct PipeKey {
     route_lane: u32,
     /// 0 = shared; else 1 + the id of the `own_pipes` stop sounding it.
     stop_lane: u32,
+    /// 0 = an ordinary event (key-down until release); else the stop
+    /// rule event's own lane — timed events never merge with the
+    /// organ's held pipes, or one would end the other's sound.
+    event_lane: u32,
+}
+
+/// Which key edge a voice walk answers: the press or the release.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Edge {
+    Down,
+    Up,
+}
+
+/// One rank range a stop's rule sounds at a key, with the event's
+/// pitch, level and timing already read off the rule.
+struct Part<'a> {
+    range: &'a RankRange,
+    /// The stop whose keyboard lays the range out (and voices it).
+    owner: &'a aristide_model::Stop,
+    cents: f64,
+    gain: f32,
+    delay_ms: f64,
+    /// Ends this long after the voice's trigger (key-down or key-up).
+    end_ms: Option<f64>,
+    /// Keeps speaking this long past key-up.
+    hold_ms: Option<f64>,
+    lane: u32,
 }
 
 pub struct Console {
@@ -345,6 +372,12 @@ pub struct Console {
     /// footage change is a unit-organ extension, not a tape-speed
     /// trick), the remainder bends.
     stop_adjust: HashMap<StopId, Vec<TrimRule>>,
+    /// Per stop: its rule, when it is more than the conventional one
+    /// event (see [`crate::rule`]).
+    stop_rules: HashMap<StopId, crate::rule::Rule>,
+    /// When each held key went down — what decides whether a hold
+    /// past key-up has started speaking yet.
+    held_since: HashMap<(usize, u16), std::time::Instant>,
     /// Per manual: the inclusive MIDI note range that manual answers to.
     /// Starts as the sample set's own compass and is widened to the
     /// player's keyboard (see `set_compass`) — a key outside it is
@@ -425,6 +458,11 @@ struct Speaking {
     /// The chest the voice draws from: which voices a tremulant
     /// switch reaches.
     group: u8,
+    /// Frames the voice keeps speaking past key-up (0 = stops there),
+    /// and when it first speaks: a hold only continues a voice that
+    /// has started.
+    hold_frames: u32,
+    speaks_at: std::time::Instant,
 }
 
 impl Speaking {
@@ -451,6 +489,7 @@ struct KeyVoice {
     trim: VoiceTrim,
     shift: i16,
     spec: VoiceSpec,
+    hold_frames: u32,
 }
 
 /// The engine's xorshift, control-side: cheap, stateful, deterministic
@@ -520,6 +559,8 @@ impl Console {
             speaking: HashMap::new(),
             stop_routing: HashMap::new(),
             stop_adjust: HashMap::new(),
+            stop_rules: HashMap::new(),
+            held_since: HashMap::new(),
             last_pipe_voice: HashMap::new(),
             attack_options: HashMap::new(),
             last_released: HashMap::new(),
@@ -1768,6 +1809,126 @@ impl Console {
         }
     }
 
+    /// What `stop` sounds on one key edge, range by range: its own
+    /// ranks on key-down when it has no rule, else each of its rule's
+    /// events that this edge triggers.
+    fn parts<'a>(&'a self, stop: &'a aristide_model::Stop, edge: Edge) -> Vec<Part<'a>> {
+        let Some(rule) = self.stop_rules.get(&stop.id) else {
+            if edge == Edge::Up {
+                return Vec::new();
+            }
+            return stop
+                .ranks
+                .iter()
+                .map(|range| Part {
+                    range,
+                    owner: stop,
+                    cents: 0.0,
+                    gain: 1.0,
+                    delay_ms: 0.0,
+                    end_ms: None,
+                    hold_ms: None,
+                    lane: 0,
+                })
+                .collect();
+        };
+        let mut parts = Vec::new();
+        for (index, event) in rule.events.iter().enumerate() {
+            let Ok(timing) = rule.timing(event) else {
+                continue;
+            };
+            let (delay_ms, end_ms, hold_ms) = match (timing, edge) {
+                (crate::rule::Timing::Down { delay_ms, end_ms, hold_ms }, Edge::Down) => {
+                    (delay_ms, end_ms, hold_ms)
+                }
+                (crate::rule::Timing::Up { delay_ms, end_ms }, Edge::Up) => {
+                    (delay_ms, Some(end_ms), None)
+                }
+                _ => continue,
+            };
+            let Some(owner) = self.organ.stops.iter().find(|s| s.id == event.source.stop) else {
+                continue;
+            };
+            let ordinary = delay_ms == 0.0 && end_ms.is_none() && hold_ms.is_none();
+            let lane = if ordinary { 0 } else { (stop.id.0 + 1) << 8 | (index as u32 + 1) };
+            for range in owner
+                .ranks
+                .iter()
+                .filter(|range| event.source.rank.is_none_or(|rank| rank == range.rank))
+            {
+                parts.push(Part {
+                    range,
+                    owner,
+                    cents: event.cents,
+                    gain: aristide_model::units::db_to_linear(event.level_db) as f32,
+                    delay_ms,
+                    end_ms,
+                    hold_ms,
+                    lane,
+                });
+            }
+        }
+        parts
+    }
+
+    /// Install every stop's rule at load. Plain rules are dropped.
+    pub fn set_stop_rules(&mut self, rules: HashMap<StopId, crate::rule::Rule>) {
+        self.stop_rules = rules
+            .into_iter()
+            .filter(|(stop, rule)| !rule.is_plain(*stop))
+            .collect();
+    }
+
+    /// One stop's rule — the conventional one when it has none of its own.
+    pub fn stop_rule(&self, stop: StopId) -> crate::rule::Rule {
+        self.stop_rules
+            .get(&stop)
+            .cloned()
+            .unwrap_or_else(|| crate::rule::Rule::plain(stop))
+    }
+
+    pub fn stop_has_rule(&self, stop: StopId) -> bool {
+        self.stop_rules.contains_key(&stop)
+    }
+
+    /// Replace one stop's rule live (`None`: back to the conventional
+    /// stop). A rule naming a stop or rank this organ hasn't got is
+    /// refused. Held keys re-speak the stop, as drawing it would.
+    pub fn set_stop_rule(
+        &mut self,
+        stop: StopId,
+        rule: Option<crate::rule::Rule>,
+    ) -> Result<(Vec<u64>, Vec<VoiceStart>), String> {
+        if !self.organ.stops.iter().any(|s| s.id == stop) {
+            return Err("no such stop".into());
+        }
+        match rule {
+            Some(rule) if !rule.is_plain(stop) => {
+                rule.validate()?;
+                for event in &rule.events {
+                    let source = self
+                        .organ
+                        .stops
+                        .iter()
+                        .find(|s| s.id == event.source.stop && !self.noise_stops.contains(&s.id))
+                        .ok_or("an event's source stop is not in this organ")?;
+                    if event
+                        .source
+                        .rank
+                        .is_some_and(|rank| !source.ranks.iter().any(|r| r.rank == rank))
+                    {
+                        return Err("an event's rank is not in its source stop".into());
+                    }
+                }
+                self.stop_rules.insert(stop, rule);
+            }
+            _ => {
+                self.stop_rules.remove(&stop);
+            }
+        }
+        Ok(self.reprice_stop(stop))
+    }
+
     /// The pipes one key press sounds, with each voice's parameters
     /// settled — couplers expanded, compass enforced, missing pipes
     /// filled by repitching. Both the key press and drawing a stop
@@ -1785,6 +1946,7 @@ impl Console {
         manual_index: usize,
         key: u16,
         only: Option<StopId>,
+        edge: Edge,
     ) -> Vec<KeyVoice> {
         let Some(origin) = self.organ.manuals.get(manual_index).map(|m| m.id) else {
             return Vec::new();
@@ -1849,8 +2011,22 @@ impl Console {
                         ranges().map(|r| r.first_key as i32 + r.key_count as i32 - 1).max()?,
                     ))
                 });
-                for range in &stop.ranks {
-                    let widened = range.key_count > 0 && edges.is_some_and(|(low, high)| {
+                for part in self.parts(stop, edge) {
+                    let range = part.range;
+                    let own = part.owner.id == stop.id;
+                    // A borrowed stop's ranges are laid out on its own
+                    // keyboard: the same sounding key, counted from
+                    // that keyboard's bottom.
+                    let (source_manual, key_index) = if own {
+                        (target, key_index)
+                    } else {
+                        let Some(at) = self.organ.manuals.iter().position(|m| m.id == part.owner.manual)
+                        else {
+                            continue;
+                        };
+                        (at, midi_key - self.organ.manuals[at].first_midi_note as i16)
+                    };
+                    let widened = own && range.key_count > 0 && edges.is_some_and(|(low, high)| {
                         let first = range.first_key as i32;
                         let last = first + range.key_count as i32 - 1;
                         (i32::from(key_index) < low && first == low)
@@ -1859,7 +2035,7 @@ impl Console {
                     // Coverage is judged at the played key — a divided
                     // register is a decision about the keyboard, not
                     // about where the pitches land on the ladder.
-                    if !widened && !self.range_covers(range, key_index, target, fill) {
+                    if !widened && !self.range_covers(range, key_index, source_manual, fill) {
                         continue;
                     }
                     // The pitch this key wants under the tuning this
@@ -1886,8 +2062,8 @@ impl Console {
                     // really sound there — the octave of an 8' drawn
                     // at 4' comes from the pipes an octave up, not
                     // from doubling the tape speed.
-                    let trim = self.trim_for(stop.id, range.rank, midi_key as i32);
-                    let adjust_cents = trim.cents;
+                    let trim = self.trim_for(part.owner.id, range.rank, midi_key as i32);
+                    let adjust_cents = trim.cents + part.cents;
                     // A target tuning bends each pipe from where it
                     // was measured to sound (or from the organ's model
                     // of it, when it keeps its drift), not from the
@@ -1923,9 +2099,12 @@ impl Console {
                         spec.bus = bus;
                         spec.delay_frames = delay_frames;
                     }
+                    let frames = |ms: f64| (ms * self.device_rate as f64 / 1000.0).round() as u32;
+                    spec.delay_frames += frames(part.delay_ms);
+                    spec.end_frames = part.end_ms.map_or(0, |ms| frames(ms).max(1));
                     // The user's voicing trim: level and tone directly
                     // (the cents were folded into `priced` above).
-                    spec.gain *= trim.gain;
+                    spec.gain *= trim.gain * part.gain;
                     spec.voicing_tilt = trim.tilt;
                     // Identity at cent resolution on the PHYSICAL pipe:
                     // two keys anchored to the same pipe but bent apart
@@ -1943,6 +2122,7 @@ impl Console {
                         cents: (nominal - pipe as i32) * 100 + bend_cents.round() as i32,
                         route_lane: lane,
                         stop_lane: if stop.own_pipes { stop.id.0 + 1 } else { 0 },
+                        event_lane: part.lane,
                     };
                     voices.push(KeyVoice {
                         stop: stop.id,
@@ -1956,6 +2136,7 @@ impl Console {
                         trim,
                         shift,
                         spec: self.voiced(spec, ratio * bend_ratio),
+                        hold_frames: part.hold_ms.map_or(0, |ms| frames(ms).max(1)),
                     });
                 }
             }
@@ -2192,9 +2373,10 @@ impl Console {
             }
         }
         self.held_velocity.insert((manual_index, key), velocity);
+        self.held_since.insert((manual_index, key), std::time::Instant::now());
         let mut starts = Vec::new();
         let mut held = Vec::new();
-        for mut voice in self.voices_for_key(manual_index, key, None) {
+        for mut voice in self.voices_for_key(manual_index, key, None, Edge::Down) {
             self.price(&mut voice, velocity);
             if voice.spec.percussive {
                 // One-shots (noises) aren't refcounted.
@@ -2226,28 +2408,58 @@ impl Console {
     }
 
     /// `note_off` addressed by manual index (see `note_on_manual`).
-    /// Returns (handles to stop, voices to start) — a note-off can
-    /// *start* sound when a Bass/Melody coupler hands its coupled note
-    /// to the next-extreme key still held.
-    pub fn note_off_manual(&mut self, manual_index: usize, key: u16) -> (Vec<u64>, Vec<VoiceStart>) {
-        self.held_velocity.remove(&(manual_index, key));
+    /// Returns (handles to stop, voices to start, `(handle, frames)`
+    /// voices to stop later) — a note-off can *start* sound when a
+    /// Bass/Melody coupler hands its coupled note to the next-extreme
+    /// key still held, or a stop rule has events after key-up; and a
+    /// rule's hold past key-up stops its voice later.
+    pub fn note_off_manual(
+        &mut self,
+        manual_index: usize,
+        key: u16,
+    ) -> (Vec<u64>, Vec<VoiceStart>, Vec<(u64, u32)>) {
+        let velocity = self.held_velocity.remove(&(manual_index, key)).unwrap_or(127);
+        self.held_since.remove(&(manual_index, key));
+        let now = std::time::Instant::now();
         let mut released = Vec::new();
+        let mut later = Vec::new();
         for (_, held) in self
             .sounding
             .remove(&(manual_index, key))
             .unwrap_or_default()
         {
+            // A hold continues a voice already speaking; one still
+            // waiting out its onset is cancelled like any other.
+            let hold = self
+                .speaking
+                .get(&held)
+                .filter(|voice| voice.hold_frames > 0 && voice.speaks_at <= now)
+                .map(|voice| voice.hold_frames);
             if let Some(handle) = self.release_pipe(held) {
-                released.push(handle);
+                match hold {
+                    Some(frames) => later.push((handle, frames)),
+                    None => released.push(handle),
+                }
             }
         }
         let mut starts = Vec::new();
+        if manual_index < self.organ.manuals.len() {
+            for mut voice in self.voices_for_key(manual_index, key, None, Edge::Up) {
+                self.price(&mut voice, velocity);
+                let handle = self.next_handle;
+                self.next_handle += 1;
+                starts.push(VoiceStart {
+                    handle,
+                    spec: voice.spec,
+                });
+            }
+        }
         if self.tracks_extremes(manual_index) {
             self.recouple_held_keys(&mut released, &mut starts);
             released.sort_unstable();
             released.dedup();
         }
-        (released, starts)
+        (released, starts, later)
     }
 
     /// One more holder demands a pipe. A pipe speaks ONCE no matter how
@@ -2285,6 +2497,11 @@ impl Console {
                         pipe: voice.pipe,
                         sample: voice.spec.sample,
                         group: voice.spec.group,
+                        hold_frames: voice.hold_frames,
+                        speaks_at: std::time::Instant::now()
+                            + std::time::Duration::from_secs_f32(
+                                voice.spec.delay_frames as f32 / self.device_rate.max(1.0),
+                            ),
                     },
                 );
                 if let Some(previous) = self.last_pipe_voice.insert(at, handle) {
@@ -2428,7 +2645,7 @@ impl Console {
                 .copied()
                 .unwrap_or(127);
             let mut new_entries = Vec::new();
-            for mut voice in self.voices_for_key(manual_index, key, Some(stop)) {
+            for mut voice in self.voices_for_key(manual_index, key, Some(stop), Edge::Down) {
                 self.price(&mut voice, velocity);
                 // One-shots strike on key press, not on drawing the
                 // stop mid-hold.
@@ -2722,7 +2939,7 @@ impl Console {
                 .copied()
                 .unwrap_or(127);
             let mut desired: Vec<KeyVoice> = self
-                .voices_for_key(manual_index, key, None)
+                .voices_for_key(manual_index, key, None, Edge::Down)
                 .into_iter()
                 .filter(|voice| !voice.spec.percussive)
                 .collect();
@@ -4234,6 +4451,93 @@ mod tests {
         );
     }
 
+    /// Titanique, shortened: the stop's own pipes until release, an
+    /// octave of the second stop's rank ending 50 ms after key-down,
+    /// and the same rank again from 50 to 150 ms after key-up.
+    fn titanique() -> crate::rule::Rule {
+        use crate::rule::{Anchor, Event, Rule, Source, Stamp};
+        let mut rule = Rule::plain(StopId(1));
+        rule.stamps.push(Stamp { id: "t1".into(), anchor: Anchor::Down, ms: 50.0 });
+        rule.stamps.push(Stamp { id: "u1".into(), anchor: Anchor::Up, ms: 50.0 });
+        rule.stamps.push(Stamp { id: "u2".into(), anchor: Anchor::Up, ms: 150.0 });
+        let octave = Source { stop: StopId(2), rank: Some(RankId(2)) };
+        rule.events.push(Event { source: octave, cents: 1200.0, level_db: -6.0, start: "down".into(), end: Some("t1".into()) });
+        rule.events.push(Event { source: octave, cents: 0.0, level_db: 0.0, start: "u1".into(), end: Some("u2".into()) });
+        rule
+    }
+
+    #[test]
+    fn a_stop_rule_sounds_its_events_on_both_key_edges() {
+        let mut console = test_console();
+        console.set_drawn(StopId(2), false);
+        console.set_stop_rule(StopId(1), Some(titanique())).expect("valid rule");
+        let (starts, _) = console.note_on_manual(0, 60, 127);
+        assert_eq!(starts.len(), 2, "own pipes and the finite octave");
+        let own = starts.iter().find(|s| s.spec.sample == 0).expect("own pipe");
+        assert_eq!((own.spec.delay_frames, own.spec.end_frames), (0, 0));
+        let octave = starts.iter().find(|s| s.spec.sample == 1).expect("octave");
+        assert_eq!(octave.spec.end_frames, 2400, "ends 50 ms after key-down");
+        assert!((octave.spec.gain - 0.501).abs() < 0.01, "−6 dB");
+
+        let (stopped, starts, later) = console.note_off_manual(0, 60);
+        assert_eq!(stopped.len(), 2, "key-up stops what key-down started");
+        assert!(later.is_empty());
+        assert_eq!(starts.len(), 1, "the event after key-up");
+        assert_eq!(
+            (starts[0].spec.delay_frames, starts[0].spec.end_frames),
+            (2400, 7200),
+            "starts 50 ms after key-up and ends 150 ms after it"
+        );
+        assert!(console.speaking.is_empty(), "release events are not held");
+    }
+
+    #[test]
+    fn a_hold_past_key_up_stops_later_once_it_has_started() {
+        let mut console = test_console();
+        console.set_drawn(StopId(2), false);
+        let mut rule = titanique();
+        rule.events.truncate(1);
+        rule.events[0].end = Some("u1".into());
+        console.set_stop_rule(StopId(1), Some(rule.clone())).expect("valid rule");
+        let (starts, _) = console.note_on_manual(0, 60, 127);
+        let (stopped, _, later) = console.note_off_manual(0, 60);
+        assert!(stopped.is_empty());
+        assert_eq!(later, vec![(starts[0].handle, 2400)]);
+
+        // Not yet speaking at key-up: cancelled, not continued.
+        rule.stamps.push(crate::rule::Stamp { id: "t9".into(), anchor: crate::rule::Anchor::Down, ms: 10_000.0 });
+        rule.events[0].start = "t9".into();
+        console.set_stop_rule(StopId(1), Some(rule)).expect("valid rule");
+        let (starts, _) = console.note_on_manual(0, 60, 127);
+        let (stopped, _, later) = console.note_off_manual(0, 60);
+        assert_eq!(stopped, vec![starts[0].handle]);
+        assert!(later.is_empty());
+    }
+
+    #[test]
+    fn a_rule_edit_lands_under_held_keys_and_resets() {
+        let mut console = test_console();
+        console.set_drawn(StopId(2), false);
+        console.note_on_manual(0, 60, 127);
+        let (stopped, starts) = console.set_stop_rule(StopId(1), Some(titanique())).expect("valid");
+        assert_eq!((stopped.len(), starts.len()), (1, 2), "the stop re-speaks with its rule");
+        assert!(console.stop_has_rule(StopId(1)));
+        console.set_stop_rule(StopId(1), Some(crate::rule::Rule::plain(StopId(1)))).expect("plain");
+        assert!(!console.stop_has_rule(StopId(1)), "a plain rule is no rule");
+    }
+
+    #[test]
+    fn a_rule_naming_missing_pipework_is_refused() {
+        let mut console = test_console();
+        let mut rule = titanique();
+        rule.events[1].source.stop = StopId(99);
+        assert!(console.set_stop_rule(StopId(1), Some(rule)).is_err());
+        let mut rule = titanique();
+        rule.events[1].source.rank = Some(RankId(1));
+        assert!(console.set_stop_rule(StopId(1), Some(rule)).is_err(), "rank 1 is not stop 2's");
+        assert!(!console.stop_has_rule(StopId(1)));
+    }
+
     #[test]
     fn drawing_a_stop_starts_pipes_under_held_keys() {
         let mut console = test_console();
@@ -4592,14 +4896,14 @@ mod tests {
 
         // Releasing the bass key hands the coupled note back up to C4:
         // a note-off that *starts* a voice.
-        let (stopped, starts) = console.note_off_manual(0, 55);
+        let (stopped, starts, _) = console.note_off_manual(0, 55);
         assert!(stopped.contains(&coupled_g));
         assert_eq!(starts.len(), 1);
         assert_eq!(starts[0].spec.sample, 1, "the bass re-speaks under C4");
 
         // Once every key is up, nothing is left sounding.
         console.note_off_manual(0, 64);
-        let (stopped, starts) = console.note_off_manual(0, 60);
+        let (stopped, starts, _) = console.note_off_manual(0, 60);
         assert!(starts.is_empty());
         assert_eq!(stopped.len(), 2, "C4's own pipe and its coupled bass");
         assert!(console.speaking.is_empty());
@@ -4645,7 +4949,7 @@ mod tests {
         assert_eq!(starts.len(), 2, "C5 and the melody moved onto it");
 
         // Releasing it hands the melody back to G4.
-        let (_, starts) = console.note_off_manual(0, 72);
+        let (_, starts, _) = console.note_off_manual(0, 72);
         assert_eq!(starts.len(), 1);
         assert_eq!(starts[0].spec.sample, 1, "the melody re-speaks under G4");
 

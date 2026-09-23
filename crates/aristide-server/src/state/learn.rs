@@ -289,14 +289,18 @@ impl State {
                     engine.send(start.command());
                 }
             } else {
-                let (stopped, starts) =
+                let (stopped, starts, later) =
                     console.note_off_manual(keyboard.manual, key);
                 for handle in stopped {
                     engine.send(Command::StopVoice { handle });
                 }
-                // A Bass/Melody coupler retargeting onto another held key.
+                // A Bass/Melody coupler retargeting onto another held key,
+                // or a stop rule's events after key-up.
                 for start in starts {
                     engine.send(start.command());
+                }
+                for (handle, frames) in later {
+                    engine.send(Command::StopVoiceIn { handle, frames });
                 }
             }
         }

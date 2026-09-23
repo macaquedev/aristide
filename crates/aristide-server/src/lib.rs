@@ -10,6 +10,7 @@ mod http;
 mod load;
 mod pitch;
 mod routing;
+mod rule;
 mod spool;
 mod state;
 mod tuning;

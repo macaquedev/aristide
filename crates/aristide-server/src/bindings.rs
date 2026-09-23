@@ -673,12 +673,15 @@ fn handle_note_off(
         Control::Organ(console) => {
             live_notes.remove(&(port, channel, raw_key));
             for (manual, key) in lands {
-                let (stopped, starts) = console.note_off_manual(manual, key);
+                let (stopped, starts, later) = console.note_off_manual(manual, key);
                 for handle in stopped {
                     send(Command::StopVoice { handle });
                 }
                 for start in starts {
                     send(start.command());
+                }
+                for (handle, frames) in later {
+                    send(Command::StopVoiceIn { handle, frames });
                 }
             }
         }

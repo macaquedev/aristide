@@ -9,6 +9,7 @@
 //!
 //! - [`organ`] — loading, saving, library discovery, manuals and enclosures
 //! - [`stops`] — drawing, pulling and retiring stops, and voicing
+//! - [`build`] — one stop's rule: its events and timestamps
 //! - [`couplers`] — engaging, defining and linking couplers
 //! - [`tuning`] — every tuning scope, from instrument to rank
 //! - [`midi`] — ports, input bindings, learn and control bindings
@@ -23,6 +24,7 @@ use tiny_http::{Header, Method, Response, Server};
 
 use crate::State;
 
+mod build;
 mod couplers;
 mod midi;
 mod organ;
@@ -83,6 +85,8 @@ pub(crate) fn respond(
         (Method::Get, "/api/routing") => routing::matrix,
         (Method::Post, "/api/routing") => routing::set,
         (Method::Post, "/api/speakers") => routing::speakers,
+        (Method::Get, "/api/rule") => build::get,
+        (Method::Post, "/api/organ/rule") => build::set,
         (Method::Get, "/api/tuning") => tuning::scopes,
         (Method::Post, "/api/tuning") => tuning::set,
         (Method::Post, "/api/organ/move") => stops::move_to_manual,
@@ -176,13 +180,17 @@ fn apply_note(state: &Mutex<State>, manual: usize, key: u16, on: bool) {
                 send_start(engine, Some(start));
             }
         } else {
-            let (stopped, starts) = console.note_off_manual(manual, key);
+            let (stopped, starts, later) = console.note_off_manual(manual, key);
             for handle in stopped {
                 engine.send(Command::StopVoice { handle });
             }
-            // A Bass/Melody coupler retargeting onto another held key.
+            // A Bass/Melody coupler retargeting onto another held key,
+            // or a stop rule's events after key-up.
             for start in starts {
                 send_start(engine, Some(start));
+            }
+            for (handle, frames) in later {
+                engine.send(Command::StopVoiceIn { handle, frames });
             }
         }
     }
@@ -1420,6 +1428,77 @@ mod tests {
         }
         let refused = respond(&state, &Method::Post, "/api/trem/params?rate=5");
         assert_eq!(refused.status_code().0, 400, "wave tremulants have no shape");
+    }
+
+    /// A stop rule lands live and in the organ file, loads back the
+    /// same, and resetting it removes the file's row.
+    #[test]
+    fn stop_rules_are_live_saved_and_reload() {
+        let Some(state) = demo_state() else { return };
+        let demo = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testsets/grandorgue-demo/demo.organ");
+        let dir = std::env::temp_dir().join("aristide-rule-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let organ = aristide_formats::grandorgue::load(&demo).expect("demo parses").organ;
+        let canonical = demo.canonicalize().expect("canonicalizes");
+        let file = crate::config::create_wrapper_organ(&dir, "Ruled", &canonical, &organ, None)
+            .expect("organ file written");
+        state.lock().expect("state").composite_path = Some(file.clone());
+        let body_of = |response: Response<std::io::Cursor<Vec<u8>>>| -> serde_json::Value {
+            assert_eq!(response.status_code().0, 200);
+            let mut body = String::new();
+            std::io::Read::read_to_string(&mut response.into_reader(), &mut body).expect("reads");
+            serde_json::from_str(&body).expect("json")
+        };
+        let first = state.lock().expect("state").console().expect("organ").stop_states()[0].0 .0;
+        let plain = body_of(respond(&state, &Method::Get, &format!("/api/rule?stop={first}")));
+        assert_eq!(plain["custom"], false);
+        assert_eq!(plain["events"].as_array().unwrap().len(), 1);
+        let other = plain["sources"].as_array().unwrap().iter()
+            .find(|s| s["stop"] != first).expect("another stop").clone();
+
+        let rule = serde_json::json!({
+            "stamps": [
+                { "id": "down", "anchor": "down", "ms": 0.0 },
+                { "id": "up", "anchor": "up", "ms": 0.0 },
+                { "id": "t1", "anchor": "down", "ms": 50.0 },
+            ],
+            "events": [
+                plain["events"][0],
+                { "source": { "stop": other["stop"], "rank": null }, "cents": 1250.0, "level": -3.0, "start": "down", "end": "t1" },
+            ],
+        });
+        let encoded: String = url_encode(&rule.to_string());
+        let set = body_of(respond(&state, &Method::Post, &format!("/api/organ/rule?stop={first}&rule={encoded}")));
+        assert_eq!(set["custom"], true);
+        assert_eq!(set["events"][1]["cents"], 1250.0);
+        let text = std::fs::read_to_string(&file).expect("reads");
+        assert!(text.contains("[[rule]]") && text.contains("[[rule.event]]"), "saved: {text}");
+
+        let prepared = crate::load::prepare_with(&[file.clone()], &[], 48_000.0,
+            &crate::config::SamplePrefs::default(), &|_| {}).expect("reloads");
+        assert!(prepared.warnings.iter().all(|w| !w.starts_with("rule")), "{:?}", prepared.warnings);
+        let name = plain["stop"]["name"].as_str().unwrap().to_string();
+        let reloaded = prepared.console.stop_states().iter()
+            .find(|(_, n, ..)| *n == name).map(|(id, ..)| *id).expect("same stop");
+        assert!(prepared.console.stop_has_rule(reloaded), "the rule came back");
+        assert_eq!(prepared.console.stop_rule(reloaded).events[1].cents, 1250.0);
+
+        let bad = respond(&state, &Method::Post, &format!("/api/organ/rule?stop={first}&rule=%7B%7D"));
+        assert_eq!(bad.status_code().0, 400);
+        let reset = body_of(respond(&state, &Method::Post, &format!("/api/organ/rule?stop={first}&reset=1")));
+        assert_eq!(reset["custom"], false);
+        let text = std::fs::read_to_string(&file).expect("reads");
+        assert!(!text.contains("[[rule]]"), "the row is gone: {text}");
+    }
+
+    fn url_encode(text: &str) -> String {
+        text.bytes()
+            .map(|b| match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' => (b as char).to_string(),
+                _ => format!("%{b:02X}"),
+            })
+            .collect()
     }
 
     /// Route edits land live and in the organ file, stops follow their

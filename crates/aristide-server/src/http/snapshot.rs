@@ -248,6 +248,10 @@ struct StopView {
     /// (absent) is the default and the organ norm.
     #[serde(skip_serializing_if = "Option::is_none")]
     own_pipes: Option<bool>,
+    /// Present only when the stop has a rule of its own (Build) — the
+    /// custom-stop mark on the console.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    custom: Option<bool>,
     tuning: StopScopeView,
     ranks: Vec<RankView>,
     /// The stop's own narrowed voicing rules, most general first.
@@ -744,6 +748,7 @@ fn snapshot(state: &State) -> Snapshot {
                         own: state.stop_voicing.contains_key(&id),
                     },
                     own_pipes: console.stop_own_pipes(id).then_some(true),
+                    custom: console.stop_has_rule(id).then_some(true),
                     tuning: StopScopeView {
                         scope: scope.name(),
                         follow: if console.stop_own_tuning(id).is_some() {

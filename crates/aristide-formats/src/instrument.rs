@@ -141,6 +141,8 @@ pub struct Definition {
     pub routing: sidecar::RoutingConfig,
     #[serde(default)]
     pub voicing: sidecar::VoicingConfig,
+    #[serde(default, rename = "rule", skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<sidecar::RuleDef>,
     /// Where the console's movable panels sit on the canvas — purely
     /// cosmetic, never read by anything that assembles the instrument.
     #[serde(default)]
@@ -618,6 +620,7 @@ impl Definition {
             couplers: self.couplers.clone(),
             routing: self.routing.clone(),
             voicing: self.voicing.clone(),
+            rules: self.rules.clone(),
         }
     }
 
