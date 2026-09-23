@@ -4,6 +4,7 @@ Newest first. One entry per work session; keep entries factual and short.
 Milestones refer to DESIGN.md. Older UI entries are historical; the current
 implementation scope is described by the newest notes.
 
+- [2026-09-23 — the Route panel: speaker groups and a send matrix](progress/2026-09-23-route-panel.md)
 - [2026-09-22 — visual study navigation, concise UI](progress/2026-09-22-visual-studies.md)
 - [2026-09-21 — restore the last instrument on desktop launch](progress/2026-09-21-session-restore.md)
 - [2026-09-21 — eight clickable Build and Tuning studies](design/editor-studies.md)

@@ -1,0 +1,26 @@
+.route-panel { display: flex; flex-direction: column; min-height: calc(100dvh - 80px); }
+.route-header { padding: 12px 16px; border-bottom: 1px solid var(--mantine-color-default-border); }
+.route-scroll { overflow: auto; flex: 1; }
+.route-matrix { border-collapse: separate; border-spacing: 0; }
+.route-matrix th, .route-matrix td { border-bottom: 1px solid var(--mantine-color-default-border); padding: 4px; }
+.route-matrix thead th { position: sticky; top: 0; z-index: 2; background: var(--mantine-color-body); text-align: center; width: 104px; min-width: 88px; padding: 10px 6px; vertical-align: bottom; }
+.route-matrix tbody th { position: sticky; left: 0; z-index: 1; background: var(--mantine-color-body); text-align: left; font-weight: 400; width: 280px; min-width: 240px; max-width: 320px; }
+.route-matrix thead .route-corner { left: 0; z-index: 3; text-align: left; padding-left: 16px; }
+.route-source { display: flex; align-items: center; justify-content: space-between; gap: 4px; min-height: 56px; }
+.route-expand { height: auto; min-height: 52px; padding-inline: 8px; }
+.route-expand .mantine-Button-label { white-space: normal; text-align: left; }
+.route-stop th .route-source { padding-left: 40px; }
+.route-stop-name { overflow-wrap: anywhere; }
+.route-matrix td { text-align: center; }
+.route-cell { width: 100%; min-width: 72px; height: 52px; border: 1px solid var(--mantine-color-default-border); border-radius: var(--mantine-radius-default); background: transparent; color: var(--mantine-color-text); font: inherit; font-variant-numeric: tabular-nums; cursor: pointer; touch-action: none; user-select: none; }
+.route-cell[data-connected] { background: var(--mantine-primary-color-filled); border-color: var(--mantine-primary-color-filled); color: white; cursor: ns-resize; }
+.route-cell[data-inherited] { background: transparent; border-color: var(--mantine-color-default-border); color: var(--mantine-color-dimmed); }
+.route-cell:disabled { cursor: default; }
+.route-cell:not(:disabled):hover { border-color: var(--mantine-color-gray-5); }
+.route-cell:focus-visible { outline: 2px solid var(--mantine-primary-color-filled); outline-offset: 2px; }
+[data-density="compact"] .route-cell { height: 40px; }
+[data-density="compact"] .route-source { min-height: 44px; }
+@media (max-width: 700px) {
+  .route-matrix tbody th { min-width: 150px; }
+  .route-stop th .route-source { padding-left: 20px; }
+}

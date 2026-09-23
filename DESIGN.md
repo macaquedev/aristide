@@ -527,7 +527,10 @@ available. The standalone CLI still loads only explicitly supplied paths.
   N-channel output. See docs/progress/2026-08-24-m6-contemporary-layer.md. Named
   deferrals: MIDI 2.0 UMP parsing (device layer — the cents seam is ready), the full
   effect-node graph and per-single-pipe addressing (overlap M4), multi-device output
-  and a full routing matrix, console editors for routing. 2026-09-01: tuning
+  and a full routing matrix, console editors for routing. 2026-09-23: the
+  Route panel's send matrix — buses feed several output pairs, divisions
+  and stops send to Setup's speaker groups, `[[routing.source]]` in the
+  layer; see docs/progress/2026-09-23-route-panel.md. 2026-09-01: tuning
   scopes — sets, stops, ranks within stops — see
   docs/progress/2026-09-01-tuning-scopes.md.
 - **M7 — HW-unencrypted loader, CLAP wrapper, Windows/macOS CI.** 2026-09-02: the

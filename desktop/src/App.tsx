@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ActionIcon, Button, Card, Drawer, Group, Loader, Modal, SegmentedControl, Stack, Text, TextInput, Tooltip, useMantineColorScheme } from '@mantine/core';
-import { ArrowLeft, ChevronLeft, ChevronRight, Folder, LockKeyhole, Settings, Undo2, UnlockKeyhole } from 'lucide-react';
+import { ActionIcon, Button, Card, Drawer, Group, Loader, Modal, NumberInput, SegmentedControl, Stack, Text, TextInput, Tooltip, useMantineColorScheme } from '@mantine/core';
+import { ArrowLeft, ChevronLeft, ChevronRight, Folder, LockKeyhole, Settings, Trash2, Undo2, UnlockKeyhole } from 'lucide-react';
 import { endpoint, request, native, type Browse, type Snapshot, type Stop } from './api';
 import { useEngine } from './engine';
 import { TuningPanel } from './tuning/TuningPanel';
+import { RoutePanel, type Routing } from './route/RoutePanel';
 
 const panels = ['Play', 'Build', 'Route', 'Tuning', 'Library'] as const;
 type Panel = typeof panels[number] | 'Setup';
@@ -64,12 +65,14 @@ export function App() {
       {panel === 'Library' && <Library state={state} command={command}/>}
       {panel === 'Setup' && <Stack p="lg"><Group><Button variant="subtle" leftSection={<ArrowLeft size={18}/>} onClick={() => setPanel('Play')}>Play</Button><Text fw={600}>Setup</Text></Group>
         <Appearance edit={edit} density={density} changeDensity={value => { setDensity(value); localStorage.setItem('aristide-density', value); }}/>
-        {state && <ConsoleSetup state={state} command={command} edit={edit}/>}</Stack>}
+        {state && <ConsoleSetup state={state} command={command} edit={edit}/>}
+        {state && <SpeakerSetup edit={edit}/>}</Stack>}
       {panel === 'Tuning' && (state?.organ ? <TuningPanel edit={edit} organ={state.organ} offerUndo={offerUndo}/> : <Stack align="center" p="xl"><Text>Choose an organ to tune.</Text><Button onClick={() => setPanel('Library')}>Open Library</Button></Stack>)}
-      {['Build', 'Route'].includes(panel) && <Stack p="lg">
-        <Text fw={600}>{panel === 'Build' && selected ? selected.name : panel}</Text>
-        <Text c="dimmed">{panel === 'Build' ? 'Editor preview' : `${panel} unavailable`}</Text>
-        {panel === 'Build' && <Button component="a" href="/?study=1&panel=build" variant="default" w="fit-content">Compare layouts</Button>}
+      {panel === 'Route' && (state?.organ ? <RoutePanel edit={edit} organ={state.organ} offerUndo={offerUndo} openSetup={() => setPanel('Setup')}/> : <Stack align="center" p="xl"><Text>Choose an organ to route.</Text><Button onClick={() => setPanel('Library')}>Open Library</Button></Stack>)}
+      {panel === 'Build' && <Stack p="lg">
+        <Text fw={600}>{selected ? selected.name : panel}</Text>
+        <Text c="dimmed">Editor preview</Text>
+        <Button component="a" href="/?study=1&panel=build" variant="default" w="fit-content">Compare layouts</Button>
         <Button variant="default" w="fit-content" onClick={() => setPanel('Play')}>Back to Play</Button>
       </Stack>}
     </main>
@@ -160,5 +163,41 @@ function ConsoleSetup({ state, command, edit }: { state: Snapshot; command: Comm
         <Button disabled={!edit} variant="default" onClick={() => command('midi/bind', { manual: manual.idx, slot: manual.inputs.length, device: 'Computer keyboard' })}>Use computer keyboard</Button></Group>
     </Group>)}
     {state.midi.learning && <Group><Text>Press a key on your console.</Text><Button variant="default" onClick={() => command('midi/learn')}>Cancel learning</Button></Group>}
+  </Stack></Card>;
+}
+
+function SpeakerSetup({ edit }: { edit: boolean }) {
+  const [routing, setRouting] = useState<Routing>();
+  const [name, setName] = useState('');
+  const [output, setOutput] = useState<[number, number]>([3, 4]);
+  const [failure, setFailure] = useState(false);
+  useEffect(() => { request<Routing>('GET', '/api/routing').then(setRouting, () => setRouting(undefined)); }, []);
+  const change = (values: Record<string, string | number>) => {
+    setFailure(false);
+    return request<Routing>('POST', endpoint('speakers', values)).then(setRouting, () => { setFailure(true); throw new Error('speakers'); });
+  };
+  const channel = (value: string | number) => Math.max(1, Math.min(64, Math.round(Number(value) || 1)));
+  const defined = routing?.speakers.filter(s => s.defined && s.output) ?? [];
+  return <Card withBorder><Stack>
+    <Group justify="space-between"><Text fw={600}>Speakers</Text>{routing && <Text size="xs" c="dimmed">Device outputs: {routing.channels}</Text>}</Group>
+    {defined.map(speaker => <Group key={speaker.name} wrap="nowrap">
+      <Stack gap={0} style={{ flex: 1 }}><Text>{speaker.name}</Text>{!speaker.available && <Text size="xs" c="dimmed">Not on this device · plays through Main</Text>}</Stack>
+      {speaker.name === 'Main' ? <Text c="dimmed">1 / 2</Text> : <>
+        <NumberInput w={84} aria-label={`${speaker.name} left channel`} disabled={!edit} min={1} max={64} value={speaker.output![0]}
+          onChange={v => void change({ name: speaker.name, left: channel(v), right: speaker.output![1] }).catch(() => {})}/>
+        <NumberInput w={84} aria-label={`${speaker.name} right channel`} disabled={!edit} min={1} max={64} value={speaker.output![1]}
+          onChange={v => void change({ name: speaker.name, left: speaker.output![0], right: channel(v) }).catch(() => {})}/>
+        <ActionIcon size="lg" variant="subtle" color="red" disabled={!edit} aria-label={`Remove ${speaker.name}`} onClick={() => void change({ name: speaker.name, remove: 1 }).catch(() => {})}><Trash2 size={18}/></ActionIcon>
+      </>}
+    </Group>)}
+    <form onSubmit={e => { e.preventDefault(); if (name.trim()) void change({ name: name.trim(), left: output[0], right: output[1] }).then(() => setName(''), () => {}); }}>
+      <Group wrap="nowrap" align="end">
+        <TextInput style={{ flex: 1 }} label="New group" placeholder="Name" disabled={!edit} value={name} onChange={e => setName(e.currentTarget.value)}/>
+        <NumberInput w={84} label="Left" disabled={!edit} min={1} max={64} value={output[0]} onChange={v => setOutput([channel(v), output[1]])}/>
+        <NumberInput w={84} label="Right" disabled={!edit} min={1} max={64} value={output[1]} onChange={v => setOutput([output[0], channel(v)])}/>
+        <Button type="submit" disabled={!edit || !name.trim()}>Add</Button>
+      </Group>
+    </form>
+    {failure && <Text>That speaker group could not be saved. Use a new name without commas or colons.</Text>}
   </Stack></Card>;
 }
