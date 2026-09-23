@@ -69,6 +69,10 @@ pub struct VoiceSpec {
     pub bus: u8,
     /// Onset (speaking) delay in output frames.
     pub delay_frames: u32,
+    /// Frames after starting (onset included) at which the voice
+    /// releases itself; 0 = held until stopped. Stamped per voice by
+    /// a stop rule's finite events.
+    pub end_frames: u32,
 }
 
 /// One selectable attack of a pipe (GO multi-attack): which bank sample
@@ -1082,6 +1086,7 @@ fn assign_voice_specs(
                 enclosures: p.enclosures,
                 bus: 0,
                 delay_frames: 0,
+                end_frames: 0,
             },
         );
     }
@@ -2229,6 +2234,7 @@ mod tests {
                     aristide_engine::enclosure::MAX_VOICE_ENCLOSURES],
                 bus: 0,
                 delay_frames: 0,
+                end_frames: 0,
                 nominal_hz: spec.nominal_hz,
             });
         };

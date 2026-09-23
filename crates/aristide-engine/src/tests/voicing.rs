@@ -34,6 +34,7 @@ fn tilted_level(brightness_db: f32) -> f32 {
         enclosures: [ENCLOSURE_NONE; MAX_VOICE_ENCLOSURES],
         bus: 0,
         delay_frames: 0,
+        end_frames: 0,
         nominal_hz: 1000.0,
     });
     let mut buffer = vec![0.0f32; 4096 * 2];
@@ -87,6 +88,7 @@ fn a_flat_tilt_bypasses_the_filter_bit_for_bit() {
             enclosures: [ENCLOSURE_NONE; MAX_VOICE_ENCLOSURES],
             bus: 0,
             delay_frames: 0,
+            end_frames: 0,
             nominal_hz: 1000.0,
         });
         let mut buffer = vec![0.0f32; 4096 * 2];
@@ -135,6 +137,7 @@ fn a_live_trim_moves_a_held_voice_without_a_step() {
             enclosures: [ENCLOSURE_NONE; MAX_VOICE_ENCLOSURES],
             bus: 0,
             delay_frames: 0,
+            end_frames: 0,
             nominal_hz: 100.0,
         });
         render(&mut engine, 512);
@@ -195,6 +198,7 @@ fn a_released_voice_ignores_a_trim() {
             enclosures: [ENCLOSURE_NONE; MAX_VOICE_ENCLOSURES],
             bus: 0,
             delay_frames: 0,
+            end_frames: 0,
             nominal_hz: 1000.0,
         });
         render(&mut engine, 256);

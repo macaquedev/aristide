@@ -27,7 +27,9 @@ pub enum Command {
     /// pair) and `delay_frames` an onset delay: the voice waits that
     /// many output frames before speaking — per-pipe tracker/speaking
     /// delay, the Orgelpark trick at its smallest. A voice released
-    /// before it ever spoke dies silently.
+    /// before it ever spoke dies silently. `end_frames` > 0 releases
+    /// the voice by itself that many frames after it starts, onset
+    /// included — a stop rule's finite event; 0 holds until StopVoice.
     StartVoice {
         handle: u64,
         sample: u32,
@@ -40,6 +42,7 @@ pub enum Command {
         enclosures: [u8; MAX_VOICE_ENCLOSURES],
         bus: u8,
         delay_frames: u32,
+        end_frames: u32,
         /// The pipe's sounding frequency in Hz — how big a pipe this
         /// is, which is what decides how fast its amplitude can answer
         /// the chest (speech time ~ tens of periods). 0 = unpitched
@@ -114,6 +117,11 @@ pub enum Command {
     /// Release the voice started with `handle`. Loop-less (percussive)
     /// voices ignore this and play to their end.
     StopVoice { handle: u64 },
+    /// Release the voice `frames` from now instead of at once: a stop
+    /// rule's event held past key-up to a finite ending. A voice still
+    /// waiting out its onset when the time comes dies silently, as a
+    /// StopVoice would find it.
+    StopVoiceIn { handle: u64, frames: u32 },
     /// Silence a voice quickly WITHOUT its release tail (a short fade) —
     /// for retiring control-noise voices silently.
     KillVoice { handle: u64 },

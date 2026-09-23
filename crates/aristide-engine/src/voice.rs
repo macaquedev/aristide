@@ -273,6 +273,9 @@ pub(crate) struct SampledVoice {
     /// Output frames since the voice started — drives the wind model's
     /// pallet-opening attack boost.
     pub(crate) age_frames: u32,
+    /// Output frames until the voice releases itself (a stop rule's
+    /// finite event), counted down per chunk; 0 = no timer.
+    pub(crate) stop_in: u32,
     pub(crate) rng: u32,
     /// Stream slot feeding this voice's tail, or
     /// [`NO_SLOT`](crate::stream::NO_SLOT) /

@@ -106,6 +106,7 @@ fn start_on(bank: Arc<SampleBank>, sample: u32) -> (Engine, EngineHandle) {
         enclosures: [ENCLOSURE_NONE; MAX_VOICE_ENCLOSURES],
         bus: 0,
         delay_frames: 0,
+        end_frames: 0,
         nominal_hz: 0.0,
     });
     (engine, handle)

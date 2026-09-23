@@ -23,6 +23,7 @@ fn a_bus_with_two_sends_lands_on_both_pairs_at_their_own_gains() {
         enclosures: [ENCLOSURE_NONE; MAX_VOICE_ENCLOSURES],
         bus: 1,
         delay_frames: 0,
+        end_frames: 0,
         nominal_hz: 0.0,
     });
     // The send gains ramp across one whole `process()` call (it's one
@@ -63,6 +64,7 @@ fn sends_count_zero_silences_the_bus() {
         enclosures: [ENCLOSURE_NONE; MAX_VOICE_ENCLOSURES],
         bus: 1,
         delay_frames: 0,
+        end_frames: 0,
         nominal_hz: 0.0,
     });
     // Let the ramp down to silence finish in its own chunk, then check
@@ -97,6 +99,7 @@ fn voices_route_to_their_buses_output_pairs() {
         enclosures: [ENCLOSURE_NONE; MAX_VOICE_ENCLOSURES],
         bus: 1,
         delay_frames: 0,
+        end_frames: 0,
         nominal_hz: 0.0,
     });
     let frames = 40;
@@ -135,6 +138,7 @@ fn limiter_prevents_clipping_without_distorting() {
         enclosures: [ENCLOSURE_NONE; MAX_VOICE_ENCLOSURES],
         bus: 0,
         delay_frames: 0,
+        end_frames: 0,
         nominal_hz: 0.0,
     });
     // Let the limiter settle, then inspect a window.
@@ -194,6 +198,7 @@ fn limiter_passthrough_below_ceiling() {
         enclosures: [ENCLOSURE_NONE; MAX_VOICE_ENCLOSURES],
         bus: 0,
         delay_frames: 0,
+        end_frames: 0,
         nominal_hz: 0.0,
     });
     let mut buffer = vec![0.0f32; 4800 * 2];

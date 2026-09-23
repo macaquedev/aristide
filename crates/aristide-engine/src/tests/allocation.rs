@@ -18,6 +18,7 @@ fn set_voice_rate_snaps_when_glide_is_zero() {
         enclosures: [ENCLOSURE_NONE; MAX_VOICE_ENCLOSURES],
         bus: 0,
         delay_frames: 0,
+        end_frames: 0,
         nominal_hz: 0.0,
     });
     render(&mut engine, 20);
@@ -67,6 +68,7 @@ fn set_voice_rate_glides_geometrically() {
         enclosures: [ENCLOSURE_NONE; MAX_VOICE_ENCLOSURES],
         bus: 0,
         delay_frames: 0,
+        end_frames: 0,
         nominal_hz: 0.0,
     });
     render(&mut engine, 20);
@@ -113,6 +115,7 @@ fn a_release_freezes_a_glide_in_flight() {
         enclosures: [ENCLOSURE_NONE; MAX_VOICE_ENCLOSURES],
         bus: 0,
         delay_frames: 0,
+        end_frames: 0,
         nominal_hz: 0.0,
     });
     render(&mut engine, 10);

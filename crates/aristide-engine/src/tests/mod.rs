@@ -16,6 +16,7 @@ mod buses;
 mod golden;
 mod streaming;
 mod voicing;
+mod timed;
 
 /// 100-frame mono ramp 0..1, loop frames 20..=59, release tail at 60.
 fn test_bank() -> Arc<SampleBank> {
@@ -106,6 +107,7 @@ fn release_dip_ratio(bank: Arc<SampleBank>, stop_after: usize, period: usize) ->
         enclosures: [ENCLOSURE_NONE; MAX_VOICE_ENCLOSURES],
         bus: 0,
         delay_frames: 0,
+        end_frames: 0,
         nominal_hz: 0.0,
     });
     let mut buffer = vec![0.0f32; stop_after * 2];
@@ -218,6 +220,7 @@ fn enclosure_test_engine(full_sweep_s: f32) -> (Engine, EngineHandle) {
         enclosures: [0, ENCLOSURE_NONE],
         bus: 0,
         delay_frames: 0,
+        end_frames: 0,
         nominal_hz: 0.0,
     });
     (engine, handle)

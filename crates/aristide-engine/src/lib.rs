@@ -91,6 +91,7 @@ struct VoiceSpec {
     enclosures: [u8; MAX_VOICE_ENCLOSURES],
     bus: u8,
     delay_frames: u32,
+    end_frames: u32,
     nominal_hz: f32,
 }
 
@@ -139,6 +140,9 @@ pub struct Engine {
     /// StopVoice handles batched during the command drain and applied
     /// in ONE voice pass (mass releases used to scan per handle).
     stop_batch: Vec<u64>,
+    /// Whether any voice may carry a release countdown (`stop_in`):
+    /// the chunk's countdown pass is skipped entirely while none does.
+    timed_voices: bool,
     /// Max random pallet-close delay applied to key releases, frames.
     release_stagger_frames: f32,
     /// Limiter envelope: the current tracked bus peak (decaying).
@@ -177,6 +181,7 @@ impl Engine {
             tap: None,
             free_slots: (0..MAX_VOICES as u16).rev().collect(),
             stop_batch: Vec::with_capacity(MAX_VOICES),
+            timed_voices: false,
             release_stagger_frames: 0.008 * sample_rate,
             limiter_envelope: 0.0,
             limiter_release: (-1.0 / (LIMITER_RELEASE_SECONDS * sample_rate)).exp(),
@@ -286,6 +291,7 @@ impl Engine {
     /// One bounded slice of output: shed, regulate, tick every voice
     /// onto its bus, mix the buses down, then the room and the ceiling.
     fn render_chunk(&mut self, buffer: &mut [f32], channels: usize, frames: usize) {
+        self.expire_timed_voices(frames as u32);
         self.shed_tail_voices();
         let demand = self.aggregate_wind_demand();
         let dt = frames as f32 / self.sample_rate;
@@ -497,6 +503,47 @@ impl Engine {
         }
     }
 
+    /// Count down every release timer by one chunk and release the
+    /// voices whose time has come, at the chunk boundary nearest it.
+    fn expire_timed_voices(&mut self, frames: u32) {
+        if !self.timed_voices {
+            return;
+        }
+        let mut remaining = false;
+        for voice in self.voices.iter_mut() {
+            let Voice::Sampled(sampled) = voice else {
+                continue;
+            };
+            if sampled.stop_in == 0 {
+                continue;
+            }
+            if sampled.stop_in <= frames / 2 {
+                sampled.stop_in = 0;
+                if self.stop_batch.len() < self.stop_batch.capacity() {
+                    self.stop_batch.push(sampled.handle);
+                }
+            } else {
+                sampled.stop_in = sampled.stop_in.saturating_sub(frames).max(1);
+                remaining = true;
+            }
+        }
+        self.timed_voices = remaining;
+        self.release_stopped_voices();
+    }
+
+    /// [`Command::StopVoiceIn`]: arm (or re-arm) one voice's timer.
+    fn stop_voice_in(&mut self, handle: u64, frames: u32) {
+        for voice in self.voices.iter_mut() {
+            if let Voice::Sampled(sampled) = voice
+                && sampled.handle == handle
+                && sampled.phase == SamplePhase::Held
+            {
+                sampled.stop_in = frames.max(1);
+                self.timed_voices = true;
+            }
+        }
+    }
+
     /// Master limiter: instant attack, exponential release. Bit-exact
     /// passthrough while the bus stays under the ceiling.
     fn limit(&mut self, buffer: &mut [f32], channels: usize) {
@@ -529,6 +576,7 @@ impl Engine {
                 enclosures,
                 bus,
                 delay_frames,
+                end_frames,
                 nominal_hz,
             } => self.start_voice(VoiceSpec {
                 handle,
@@ -542,6 +590,7 @@ impl Engine {
                 enclosures,
                 bus,
                 delay_frames,
+                end_frames,
                 nominal_hz,
             }),
             Command::SetBusDelay { bus, params } => {
@@ -616,6 +665,7 @@ impl Engine {
                     self.stop_batch.push(handle);
                 }
             }
+            Command::StopVoiceIn { handle, frames } => self.stop_voice_in(handle, frames),
             Command::KillVoice { handle } => self.kill_voice(handle),
             Command::NoteOn { key, freq_hz } => self.note_on(key, freq_hz),
             Command::NoteOff { key } => self.note_off(key),
@@ -658,6 +708,7 @@ impl Engine {
             // covers any musical canon trick).
             onset: spec.delay_frames.min((30.0 * self.sample_rate) as u32),
             age_frames: 0,
+            stop_in: spec.end_frames,
             rng: (spec.handle as u32).wrapping_mul(0x9E37_79B9) | 1,
             stream: NO_SLOT,
             starving: false,
@@ -700,6 +751,7 @@ impl Engine {
             switch: SwitchState::IDLE,
         };
         if let Some(slot) = self.allocate_slot() {
+            self.timed_voices |= spec.end_frames > 0;
             self.voices[slot] = Voice::Sampled(voice);
         }
     }

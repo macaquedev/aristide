@@ -103,6 +103,7 @@ fn golden_render(lite: bool) -> (u64, f32) {
         enclosures,
         bus,
         delay_frames,
+        end_frames: 0,
         nominal_hz,
     };
     let mut hash = 0xCBF2_9CE4_8422_2325u64;

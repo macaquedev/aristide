@@ -23,6 +23,7 @@ fn wind_pressure_sags_pitch_under_load() {
                 enclosures: [ENCLOSURE_NONE; MAX_VOICE_ENCLOSURES],
         bus: 0,
         delay_frames: 0,
+        end_frames: 0,
                 nominal_hz: 0.0,
             });
         }
@@ -38,6 +39,7 @@ fn wind_pressure_sags_pitch_under_load() {
             enclosures: [ENCLOSURE_NONE; MAX_VOICE_ENCLOSURES],
         bus: 0,
         delay_frames: 0,
+        end_frames: 0,
             nominal_hz: 0.0,
         });
         // Settle for ~1.5 s (12+ time constants), then measure.
@@ -94,6 +96,7 @@ fn released_pipes_stop_drawing_wind() {
             enclosures: [ENCLOSURE_NONE; MAX_VOICE_ENCLOSURES],
             bus: 0,
             delay_frames: 0,
+            end_frames: 0,
             nominal_hz: 0.0,
         });
     }
@@ -157,6 +160,7 @@ fn brightness_tilt_attenuates_highs_under_load() {
                     enclosures: [ENCLOSURE_NONE; MAX_VOICE_ENCLOSURES],
         bus: 0,
         delay_frames: 0,
+        end_frames: 0,
                     nominal_hz: 0.0,
                 });
             }
@@ -173,6 +177,7 @@ fn brightness_tilt_attenuates_highs_under_load() {
             enclosures: [ENCLOSURE_NONE; MAX_VOICE_ENCLOSURES],
         bus: 0,
         delay_frames: 0,
+        end_frames: 0,
             nominal_hz: 0.0,
         });
         let mut buffer = vec![0.0f32; 1024 * 2];
@@ -224,6 +229,7 @@ fn flow_noise_wobbles_pitch_slightly_and_independently() {
             enclosures: [ENCLOSURE_NONE; MAX_VOICE_ENCLOSURES],
         bus: 0,
         delay_frames: 0,
+        end_frames: 0,
             nominal_hz: 0.0,
         });
         // 10 windows of 0.2 s: the wander drifts across them.
@@ -271,6 +277,7 @@ fn tremulant_moves_small_pipes_more_than_basses() {
             enclosures: [ENCLOSURE_NONE; MAX_VOICE_ENCLOSURES],
             bus: 0,
             delay_frames: 0,
+            end_frames: 0,
             nominal_hz,
         });
         let sr = 44_100usize;
@@ -320,6 +327,7 @@ fn release_tail_ignores_later_tremulant() {
             enclosures: [ENCLOSURE_NONE; MAX_VOICE_ENCLOSURES],
             bus: 0,
             delay_frames: 0,
+            end_frames: 0,
             nominal_hz: 0.0,
         });
         let sr = 44_100usize;

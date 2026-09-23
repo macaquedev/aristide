@@ -18,6 +18,7 @@ fn sampled_voice_plays_and_loops() {
         enclosures: [ENCLOSURE_NONE; MAX_VOICE_ENCLOSURES],
         bus: 0,
         delay_frames: 0,
+        end_frames: 0,
         nominal_hz: 0.0,
     });
     // 200 frames from a 100-frame sample: only survivable by looping.
@@ -54,6 +55,7 @@ fn onset_delay_holds_the_pipe_silent_then_speaks() {
         enclosures: [ENCLOSURE_NONE; MAX_VOICE_ENCLOSURES],
         bus: 0,
         delay_frames: 30,
+        end_frames: 0,
         nominal_hz: 0.0,
     });
     let out = render(&mut engine, 50);
@@ -82,6 +84,7 @@ fn onset_delay_holds_the_pipe_silent_then_speaks() {
         enclosures: [ENCLOSURE_NONE; MAX_VOICE_ENCLOSURES],
         bus: 0,
         delay_frames: 200,
+        end_frames: 0,
         nominal_hz: 0.0,
     });
     render(&mut engine, 50);
@@ -125,6 +128,7 @@ fn multi_loop_voices_visit_all_loops() {
         enclosures: [ENCLOSURE_NONE; MAX_VOICE_ENCLOSURES],
         bus: 0,
         delay_frames: 0,
+        end_frames: 0,
         nominal_hz: 0.0,
     });
     // ~100 loop passes.
@@ -187,6 +191,7 @@ fn attack_start_skips_lead_in() {
         enclosures: [ENCLOSURE_NONE; MAX_VOICE_ENCLOSURES],
         bus: 0,
         delay_frames: 0,
+        end_frames: 0,
         nominal_hz: 0.0,
     });
     let mut buffer = vec![0.0f32; 64 * 2];
@@ -223,6 +228,7 @@ fn stereo_sample_reaches_both_channels() {
         enclosures: [ENCLOSURE_NONE; MAX_VOICE_ENCLOSURES],
         bus: 0,
         delay_frames: 0,
+        end_frames: 0,
         nominal_hz: 0.0,
     });
     let out = render(&mut engine, 50);

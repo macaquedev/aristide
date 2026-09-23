@@ -54,6 +54,7 @@ impl VoiceStart {
             enclosures: self.spec.enclosures,
             bus: self.spec.bus,
             delay_frames: self.spec.delay_frames,
+            end_frames: self.spec.end_frames,
             nominal_hz: self.spec.nominal_hz,
         }
     }
@@ -3237,6 +3238,7 @@ mod tests {
                             aristide_engine::enclosure::MAX_VOICE_ENCLOSURES],
                         bus: 0,
                         delay_frames: 0,
+                        end_frames: 0,
                     },
                 );
             }
@@ -4014,6 +4016,7 @@ mod tests {
                         aristide_engine::enclosure::MAX_VOICE_ENCLOSURES],
                     bus: 0,
                     delay_frames: 0,
+                    end_frames: 0,
                 },
             );
         }
@@ -4373,6 +4376,7 @@ mod tests {
                             aristide_engine::enclosure::MAX_VOICE_ENCLOSURES],
                         bus: 0,
                         delay_frames: 0,
+                        end_frames: 0,
                     },
                 );
             }
@@ -5439,6 +5443,7 @@ mod tests {
                             aristide_engine::enclosure::MAX_VOICE_ENCLOSURES],
                         bus: 0,
                         delay_frames: 0,
+                        end_frames: 0,
                     },
                 );
             }

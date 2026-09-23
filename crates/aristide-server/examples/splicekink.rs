@@ -163,6 +163,7 @@ fn main() -> anyhow::Result<()> {
                 enclosures: [ENCLOSURE_NONE; MAX_VOICE_ENCLOSURES],
                 bus: 0,
                 delay_frames: 0,
+                end_frames: 0,
                 nominal_hz: 0.0,
             });
             let mut held = vec![0.0f32; stop_after * 2];

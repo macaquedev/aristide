@@ -18,6 +18,7 @@ fn released_voice_splices_to_tail_and_ends() {
         enclosures: [ENCLOSURE_NONE; MAX_VOICE_ENCLOSURES],
         bus: 0,
         delay_frames: 0,
+        end_frames: 0,
         nominal_hz: 0.0,
     });
     render(&mut engine, 10);
@@ -52,6 +53,7 @@ fn percussive_sample_ignores_stop_and_ends_itself() {
         enclosures: [ENCLOSURE_NONE; MAX_VOICE_ENCLOSURES],
         bus: 0,
         delay_frames: 0,
+        end_frames: 0,
         nominal_hz: 0.0,
     });
     handle.send(Command::StopVoice { handle: 1 });
@@ -168,6 +170,7 @@ fn separate_releases_select_by_hold_time() {
             enclosures: [ENCLOSURE_NONE; MAX_VOICE_ENCLOSURES],
         bus: 0,
         delay_frames: 0,
+        end_frames: 0,
             nominal_hz: 0.0,
         });
         let mut buffer = vec![0.0f32; hold_frames * 2];
@@ -263,6 +266,7 @@ fn releases_select_by_wave_trem_state() {
             enclosures: [ENCLOSURE_NONE; MAX_VOICE_ENCLOSURES],
             bus: 0,
             delay_frames: 0,
+            end_frames: 0,
             nominal_hz: 0.0,
         });
         if trem_on {
@@ -480,6 +484,7 @@ fn early_release_does_not_strike_like_a_bell() {
         enclosures: [ENCLOSURE_NONE; MAX_VOICE_ENCLOSURES],
         bus: 0,
         delay_frames: 0,
+        end_frames: 0,
         nominal_hz: 0.0,
     });
     // Release 1.5 periods in: the ramp is at ~37 % amplitude.
@@ -559,6 +564,7 @@ fn channel_dip_ratio(bank: Arc<SampleBank>, stop_after: usize, period: usize, ch
         enclosures: [ENCLOSURE_NONE; MAX_VOICE_ENCLOSURES],
         bus: 0,
         delay_frames: 0,
+        end_frames: 0,
         nominal_hz: 0.0,
     });
     let mut buffer = vec![0.0f32; stop_after * 2];

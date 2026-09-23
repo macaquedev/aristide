@@ -134,6 +134,7 @@ fn nested_test_engine() -> (Engine, EngineHandle) {
         enclosures: [0, 1],
         bus: 0,
         delay_frames: 0,
+        end_frames: 0,
         nominal_hz: 0.0,
     });
     (engine, handle)
@@ -256,6 +257,7 @@ fn nested_pedal_sweep_is_click_free() {
         enclosures: [0, 1],
         bus: 0,
         delay_frames: 0,
+        end_frames: 0,
         nominal_hz: 0.0,
     });
     let sr = 44_100usize;
@@ -342,6 +344,7 @@ fn pressure_test_engine(
             enclosures: boxes,
             bus: 0,
             delay_frames: 0,
+            end_frames: 0,
             nominal_hz: 400.0,
         });
     }
