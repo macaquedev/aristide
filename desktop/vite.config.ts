@@ -8,7 +8,7 @@ export default defineConfig({
     port: 1420,
     strictPort: true,
     watch: { ignored: ['**/src-tauri/**'] },
-    proxy: { '/api': 'http://127.0.0.1:9669' },
+    proxy: { '/api': `http://127.0.0.1:${process.env.ARISTIDE_API_PORT ?? '9669'}` },
   },
   build: { target: ['es2022', 'safari15'] },
 });
