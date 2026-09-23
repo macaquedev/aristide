@@ -1,7 +1,6 @@
 .study { max-width: 1800px; margin: auto; padding: 20px; }
 .study-layouts { overflow-x: auto; }
 .study-layouts .mantine-SegmentedControl-root { min-width: max-content; }
-.modified { color: var(--mantine-color-violet-4); }
 .voice-fields { display: flex; flex-wrap: wrap; align-items: end; gap: 16px; }
 .voice-fields > div { flex: 1 1 110px; }
 .voice-fields > div:first-child { flex-basis: 230px; }
