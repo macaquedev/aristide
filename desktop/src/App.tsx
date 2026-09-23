@@ -5,6 +5,7 @@ import { endpoint, request, native, type Browse, type Snapshot, type Stop } from
 import { useEngine } from './engine';
 import { TuningPanel } from './tuning/TuningPanel';
 import { RoutePanel, type Routing } from './route/RoutePanel';
+import { BuildPanel } from './build/BuildPanel';
 
 const panels = ['Play', 'Build', 'Route', 'Tuning', 'Library'] as const;
 type Panel = typeof panels[number] | 'Setup';
@@ -15,7 +16,8 @@ export function App() {
   const { snapshot: state, command } = engine;
   const [panel, setPanel] = useState<Panel>('Play');
   const [edit, setEdit] = useState(false);
-  const [selected, setSelected] = useState<Stop>();
+  const [selected, setSelected] = useState<number>();
+  const [tuningScope, setTuningScope] = useState<string>();
   const [density, setDensity] = useState(() => localStorage.getItem('aristide-density') ?? 'comfortable');
   const [dismissedLoadError, setDismissedLoadError] = useState<string>();
   const [undo, setUndo] = useState<() => void>();
@@ -61,20 +63,17 @@ export function App() {
       {!state && <Stack align="center" p="xl"><Group><Loader size="sm"/><Text>Connecting to the sound engine…</Text></Group>
         {!native && <><Text c="dimmed">Prototypes · no audio</Text><PreviewLinks/></>}
       </Stack>}
-      {panel === 'Play' && state && <Play state={state} command={command} edit={edit} openLibrary={() => setPanel('Library')} openStop={stop => { setSelected(stop); setPanel('Build'); }}/>} 
+      {panel === 'Play' && state && <Play state={state} command={command} edit={edit} openLibrary={() => setPanel('Library')} openStop={stop => { setSelected(stop.id); setPanel('Build'); }}/>} 
       {panel === 'Library' && <Library state={state} command={command}/>}
       {panel === 'Setup' && <Stack p="lg"><Group><Button variant="subtle" leftSection={<ArrowLeft size={18}/>} onClick={() => setPanel('Play')}>Play</Button><Text fw={600}>Setup</Text></Group>
         <Appearance edit={edit} density={density} changeDensity={value => { setDensity(value); localStorage.setItem('aristide-density', value); }}/>
         {state && <ConsoleSetup state={state} command={command} edit={edit}/>}
         {state && <SpeakerSetup edit={edit}/>}</Stack>}
-      {panel === 'Tuning' && (state?.organ ? <TuningPanel edit={edit} organ={state.organ} offerUndo={offerUndo}/> : <Stack align="center" p="xl"><Text>Choose an organ to tune.</Text><Button onClick={() => setPanel('Library')}>Open Library</Button></Stack>)}
+      {panel === 'Tuning' && (state?.organ ? <TuningPanel key={tuningScope} edit={edit} organ={state.organ} offerUndo={offerUndo} scope={tuningScope}/> : <Stack align="center" p="xl"><Text>Choose an organ to tune.</Text><Button onClick={() => setPanel('Library')}>Open Library</Button></Stack>)}
       {panel === 'Route' && (state?.organ ? <RoutePanel edit={edit} organ={state.organ} offerUndo={offerUndo} openSetup={() => setPanel('Setup')}/> : <Stack align="center" p="xl"><Text>Choose an organ to route.</Text><Button onClick={() => setPanel('Library')}>Open Library</Button></Stack>)}
-      {panel === 'Build' && <Stack p="lg">
-        <Text fw={600}>{selected ? selected.name : panel}</Text>
-        <Text c="dimmed">Editor preview</Text>
-        <Button component="a" href="/?study=1&panel=build" variant="default" w="fit-content">Compare layouts</Button>
-        <Button variant="default" w="fit-content" onClick={() => setPanel('Play')}>Back to Play</Button>
-      </Stack>}
+      {panel === 'Build' && (state?.organ ? <BuildPanel organ={state.organ} stops={state.stops} stopId={state.stops.some(s => s.id === selected) ? selected : undefined}
+        select={setSelected} offerUndo={offerUndo} openTuning={stop => { setTuningScope(`stop:${stop}`); setPanel('Tuning'); }}/>
+        : <Stack align="center" p="xl"><Text>Choose an organ to build.</Text><Button onClick={() => setPanel('Library')}>Open Library</Button></Stack>)}
     </main>
     <Modal opened={Boolean(error)} title={errorTitle} onClose={() => { engine.dismissError(); setDismissedLoadError(state?.load_error); }}>
       <Stack><Text>{errorMessage}</Text>
@@ -119,7 +118,7 @@ function StopButton({ stop, edit, toggle, open }: { stop: Stop; edit: boolean; t
     onPointerMove={e => { if (Math.hypot(e.clientX - origin.current.x, e.clientY - origin.current.y) > 10) { clear(); consumed.current = true; } }}
     onPointerUp={clear} onPointerCancel={() => { clear(); consumed.current = true; }} onPointerLeave={clear}
     onClick={() => { if (!consumed.current) toggle(); consumed.current = false; }}>
-    <span className="stop-name">{stop.name}</span><span className="stop-pitch">{footage ? `${Number(footage.toFixed(2))}′` : `${stop.ranks.length} ranks`}</span>
+    <span className="stop-name">{stop.name}{stop.custom && <span className="stop-mark" aria-label="custom"> ◇</span>}</span><span className="stop-pitch">{footage ? `${Number(footage.toFixed(2))}′` : `${stop.ranks.length} ranks`}</span>
   </button>;
 }
 

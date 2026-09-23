@@ -4,6 +4,7 @@ export type Stop = {
   id: number; name: string; midx: number; manual: string; on: boolean;
   pitch: { native: number | null; footage: number | null; cents: number; gain: number; own: boolean };
   ranks: { id: number; name: string }[];
+  custom?: boolean;
 };
 export type Snapshot = {
   organ?: string; loading?: string; load_error?: string;

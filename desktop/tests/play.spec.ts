@@ -22,6 +22,15 @@ async function rig(page: Page) {
       if (url.pathname === '/api/setter') state.setter = url.searchParams.get('on') === '1';
       if (url.pathname === '/api/general' && state.setter) { state.generals.push(Number(url.searchParams.get('n'))); state.setter = false; }
     }
+    if (url.pathname === '/api/rule') {
+      const stop = state.stops.find(s => s.id === Number(url.searchParams.get('stop')))!;
+      return route.fulfill({ json: {
+        stop: { id: stop.id, name: stop.name, manual: stop.manual, midx: stop.midx }, custom: false, voices: 1,
+        stamps: [{ id: 'down', anchor: 'down', ms: 0 }, { id: 'up', anchor: 'up', ms: 0 }],
+        events: [{ source: { stop: stop.id, rank: null }, cents: 0, level: 0, start: 'down', end: null }],
+        sources: state.stops.map(s => ({ stop: s.id, name: s.name, manual: s.manual, midx: s.midx, ranks: s.ranks })),
+      } });
+    }
     await route.fulfill({ json: state });
   });
   await page.goto('/');
@@ -49,7 +58,7 @@ test('editing a stop requires Edit; relocking returns from Build to Play', async
   await rig(page);
   await page.getByRole('button', { name: 'Perform', exact: true }).click();
   await page.getByRole('button', { name: 'Bourdon' }).click({ button: 'right' });
-  await expect(page.getByText('Editor preview', { exact: false })).toBeVisible();
+  await expect(page.locator('.roll-stop-name')).toContainText('Bourdon');
   await page.getByRole('button', { name: 'Edit', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Bourdon' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Build', exact: true })).toBeDisabled();
@@ -77,7 +86,7 @@ test('touch hold is harmless while locked and opens Build when unlocked', async 
   await expect(stop).toHaveAttribute('aria-pressed', 'false');
   await page.getByRole('button', { name: 'Perform', exact: true }).tap();
   await stop.dispatchEvent('pointerdown', { pointerType: 'touch', pointerId: 2, button: 0 });
-  await expect(page.getByText('Editor preview', { exact: false })).toBeVisible();
+  await expect(page.locator('.roll-stop-name')).toContainText('Bourdon');
   expect(requests.filter(url => url.startsWith('/api/stop'))).toHaveLength(0);
   await page.close();
 });

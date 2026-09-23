@@ -45,9 +45,9 @@ function shapeParams(shape: Shape): Params {
 }
 
 /** The Tuning panel on the live engine: every edit sounds and autosaves. */
-export function TuningPanel({ edit, organ, offerUndo }: { edit: boolean; organ: string; offerUndo: (undo?: () => void) => void }) {
+export function TuningPanel({ edit, organ, offerUndo, scope }: { edit: boolean; organ: string; offerUndo: (undo?: () => void) => void; scope?: string }) {
   const [scopes, setScopes] = useState<Scopes>();
-  const [selected, setSelected] = useState('instrument');
+  const [selected, setSelected] = useState(scope ?? 'instrument');
   const [failure, setFailure] = useState<string>();
   const [notice, setNotice] = useState(false);
   const [scala, setScala] = useState(false);

@@ -1,0 +1,15 @@
+.build-panel { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 16px; padding: 16px; min-width: 0; }
+.build-stops { display: flex; flex-direction: column; gap: 12px; max-height: calc(100dvh - 110px); overflow-y: auto; position: sticky; top: 16px; }
+.build-stops button { min-height: 44px; }
+.build-division { padding: 0 12px 4px; }
+.build-editor { min-width: 0; }
+@media (max-width: 900px) {
+  .build-panel { grid-template-columns: minmax(0, 1fr); padding: 8px; }
+  .build-stops { flex-direction: row; overflow-x: auto; max-height: none; position: static; }
+  .build-stops > div { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+  .build-stops button { width: auto; }
+}
+@media (max-width: 760px) {
+  .build-editor .roll-inspector-fields { align-items: stretch; }
+  .build-editor .roll-inspector-fields > * { width: 100%; }
+}
