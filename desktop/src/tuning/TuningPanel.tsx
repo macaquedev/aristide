@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Button, Loader, Modal, Stack, Text } from '@mantine/core';
+import { Button, Loader, Modal, SegmentedControl, Stack, Text } from '@mantine/core';
 import { editInstrument, request } from '../api';
 import { TuningDesk, type DeskScope, type Part } from './TuningDesk';
 import { CUSTOM, RECORDED, type Anchor, type Shape } from './model';
@@ -44,10 +44,14 @@ function shapeParams(shape: Shape): Params {
   return { scale: shape.scl, ...(shape.kbm ? { keymap: shape.kbm } : { start_key: shape.startKey }) };
 }
 
-/** The Tuning panel on the live engine: every edit sounds and autosaves. */
-export function TuningPanel({ edit, organ, offerUndo, scope }: { edit: boolean; organ: string; offerUndo: (undo?: () => void) => void; scope?: string }) {
+/** Tuning on the live engine: every edit sounds and autosaves. The Tuning tab edits the
+ * tuning stops share (instrument, divisions); given `stop`, it edits that stop's own
+ * tuning and its ranks' inside the stop editor, and `openScope` leads to what it follows. */
+export function TuningPanel({ edit, organ, offerUndo, scope, stop, openScope }: {
+  edit: boolean; organ: string; offerUndo: (undo?: () => void) => void; scope?: string; stop?: number; openScope?: (id: string) => void;
+}) {
   const [scopes, setScopes] = useState<Scopes>();
-  const [selected, setSelected] = useState(scope ?? 'instrument');
+  const [selected, setSelected] = useState(scope ?? (stop === undefined ? 'instrument' : `stop:${stop}`));
   const [failure, setFailure] = useState<string>();
   const [notice, setNotice] = useState(false);
   const [scala, setScala] = useState(false);
@@ -70,7 +74,7 @@ export function TuningPanel({ edit, organ, offerUndo, scope }: { edit: boolean; 
     return task.finally(() => void refresh());
   };
 
-  const views: DeskScope[] = scopes ? [
+  const all: DeskScope[] = scopes ? [
     { id: 'instrument', name: 'Whole instrument', own: { anchor: true, scale: true }, anchor: toAnchor(scopes.instrument), shape: toShape(scopes.instrument) },
     ...scopes.manuals.flatMap(manual => [
       { id: `manual:${manual.idx}`, name: manual.name, parent: 'instrument', own: manual.own, anchor: toAnchor(manual.tuning), shape: toShape(manual.tuning) },
@@ -82,6 +86,12 @@ export function TuningPanel({ edit, organ, offerUndo, scope }: { edit: boolean; 
       ]),
     ]),
   ] : [];
+  const own = (id: string) => id === `stop:${stop}` || id.startsWith(`rank:${stop}:`);
+  const shared = (id: string) => id === 'instrument' || id.startsWith('manual:');
+  const home = scopes?.stops.find(s => s.id === stop);
+  // A stop's editor shows the chain it inherits through, so the desk can say where values come from.
+  const views = all.filter(s => stop === undefined ? shared(s.id) : s.id === 'instrument' || s.id === `manual:${home?.midx}` || own(s.id));
+  const choose = (id: string) => stop === undefined || own(id) ? setSelected(id) : openScope?.(id);
   const remember = (id: string) => {
     const scope = views.find(s => s.id === id);
     if (!scope) return;
@@ -113,9 +123,13 @@ export function TuningPanel({ edit, organ, offerUndo, scope }: { edit: boolean; 
   useEffect(() => () => offerUndo(undefined), [offerUndo]);
 
   if (!scopes) return <Stack align="center" p="xl"><Loader size="sm"/><Text c="dimmed">Loading tuning</Text></Stack>;
-  const current = views.find(s => s.id === selected) ?? views[0];
+  if (stop !== undefined && !home) return <Text c="dimmed" p="md">This stop has no tuning of its own.</Text>;
+  const current = views.find(s => s.id === selected) ?? views.find(s => own(s.id)) ?? views[0];
+  const ranks = views.filter(s => own(s.id));
   return <div className="tuning-panel">
-    <TuningDesk layout="channel" scopes={views} selected={current.id} select={setSelected} readOnly={!edit} recorded
+    {ranks.length > 1 && <SegmentedControl mb="sm" aria-label="Tuning of" value={current.id} onChange={setSelected}
+      data={ranks.map(s => ({ value: s.id, label: s.id.startsWith('stop:') ? 'Whole stop' : s.name }))}/>}
+    <TuningDesk layout="channel" scopes={views} selected={current.id} select={choose} readOnly={!edit} recorded browser={stop === undefined}
       assign={() => setNotice(true)}
       setAnchor={(id, anchor) => change(id, [anchorParams(anchor)], 'That pitch could not be set.')}
       setShape={(id, shape) => change(id, [shapeParams(shape)], 'That scale could not be set.')}

@@ -5,6 +5,7 @@ export type Stop = {
   pitch: { native: number | null; footage: number | null; cents: number; gain: number; own: boolean };
   ranks: { id: number; name: string }[];
   custom?: boolean;
+  tuning?: { scope: string; follow: string };
 };
 export type Snapshot = {
   organ?: string; loading?: string; load_error?: string;

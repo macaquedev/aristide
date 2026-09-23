@@ -4,6 +4,7 @@ import { editInstrument, endpoint, request } from '../api';
 import { NumberControl } from '../design/NumberControl';
 import { RollCanvas, type RollView } from '../design/RollCanvas';
 import { anchorName, cents, validNote, type Anchor, type RollModel, type RollNote, type Stamp } from '../design/rollModel';
+import { TuningPanel } from '../tuning/TuningPanel';
 import '../design/roll.css';
 import './organ.css';
 
@@ -44,9 +45,9 @@ const freshStamp = (anchor: Anchor, ms: number): Stamp => ({ id: `${anchor[0]}${
 
 /** Organ: the organ's stops, and one stop's rule as two piano rolls (key down, key up) with the event inspector beside them.
  * Every edit sounds from the next note, held keys re-speak, and the organ file saves it. */
-export function OrganPanel({ organ, stops, stopId, select, offerUndo, openTuning }: {
-  organ: string; stops: { id: number; name: string; midx: number; manual: string; custom?: boolean }[];
-  stopId?: number; select: (id: number) => void; offerUndo: (undo?: () => void) => void; openTuning: (stop: number) => void;
+export function OrganPanel({ organ, edit: editable, stops, stopId, select, offerUndo, openScope }: {
+  organ: string; edit: boolean; stops: { id: number; name: string; midx: number; manual: string; custom?: boolean; tuning?: { follow: string } }[];
+  stopId?: number; select: (id: number) => void; offerUndo: (undo?: () => void) => void; openScope: (id: string) => void;
 }) {
   const root = useRef<HTMLDivElement>(null);
   const pointer = useRef<{ x: number; y: number } | null>(null);
@@ -65,6 +66,7 @@ export function OrganPanel({ organ, stops, stopId, select, offerUndo, openTuning
   const [stampError, setStampError] = useState('');
   const [failure, setFailure] = useState<string>();
   const [notice, setNotice] = useState(false);
+  const [view, setView] = useState<'events' | 'tuning'>('events');
   // Latest edit wins: a number dragged fast sends only what is current when the last request returns.
   const sending = useRef(false);
   const pending = useRef<{ stop: number; rule: Rule | null } | null>(null);
@@ -118,7 +120,8 @@ export function OrganPanel({ organ, stops, stopId, select, offerUndo, openTuning
   const latestUndo = useRef(undo);
   latestUndo.current = undo;
   const undoable = history.length > 0;
-  useEffect(() => { offerUndo(undoable ? () => latestUndo.current() : undefined); }, [undoable, offerUndo]);
+  // The tuning view offers its own undo while it is open.
+  useEffect(() => { if (view === 'events') offerUndo(undoable ? () => latestUndo.current() : undefined); }, [undoable, offerUndo, view]);
   useEffect(() => () => offerUndo(undefined), [offerUndo]);
 
   const note = model?.notes.find(n => n.id === selected) ?? model?.notes[0];
@@ -200,6 +203,7 @@ export function OrganPanel({ organ, stops, stopId, select, offerUndo, openTuning
     addStamp={anchor => { setStampError(''); setStampEditor({ anchor, ms: Math.max(...model.stamps.filter(s => s.anchor === anchor).map(s => s.ms)) + 50 }); }}/>;
   const zoom = (axis: 'span' | 'pitchSpan', factor: number) => setViews(v => Object.fromEntries(Object.entries(v).map(([key, value]) => [key, { ...value, [axis]: Math.max(axis === 'span' ? 10 : 8, Math.min(axis === 'span' ? 10000 : 19200, value[axis] * factor)) }])) as Record<Anchor, RollView>);
   const divisions = [...new Map(stops.map(s => [s.midx, s.manual])).entries()];
+  const ownTuning = stops.find(s => s.id === rule.stop.id)?.tuning?.follow === 'own';
 
   return <div className="build-panel">
     <nav className="build-stops" aria-label="Stops">{divisions.map(([midx, manual]) => <div key={midx}>
@@ -215,11 +219,15 @@ export function OrganPanel({ organ, stops, stopId, select, offerUndo, openTuning
           <Text c="dimmed" size="xs">{rule.stop.manual} · {rule.voices} {rule.voices === 1 ? 'voice' : 'voices'} per key</Text>
         </div>
         <Group gap="xs">
-          <Button variant="default" onClick={() => openTuning(rule.stop.id)}>Tuning</Button>
-          <Button variant="default" disabled={!rule.custom} onClick={() => { setHistory(h => [...h, toRule(model)]); send(null); }}>Reset</Button>
-          <Button onClick={() => add('down', 'down', 0)}>Add event</Button>
+          <SegmentedControl aria-label="Stop view" value={view} onChange={value => setView(value as 'events' | 'tuning')}
+            data={[{ value: 'events', label: 'Events' }, { value: 'tuning', label: <span>Tuning{ownTuning && <span className="modified" aria-label="own tuning"> ◇</span>}</span> }]}/>
+          {view === 'events' && <>
+            <Button variant="default" disabled={!rule.custom} onClick={() => { setHistory(h => [...h, toRule(model)]); send(null); }}>Reset</Button>
+            <Button onClick={() => add('down', 'down', 0)}>Add event</Button>
+          </>}
         </Group>
       </Group>
+      {view === 'tuning' ? <TuningPanel key={rule.stop.id} edit={editable} organ={organ} offerUndo={offerUndo} stop={rule.stop.id} openScope={openScope}/> : <>
       <div className="roll-toolbar">
         <SegmentedControl aria-label="Roll tool" value={tool} onChange={setTool} data={[{ value: 'draw', label: 'Draw' }, { value: 'pan', label: 'Pan' }]}/>
         <div className="roll-zoom"><Text size="xs" c="dimmed">Time</Text><Button variant="default" aria-label="Zoom time out" onClick={() => zoom('span', 1.5)}>−</Button><Button variant="default" aria-label="Zoom time in" onClick={() => zoom('span', 1 / 1.5)}>+</Button></div>
@@ -236,6 +244,7 @@ export function OrganPanel({ organ, stops, stopId, select, offerUndo, openTuning
         <aside className="roll-inspector">{inspector}</aside>
       </div>
       <Group justify="space-between" className="roll-footer"><Text size="xs" c="dimmed">→ Until release · → / ← Hold after release</Text><Text size="xs" c="dimmed">Right-click / Delete to remove · Middle-drag to pan</Text></Group>
+      </>}
     </Stack>
     <Drawer closeButtonProps={{ 'aria-label': 'Close' }} opened={sourceOpen} onClose={() => setSourceOpen(false)} title="Source" position="right" size="md"><Stack gap="xs">
       {divisions.map(([midx, manual]) => <Stack key={midx} gap={4}><Text size="xs" c="dimmed">{manual}</Text>

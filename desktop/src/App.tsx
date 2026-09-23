@@ -71,8 +71,8 @@ export function App() {
         {state && <SpeakerSettings edit={edit}/>}</Stack>}
       {panel === 'Tuning' && (state?.organ ? <TuningPanel key={tuningScope} edit={edit} organ={state.organ} offerUndo={offerUndo} scope={tuningScope}/> : <Stack align="center" p="xl"><Text>Choose an organ to tune.</Text><Button onClick={() => setPanel('Library')}>Open Library</Button></Stack>)}
       {panel === 'Sound' && (state?.organ ? <SoundPanel edit={edit} organ={state.organ} offerUndo={offerUndo} openSettings={() => setPanel('Settings')}/> : <Stack align="center" p="xl"><Text>Choose an organ first.</Text><Button onClick={() => setPanel('Library')}>Open Library</Button></Stack>)}
-      {panel === 'Organ' && (state?.organ ? <OrganPanel organ={state.organ} stops={state.stops} stopId={state.stops.some(s => s.id === selected) ? selected : undefined}
-        select={setSelected} offerUndo={offerUndo} openTuning={stop => { setTuningScope(`stop:${stop}`); setPanel('Tuning'); }}/>
+      {panel === 'Organ' && (state?.organ ? <OrganPanel organ={state.organ} edit={edit} stops={state.stops} stopId={state.stops.some(s => s.id === selected) ? selected : undefined}
+        select={setSelected} offerUndo={offerUndo} openScope={scope => { setTuningScope(scope); setPanel('Tuning'); }}/>
         : <Stack align="center" p="xl"><Text>Choose an organ to edit.</Text><Button onClick={() => setPanel('Library')}>Open Library</Button></Stack>)}
     </main>
     <Modal opened={Boolean(error)} title={errorTitle} onClose={() => { engine.dismissError(); setDismissedLoadError(state?.load_error); }}>

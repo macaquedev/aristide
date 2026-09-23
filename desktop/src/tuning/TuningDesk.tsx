@@ -13,6 +13,8 @@ export type DeskProps = {
   layout: string; scopes: DeskScope[]; selected: string; select: (id: string) => void;
   setAnchor: (id: string, anchor: Anchor) => void; setShape: (id: string, shape: Shape) => void; setOwn: (id: string, part: Part, own: boolean) => void;
   assign: (address: string) => void; recorded?: boolean; undo?: () => void; canUndo?: boolean; importScala?: () => void; readOnly?: boolean;
+  /** Hide the scope list when the scope is chosen elsewhere (a stop's own editor). */
+  browser?: boolean;
 };
 
 export const tuningDeskLayouts = [
@@ -28,7 +30,7 @@ export const shapeLabel = (shape: Shape) =>
 
 const keyLabel = (key: number) => `(${noteName(key)})`;
 
-export function TuningDesk({ layout, scopes, selected, select, setAnchor, setShape, setOwn, assign, recorded = false, undo, canUndo = false, importScala, readOnly = false }: DeskProps) {
+export function TuningDesk({ layout, scopes, selected, select, setAnchor, setShape, setOwn, assign, recorded = false, undo, canUndo = false, importScala, readOnly = false, browser = true }: DeskProps) {
   const [selectedStep, setSelectedStep] = useState(0);
   const [query, setQuery] = useState('');
   const [collapsed, setCollapsed] = useState(() => scopes.filter(s => s.parent && scopes.some(child => child.parent === s.id)).map(s => s.id));
@@ -160,8 +162,8 @@ export function TuningDesk({ layout, scopes, selected, select, setAnchor, setSha
       : <Button variant="subtle" size="compact-xs" onClick={() => select(from.id)}>{label[0].toUpperCase() + label.slice(1)} · {from.name} ↗</Button>;
   };
 
-  return <div className={`tuning-desk tuning-${layout}`}>
-    <nav className="tuning-browser" aria-label="Tuning scopes">
+  return <div className={`tuning-desk tuning-${layout}${browser ? '' : ' tuning-no-browser'}`}>
+    {browser && <nav className="tuning-browser" aria-label="Tuning scopes">
       <Text fw={600} mb="sm">Scopes</Text><TextInput aria-label="Find scope" placeholder="Find scope" leftSection={<Search size={14}/>} value={query} onChange={e => setQuery(e.currentTarget.value)} mb="sm"/>
       <div className="tuning-scope-list">{scopes.filter(visible).map(s => {
         const children = scopes.some(child => child.parent === s.id);
@@ -171,7 +173,7 @@ export function TuningDesk({ layout, scopes, selected, select, setAnchor, setSha
             <span>{s.name}{s.parent && (s.own.anchor || s.own.scale) && <span className="modified" aria-label="Tuning override"> ◇</span>}</span><span className="scope-detail">{Number(s.anchor.hz.toFixed(2))} Hz · {shapeLabel(s.shape)}</span>
           </Button></div>;
       })}{!scopes.some(visible) && <Text c="dimmed" size="xs">No matching scopes</Text>}</div>
-    </nav>
+    </nav>}
     <Card withBorder padding={0} className="tuning-device">
       <div className="tuning-device-header"><Group justify="space-between" gap="sm"><div><Group gap={4} className="tuning-path">{ancestors(scopes, scope).map(s => <Button key={s.id} variant="subtle" color="gray" size="compact-xs" onClick={() => select(s.id)}>{s.name} ›</Button>)}</Group><Text fw={600} className="tuning-scope-name">{scope.name}</Text></div>
         {undo && <Button variant="default" disabled={readOnly || !canUndo} onClick={undo}>Undo</Button>}</Group>

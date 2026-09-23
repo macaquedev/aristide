@@ -1,4 +1,5 @@
 .tuning-desk { display: grid; grid-template-columns: 235px minmax(0, 1fr); gap: 12px; align-items: start; }
+.tuning-desk.tuning-no-browser { grid-template-columns: minmax(0, 1fr); }
 .tuning-browser { padding: 14px 8px; border: 1px solid var(--mantine-color-default-border); border-radius: var(--mantine-radius-default); background: var(--mantine-color-dark-7); }
 .tuning-browser > p, .tuning-browser > .mantine-TextInput-root { margin-inline: 6px; }
 .tuning-scope-row { display: flex; gap: 2px; align-items: center; min-width: 0; }

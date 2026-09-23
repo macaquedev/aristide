@@ -48,6 +48,24 @@ test('Organ edits a stop rule live without interrupting a held note', async ({ p
   await page.getByRole('button', { name: 'Undo', exact: true }).click();
   await expect.poll(async () => (await rule(page, stop.id)).events[1].end).toBeNull();
 
+  // The stop's own tuning lives in its editor; the Tuning tab keeps only what stops share.
+  const tuning = async () => (await (await page.request.get('/api/tuning')).json()).stops.find((s: { id: number }) => s.id === stop.id);
+  await page.locator('.mantine-SegmentedControl-label', { hasText: /^Tuning/ }).click();
+  const follow = page.getByRole('switch', { name: `Scale follows ${stop.manual}` });
+  await expect(follow).toBeChecked();
+  await expect(page.getByRole('navigation', { name: 'Tuning scopes' })).toHaveCount(0);
+  await follow.dispatchEvent('click');
+  await expect.poll(async () => (await tuning()).own.scale).toBe(true);
+  await expect(page.locator('.mantine-SegmentedControl-label', { hasText: /^Tuning/ }).locator('.modified')).toBeVisible();
+  await page.screenshot({ path: 'test-results/organ-stop-tuning.png', fullPage: true });
+  await page.getByRole('switch', { name: `Scale follows ${stop.manual}` }).dispatchEvent('click');
+  await expect.poll(async () => (await tuning()).own.scale).toBe(false);
+  await page.locator('.mantine-SegmentedControl-label', { hasText: 'Events' }).click();
+  await page.getByRole('button', { name: 'Tuning', exact: true }).click();
+  await expect(page.getByRole('navigation', { name: 'Tuning scopes' })).toBeVisible();
+  await expect(page.getByRole('navigation', { name: 'Tuning scopes' }).getByRole('button', { name: stop.name, exact: true })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Organ', exact: true }).click();
+
   // The held note survived every edit and a round trip through Play.
   expect(await held(page)).toContain(60);
   await page.getByRole('button', { name: 'Play', exact: true }).click();

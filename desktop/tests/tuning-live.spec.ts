@@ -1,7 +1,8 @@
 import { test, expect } from '@playwright/test';
+import { fileURLToPath } from 'node:url';
 
 // Runs against a real aristide-server with an organ loaded, e.g.
-// ARISTIDE_LIVE=1 ARISTIDE_SCALES=/path/with/bohlen-pierce.scl bunx playwright test tuning-live
+// ARISTIDE_LIVE=1 bunx playwright test tuning-live (ARISTIDE_SCALES overrides the repo's scales/)
 test.skip(!process.env.ARISTIDE_LIVE, 'needs a running engine');
 
 test('the connected Tuning panel edits the engine', async ({ page }) => {
@@ -35,9 +36,9 @@ test('the connected Tuning panel edits the engine', async ({ page }) => {
   await page.getByRole('button', { name, exact: true }).click();
   await page.getByRole('button', { name: 'Import Scala', exact: true }).click();
   const sheet = page.getByRole('dialog', { name: 'Import Scala' });
-  await sheet.getByRole('textbox', { name: 'Folder' }).fill(process.env.ARISTIDE_SCALES ?? '');
+  await sheet.getByRole('textbox', { name: 'Folder' }).fill(process.env.ARISTIDE_SCALES ?? fileURLToPath(new URL('../../scales', import.meta.url)));
   await sheet.getByRole('button', { name: 'Go', exact: true }).click();
-  await sheet.getByRole('button', { name: 'bohlen-pierce.scl', exact: true }).click();
+  await sheet.getByRole('button', { name: 'bohlen-pierce-eq.scl', exact: true }).click();
   await sheet.getByRole('button', { name: 'Use scale', exact: true }).click();
   await expect(page.getByText(/^13 steps · Repeat 1901\.9[56] ¢$/).first()).toBeVisible();
   await expect(page.getByRole('button', { name, exact: true })).toContainText('Bohlen-Pierce');
@@ -48,19 +49,24 @@ test('the connected Tuning panel edits the engine', async ({ page }) => {
   await page.getByRole('switch', { name: 'Scale follows Whole instrument' }).click();
   await expect(page.getByRole('switch', { name: 'Scale follows Whole instrument' })).toBeChecked();
   await expect(page.getByRole('button', { name, exact: true })).toContainText('Quarter-comma meantone');
-  await page.getByRole('button', { name: `Expand ${name}`, exact: true }).click();
-  await expect(page.getByRole('button', { name: "Expand Montre 8'", exact: true })).toHaveCount(0);
-  await page.getByRole('button', { name: 'Expand Plein jeu III', exact: true }).click();
-  const rank = page.getByRole('button', { name: 'Plein jeu 2nd rank', exact: true });
-  await rank.click();
-  await expect(page.getByRole('switch', { name: 'Scale follows Plein jeu III' })).toBeChecked();
-  await page.getByRole('switch', { name: 'Scale follows Plein jeu III' }).click();
-  await expect(page.getByRole('switch', { name: 'Scale follows Plein jeu III' })).not.toBeChecked();
+  // Stops' own tuning is edited in their editor, not here.
+  await expect(page.getByRole('button', { name: `Expand ${name}`, exact: true })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Organ', exact: true }).click();
+  await page.getByRole('navigation', { name: 'Stops' }).getByRole('button', { name: 'Plein jeu III' }).click();
+  await page.locator('.mantine-SegmentedControl-label', { hasText: /^Tuning/ }).click();
+  await page.locator('.mantine-SegmentedControl-label', { hasText: 'Plein jeu 2nd rank' }).click();
+  const follows = page.getByRole('switch', { name: 'Scale follows Plein jeu III' });
+  await expect(follows).toBeChecked();
+  await follows.dispatchEvent('click');
+  await expect(follows).not.toBeChecked();
   await choose('Temperament', 'Pythagorean');
-  await expect(rank).toContainText('Pythagorean');
-  await expect(page.getByRole('button', { name: 'Plein jeu 1st rank', exact: true })).toContainText('Quarter-comma meantone');
-  await expect(page.getByRole('button', { name: 'Plein jeu III', exact: true })).toContainText('Quarter-comma meantone');
+  await expect(page.getByRole('combobox', { name: 'Temperament', exact: true })).toHaveValue('Pythagorean');
+  const ranks = async () => (await (await page.request.get('/api/tuning')).json()).stops.find((s: { name: string }) => s.name === 'Plein jeu III').ranks;
+  await expect.poll(async () => (await ranks()).map((r: { own: { scale: boolean } }) => r.own.scale)).toEqual([false, true, false]);
   await page.screenshot({ path: 'test-results/live-rank.png', fullPage: true });
+  await page.getByRole('switch', { name: 'Scale follows Plein jeu III' }).dispatchEvent('click');
+  await expect.poll(async () => (await ranks()).map((r: { own: { scale: boolean } }) => r.own.scale)).toEqual([false, false, false]);
+  await page.getByRole('button', { name: 'Tuning', exact: true }).click();
 
   await page.getByRole('button', { name: 'Whole instrument', exact: true }).click();
   await choose('Temperament', 'As recorded');
