@@ -10,8 +10,8 @@ export type Stop = {
 export type Snapshot = {
   organ?: string; loading?: string; load_error?: string;
   stops: Stop[];
-  manuals: { idx: number; name: string; pedal: boolean; held: number[] }[];
-  couplers: { idx: number; name: string; on: boolean; hidden?: boolean; routes: { from: number; to: number }[] }[];
+  manuals: { idx: number; name: string; pedal: boolean; held: number[]; first_key?: number; key_count?: number; kind?: string }[];
+  couplers: { idx: number; name: string; on: boolean; hidden?: boolean; routes: { from?: number; to?: number; shift?: number }[] }[];
   trems: { idx: number; name: string; on: boolean }[];
   generals: number[]; setter: boolean; gain: number;
   combinations?: { matching_generals: number[]; divisionals: Record<string, number[]>; matching_divisionals: Record<string, number[]>; frame: number; frames: number };

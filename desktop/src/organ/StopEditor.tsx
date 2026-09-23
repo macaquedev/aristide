@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Button, Checkbox, Drawer, Group, Loader, Modal, NumberInput, SegmentedControl, Select, Stack, Text } from '@mantine/core';
 import { editInstrument, endpoint, request } from '../api';
 import { NumberControl } from '../design/NumberControl';
@@ -6,7 +6,6 @@ import { RollCanvas, type RollView } from '../design/RollCanvas';
 import { anchorName, cents, validNote, type Anchor, type RollModel, type RollNote, type Stamp } from '../design/rollModel';
 import { TuningPanel } from '../tuning/TuningPanel';
 import '../design/roll.css';
-import './organ.css';
 
 type RuleSource = { stop: number; rank: number | null };
 type RuleEvent = { source: RuleSource; cents: number; level: number; start: string; end: string | null };
@@ -43,15 +42,14 @@ const toRule = (model: RollModel): Rule => ({
 });
 const freshStamp = (anchor: Anchor, ms: number): Stamp => ({ id: `${anchor[0]}${crypto.randomUUID().slice(0, 8)}`, anchor, ms });
 
-/** Organ: the organ's stops, and one stop's rule as two piano rolls (key down, key up) with the event inspector beside them.
+/** One stop's rule as two piano rolls (key down, key up) with the event inspector beside them, or its own tuning.
  * Every edit sounds from the next note, held keys re-speak, and the organ file saves it. */
-export function OrganPanel({ organ, edit: editable, stops, stopId, select, offerUndo, openScope }: {
+export function StopEditor({ organ, edit: editable, stops, stopId: current, actions, offerUndo, openScope }: {
   organ: string; edit: boolean; stops: { id: number; name: string; midx: number; manual: string; custom?: boolean; tuning?: { follow: string } }[];
-  stopId?: number; select: (id: number) => void; offerUndo: (undo?: () => void) => void; openScope: (id: string) => void;
+  stopId: number; actions?: ReactNode; offerUndo: (undo?: () => void) => void; openScope: (id: string) => void;
 }) {
   const root = useRef<HTMLDivElement>(null);
   const pointer = useRef<{ x: number; y: number } | null>(null);
-  const current = stopId ?? stops[0]?.id;
   const [rule, setRule] = useState<StopRule>();
   const [model, setModel] = useState<RollModel>();
   const [history, setHistory] = useState<Rule[]>([]);
@@ -75,7 +73,6 @@ export function OrganPanel({ organ, edit: editable, stops, stopId, select, offer
     setRule(value); setModel(toModel(value));
   }, () => setFailure('This stop could not be opened.')), []);
   useEffect(() => {
-    if (current === undefined) return;
     setHistory([]); setSelected(noteId(0)); setViews({ down: home, up: home });
     void load(current);
   }, [current, load]);
@@ -99,7 +96,6 @@ export function OrganPanel({ organ, edit: editable, stops, stopId, select, offer
     } finally { sending.current = false; }
   };
   const send = (next: Rule | null) => {
-    if (current === undefined) return;
     pending.current = { stop: current, rule: next };
     void flush();
   };
@@ -149,7 +145,6 @@ export function OrganPanel({ organ, edit: editable, stops, stopId, select, offer
     return () => document.removeEventListener('keydown', keydown);
   });
 
-  if (current === undefined) return <Stack align="center" p="xl"><Text>This organ has no stops.</Text></Stack>;
   if (!rule || !model) return <Stack align="center" p="xl"><Loader size="sm"/><Text c="dimmed">Opening stop</Text></Stack>;
 
   const source = model.sources.find(s => s.id === note?.source);
@@ -205,28 +200,18 @@ export function OrganPanel({ organ, edit: editable, stops, stopId, select, offer
   const divisions = [...new Map(stops.map(s => [s.midx, s.manual])).entries()];
   const ownTuning = stops.find(s => s.id === rule.stop.id)?.tuning?.follow === 'own';
 
-  return <div className="build-panel">
-    <nav className="build-stops" aria-label="Stops">{divisions.map(([midx, manual]) => <div key={midx}>
-      <Text size="xs" c="dimmed" className="build-division">{manual}</Text>
-      {stops.filter(s => s.midx === midx).map(s => <Button key={s.id} fullWidth justify="space-between" variant={s.id === current ? 'light' : 'subtle'} color={s.id === current ? undefined : 'gray'}
-        aria-current={s.id === current ? 'true' : undefined} onClick={() => select(s.id)}>{s.name}{s.custom && <span className="modified" aria-label="custom">◇</span>}</Button>)}
-    </div>)}</nav>
-    <Stack ref={root} className="piano-study build-editor" gap="md"
+  return <>
+    <Stack ref={root} className="piano-study organ-stop-editor" gap="md"
       onPointerMoveCapture={e => { pointer.current = e.pointerType === 'touch' ? null : { x: e.clientX, y: e.clientY }; }} onPointerLeave={() => { pointer.current = null; }}>
-      <Group justify="space-between" align="center">
+      <Group justify="space-between" align="start">
         <div>
           <Text className="roll-stop-name" fw={600}>{rule.stop.name} {rule.custom && <span className="modified" aria-label="custom">◇</span>}</Text>
           <Text c="dimmed" size="xs">{rule.stop.manual} · {rule.voices} {rule.voices === 1 ? 'voice' : 'voices'} per key</Text>
         </div>
-        <Group gap="xs">
-          <SegmentedControl aria-label="Stop view" value={view} onChange={value => setView(value as 'events' | 'tuning')}
-            data={[{ value: 'events', label: 'Events' }, { value: 'tuning', label: <span>Tuning{ownTuning && <span className="modified" aria-label="own tuning"> ◇</span>}</span> }]}/>
-          {view === 'events' && <>
-            <Button variant="default" disabled={!rule.custom} onClick={() => { setHistory(h => [...h, toRule(model)]); send(null); }}>Reset</Button>
-            <Button onClick={() => add('down', 'down', 0)}>Add event</Button>
-          </>}
-        </Group>
+        <SegmentedControl aria-label="Stop view" value={view} onChange={value => setView(value as 'events' | 'tuning')}
+          data={[{ value: 'events', label: 'Events' }, { value: 'tuning', label: <span>Tuning{ownTuning && <span className="modified" aria-label="own tuning"> ◇</span>}</span> }]}/>
       </Group>
+      {actions && <Group gap="xs" className="stop-identity">{actions}</Group>}
       {view === 'tuning' ? <TuningPanel key={rule.stop.id} edit={editable} organ={organ} offerUndo={offerUndo} stop={rule.stop.id} openScope={openScope}/> : <>
       <div className="roll-toolbar">
         <SegmentedControl aria-label="Roll tool" value={tool} onChange={setTool} data={[{ value: 'draw', label: 'Draw' }, { value: 'pan', label: 'Pan' }]}/>
@@ -237,8 +222,12 @@ export function OrganPanel({ organ, edit: editable, stops, stopId, select, offer
         <Checkbox label="Time grid" checked={grid} onChange={e => setGrid(e.currentTarget.checked)}/>
         <Select className="roll-tuning" aria-label="Pitch guide" value={String(steps)} allowDeselect={false} data={[{ value: '12', label: 'Guide · 12 equal' }, { value: '19', label: 'Guide · 19 equal' }, { value: '31', label: 'Guide · 31 equal' }]} onChange={value => value && setSteps(Number(value))}/>
       </div>
+      <Group gap="xs" wrap="nowrap" className="stop-events-row">
       <div className="roll-event-strip" aria-label="Events">{model.notes.map(n => <Button key={n.id} variant={note?.id === n.id ? 'light' : 'subtle'} aria-pressed={note?.id === n.id} onClick={() => setSelected(n.id)}>
         {model.sources.find(s => s.id === n.source)?.name ?? 'Missing'} <span className="event-chip-pitch">{cents(n.pitch)}</span></Button>)}</div>
+        <Button variant="default" ml="auto" disabled={!rule.custom} onClick={() => { setHistory(h => [...h, toRule(model)]); send(null); }}>Reset</Button>
+        <Button onClick={() => add('down', 'down', 0)}>Add event</Button>
+      </Group>
       <div className="roll-workspace variant-split">
         <div className="roll-pair">{canvas('down')}{canvas('up')}</div>
         <aside className="roll-inspector">{inspector}</aside>
@@ -282,5 +271,5 @@ export function OrganPanel({ organ, edit: editable, stops, stopId, select, offer
     <Modal opened={Boolean(failure)} onClose={() => setFailure(undefined)} title="Stop not changed">
       <Stack><Text>{failure} The stop keeps its last saved rule.</Text><Button onClick={() => setFailure(undefined)}>Close</Button></Stack>
     </Modal>
-  </div>;
+  </>;
 }

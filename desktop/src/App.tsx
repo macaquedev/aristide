@@ -22,6 +22,8 @@ export function App() {
   const [dismissedLoadError, setDismissedLoadError] = useState<string>();
   const [undo, setUndo] = useState<() => void>();
   const offerUndo = useCallback((action?: () => void) => setUndo(() => action), []);
+  // Only an organ picked in the Library opens on Play; rebuilds and saved copies stay where they are.
+  const picked = useRef(false);
   const loading = useRef(false);
   // Nothing loads at startup: with no organ, the app opens on the Library.
   const started = useRef(false);
@@ -34,7 +36,8 @@ export function App() {
     if (state?.loading) loading.current = true;
     else if (loading.current) {
       loading.current = false;
-      if (!state?.load_error) { setPanel('Play'); setEdit(false); }
+      if (picked.current && !state?.load_error) { setPanel('Play'); setEdit(false); }
+      picked.current = false;
     }
   }, [state?.loading, state?.load_error]);
   const error = engine.error ?? (state?.load_error !== dismissedLoadError ? state?.load_error : undefined);
@@ -64,15 +67,15 @@ export function App() {
         {!native && <><Text c="dimmed">Prototypes · no audio</Text><PreviewLinks/></>}
       </Stack>}
       {panel === 'Play' && state && <Play state={state} command={command} edit={edit} openLibrary={() => setPanel('Library')} openStop={stop => { setSelected(stop.id); setPanel('Organ'); }}/>} 
-      {panel === 'Library' && <Library state={state} command={command}/>}
+      {panel === 'Library' && <Library state={state} command={command} pick={() => { picked.current = true; }}/>}
       {panel === 'Settings' && <Stack p="lg"><Group><Button variant="subtle" leftSection={<ArrowLeft size={18}/>} onClick={() => setPanel('Play')}>Play</Button><Text fw={600}>Settings</Text></Group>
         <Appearance edit={edit} density={density} changeDensity={value => { setDensity(value); localStorage.setItem('aristide-density', value); }}/>
         {state && <ConsoleSettings state={state} command={command} edit={edit}/>}
         {state && <SpeakerSettings edit={edit}/>}</Stack>}
       {panel === 'Tuning' && (state?.organ ? <TuningPanel key={tuningScope} edit={edit} organ={state.organ} offerUndo={offerUndo} scope={tuningScope}/> : <Stack align="center" p="xl"><Text>Choose an organ to tune.</Text><Button onClick={() => setPanel('Library')}>Open Library</Button></Stack>)}
       {panel === 'Sound' && (state?.organ ? <SoundPanel edit={edit} organ={state.organ} offerUndo={offerUndo} openSettings={() => setPanel('Settings')}/> : <Stack align="center" p="xl"><Text>Choose an organ first.</Text><Button onClick={() => setPanel('Library')}>Open Library</Button></Stack>)}
-      {panel === 'Organ' && (state?.organ ? <OrganPanel organ={state.organ} edit={edit} stops={state.stops} stopId={state.stops.some(s => s.id === selected) ? selected : undefined}
-        select={setSelected} offerUndo={offerUndo} openScope={scope => { setTuningScope(scope); setPanel('Tuning'); }}/>
+      {panel === 'Organ' && (state?.organ ? <OrganPanel organ={state.organ} edit={edit} state={state} stopId={state.stops.some(s => s.id === selected) ? selected : undefined}
+        select={setSelected} offerUndo={offerUndo} openScope={(scope: string) => { setTuningScope(scope); setPanel('Tuning'); }}/>
         : <Stack align="center" p="xl"><Text>Choose an organ to edit.</Text><Button onClick={() => setPanel('Library')}>Open Library</Button></Stack>)}
     </main>
     <Modal opened={Boolean(error)} title={errorTitle} onClose={() => { engine.dismissError(); setDismissedLoadError(state?.load_error); }}>
@@ -122,7 +125,7 @@ function StopButton({ stop, edit, toggle, open }: { stop: Stop; edit: boolean; t
   </button>;
 }
 
-function Library({ state, command }: { state?: Snapshot; command: Command }) {
+function Library({ state, command, pick }: { state?: Snapshot; command: Command; pick: () => void }) {
   const [browse, setBrowse] = useState<Browse>();
   const [opened, setOpened] = useState(false);
   const [path, setPath] = useState('');
@@ -134,7 +137,7 @@ function Library({ state, command }: { state?: Snapshot; command: Command }) {
   };
   return <Stack p="lg"><Group justify="space-between"><Text fw={600}>Library</Text><Button onClick={() => void visit()}>Add organ</Button></Group>
     {state?.loading && <Group><Loader size="sm"/><Text>{state.loading}</Text></Group>}
-    <div className="library-grid">{state?.library.map(organ => <Card key={organ.path} withBorder component="button" className="library-card" onClick={() => command('organ/load', { path: organ.path })}>
+    <div className="library-grid">{state?.library.map(organ => <Card key={organ.path} withBorder component="button" className="library-card" onClick={() => { pick(); command('organ/load', { path: organ.path }); }}>
       <Text fw={600}>{organ.name}</Text><Text c="dimmed">Open organ</Text></Card>)}</div>
     {!state?.library.length && <Text c="dimmed">GrandOrgue · Unencrypted Hauptwerk</Text>}
     <Drawer opened={opened} onClose={() => setOpened(false)} title="Add an organ" position="right" size="lg"><Stack>
@@ -142,7 +145,7 @@ function Library({ state, command }: { state?: Snapshot; command: Command }) {
       {failure && <Text>That folder could not be opened. Choose another folder.</Text>}
       {browse?.parent && <Button variant="default" leftSection={<ArrowLeft size={18}/>} onClick={() => void visit(browse.parent!)}>Parent folder</Button>}
       {browse?.entries.filter(e => e.dir || !/\.(scl|kbm)$/i.test(e.name)).map(entry => <Button key={entry.path} justify="start" variant="default" leftSection={entry.dir ? <Folder size={18}/> : undefined} onClick={() => {
-        if (entry.dir) void visit(entry.path); else { command('organ/load', { path: entry.path }); setOpened(false); }
+        if (entry.dir) void visit(entry.path); else { pick(); command('organ/load', { path: entry.path }); setOpened(false); }
       }}>{entry.name}</Button>)}
     </Stack></Drawer>
   </Stack>;
