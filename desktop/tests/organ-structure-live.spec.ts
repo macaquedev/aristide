@@ -11,7 +11,6 @@ const settled = async (page: Page) => expect.poll(async () => (await snapshot(pa
 test('Organ adds, renames, moves and removes divisions, stops and couplers', async ({ page }) => {
   test.setTimeout(90_000);
   await page.goto('/');
-  await page.getByRole('button', { name: 'Perform', exact: true }).click();
   await page.getByRole('button', { name: 'Organ', exact: true }).click();
   const tree = page.getByRole('navigation', { name: 'Organ' });
   const start = await snapshot(page);

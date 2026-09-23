@@ -37,21 +37,19 @@ async function rig(page: Page) {
   return { requests };
 }
 
-test('Sound shows inheritance and marks, and locks in perform mode', async ({ page }) => {
+test('Sound shows inheritance and marks', async ({ page }) => {
   await rig(page);
   await expect(page.getByRole('columnheader', { name: /Gallery/ })).toContainText('Plays through Main');
   // A division opens by itself when one of its stops is routed apart.
   await expect(page.getByText('Organ file · chamade')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Bourdon to Rear: -6 dB', exact: true })).toHaveAttribute('data-inherited', 'true');
-  await expect(page.getByRole('button', { name: 'Great to Rear: -6 dB', exact: true })).toBeDisabled();
-  await expect(page.getByRole('button', { name: 'Great reset', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Great reset', exact: true })).toBeVisible();
   const cell = await page.getByRole('button', { name: 'Great to Main: 0 dB', exact: true }).boundingBox();
   expect(cell!.height).toBeGreaterThanOrEqual(48);
 });
 
-test('Sound connects, re-levels and disconnects in edit mode', async ({ page }) => {
+test('Sound connects, re-levels and disconnects', async ({ page }) => {
   const { requests } = await rig(page);
-  await page.getByRole('button', { name: 'Perform', exact: true }).click();
   await page.getByRole('button', { name: 'Connect Great to Gallery', exact: true }).click();
   await expect.poll(() => requests).toContain('/api/routing?manual=0&speakers=Gallery&level_db=0');
   await page.getByRole('button', { name: 'Great to Rear: -6 dB', exact: true }).click();

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ActionIcon, Button, Card, Drawer, Group, Loader, Modal, NumberInput, SegmentedControl, Stack, Text, TextInput, Tooltip, useMantineColorScheme } from '@mantine/core';
-import { ArrowLeft, ChevronLeft, ChevronRight, Folder, LockKeyhole, Settings, Trash2, Undo2, UnlockKeyhole } from 'lucide-react';
+import { ArrowLeft, ChevronLeft, ChevronRight, Folder, Settings, Trash2, Undo2 } from 'lucide-react';
 import { endpoint, request, native, type Browse, type Snapshot, type Stop } from './api';
 import { useEngine } from './engine';
 import { TuningPanel } from './tuning/TuningPanel';
@@ -15,7 +15,6 @@ export function App() {
   const engine = useEngine();
   const { snapshot: state, command } = engine;
   const [panel, setPanel] = useState<Panel>('Play');
-  const [edit, setEdit] = useState(false);
   const [selected, setSelected] = useState<number>();
   const [tuningScope, setTuningScope] = useState<string>();
   const [density, setDensity] = useState(() => localStorage.getItem('aristide-density') ?? 'comfortable');
@@ -36,7 +35,7 @@ export function App() {
     if (state?.loading) loading.current = true;
     else if (loading.current) {
       loading.current = false;
-      if (picked.current && !state?.load_error) { setPanel('Play'); setEdit(false); }
+      if (picked.current && !state?.load_error) setPanel('Play');
       picked.current = false;
     }
   }, [state?.loading, state?.load_error]);
@@ -54,10 +53,8 @@ export function App() {
     <header className="topbar">
       <Text className="instrument" fw={600} title={state?.organ}>{state?.organ ?? 'Aristide'}</Text>
       <nav aria-label="Panels">{panels.map(name => <Button key={name} variant={panel === name ? 'filled' : 'subtle'} color={panel === name ? undefined : 'gray'}
-        disabled={name === 'Organ' && !edit} onClick={() => setPanel(name)} aria-current={panel === name ? 'page' : undefined}>{name}</Button>)}</nav>
-      <Tooltip label={edit ? 'Lock for performance' : 'Unlock to edit'}><Button variant="default" leftSection={edit ? <UnlockKeyhole size={18}/> : <LockKeyhole size={18}/>}
-        onClick={() => { setEdit(!edit); if (edit && panel === 'Organ') setPanel('Play'); }}>{edit ? 'Edit' : 'Perform'}</Button></Tooltip>
-      <Tooltip label={undo ? 'Undo' : 'Nothing to undo'}><ActionIcon variant="default" size="lg" disabled={!undo || !edit} aria-label="Undo" onClick={() => undo?.()}><Undo2 size={18}/></ActionIcon></Tooltip>
+        onClick={() => setPanel(name)} aria-current={panel === name ? 'page' : undefined}>{name}</Button>)}</nav>
+      <Tooltip label={undo ? 'Undo' : 'Nothing to undo'}><ActionIcon variant="default" size="lg" disabled={!undo} aria-label="Undo" onClick={() => undo?.()}><Undo2 size={18}/></ActionIcon></Tooltip>
       <Text className="meters" c="dimmed" size="xs">CPU —<br/>{state?.memory ? `${state.memory.resident_mb} MB` : 'Memory —'}</Text>
       <Button color="red" variant="filled" disabled={!engine.ready} onClick={() => command('panic')}>Panic</Button>
       <ActionIcon size="lg" variant={panel === 'Settings' ? 'filled' : 'default'} aria-label="Settings" onClick={() => setPanel('Settings')}><Settings size={20}/></ActionIcon>
@@ -66,15 +63,15 @@ export function App() {
       {!state && <Stack align="center" p="xl"><Group><Loader size="sm"/><Text>Connecting to the sound engine…</Text></Group>
         {!native && <><Text c="dimmed">Prototypes · no audio</Text><PreviewLinks/></>}
       </Stack>}
-      {panel === 'Play' && state && <Play state={state} command={command} edit={edit} openLibrary={() => setPanel('Library')} openStop={stop => { setSelected(stop.id); setPanel('Organ'); }}/>} 
+      {panel === 'Play' && state && <Play state={state} command={command} openLibrary={() => setPanel('Library')} openStop={stop => { setSelected(stop.id); setPanel('Organ'); }}/>} 
       {panel === 'Library' && <Library state={state} command={command} pick={() => { picked.current = true; }}/>}
       {panel === 'Settings' && <Stack p="lg"><Group><Button variant="subtle" leftSection={<ArrowLeft size={18}/>} onClick={() => setPanel('Play')}>Play</Button><Text fw={600}>Settings</Text></Group>
-        <Appearance edit={edit} density={density} changeDensity={value => { setDensity(value); localStorage.setItem('aristide-density', value); }}/>
-        {state && <ConsoleSettings state={state} command={command} edit={edit}/>}
-        {state && <SpeakerSettings edit={edit}/>}</Stack>}
-      {panel === 'Tuning' && (state?.organ ? <TuningPanel key={tuningScope} edit={edit} organ={state.organ} offerUndo={offerUndo} scope={tuningScope}/> : <Stack align="center" p="xl"><Text>Choose an organ to tune.</Text><Button onClick={() => setPanel('Library')}>Open Library</Button></Stack>)}
-      {panel === 'Sound' && (state?.organ ? <SoundPanel edit={edit} organ={state.organ} offerUndo={offerUndo} openSettings={() => setPanel('Settings')}/> : <Stack align="center" p="xl"><Text>Choose an organ first.</Text><Button onClick={() => setPanel('Library')}>Open Library</Button></Stack>)}
-      {panel === 'Organ' && (state?.organ ? <OrganPanel organ={state.organ} edit={edit} state={state} stopId={state.stops.some(s => s.id === selected) ? selected : undefined}
+        <Appearance density={density} changeDensity={value => { setDensity(value); localStorage.setItem('aristide-density', value); }}/>
+        {state && <ConsoleSettings state={state} command={command}/>}
+        {state && <SpeakerSettings/>}</Stack>}
+      {panel === 'Tuning' && (state?.organ ? <TuningPanel key={tuningScope} organ={state.organ} offerUndo={offerUndo} scope={tuningScope}/> : <Stack align="center" p="xl"><Text>Choose an organ to tune.</Text><Button onClick={() => setPanel('Library')}>Open Library</Button></Stack>)}
+      {panel === 'Sound' && (state?.organ ? <SoundPanel organ={state.organ} offerUndo={offerUndo} openSettings={() => setPanel('Settings')}/> : <Stack align="center" p="xl"><Text>Choose an organ first.</Text><Button onClick={() => setPanel('Library')}>Open Library</Button></Stack>)}
+      {panel === 'Organ' && (state?.organ ? <OrganPanel organ={state.organ} state={state} stopId={state.stops.some(s => s.id === selected) ? selected : undefined}
         select={setSelected} offerUndo={offerUndo} openScope={(scope: string) => { setTuningScope(scope); setPanel('Tuning'); }}/>
         : <Stack align="center" p="xl"><Text>Choose an organ to edit.</Text><Button onClick={() => setPanel('Library')}>Open Library</Button></Stack>)}
     </main>
@@ -91,12 +88,12 @@ function PreviewLinks() {
     <Button component="a" href="/?study=1&panel=tuning" variant="default">Preview Tuning</Button></Group>;
 }
 
-function Play({ state, command, edit, openStop, openLibrary }: { state: Snapshot; command: Command; edit: boolean; openStop: (stop: Stop) => void; openLibrary: () => void }) {
+function Play({ state, command, openStop, openLibrary }: { state: Snapshot; command: Command; openStop: (stop: Stop) => void; openLibrary: () => void }) {
   if (!state.organ) return <Stack align="center" p="xl"><Text>Choose an organ to begin.</Text><Button onClick={openLibrary}>Open Library</Button></Stack>;
   return <div className="play">
     <div className="divisions">{state.manuals.map(manual => <section className="division" key={manual.idx} aria-label={manual.name}>
       <header className="division-heading"><Text fw={600}>{manual.name}</Text>{state.manual_tuning?.filter(t => t.idx === manual.idx).map(t => <Text key={t.idx} size="xs" c="violet">{t.temperament}, {t.reference.hz}</Text>)}</header>
-      <div className="stops">{state.stops.filter(stop => stop.midx === manual.idx).map(stop => <StopButton key={stop.id} stop={stop} edit={edit} open={() => openStop(stop)} toggle={() => command('stop', { id: stop.id, on: stop.on ? 0 : 1 })}/>)}</div>
+      <div className="stops">{state.stops.filter(stop => stop.midx === manual.idx).map(stop => <StopButton key={stop.id} stop={stop} open={() => openStop(stop)} toggle={() => command('stop', { id: stop.id, on: stop.on ? 0 : 1 })}/>)}</div>
       {state.couplers.filter(c => !c.hidden && c.routes.some(r => r.from === manual.idx)).map(c => <Button className="coupler" key={c.idx} variant={c.on ? 'filled' : 'default'} aria-pressed={c.on} onClick={() => command('coupler', { idx: c.idx, on: c.on ? 0 : 1 })}>{c.name}</Button>)}
       <Group className="divisionals" gap="xs">{(state.combinations?.divisionals[String(manual.idx)] ?? []).map(n => <Button key={n} variant={state.combinations?.matching_divisionals[String(manual.idx)]?.includes(n) ? 'filled' : 'default'} aria-label={`${manual.name} piston ${n}`} onClick={() => command('divisional', { manual: manual.idx, n })}>{n}</Button>)}</Group>
     </section>)}</div>
@@ -109,15 +106,15 @@ function Play({ state, command, edit, openStop, openLibrary }: { state: Snapshot
   </div>;
 }
 
-function StopButton({ stop, edit, toggle, open }: { stop: Stop; edit: boolean; toggle: () => void; open: () => void }) {
+function StopButton({ stop, toggle, open }: { stop: Stop; toggle: () => void; open: () => void }) {
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const origin = useRef({ x: 0, y: 0 });
   const consumed = useRef(false);
   const clear = () => { clearTimeout(timer.current); };
-  useEffect(() => clear, [edit]);
+  useEffect(() => clear, []);
   const footage = stop.pitch.footage ?? stop.pitch.native;
-  return <button className="stop" aria-pressed={stop.on} onContextMenu={e => { e.preventDefault(); if (edit) open(); }}
-    onPointerDown={e => { consumed.current = false; origin.current = { x: e.clientX, y: e.clientY }; if (e.button === 0) timer.current = setTimeout(() => { consumed.current = true; if (edit) open(); }, 600); }}
+  return <button className="stop" aria-pressed={stop.on} onContextMenu={e => { e.preventDefault(); open(); }}
+    onPointerDown={e => { consumed.current = false; origin.current = { x: e.clientX, y: e.clientY }; if (e.button === 0) timer.current = setTimeout(() => { consumed.current = true; open(); }, 600); }}
     onPointerMove={e => { if (Math.hypot(e.clientX - origin.current.x, e.clientY - origin.current.y) > 10) { clear(); consumed.current = true; } }}
     onPointerUp={clear} onPointerCancel={() => { clear(); consumed.current = true; }} onPointerLeave={clear}
     onClick={() => { if (!consumed.current) toggle(); consumed.current = false; }}>
@@ -151,24 +148,23 @@ function Library({ state, command, pick }: { state?: Snapshot; command: Command;
   </Stack>;
 }
 
-function Appearance({ edit, density, changeDensity }: { edit: boolean; density: string; changeDensity: (value: string) => void }) {
+function Appearance({ density, changeDensity }: { density: string; changeDensity: (value: string) => void }) {
   const { colorScheme, setColorScheme } = useMantineColorScheme();
-  return <Card withBorder><Stack><Text fw={600}>Appearance</Text><Group><Text>Colour</Text><SegmentedControl disabled={!edit} value={colorScheme} onChange={value => setColorScheme(value as 'dark' | 'light')} data={[{ value: 'dark', label: 'Dark' }, { value: 'light', label: 'Light' }]}/></Group>
-    <Group><Text>Density</Text><SegmentedControl disabled={!edit} value={density} onChange={changeDensity} data={[{ value: 'comfortable', label: 'Comfortable' }, { value: 'compact', label: 'Compact' }]}/></Group></Stack></Card>;
+  return <Card withBorder><Stack><Text fw={600}>Appearance</Text><Group><Text>Colour</Text><SegmentedControl value={colorScheme} onChange={value => setColorScheme(value as 'dark' | 'light')} data={[{ value: 'dark', label: 'Dark' }, { value: 'light', label: 'Light' }]}/></Group>
+    <Group><Text>Density</Text><SegmentedControl value={density} onChange={changeDensity} data={[{ value: 'comfortable', label: 'Comfortable' }, { value: 'compact', label: 'Compact' }]}/></Group></Stack></Card>;
 }
 
-function ConsoleSettings({ state, command, edit }: { state: Snapshot; command: Command; edit: boolean }) {
-  return <Card withBorder><Stack><Group justify="space-between"><Text fw={600}>Console</Text><Button variant="default" disabled={!edit} onClick={() => command('midi/rescan')}>Rescan MIDI</Button></Group>
-    {!edit && <Text c="dimmed">Console locked</Text>}
+function ConsoleSettings({ state, command }: { state: Snapshot; command: Command }) {
+  return <Card withBorder><Stack><Group justify="space-between"><Text fw={600}>Console</Text><Button variant="default" onClick={() => command('midi/rescan')}>Rescan MIDI</Button></Group>
     {state.midi.manuals.map(manual => <Group key={manual.idx} justify="space-between"><Stack gap={0}><Text>{manual.name}</Text><Text size="xs" c="dimmed">{manual.inputs.map(i => `${i.device}${i.connected ? '' : ' (disconnected)'}`).join(', ') || 'No console assigned'}</Text></Stack>
-      <Group><Button disabled={!edit} variant="default" onClick={() => command('midi/learn', { manual: manual.idx, slot: 0 })}>Learn keys</Button>
-        <Button disabled={!edit} variant="default" onClick={() => command('midi/bind', { manual: manual.idx, slot: manual.inputs.length, device: 'Computer keyboard' })}>Use computer keyboard</Button></Group>
+      <Group><Button variant="default" onClick={() => command('midi/learn', { manual: manual.idx, slot: 0 })}>Learn keys</Button>
+        <Button variant="default" onClick={() => command('midi/bind', { manual: manual.idx, slot: manual.inputs.length, device: 'Computer keyboard' })}>Use computer keyboard</Button></Group>
     </Group>)}
     {state.midi.learning && <Group><Text>Press a key on your console.</Text><Button variant="default" onClick={() => command('midi/learn')}>Cancel learning</Button></Group>}
   </Stack></Card>;
 }
 
-function SpeakerSettings({ edit }: { edit: boolean }) {
+function SpeakerSettings() {
   const [routing, setRouting] = useState<Routing>();
   const [name, setName] = useState('');
   const [output, setOutput] = useState<[number, number]>([3, 4]);
@@ -185,19 +181,19 @@ function SpeakerSettings({ edit }: { edit: boolean }) {
     {defined.map(speaker => <Group key={speaker.name} wrap="nowrap">
       <Stack gap={0} style={{ flex: 1 }}><Text>{speaker.name}</Text>{!speaker.available && <Text size="xs" c="dimmed">Not on this device · plays through Main</Text>}</Stack>
       {speaker.name === 'Main' ? <Text c="dimmed">1 / 2</Text> : <>
-        <NumberInput w={84} aria-label={`${speaker.name} left channel`} disabled={!edit} min={1} max={64} value={speaker.output![0]}
+        <NumberInput w={84} aria-label={`${speaker.name} left channel`} min={1} max={64} value={speaker.output![0]}
           onChange={v => void change({ name: speaker.name, left: channel(v), right: speaker.output![1] }).catch(() => {})}/>
-        <NumberInput w={84} aria-label={`${speaker.name} right channel`} disabled={!edit} min={1} max={64} value={speaker.output![1]}
+        <NumberInput w={84} aria-label={`${speaker.name} right channel`} min={1} max={64} value={speaker.output![1]}
           onChange={v => void change({ name: speaker.name, left: speaker.output![0], right: channel(v) }).catch(() => {})}/>
-        <ActionIcon size="lg" variant="subtle" color="red" disabled={!edit} aria-label={`Remove ${speaker.name}`} onClick={() => void change({ name: speaker.name, remove: 1 }).catch(() => {})}><Trash2 size={18}/></ActionIcon>
+        <ActionIcon size="lg" variant="subtle" color="red" aria-label={`Remove ${speaker.name}`} onClick={() => void change({ name: speaker.name, remove: 1 }).catch(() => {})}><Trash2 size={18}/></ActionIcon>
       </>}
     </Group>)}
     <form onSubmit={e => { e.preventDefault(); if (name.trim()) void change({ name: name.trim(), left: output[0], right: output[1] }).then(() => setName(''), () => {}); }}>
       <Group wrap="nowrap" align="end">
-        <TextInput style={{ flex: 1 }} label="New group" placeholder="Name" disabled={!edit} value={name} onChange={e => setName(e.currentTarget.value)}/>
-        <NumberInput w={84} label="Left" disabled={!edit} min={1} max={64} value={output[0]} onChange={v => setOutput([channel(v), output[1]])}/>
-        <NumberInput w={84} label="Right" disabled={!edit} min={1} max={64} value={output[1]} onChange={v => setOutput([output[0], channel(v)])}/>
-        <Button type="submit" disabled={!edit || !name.trim()}>Add</Button>
+        <TextInput style={{ flex: 1 }} label="New group" placeholder="Name" value={name} onChange={e => setName(e.currentTarget.value)}/>
+        <NumberInput w={84} label="Left" min={1} max={64} value={output[0]} onChange={v => setOutput([channel(v), output[1]])}/>
+        <NumberInput w={84} label="Right" min={1} max={64} value={output[1]} onChange={v => setOutput([output[0], channel(v)])}/>
+        <Button type="submit" disabled={!name.trim()}>Add</Button>
       </Group>
     </form>
     {failure && <Text>That speaker group could not be saved. Use a new name without commas or colons.</Text>}

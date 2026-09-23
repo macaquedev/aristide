@@ -19,7 +19,6 @@ test('the connected Sound panel routes sources to speaker groups', async ({ page
   await page.request.post('/api/routing?manual=1&follow=1');
   await page.request.post(`/api/routing?stop=${start.stops.find((s: { midx: number }) => s.midx === 1).id}&follow=1`);
 
-  await page.getByRole('button', { name: 'Perform', exact: true }).click();
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await page.getByRole('textbox', { name: 'New group' }).fill('Rear');
   await page.getByRole('button', { name: 'Add', exact: true }).click();
@@ -67,9 +66,6 @@ test('the connected Sound panel routes sources to speaker groups', async ({ page
   await page.getByRole('button', { name: `${first.name} follow`, exact: true }).click();
   await expect.poll(async () => (await routing(page)).stops.find((s: { id: number }) => s.id === first.id).own).toBe(false);
 
-  // Perform mode locks the matrix.
-  await page.getByRole('button', { name: 'Edit', exact: true }).click();
-  await expect(page.getByRole('button', { name: `${division} to Rear: -5 dB`, exact: true })).toBeDisabled();
 
   const after = await (await page.request.get('/api/state')).json();
   expect(after.manuals[1].held).toContain(60);

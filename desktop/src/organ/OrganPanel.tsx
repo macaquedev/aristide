@@ -16,8 +16,8 @@ const pitchName = (shift: number) => pitches.find(p => Number(p.value) === shift
 
 /** Organ: this organ's divisions, stops and couplers down the left, the selected one's editor on the right.
  * Renames land live; adding, moving and removing rebuild the organ from its file. */
-export function OrganPanel({ organ, edit, state, stopId, select, offerUndo, openScope }: {
-  organ: string; edit: boolean; state: Snapshot; stopId?: number; select: (id: number) => void;
+export function OrganPanel({ organ, state, stopId, select, offerUndo, openScope }: {
+  organ: string; state: Snapshot; stopId?: number; select: (id: number) => void;
   offerUndo: (undo?: () => void) => void; openScope: (id: string) => void;
 }) {
   const [selection, setSelection] = useState<Selection | undefined>(stopId === undefined ? undefined : { kind: 'stop', id: stopId });
@@ -85,20 +85,20 @@ export function OrganPanel({ organ, edit, state, stopId, select, offerUndo, open
           data-selected={division?.idx === manual.idx} onClick={() => choose({ kind: 'division', idx: manual.idx })}>{manual.name}</Button>
         <nav aria-label={`${manual.name} stops`}>{stops.filter(s => s.midx === manual.idx).map(s => <Button key={s.id} fullWidth justify="space-between" variant={stop?.id === s.id ? 'light' : 'subtle'} color={stop?.id === s.id ? undefined : 'gray'}
           aria-current={stop?.id === s.id ? 'true' : undefined} data-selected={stop?.id === s.id} onClick={() => choose({ kind: 'stop', id: s.id })}>{s.name}{s.custom && <span className="modified" aria-label="custom">◇</span>}</Button>)}</nav>
-        <Button className="organ-add" variant="subtle" color="gray" size="compact-sm" leftSection={<Plus size={14}/>} disabled={!edit || busy} onClick={() => setAdding({ kind: 'stop', manual: manual.name })}>Add stop</Button>
+        <Button className="organ-add" variant="subtle" color="gray" size="compact-sm" leftSection={<Plus size={14}/>} disabled={busy} onClick={() => setAdding({ kind: 'stop', manual: manual.name })}>Add stop</Button>
       </section>)}
       <section aria-label="Couplers">
         <Text size="xs" c="dimmed" className="organ-heading">Couplers</Text>
         {couplers.map(c => <Button key={c.idx} fullWidth justify="space-between" variant={coupler?.idx === c.idx ? 'light' : 'subtle'} color={coupler?.idx === c.idx ? undefined : 'gray'}
           data-selected={coupler?.idx === c.idx} onClick={() => choose({ kind: 'coupler', idx: c.idx })} rightSection={c.hidden ? <Text component="span" size="xs" c="dimmed">Hidden</Text> : undefined}>{c.name}</Button>)}
-        <Button className="organ-add" variant="subtle" color="gray" size="compact-sm" leftSection={<Plus size={14}/>} disabled={!edit || busy || manuals.length < 2} onClick={() => setAdding({ kind: 'coupler' })}>Add coupler</Button>
+        <Button className="organ-add" variant="subtle" color="gray" size="compact-sm" leftSection={<Plus size={14}/>} disabled={busy || manuals.length < 2} onClick={() => setAdding({ kind: 'coupler' })}>Add coupler</Button>
       </section>
-      <Button variant="default" leftSection={<Plus size={16}/>} disabled={!edit || busy} onClick={() => setAdding({ kind: 'division' })}>Add division</Button>
+      <Button variant="default" leftSection={<Plus size={16}/>} disabled={busy} onClick={() => setAdding({ kind: 'division' })}>Add division</Button>
     </nav>
 
     <div className="organ-detail">
       {busy && <Group className="organ-busy" gap="xs" role="status"><Loader size="xs"/><Text size="sm">Rebuilding the organ</Text></Group>}
-      {stop && <StopEditor key={stop.id} organ={organ} edit={edit} stops={stops} stopId={stop.id} actions={stopActions} offerUndo={offerUndo} openScope={openScope}/>}
+      {stop && <StopEditor key={stop.id} organ={organ} stops={stops} stopId={stop.id} actions={stopActions} offerUndo={offerUndo} openScope={openScope}/>}
       {division && <DivisionEditor division={division} count={manuals.length} stops={stops.filter(s => s.midx === division.idx).length} busy={busy}
         rename={name => change('organ/manual/rename', { manual: division.idx, name }, 'The division could not be renamed. Use a name no other division has.', { kind: 'division', name })}
         kind={kind => void change('organ/manual/kind', { manual: division.idx, kind }, 'The keyboard type could not be changed.', { kind: 'division', name: division.name })}
@@ -111,7 +111,7 @@ export function OrganPanel({ organ, edit, state, stopId, select, offerUndo, open
         keep={keep => void change('organ/coupler', { idx: coupler.idx, keep: keep ? 1 : 0 }, 'The coupler could not be changed.')}
         remove={() => ask(`Remove ${coupler.name}?`, 'A coupler that came with the sample set is taken off the console instead, and can be shown again.',
           () => void change('organ/coupler/remove', { idx: coupler.idx }, 'This coupler could not be removed.'))}/>}
-      {!current && !busy && <Stack align="center" p="xl"><Text>This organ has no stops yet.</Text><Button disabled={!edit || !manuals.length} onClick={() => manuals[0] && setAdding({ kind: 'stop', manual: manuals[0].name })}>Add stop</Button></Stack>}
+      {!current && !busy && <Stack align="center" p="xl"><Text>This organ has no stops yet.</Text><Button disabled={!manuals.length} onClick={() => manuals[0] && setAdding({ kind: 'stop', manual: manuals[0].name })}>Add stop</Button></Stack>}
     </div>
 
     <AddStop opened={adding?.kind === 'stop'} manual={adding?.kind === 'stop' ? adding.manual : ''} taken={adding?.kind === 'stop' ? named(adding.manual) : []} close={() => setAdding(undefined)}

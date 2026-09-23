@@ -38,30 +38,26 @@ async function rig(page: Page) {
   return { requests, state };
 }
 
-test('Play opens locked; stop drawing and Set work in perform mode', async ({ page }) => {
+test('stop drawing and Set work on Play', async ({ page }) => {
   const { requests } = await rig(page);
-  await expect(page.getByRole('button', { name: 'Organ', exact: true })).toBeDisabled();
   const stop = page.getByRole('button', { name: 'Bourdon' });
   const size = await stop.boundingBox();
   expect(size!.height).toBeGreaterThanOrEqual(60);
   await stop.click();
   await expect(stop).toHaveAttribute('aria-pressed', 'true');
-  await stop.click({ button: 'right' });
-  await expect(stop).toBeVisible();
   await page.getByRole('button', { name: 'Set', exact: true }).click();
   await page.getByRole('button', { name: 'General 1', exact: true }).click();
   await expect.poll(() => requests.includes('/api/general?n=1')).toBe(true);
   expect(requests.some(url => url.includes('recall=1'))).toBe(false);
 });
 
-test('editing a stop requires Edit; relocking returns from Organ to Play', async ({ page }) => {
+test('right-clicking a stop opens it in Organ, and Play is one tap back', async ({ page }) => {
   await rig(page);
-  await page.getByRole('button', { name: 'Perform', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Perform', exact: true })).toHaveCount(0);
   await page.getByRole('button', { name: 'Bourdon' }).click({ button: 'right' });
   await expect(page.locator('.roll-stop-name')).toContainText('Bourdon');
-  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await page.getByRole('button', { name: 'Play', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Bourdon' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Organ', exact: true })).toBeDisabled();
 });
 
 test('held computer keys survive navigation and release in the other panel', async ({ page }) => {
@@ -74,17 +70,10 @@ test('held computer keys survive navigation and release in the other panel', asy
   expect(requests).toEqual(['/api/key?code=KeyA&on=1', '/api/key?code=KeyA&on=0']);
 });
 
-test('touch hold is harmless while locked and opens Organ when unlocked', async ({ browser }) => {
+test('touch hold opens a stop in Organ without drawing it', async ({ browser }) => {
   const page = await browser.newPage({ hasTouch: true, viewport: { width: 800, height: 1000 } });
   const { requests } = await rig(page);
   const stop = page.getByRole('button', { name: 'Bourdon' });
-  await stop.dispatchEvent('pointerdown', { pointerType: 'touch', pointerId: 1, button: 0 });
-  await page.waitForTimeout(700);
-  await expect(stop).toBeVisible();
-  await stop.dispatchEvent('pointerup', { pointerType: 'touch', pointerId: 1, button: 0 });
-  await stop.dispatchEvent('click');
-  await expect(stop).toHaveAttribute('aria-pressed', 'false');
-  await page.getByRole('button', { name: 'Perform', exact: true }).tap();
   await stop.dispatchEvent('pointerdown', { pointerType: 'touch', pointerId: 2, button: 0 });
   await expect(page.locator('.roll-stop-name')).toContainText('Bourdon');
   expect(requests.filter(url => url.startsWith('/api/stop'))).toHaveLength(0);

@@ -17,9 +17,7 @@ test('Organ edits a stop rule live without interrupting a held note', async ({ p
   await page.request.post(`/api/stop?id=${stop.id}&on=1`);
   await page.request.post('/api/note?manual=1&key=60&on=1');
 
-  // The stop editor opens through the stop, in edit mode only.
-  await expect(page.getByRole('button', { name: 'Organ', exact: true })).toBeDisabled();
-  await page.getByRole('button', { name: 'Perform', exact: true }).click();
+  // The stop editor opens through the stop.
   const knob = page.getByRole('button', { name: new RegExp(`^${stop.name}`) }).first();
   await knob.click({ button: 'right' });
   await expect(page.locator('.roll-stop-name')).toContainText(stop.name);
@@ -88,8 +86,5 @@ test('Organ edits a stop rule live without interrupting a held note', async ({ p
   await page.getByRole('button', { name: 'Reset', exact: true }).click();
   await expect.poll(async () => (await rule(page, stop.id)).custom).toBe(false);
 
-  // Locking returns to Play and closes Organ.
-  await page.getByRole('button', { name: 'Edit', exact: true }).click();
-  await expect(page.getByRole('button', { name: 'Organ', exact: true })).toBeDisabled();
   await page.request.post('/api/note?manual=1&key=60&on=0');
 });

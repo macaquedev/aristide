@@ -22,7 +22,7 @@ const levelOf = (sends: Sends | null, group: string) =>
   sends ? Object.entries(sends).find(([name]) => name.toLowerCase() === group.toLowerCase())?.[1] : undefined;
 
 /** Sound: sources down the side, speaker groups across the top. Every edit sounds and autosaves. */
-export function SoundPanel({ edit, organ, offerUndo, openSettings }: { edit: boolean; organ: string; offerUndo: (undo?: () => void) => void; openSettings: () => void }) {
+export function SoundPanel({ organ, offerUndo, openSettings }: { organ: string; offerUndo: (undo?: () => void) => void; openSettings: () => void }) {
   const [routing, setRouting] = useState<Routing>();
   const [open, setOpen] = useState<number[]>();
   const [failure, setFailure] = useState<string>();
@@ -87,13 +87,13 @@ export function SoundPanel({ edit, organ, offerUndo, openSettings }: { edit: boo
   const cells = (source: Source, name: string, sends: Sends | null, own: boolean) => routing.speakers.map(speaker => {
     const level = levelOf(sends, speaker.name);
     return <td key={speaker.name}>
-      <SoundCell label={`${name} to ${speaker.name}`} level={level} inherited={!own} disabled={!edit} assign={() => setNotice(true)}
+      <SoundCell label={`${name} to ${speaker.name}`} level={level} inherited={!own} assign={() => setNotice(true)}
         connect={() => change(source, { speakers: speaker.name, level_db: 0 }, 'That connection could not be made.')}
         setLevel={db => change(source, { speakers: speaker.name, level_db: db }, 'That level could not be set.')}
         disconnect={() => change(source, { speakers: speaker.name, off: 1 }, 'That connection could not be removed.')}/>
     </td>;
   });
-  const follow = (source: Source, label: string, name: string) => edit &&
+  const follow = (source: Source, label: string, name: string) =>
     <Button size="compact-sm" variant="subtle" color="gray" aria-label={`${name} ${label.toLowerCase()}`}
       onClick={() => change(source, { follow: 1 }, 'That routing could not be reset.')}>{label}</Button>;
 

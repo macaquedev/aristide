@@ -44,8 +44,8 @@ const freshStamp = (anchor: Anchor, ms: number): Stamp => ({ id: `${anchor[0]}${
 
 /** One stop's rule as two piano rolls (key down, key up) with the event inspector beside them, or its own tuning.
  * Every edit sounds from the next note, held keys re-speak, and the organ file saves it. */
-export function StopEditor({ organ, edit: editable, stops, stopId: current, actions, offerUndo, openScope }: {
-  organ: string; edit: boolean; stops: { id: number; name: string; midx: number; manual: string; custom?: boolean; tuning?: { follow: string } }[];
+export function StopEditor({ organ, stops, stopId: current, actions, offerUndo, openScope }: {
+  organ: string; stops: { id: number; name: string; midx: number; manual: string; custom?: boolean; tuning?: { follow: string } }[];
   stopId: number; actions?: ReactNode; offerUndo: (undo?: () => void) => void; openScope: (id: string) => void;
 }) {
   const root = useRef<HTMLDivElement>(null);
@@ -212,7 +212,7 @@ export function StopEditor({ organ, edit: editable, stops, stopId: current, acti
           data={[{ value: 'events', label: 'Events' }, { value: 'tuning', label: <span>Tuning{ownTuning && <span className="modified" aria-label="own tuning"> ◇</span>}</span> }]}/>
       </Group>
       {actions && <Group gap="xs" className="stop-identity">{actions}</Group>}
-      {view === 'tuning' ? <TuningPanel key={rule.stop.id} edit={editable} organ={organ} offerUndo={offerUndo} stop={rule.stop.id} openScope={openScope}/> : <>
+      {view === 'tuning' ? <TuningPanel key={rule.stop.id} organ={organ} offerUndo={offerUndo} stop={rule.stop.id} openScope={openScope}/> : <>
       <div className="roll-toolbar">
         <SegmentedControl aria-label="Roll tool" value={tool} onChange={setTool} data={[{ value: 'draw', label: 'Draw' }, { value: 'pan', label: 'Pan' }]}/>
         <div className="roll-zoom"><Text size="xs" c="dimmed">Time</Text><Button variant="default" aria-label="Zoom time out" onClick={() => zoom('span', 1.5)}>−</Button><Button variant="default" aria-label="Zoom time in" onClick={() => zoom('span', 1 / 1.5)}>+</Button></div>

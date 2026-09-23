@@ -7,8 +7,8 @@ const clamp = (db: number) => Math.max(MIN, Math.min(MAX, Math.round(db * 10) / 
 const format = (db: number) => (db > 0 ? `+${db}` : `${db}`).replace('-', '−');
 
 /** One matrix cell: tap to connect, then the shared number gesture — drag, tap for a stepper, type, hold to assign. */
-export function SoundCell({ label, level, inherited, disabled, connect, setLevel, disconnect, assign }: {
-  label: string; level?: number; inherited: boolean; disabled: boolean;
+export function SoundCell({ label, level, inherited, connect, setLevel, disconnect, assign }: {
+  label: string; level?: number; inherited: boolean;
   connect: () => void; setLevel: (db: number) => void; disconnect: () => void; assign: () => void;
 }) {
   const [opened, setOpened] = useState(false);
@@ -39,7 +39,7 @@ export function SoundCell({ label, level, inherited, disabled, connect, setLevel
   return <Popover opened={opened} onChange={setOpened} position="bottom" withArrow trapFocus>
     <Popover.Target>
       <button type="button" className="route-cell" data-connected={connected || undefined} data-inherited={(connected && inherited) || undefined}
-        disabled={disabled} aria-label={connected ? `${label}: ${shown} dB` : `Connect ${label}`} aria-pressed={connected}
+        aria-label={connected ? `${label}: ${shown} dB` : `Connect ${label}`} aria-pressed={connected}
         onPointerDown={e => {
           if (e.button !== 0) return;
           gesture.current = { y: e.clientY, level: level ?? 0, moved: false, held: false };
@@ -62,7 +62,7 @@ export function SoundCell({ label, level, inherited, disabled, connect, setLevel
           if (gesture.current.held || (gesture.current.moved && e.detail !== 0)) return;
           if (connected) setOpened(true); else connect();
         }}
-        onContextMenu={e => { e.preventDefault(); if (connected && !disabled) assign(); }}>
+        onContextMenu={e => { e.preventDefault(); if (connected) assign(); }}>
         {connected ? format(shown!) : ''}
       </button>
     </Popover.Target>

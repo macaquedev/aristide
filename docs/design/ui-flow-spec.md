@@ -38,8 +38,8 @@ Every advanced feature is this one idea:
 These seven rules apply on every screen and outrank any individual screen's design.
 
 1. **Play is home.** The app opens on Play. Every other screen is one tap from it and one tap back.
-2. **Two modes: perform and edit.** A padlock in the top bar switches between them. In perform mode nothing can be moved, added or changed, and long-press does nothing, so a stray touch mid-piece is harmless. In edit mode everything is editable. Setting pistons works in both.
-3. **You enter a stop's editor through the stop.** In edit mode, long-press a stop to open it in Organ. At the console you open the thing you're pointing at and never navigate to it.
+2. **Everything is editable, always.** There is no lock and no perform or edit mode (Alex, 23 Sept 2026, replacing the padlock). Tapping a stop draws it; long-press or right-click opens it. Setting pistons works as always.
+3. **You enter a stop's editor through the stop.** Long-press or right-click a stop to open it in Organ. At the console you open the thing you're pointing at and never navigate to it.
 4. **Sound never stops.** No screen change, sheet or edit interrupts audio. Only loading a different organ does.
 5. **Sheets, not dialogs, for editing.** Editors and pickers slide in while the keys keep working. Modals are reserved for errors, destructive actions and decisions that block progress.
 6. **No save button.** The layer autosaves, undo is global and deep, and snapshots mark a version on purpose.
@@ -77,7 +77,7 @@ Sheets that slide over any panel: source picker (choose a rank from any loaded o
 
 A new feature should become a row, column or sheet in an existing panel before it becomes a new screen.
 
-**Top bar, identical everywhere, left to right:** instrument name, panel tabs (Play, Organ, Sound, Tuning, Library), perform/edit padlock, undo, CPU and memory readout, Panic, Settings.
+**Top bar, identical everywhere, left to right:** instrument name, panel tabs (Play, Organ, Sound, Tuning, Library), undo, CPU and memory readout, Panic, Settings.
 
 **Panels and screens.** Each panel can be sent to any screen. One small screen shows panels as tabs. Two jamb screens take a panel each. A large monitor shows several side by side, for example Play with Organ open beside it. On a small screen a sheet goes full-screen with a back arrow.
 
@@ -90,7 +90,7 @@ Target: sound within two minutes of first launch, with no settings dialog seen.
 1. **Find my organs.** Aristide scans the usual GrandOrgue and Hauptwerk folders, or the user points at one. A small bundled organ guarantees sound with nothing installed.
 2. **Learn the console.** "Press a key on each manual, bottom to top, then a pedal." No channel numbers typed. Skippable.
 3. **Test sound.** The audio device is chosen automatically and a test note plays. Change it only if it's wrong.
-4. **Pick an organ.** The Library shows what was found. Tap one, it loads, and the user lands in Play in perform mode.
+4. **Pick an organ.** The Library shows what was found. Tap one, it loads, and the user lands in Play.
 
 Every day after: open the app and the Library appears. Nothing loads until an organ is chosen (Alex, 22 Sept 2026; this replaces restoring the last instrument).
 
@@ -99,13 +99,13 @@ Every day after: open the app and the Library appears. Nothing loads until an or
 Play is an abstract console: stops as large toggles grouped in one column per division, couplers beside them, pistons along the bottom.
 
 - A stop is a rectangle with its name large and its pitch small. On is filled, off is outlined. Minimum target about 60 px, with a comfortable/compact density switch.
-- Layout comes from the organ definition, so an imported organ looks right with no effort. In edit mode stops can be dragged, and the arrangement is stored in the layer.
+- Layout comes from the organ definition, so an imported organ looks right with no effort. Stops can be dragged, and the arrangement is stored in the layer.
 - Custom stops look like any other stop with a small mark. Whether a stop is a plain Bourdon or a twelve-voice delay machine is invisible until it's opened.
 - Division headings show a small tag when that division's tuning differs from the instrument, for example "meantone, 415".
 
-**Edit-mode actions on a stop** (long-press or right-click): Edit (opens it in Organ), Duplicate (copies the stop and opens the copy in Organ), Rename, Hide from console, Delete.
+**Actions on a stop** (long-press or right-click): Edit (opens it in Organ), Duplicate (copies the stop and opens the copy in Organ), Rename, Hide from console, Delete.
 
-**Variants.** Duplicates accumulate, so a stop can be hidden from the console while still usable in pistons. In edit mode, variants of the same stop are shown grouped together.
+**Variants.** Duplicates accumulate, so a stop can be hidden from the console while still usable in pistons. In Organ, variants of the same stop are shown grouped together.
 
 **Also on Play:** MIDI record and playback, as a small transport. It lets players hear themselves from the nave and is the seed of the later DAW ambition.
 
@@ -118,7 +118,7 @@ A combination stores which stops are on and nothing else. It works exactly as on
 - Divisionals sit under each division's column and can be absent.
 - Combinations live in named sets ("Franck Choral 3", "Sunday"), chosen from a dropdown beside the pistons and saved separately from the instrument. One instrument serves many pieces.
 - A Sequence sheet shows the stepper as an ordered list that can be reordered, inserted into and labelled.
-- Pistons, Prev and Next can be MIDI-learnt to physical pistons and toe studs in edit mode.
+- Pistons, Prev and Next can be MIDI-learnt to physical pistons and toe studs.
 
 **Why on/off only.** Delay, routing, tuning and every other parameter belong to the stop. To have the Théorbe at 120 ms to the front and at 300 ms to the rear, make two stops and let pistons choose between them. This gives scene-like changes using a concept every organist already knows.
 
@@ -126,7 +126,7 @@ Changes wider than a stop, such as retuning a whole manual mid-piece, go through
 
 ## Organ
 
-Organ edits this organ (23 Sept 2026 · Alex). The left side lists its divisions, each with its stops and couplers, with Add, Remove, Rename, Move and Reorder. Divisions can be added, renamed, reordered and removed. New stops come from any loaded or importable organ's ranks, or as a duplicate of an existing stop. Selecting a stop opens its editor on the right; selecting a coupler or division opens its fields there. Organ only opens in edit mode.
+Organ edits this organ (23 Sept 2026 · Alex). The left side lists its divisions, each with its stops and couplers, with Add, Remove, Rename, Move and Reorder. Divisions can be added, renamed, reordered and removed. New stops come from any loaded or importable organ's ranks, or as a duplicate of an existing stop. Selecting a stop opens its editor on the right; selecting a coupler or division opens its fields there.
 
 ### The stop editor (formerly Build)
 
@@ -287,7 +287,7 @@ Settings (formerly Setup) holds what is configured once for Aristide itself, wha
 
 **Errors are modals.** Anything that needs a decision or stops the sound gets a popup: a device unplugged, missing sample files, a borrowed organ that has moved, an organ that can't be opened. One sentence on what happened, one on what to do, one or two buttons. Never a raw error string.
 
-**The perform-mode exception.** In perform mode, a problem that fixes itself, such as a momentary audio glitch, does not raise a modal, because a popup over the pistons mid-piece is worse than the glitch. These are logged and shown when the user switches to edit mode. Anything that actually stops the sound still raises a modal immediately.
+**The playing exception.** A problem that fixes itself, such as a momentary audio glitch, does not raise a modal, because a popup over the pistons mid-piece is worse than the glitch. These are logged and shown in Settings. Anything that actually stops the sound still raises a modal immediately.
 
 ## Visual rules
 

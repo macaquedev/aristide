@@ -12,8 +12,6 @@ test('the connected Tuning panel edits the engine', async ({ page }) => {
   };
   await page.goto('/');
   await page.getByRole('button', { name: 'Tuning', exact: true }).click();
-  await expect(page.getByRole('combobox', { name: 'Temperament', exact: true })).toBeDisabled();
-  await page.getByRole('button', { name: 'Perform', exact: true }).click();
 
   await choose('Temperament', 'Quarter-comma meantone');
   await expect(page.getByText('Wolf G♯–E♭ · 737.6 ¢', { exact: true })).toBeVisible();
@@ -70,6 +68,4 @@ test('the connected Tuning panel edits the engine', async ({ page }) => {
 
   await page.getByRole('button', { name: 'Whole instrument', exact: true }).click();
   await choose('Temperament', 'As recorded');
-  await page.getByRole('button', { name: 'Edit', exact: true }).click();
-  await expect(page.getByRole('combobox', { name: 'Temperament', exact: true })).toBeDisabled();
 });

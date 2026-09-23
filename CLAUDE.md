@@ -40,9 +40,10 @@ settings. Imported organs and samples remain untouched; customisation lives in l
 - Work in small, coherent, reviewable increments. State the scope and the relevant
   spec sections before implementing; avoid building every panel at once.
 - The seven Control flow rules outrank individual screen designs. Play is home;
-  the top-bar padlock separates perform and edit; a stop's editor opens through
-  the stop in edit mode; sheets and edits must leave audio running. Follow the
-  spec's autosave, global undo, snapshots and shared number behaviour.
+  everything is always editable, with no lock or modes (Alex, 2026-09-23); a
+  stop's editor opens through the stop; sheets and edits must leave audio
+  running. Follow the spec's autosave, global undo, snapshots and shared
+  number behaviour.
 - Use the new five-panel shell: Play, Organ, Sound, Tuning, Library, with
   Settings separate (Alex, 2026-09-23: organ settings apart from Aristide's).
   Do not bring back the old Voice workspace or its settings hierarchy.

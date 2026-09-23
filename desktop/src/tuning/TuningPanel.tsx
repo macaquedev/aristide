@@ -47,8 +47,8 @@ function shapeParams(shape: Shape): Params {
 /** Tuning on the live engine: every edit sounds and autosaves. The Tuning tab edits the
  * tuning stops share (instrument, divisions); given `stop`, it edits that stop's own
  * tuning and its ranks' inside the stop editor, and `openScope` leads to what it follows. */
-export function TuningPanel({ edit, organ, offerUndo, scope, stop, openScope }: {
-  edit: boolean; organ: string; offerUndo: (undo?: () => void) => void; scope?: string; stop?: number; openScope?: (id: string) => void;
+export function TuningPanel({ organ, offerUndo, scope, stop, openScope }: {
+  organ: string; offerUndo: (undo?: () => void) => void; scope?: string; stop?: number; openScope?: (id: string) => void;
 }) {
   const [scopes, setScopes] = useState<Scopes>();
   const [selected, setSelected] = useState(scope ?? (stop === undefined ? 'instrument' : `stop:${stop}`));
@@ -129,7 +129,7 @@ export function TuningPanel({ edit, organ, offerUndo, scope, stop, openScope }: 
   return <div className="tuning-panel">
     {ranks.length > 1 && <SegmentedControl mb="sm" aria-label="Tuning of" value={current.id} onChange={setSelected}
       data={ranks.map(s => ({ value: s.id, label: s.id.startsWith('stop:') ? 'Whole stop' : s.name }))}/>}
-    <TuningDesk layout="channel" scopes={views} selected={current.id} select={choose} readOnly={!edit} recorded browser={stop === undefined}
+    <TuningDesk layout="channel" scopes={views} selected={current.id} select={choose} recorded browser={stop === undefined}
       assign={() => setNotice(true)}
       setAnchor={(id, anchor) => change(id, [anchorParams(anchor)], 'That pitch could not be set.')}
       setShape={(id, shape) => change(id, [shapeParams(shape)], 'That scale could not be set.')}
