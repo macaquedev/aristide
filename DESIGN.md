@@ -532,7 +532,9 @@ available. The standalone CLI still loads only explicitly supplied paths.
   and stops send to Setup's speaker groups, `[[routing.source]]` in the
   layer; see docs/progress/2026-09-23-route-panel.md. 2026-09-23: stop
   rules — timed events on both key edges, `[[rule]]` in the layer, the
-  connected Build panel; see docs/progress/2026-09-23-build-panel.md. 2026-09-01: tuning
+  connected Build panel; see docs/progress/2026-09-23-build-panel.md. 2026-09-23:
+  tabs become Play, Organ, Sound, Tuning, Library and Settings; Organ edits
+  divisions, stops and couplers; see docs/progress/2026-09-23-organ-panel.md. 2026-09-01: tuning
   scopes — sets, stops, ranks within stops — see
   docs/progress/2026-09-01-tuning-scopes.md.
 - **M7 — HW-unencrypted loader, CLAP wrapper, Windows/macOS CI.** 2026-09-02: the
