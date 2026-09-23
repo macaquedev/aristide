@@ -7,7 +7,7 @@ const clamp = (db: number) => Math.max(MIN, Math.min(MAX, Math.round(db * 10) / 
 const format = (db: number) => (db > 0 ? `+${db}` : `${db}`).replace('-', '−');
 
 /** One matrix cell: tap to connect, then the shared number gesture — drag, tap for a stepper, type, hold to assign. */
-export function RouteCell({ label, level, inherited, disabled, connect, setLevel, disconnect, assign }: {
+export function SoundCell({ label, level, inherited, disabled, connect, setLevel, disconnect, assign }: {
   label: string; level?: number; inherited: boolean; disabled: boolean;
   connect: () => void; setLevel: (db: number) => void; disconnect: () => void; assign: () => void;
 }) {

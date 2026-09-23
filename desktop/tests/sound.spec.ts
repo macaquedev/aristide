@@ -33,11 +33,11 @@ async function rig(page: Page) {
     await route.fulfill({ json: state });
   });
   await page.goto('/');
-  await page.getByRole('button', { name: 'Route', exact: true }).click();
+  await page.getByRole('button', { name: 'Sound', exact: true }).click();
   return { requests };
 }
 
-test('Route shows inheritance and marks, and locks in perform mode', async ({ page }) => {
+test('Sound shows inheritance and marks, and locks in perform mode', async ({ page }) => {
   await rig(page);
   await expect(page.getByRole('columnheader', { name: /Gallery/ })).toContainText('Plays through Main');
   // A division opens by itself when one of its stops is routed apart.
@@ -49,7 +49,7 @@ test('Route shows inheritance and marks, and locks in perform mode', async ({ pa
   expect(cell!.height).toBeGreaterThanOrEqual(48);
 });
 
-test('Route connects, re-levels and disconnects in edit mode', async ({ page }) => {
+test('Sound connects, re-levels and disconnects in edit mode', async ({ page }) => {
   const { requests } = await rig(page);
   await page.getByRole('button', { name: 'Perform', exact: true }).click();
   await page.getByRole('button', { name: 'Connect Great to Gallery', exact: true }).click();

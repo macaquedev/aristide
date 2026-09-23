@@ -2,8 +2,8 @@ import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import { Button, Group, Loader, Modal, Stack, Text } from '@mantine/core';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 import { editInstrument, request } from '../api';
-import { RouteCell } from './RouteCell';
-import './route.css';
+import { SoundCell } from './SoundCell';
+import './sound.css';
 
 export type Sends = Record<string, number>;
 export type Speaker = { name: string; output: [number, number] | null; defined: boolean; available: boolean };
@@ -21,8 +21,8 @@ const sendsParam = (sends: Sends) => Object.entries(sends).map(([group, db]) => 
 const levelOf = (sends: Sends | null, group: string) =>
   sends ? Object.entries(sends).find(([name]) => name.toLowerCase() === group.toLowerCase())?.[1] : undefined;
 
-/** Route: sources down the side, speaker groups across the top. Every edit sounds and autosaves. */
-export function RoutePanel({ edit, organ, offerUndo, openSetup }: { edit: boolean; organ: string; offerUndo: (undo?: () => void) => void; openSetup: () => void }) {
+/** Sound: sources down the side, speaker groups across the top. Every edit sounds and autosaves. */
+export function SoundPanel({ edit, organ, offerUndo, openSettings }: { edit: boolean; organ: string; offerUndo: (undo?: () => void) => void; openSettings: () => void }) {
   const [routing, setRouting] = useState<Routing>();
   const [open, setOpen] = useState<number[]>();
   const [failure, setFailure] = useState<string>();
@@ -87,7 +87,7 @@ export function RoutePanel({ edit, organ, offerUndo, openSetup }: { edit: boolea
   const cells = (source: Source, name: string, sends: Sends | null, own: boolean) => routing.speakers.map(speaker => {
     const level = levelOf(sends, speaker.name);
     return <td key={speaker.name}>
-      <RouteCell label={`${name} to ${speaker.name}`} level={level} inherited={!own} disabled={!edit} assign={() => setNotice(true)}
+      <SoundCell label={`${name} to ${speaker.name}`} level={level} inherited={!own} disabled={!edit} assign={() => setNotice(true)}
         connect={() => change(source, { speakers: speaker.name, level_db: 0 }, 'That connection could not be made.')}
         setLevel={db => change(source, { speakers: speaker.name, level_db: db }, 'That level could not be set.')}
         disconnect={() => change(source, { speakers: speaker.name, off: 1 }, 'That connection could not be removed.')}/>
@@ -99,15 +99,15 @@ export function RoutePanel({ edit, organ, offerUndo, openSetup }: { edit: boolea
 
   return <div className="route-panel">
     <Group className="route-header" justify="space-between">
-      <Text fw={600}>Route</Text>
-      <Button variant="default" onClick={openSetup}>Speakers</Button>
+      <Text fw={600}>Sound</Text>
+      <Button variant="default" onClick={openSettings}>Speakers</Button>
     </Group>
     <div className="route-scroll">
       <table className="route-matrix">
         <thead><tr>
           <th className="route-corner"><Text size="xs" c="dimmed">dB</Text></th>
           {routing.speakers.map(speaker => <th key={speaker.name} scope="col">
-            <Text fw={600}>{speaker.name}{!speaker.defined && <span className="modified" aria-label="Not in Setup"> ◇</span>}</Text>
+            <Text fw={600}>{speaker.name}{!speaker.defined && <span className="modified" aria-label="Not in Settings"> ◇</span>}</Text>
             <Text size="xs" c="dimmed">{speaker.output ? `${speaker.output[0]}/${speaker.output[1]}${speaker.available ? '' : ' · not on device'}` : 'Plays through Main'}</Text>
           </th>)}
         </tr></thead>

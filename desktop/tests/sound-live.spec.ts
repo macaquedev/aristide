@@ -1,12 +1,12 @@
 import { test, expect, type Page } from '@playwright/test';
 
 // Runs against a real aristide-server with an organ loaded, e.g.
-// ARISTIDE_LIVE=1 bunx playwright test route-live
+// ARISTIDE_LIVE=1 bunx playwright test sound-live
 test.skip(!process.env.ARISTIDE_LIVE, 'needs a running engine');
 
 const routing = async (page: Page) => (await page.request.get('/api/routing')).json();
 
-test('the connected Route panel routes sources to speaker groups', async ({ page }) => {
+test('the connected Sound panel routes sources to speaker groups', async ({ page }) => {
   await page.goto('/');
   await expect(page.getByRole('button', { name: 'Play', exact: true })).toBeVisible();
   // A held note must survive every panel change and edit below.
@@ -20,13 +20,13 @@ test('the connected Route panel routes sources to speaker groups', async ({ page
   await page.request.post(`/api/routing?stop=${start.stops.find((s: { midx: number }) => s.midx === 1).id}&follow=1`);
 
   await page.getByRole('button', { name: 'Perform', exact: true }).click();
-  await page.getByRole('button', { name: 'Setup', exact: true }).click();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await page.getByRole('textbox', { name: 'New group' }).fill('Rear');
   await page.getByRole('button', { name: 'Add', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Remove Rear', exact: true })).toBeVisible();
-  await page.screenshot({ path: 'test-results/route-speakers.png', fullPage: true });
+  await page.screenshot({ path: 'test-results/sound-speakers.png', fullPage: true });
 
-  await page.getByRole('button', { name: 'Route', exact: true }).click();
+  await page.getByRole('button', { name: 'Sound', exact: true }).click();
   const division = (await routing(page)).divisions[1].name as string;
   await expect(page.getByRole('columnheader', { name: /Rear/ })).toBeVisible();
   await page.getByRole('button', { name: `Connect ${division} to Rear`, exact: true }).click();
@@ -58,7 +58,7 @@ test('the connected Route panel routes sources to speaker groups', async ({ page
   await expect.poll(async () => (await routing(page)).stops.find((s: { id: number }) => s.id === first.id).own).toBe(true);
   await page.mouse.click(5, 5);
   await page.waitForTimeout(300);
-  await page.screenshot({ path: 'test-results/route-live.png', fullPage: true });
+  await page.screenshot({ path: 'test-results/sound-live.png', fullPage: true });
 
   await page.getByRole('button', { name: 'Undo', exact: true }).click();
   await expect.poll(async () => (await routing(page)).stops.find((s: { id: number }) => s.id === first.id).own).toBe(false);
@@ -78,12 +78,12 @@ test('the connected Route panel routes sources to speaker groups', async ({ page
   await page.request.post(`/api/stop?id=${stop.id}&on=0`);
 });
 
-test('Route fits a phone', async ({ page }) => {
+test('Sound fits a phone', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto('/');
-  await page.getByRole('button', { name: 'Route', exact: true }).click();
+  await page.getByRole('button', { name: 'Sound', exact: true }).click();
   await expect(page.getByRole('columnheader', { name: /Main/ })).toBeVisible();
   const width = await page.evaluate(() => document.documentElement.scrollWidth);
   expect(width).toBeLessThanOrEqual(390);
-  await page.screenshot({ path: 'test-results/route-phone.png', fullPage: true });
+  await page.screenshot({ path: 'test-results/sound-phone.png', fullPage: true });
 });

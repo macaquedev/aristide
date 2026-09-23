@@ -5,7 +5,7 @@ import { NumberControl } from '../design/NumberControl';
 import { RollCanvas, type RollView } from '../design/RollCanvas';
 import { anchorName, cents, validNote, type Anchor, type RollModel, type RollNote, type Stamp } from '../design/rollModel';
 import '../design/roll.css';
-import './build.css';
+import './organ.css';
 
 type RuleSource = { stop: number; rank: number | null };
 type RuleEvent = { source: RuleSource; cents: number; level: number; start: string; end: string | null };
@@ -42,9 +42,9 @@ const toRule = (model: RollModel): Rule => ({
 });
 const freshStamp = (anchor: Anchor, ms: number): Stamp => ({ id: `${anchor[0]}${crypto.randomUUID().slice(0, 8)}`, anchor, ms });
 
-/** Build: one stop's rule as two piano rolls (key down, key up) with the event inspector beside them.
+/** Organ: the organ's stops, and one stop's rule as two piano rolls (key down, key up) with the event inspector beside them.
  * Every edit sounds from the next note, held keys re-speak, and the organ file saves it. */
-export function BuildPanel({ organ, stops, stopId, select, offerUndo, openTuning }: {
+export function OrganPanel({ organ, stops, stopId, select, offerUndo, openTuning }: {
   organ: string; stops: { id: number; name: string; midx: number; manual: string; custom?: boolean }[];
   stopId?: number; select: (id: number) => void; offerUndo: (undo?: () => void) => void; openTuning: (stop: number) => void;
 }) {

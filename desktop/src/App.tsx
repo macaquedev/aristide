@@ -4,11 +4,11 @@ import { ArrowLeft, ChevronLeft, ChevronRight, Folder, LockKeyhole, Settings, Tr
 import { endpoint, request, native, type Browse, type Snapshot, type Stop } from './api';
 import { useEngine } from './engine';
 import { TuningPanel } from './tuning/TuningPanel';
-import { RoutePanel, type Routing } from './route/RoutePanel';
-import { BuildPanel } from './build/BuildPanel';
+import { SoundPanel, type Routing } from './sound/SoundPanel';
+import { OrganPanel } from './organ/OrganPanel';
 
-const panels = ['Play', 'Build', 'Route', 'Tuning', 'Library'] as const;
-type Panel = typeof panels[number] | 'Setup';
+const panels = ['Play', 'Organ', 'Sound', 'Tuning', 'Library'] as const;
+type Panel = typeof panels[number] | 'Settings';
 type Command = ReturnType<typeof useEngine>['command'];
 
 export function App() {
@@ -51,29 +51,29 @@ export function App() {
     <header className="topbar">
       <Text className="instrument" fw={600} title={state?.organ}>{state?.organ ?? 'Aristide'}</Text>
       <nav aria-label="Panels">{panels.map(name => <Button key={name} variant={panel === name ? 'filled' : 'subtle'} color={panel === name ? undefined : 'gray'}
-        disabled={name === 'Build' && !edit} onClick={() => setPanel(name)} aria-current={panel === name ? 'page' : undefined}>{name}</Button>)}</nav>
+        disabled={name === 'Organ' && !edit} onClick={() => setPanel(name)} aria-current={panel === name ? 'page' : undefined}>{name}</Button>)}</nav>
       <Tooltip label={edit ? 'Lock for performance' : 'Unlock to edit'}><Button variant="default" leftSection={edit ? <UnlockKeyhole size={18}/> : <LockKeyhole size={18}/>}
-        onClick={() => { setEdit(!edit); if (edit && panel === 'Build') setPanel('Play'); }}>{edit ? 'Edit' : 'Perform'}</Button></Tooltip>
+        onClick={() => { setEdit(!edit); if (edit && panel === 'Organ') setPanel('Play'); }}>{edit ? 'Edit' : 'Perform'}</Button></Tooltip>
       <Tooltip label={undo ? 'Undo' : 'Nothing to undo'}><ActionIcon variant="default" size="lg" disabled={!undo || !edit} aria-label="Undo" onClick={() => undo?.()}><Undo2 size={18}/></ActionIcon></Tooltip>
       <Text className="meters" c="dimmed" size="xs">CPU —<br/>{state?.memory ? `${state.memory.resident_mb} MB` : 'Memory —'}</Text>
       <Button color="red" variant="filled" disabled={!engine.ready} onClick={() => command('panic')}>Panic</Button>
-      <ActionIcon size="lg" variant={panel === 'Setup' ? 'filled' : 'default'} aria-label="Setup" onClick={() => setPanel('Setup')}><Settings size={20}/></ActionIcon>
+      <ActionIcon size="lg" variant={panel === 'Settings' ? 'filled' : 'default'} aria-label="Settings" onClick={() => setPanel('Settings')}><Settings size={20}/></ActionIcon>
     </header>
     <main>
       {!state && <Stack align="center" p="xl"><Group><Loader size="sm"/><Text>Connecting to the sound engine…</Text></Group>
         {!native && <><Text c="dimmed">Prototypes · no audio</Text><PreviewLinks/></>}
       </Stack>}
-      {panel === 'Play' && state && <Play state={state} command={command} edit={edit} openLibrary={() => setPanel('Library')} openStop={stop => { setSelected(stop.id); setPanel('Build'); }}/>} 
+      {panel === 'Play' && state && <Play state={state} command={command} edit={edit} openLibrary={() => setPanel('Library')} openStop={stop => { setSelected(stop.id); setPanel('Organ'); }}/>} 
       {panel === 'Library' && <Library state={state} command={command}/>}
-      {panel === 'Setup' && <Stack p="lg"><Group><Button variant="subtle" leftSection={<ArrowLeft size={18}/>} onClick={() => setPanel('Play')}>Play</Button><Text fw={600}>Setup</Text></Group>
+      {panel === 'Settings' && <Stack p="lg"><Group><Button variant="subtle" leftSection={<ArrowLeft size={18}/>} onClick={() => setPanel('Play')}>Play</Button><Text fw={600}>Settings</Text></Group>
         <Appearance edit={edit} density={density} changeDensity={value => { setDensity(value); localStorage.setItem('aristide-density', value); }}/>
-        {state && <ConsoleSetup state={state} command={command} edit={edit}/>}
-        {state && <SpeakerSetup edit={edit}/>}</Stack>}
+        {state && <ConsoleSettings state={state} command={command} edit={edit}/>}
+        {state && <SpeakerSettings edit={edit}/>}</Stack>}
       {panel === 'Tuning' && (state?.organ ? <TuningPanel key={tuningScope} edit={edit} organ={state.organ} offerUndo={offerUndo} scope={tuningScope}/> : <Stack align="center" p="xl"><Text>Choose an organ to tune.</Text><Button onClick={() => setPanel('Library')}>Open Library</Button></Stack>)}
-      {panel === 'Route' && (state?.organ ? <RoutePanel edit={edit} organ={state.organ} offerUndo={offerUndo} openSetup={() => setPanel('Setup')}/> : <Stack align="center" p="xl"><Text>Choose an organ to route.</Text><Button onClick={() => setPanel('Library')}>Open Library</Button></Stack>)}
-      {panel === 'Build' && (state?.organ ? <BuildPanel organ={state.organ} stops={state.stops} stopId={state.stops.some(s => s.id === selected) ? selected : undefined}
+      {panel === 'Sound' && (state?.organ ? <SoundPanel edit={edit} organ={state.organ} offerUndo={offerUndo} openSettings={() => setPanel('Settings')}/> : <Stack align="center" p="xl"><Text>Choose an organ first.</Text><Button onClick={() => setPanel('Library')}>Open Library</Button></Stack>)}
+      {panel === 'Organ' && (state?.organ ? <OrganPanel organ={state.organ} stops={state.stops} stopId={state.stops.some(s => s.id === selected) ? selected : undefined}
         select={setSelected} offerUndo={offerUndo} openTuning={stop => { setTuningScope(`stop:${stop}`); setPanel('Tuning'); }}/>
-        : <Stack align="center" p="xl"><Text>Choose an organ to build.</Text><Button onClick={() => setPanel('Library')}>Open Library</Button></Stack>)}
+        : <Stack align="center" p="xl"><Text>Choose an organ to edit.</Text><Button onClick={() => setPanel('Library')}>Open Library</Button></Stack>)}
     </main>
     <Modal opened={Boolean(error)} title={errorTitle} onClose={() => { engine.dismissError(); setDismissedLoadError(state?.load_error); }}>
       <Stack><Text>{errorMessage}</Text>
@@ -84,7 +84,7 @@ export function App() {
 }
 
 function PreviewLinks() {
-  return <Group><Button component="a" href="/?study=1&panel=build" variant="default">Preview Build</Button>
+  return <Group><Button component="a" href="/?study=1&panel=build" variant="default">Preview stop editor</Button>
     <Button component="a" href="/?study=1&panel=tuning" variant="default">Preview Tuning</Button></Group>;
 }
 
@@ -154,7 +154,7 @@ function Appearance({ edit, density, changeDensity }: { edit: boolean; density: 
     <Group><Text>Density</Text><SegmentedControl disabled={!edit} value={density} onChange={changeDensity} data={[{ value: 'comfortable', label: 'Comfortable' }, { value: 'compact', label: 'Compact' }]}/></Group></Stack></Card>;
 }
 
-function ConsoleSetup({ state, command, edit }: { state: Snapshot; command: Command; edit: boolean }) {
+function ConsoleSettings({ state, command, edit }: { state: Snapshot; command: Command; edit: boolean }) {
   return <Card withBorder><Stack><Group justify="space-between"><Text fw={600}>Console</Text><Button variant="default" disabled={!edit} onClick={() => command('midi/rescan')}>Rescan MIDI</Button></Group>
     {!edit && <Text c="dimmed">Console locked</Text>}
     {state.midi.manuals.map(manual => <Group key={manual.idx} justify="space-between"><Stack gap={0}><Text>{manual.name}</Text><Text size="xs" c="dimmed">{manual.inputs.map(i => `${i.device}${i.connected ? '' : ' (disconnected)'}`).join(', ') || 'No console assigned'}</Text></Stack>
@@ -165,7 +165,7 @@ function ConsoleSetup({ state, command, edit }: { state: Snapshot; command: Comm
   </Stack></Card>;
 }
 
-function SpeakerSetup({ edit }: { edit: boolean }) {
+function SpeakerSettings({ edit }: { edit: boolean }) {
   const [routing, setRouting] = useState<Routing>();
   const [name, setName] = useState('');
   const [output, setOutput] = useState<[number, number]>([3, 4]);

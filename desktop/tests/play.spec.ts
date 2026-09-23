@@ -40,7 +40,7 @@ async function rig(page: Page) {
 
 test('Play opens locked; stop drawing and Set work in perform mode', async ({ page }) => {
   const { requests } = await rig(page);
-  await expect(page.getByRole('button', { name: 'Build', exact: true })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Organ', exact: true })).toBeDisabled();
   const stop = page.getByRole('button', { name: 'Bourdon' });
   const size = await stop.boundingBox();
   expect(size!.height).toBeGreaterThanOrEqual(60);
@@ -54,14 +54,14 @@ test('Play opens locked; stop drawing and Set work in perform mode', async ({ pa
   expect(requests.some(url => url.includes('recall=1'))).toBe(false);
 });
 
-test('editing a stop requires Edit; relocking returns from Build to Play', async ({ page }) => {
+test('editing a stop requires Edit; relocking returns from Organ to Play', async ({ page }) => {
   await rig(page);
   await page.getByRole('button', { name: 'Perform', exact: true }).click();
   await page.getByRole('button', { name: 'Bourdon' }).click({ button: 'right' });
   await expect(page.locator('.roll-stop-name')).toContainText('Bourdon');
   await page.getByRole('button', { name: 'Edit', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Bourdon' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Build', exact: true })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Organ', exact: true })).toBeDisabled();
 });
 
 test('held computer keys survive navigation and release in the other panel', async ({ page }) => {
@@ -74,7 +74,7 @@ test('held computer keys survive navigation and release in the other panel', asy
   expect(requests).toEqual(['/api/key?code=KeyA&on=1', '/api/key?code=KeyA&on=0']);
 });
 
-test('touch hold is harmless while locked and opens Build when unlocked', async ({ browser }) => {
+test('touch hold is harmless while locked and opens Organ when unlocked', async ({ browser }) => {
   const page = await browser.newPage({ hasTouch: true, viewport: { width: 800, height: 1000 } });
   const { requests } = await rig(page);
   const stop = page.getByRole('button', { name: 'Bourdon' });
@@ -115,7 +115,7 @@ test('offline browser offers previews without blaming the audio device', async (
   await expect(dialog).not.toContainText('audio device');
   await expect(dialog).toHaveCSS('opacity', '1');
   await page.screenshot({ path: 'test-results/connection-unavailable.png', fullPage: true });
-  await dialog.getByRole('link', { name: 'Preview Build' }).click();
+  await dialog.getByRole('link', { name: 'Preview stop editor' }).click();
   await expect(page.getByText('Not saved', { exact: false })).toBeVisible();
   await expect(page.getByRole('dialog')).toHaveCount(0);
 });
