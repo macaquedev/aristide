@@ -53,6 +53,8 @@ export function useEngine() {
       if (!ready || event.repeat || event.ctrlKey || event.metaKey || event.altKey ||
         (event.target instanceof Element && event.target.closest('input,textarea,select,[contenteditable="true"],[role="combobox"]'))) return;
       if (!/^(Key[A-Z]|Digit[0-9]|Comma|Period|Slash|Semicolon|BracketLeft|BracketRight|Quote)$/.test(event.code)) return;
+      // WebKitGTK does not always flag auto-repeat, and a second note-on retriggers the pipe.
+      if (down.has(event.code)) return;
       down.add(event.code);
       command('key', { code: event.code, on: 1 });
     };
