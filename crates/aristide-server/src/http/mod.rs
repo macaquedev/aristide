@@ -1485,6 +1485,15 @@ mod tests {
         assert_eq!(prepared.routing.stops.len(), 1, "the stop's own sends came back");
         assert!(prepared.warnings.iter().all(|w| !w.starts_with("routing")), "{:?}", prepared.warnings);
 
+        let replaced = respond(&state, &Method::Post, &format!("/api/routing?stop={id}&sends=Main:-3,Rear:-12"));
+        let view = routing(body_of(replaced));
+        let exact = view["stops"].as_array().unwrap().iter().find(|s| s["id"] == id).unwrap().clone();
+        assert_eq!((exact["sends"]["Main"].as_f64(), exact["sends"]["Rear"].as_f64()), (Some(-3.0), Some(-12.0)));
+        let nowhere = respond(&state, &Method::Post, &format!("/api/routing?stop={id}&sends="));
+        let view = routing(body_of(nowhere));
+        let silent = view["stops"].as_array().unwrap().iter().find(|s| s["id"] == id).unwrap().clone();
+        assert_eq!(silent["sends"], serde_json::json!({}), "routed nowhere");
+
         let back = respond(&state, &Method::Post, &format!("/api/routing?stop={id}&follow=1"));
         let view = routing(body_of(back));
         let followed = view["stops"].as_array().unwrap().iter().find(|s| s["id"] == id).unwrap().clone();

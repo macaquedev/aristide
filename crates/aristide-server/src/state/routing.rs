@@ -15,6 +15,8 @@ pub enum RouteChange {
     Send(String, f64),
     /// Stop sending to a speaker group.
     Unsend(String),
+    /// Take exactly these sends (what Undo restores).
+    Replace(Sends),
     /// Drop the source's own sends and follow what is above it.
     Follow,
 }
@@ -84,6 +86,15 @@ impl State {
         };
         let own = match change {
             RouteChange::Follow => None,
+            RouteChange::Replace(sends) => Some(
+                sends
+                    .into_iter()
+                    .map(|(group, db)| {
+                        let db = db.clamp(*routing::LEVEL_RANGE.start(), *routing::LEVEL_RANGE.end());
+                        (if group.eq_ignore_ascii_case(MAIN) { MAIN.to_string() } else { group }, db)
+                    })
+                    .collect(),
+            ),
             RouteChange::Send(group, db) => {
                 let group = group.trim();
                 if group.is_empty() {
@@ -150,6 +161,9 @@ impl State {
         }
         if name.eq_ignore_ascii_case(MAIN) {
             return Err("Main is always the first output pair".into());
+        }
+        if name.contains([',', ':']) {
+            return Err("a speaker group's name cannot contain , or :".into());
         }
         let speakers = &mut self.midi_config.speakers;
         let at = speakers.iter().position(|s| s.name.eq_ignore_ascii_case(name));

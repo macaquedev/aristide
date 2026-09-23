@@ -86,7 +86,8 @@ fn routing_json(state: &State) -> String {
 
 /// `POST /api/routing?manual=<idx>[&stop=<id>]` with `speakers=<group>`
 /// and `level_db=<dB>` to send (or re-level), `speakers=<group>&off=1`
-/// to stop sending, or `follow=1` to drop the source's own sends.
+/// to stop sending, `sends=Main:0,Rear:-6` to set them all at once (empty
+/// for nowhere), or `follow=1` to drop the source's own sends.
 pub(super) fn set(state: &Mutex<State>, query: &str) -> Reply {
     let mut state = state.lock().expect("state poisoned");
     if state.is_loading() {
@@ -104,6 +105,17 @@ pub(super) fn set(state: &Mutex<State>, query: &str) -> Reply {
     let group = param(query, "speakers").map(unescape);
     let change = if param(query, "follow") == Some("1") {
         RouteChange::Follow
+    } else if let Some(list) = param(query, "sends").map(unescape) {
+        let mut sends = crate::routing::Sends::new();
+        for item in list.split(',').filter(|item| !item.trim().is_empty()) {
+            match item.rsplit_once(':').map(|(group, db)| (group.trim(), db.trim().parse::<f64>())) {
+                Some((group, Ok(db))) if !group.is_empty() && db.is_finite() => {
+                    sends.insert(group.to_string(), db);
+                }
+                _ => return bad_request("sends must read group:dB,group:dB"),
+            }
+        }
+        RouteChange::Replace(sends)
     } else {
         match (group, param(query, "off") == Some("1")) {
             (Some(group), true) => RouteChange::Unsend(group),
