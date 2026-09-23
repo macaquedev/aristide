@@ -626,7 +626,12 @@ pub(super) fn offerings_json(path: &std::path::Path) -> Result<String, String> {
                         manual.pedal()
                     ));
                     let mut first_stop = true;
-                    for stop in organ.stops.iter().filter(|stop| stop.manual == manual.id) {
+                    // Noises come with their controls, not as stops to add.
+                    for stop in organ
+                        .stops
+                        .iter()
+                        .filter(|stop| stop.manual == manual.id && !crate::console::is_noise_stop(&stop.name))
+                    {
                         if !first_stop {
                             out.push(',');
                         }

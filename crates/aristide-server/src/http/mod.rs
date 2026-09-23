@@ -2603,6 +2603,8 @@ mod tests {
         assert!(body.contains(&format!("\"alias\":\"{alias}\"")), "offered: {body}");
         assert!(body.contains("\"stops\":[{\"name\":"), "stops listed: {body}");
         assert!(!body.contains("\"error\""), "no source error: {body}");
+        assert!(body.contains("Bourdon 8'"), "playable stops offered: {body}");
+        assert!(!body.to_lowercase().contains("noise"), "noises are not stops to add: {body}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

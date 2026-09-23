@@ -11,7 +11,8 @@ spec (`docs/design/ui-flow-spec.md`, "Screens and shell", "Organ", "Sound",
 
 - **Organ** (formerly Build) lists the divisions, each with its stops, and
   then the couplers. Selecting one opens its editor beside the list. Organ
-  opens only in edit mode; long-pressing a stop in Play opens it there.
+  is always reachable; long-pressing or right-clicking a stop in Play opens
+  it there. There is no edit lock: everything is editable at all times.
 - **Sound** is the former Route matrix. **Settings** is the former Setup:
   MIDI, speaker groups and appearance, which don't depend on the organ.
 - **Tuning** lists only the whole instrument and the divisions. A stop's own
@@ -27,7 +28,9 @@ spec (`docs/design/ui-flow-spec.md`, "Screens and shell", "Organ", "Sound",
 | Coupler | rename; show or hide on the console | add; change play-from, also-sounds and pitch; remove |
 
 Adding a sample set as a new source uses the folder browser in the Add stop
-sheet. Removals ask for confirmation. Failures show one sentence in a modal.
+sheet. The sheet offers only playable stops: a set's control noises
+(drawstop thumps, blower, tremulant) belong to their controls and are left
+out, by the same name rule the console uses. Removals ask for confirmation. Failures show one sentence in a modal.
 
 ## Backend fixes found on the way
 
@@ -51,8 +54,6 @@ sheet. Removals ask for confirmation. Failures show one sentence in a modal.
 - Stops cannot yet be duplicated in place or dragged to reorder within a
   division. Adding a stop again from its sample set is how to copy one for
   now, and the copy needs a different division or a rename first.
-- The Add stop sheet also lists each set's noise stops (drawstop and motor
-  noises).
 - A coupler with several routes can only be renamed, hidden or removed.
 - Division compass and keyboard kinds other than manual/pedal (microtonal)
   have endpoints but no controls yet.

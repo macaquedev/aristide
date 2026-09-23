@@ -503,6 +503,13 @@ fn xorshift(state: &mut u32) -> u32 {
     x
 }
 
+/// Whether a stop is a control's noise (a drawstop's thump, the blower,
+/// a tremulant's clatter) rather than a playable stop: sample sets name
+/// them so. They belong to their controls, never to the registration.
+pub fn is_noise_stop(name: &str) -> bool {
+    name.to_lowercase().contains("noise")
+}
+
 impl Console {
     pub fn new(
         organ: Organ,
@@ -679,7 +686,7 @@ impl Console {
     fn classify_noises(&mut self) {
         let mut noise_stops = Vec::new();
         for stop in &self.organ.stops {
-            if stop.name.to_lowercase().contains("noise") {
+            if is_noise_stop(&stop.name) {
                 noise_stops.push(stop.id);
             }
         }
