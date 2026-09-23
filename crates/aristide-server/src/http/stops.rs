@@ -35,10 +35,9 @@ pub(super) fn move_to_manual(state: &Mutex<State>, query: &str) -> Reply {
         param(query, "manual").and_then(|v| v.parse::<usize>().ok()),
     ) {
         (Some(stop), Some(manual)) => {
-            if state.move_stop(aristide_model::StopId(stop), manual) {
-                json(state_json_locked(&state))
-            } else {
-                bad_request("no such stop or manual")
+            match state.move_stop(aristide_model::StopId(stop), manual) {
+                Ok(()) => json(state_json_locked(&state)),
+                Err(err) => bad_request(&err),
             }
         }
         _ => bad_request("missing stop/manual"),

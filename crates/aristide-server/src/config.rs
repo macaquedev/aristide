@@ -2571,9 +2571,54 @@ fn voicing_adjusts_mut(
 }
 
 /// Drop the `[[move]]` lines about a console stop name.
-fn remove_moves_for(doc: &mut toml_edit::DocumentMut, stop: &str) {
+/// The manual a stop was pulled onto, and the `[[move]]` lines that
+/// carried it from there to `on`, where the console shows it now. Its
+/// pull line still names the first manual, so a moved stop's lines are
+/// found by walking its moves back.
+fn pulled_onto(doc: &toml_edit::DocumentMut, stop: &str, on: &str) -> (String, Vec<usize>) {
+    let moves: Vec<(String, String)> = doc
+        .get("move")
+        .and_then(|m| m.as_array_of_tables())
+        .map(|tables| {
+            tables
+                .iter()
+                .map(|table| {
+                    let field = |key: &str| table.get(key).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    if field_is(table, "stop", stop) { (field("from"), field("to")) } else { Default::default() }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut chain = Vec::new();
+    // Back to where it was pulled: the last move into a manual is the one that brought it there.
+    let mut manual = on.to_string();
+    while let Some(index) = (0..moves.len())
+        .rev()
+        .find(|&i| !chain.contains(&i) && !moves[i].1.is_empty() && moves[i].1.eq_ignore_ascii_case(&manual))
+    {
+        chain.push(index);
+        manual = moves[index].0.clone();
+    }
+    // And on from `on`, should it name a manual the stop has since left.
+    let mut ahead = on.to_string();
+    while let Some(index) = (0..moves.len())
+        .find(|&i| !chain.contains(&i) && !moves[i].0.is_empty() && moves[i].0.eq_ignore_ascii_case(&ahead))
+    {
+        chain.push(index);
+        ahead = moves[index].1.clone();
+    }
+    (manual, chain)
+}
+
+/// Remove the given `[[move]]` lines, by index.
+fn remove_moves_at(doc: &mut toml_edit::DocumentMut, doomed: &[usize]) {
     if let Some(moves) = doc.get_mut("move").and_then(|m| m.as_array_of_tables_mut()) {
-        moves.retain(|table| !field_is(table, "stop", stop));
+        let mut index = 0;
+        moves.retain(|_| {
+            let keep = !doomed.contains(&index);
+            index += 1;
+            keep
+        });
         if moves.is_empty() {
             doc.remove("move");
         }
@@ -2594,6 +2639,8 @@ pub fn rename_composite_stop(
     new: &str,
 ) -> Result<bool, String> {
     let mut doc = composite_doc(path)?;
+    let (pulled, _) = pulled_onto(&doc, old, on);
+    let on = pulled.as_str();
     if prov.via_division {
         let Some(index) = division_pull_index(&doc, prov, on) else {
             return Ok(false);
@@ -2936,8 +2983,9 @@ pub fn retarget_composite_stop(
         return Err(format!("{new_from:?} is not a [sources] alias of this organ"));
     }
     let keeps_label = !console_name.eq_ignore_ascii_case(new_stop);
+    let (pulled, moves) = pulled_onto(&doc, console_name, on);
     if prov.via_division {
-        let Some(index) = division_pull_index(&doc, prov, on) else {
+        let Some(index) = division_pull_index(&doc, prov, &pulled) else {
             return Ok(false);
         };
         let table = doc["division"]
@@ -2983,7 +3031,7 @@ pub fn retarget_composite_stop(
         let Some(index) = doc
             .get("stop")
             .and_then(|s| s.as_array_of_tables())
-            .and_then(|stops| stop_pull_index(stops, prov, on))
+            .and_then(|stops| stop_pull_index(stops, prov, &pulled))
         else {
             return Ok(false);
         };
@@ -3001,7 +3049,7 @@ pub fn retarget_composite_stop(
             table.remove("rename");
         }
     }
-    remove_moves_for(&mut doc, console_name);
+    remove_moves_at(&mut doc, &moves);
     write_atomically(path, doc.to_string())?;
     Ok(true)
 }
@@ -3018,6 +3066,8 @@ pub fn remove_composite_stop(
     on: &str,
 ) -> Result<bool, String> {
     let mut doc = composite_doc(path)?;
+    let (on, moves) = pulled_onto(&doc, console_name, on);
+    let on = on.as_str();
     if prov.via_division {
         let Some(index) = division_pull_index(&doc, prov, on) else {
             return Ok(false);
@@ -3046,7 +3096,7 @@ pub fn remove_composite_stop(
             doc.remove("stop");
         }
     }
-    remove_moves_for(&mut doc, console_name);
+    remove_moves_at(&mut doc, &moves);
     if let Some(adjusts) = voicing_adjusts_mut(&mut doc) {
         adjusts.retain(|table| {
             !table
@@ -4588,6 +4638,38 @@ mod tests {
         let parsed = def(&path);
         assert_eq!(parsed.manuals.len(), 1);
         assert!(parsed.divisions.is_empty(), "the pull landing on it went too");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A stop pulled onto one manual and moved to another is found by
+    /// its pull line and removed with its moves; a same-named stop's
+    /// lines elsewhere are untouched.
+    #[test]
+    fn a_moved_stop_is_removed_with_its_moves() {
+        let dir = std::env::temp_dir().join("aristide-moved-stop-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("test dir");
+        let path = dir.join("orgue.toml");
+        std::fs::write(
+            &path,
+            "name = \"T\"\n[sources]\ns1 = \"set.organ\"\n\n[[stop]]\nfrom = \"s1\"\nmanual = \"Pedal\"\nstop = \"Bourdon 8\"\non = \"Pedal\"\n\n\
+             [[stop]]\nfrom = \"s1\"\nmanual = \"Pedal\"\nstop = \"Bourdon 8\"\non = \"Echo\"\n\n[[move]]\nstop = \"Bourdon 8\"\nfrom = \"Echo\"\nto = \"Great\"\n",
+        )
+        .expect("file written");
+        let def = |path: &Path| -> instrument::Definition {
+            toml::from_str(&std::fs::read_to_string(path).expect("reads")).expect("parses")
+        };
+        let bourdon = instrument::StopProvenance {
+            source: "s1".into(),
+            source_manual: "Pedal".into(),
+            source_stop: "Bourdon 8".into(),
+            via_division: false,
+        };
+        assert!(remove_composite_stop(&path, &bourdon, "Bourdon 8", "Great").expect("removes"));
+        let parsed = def(&path);
+        assert_eq!(parsed.stops.len(), 1, "only the moved copy went");
+        assert_eq!(parsed.stops[0].on, "Pedal", "the original stays");
+        assert!(parsed.moves.is_empty(), "and the copy's move went with it");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

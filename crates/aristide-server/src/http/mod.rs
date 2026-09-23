@@ -1430,6 +1430,36 @@ mod tests {
         assert_eq!(refused.status_code().0, 400, "wave tremulants have no shape");
     }
 
+    /// A manual never gets two stops of one name: the organ file finds
+    /// stops by manual and name, so removing one would remove both.
+    #[test]
+    fn a_manual_refuses_a_second_stop_of_one_name() {
+        let Some(state) = demo_state() else { return };
+        let demo = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testsets/grandorgue-demo/demo.organ");
+        let dir = std::env::temp_dir().join("aristide-duplicate-name-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let organ = aristide_formats::grandorgue::load(&demo).expect("demo parses").organ;
+        let canonical = demo.canonicalize().expect("canonicalizes");
+        let file = crate::config::create_wrapper_organ(&dir, "Named", &canonical, &organ, None)
+            .expect("organ file written");
+        state.lock().expect("state").composite_path = Some(file.clone());
+        let before = std::fs::read_to_string(&file).expect("reads");
+
+        let pulled = respond(&state, &Method::Post, "/api/organ/pull?from=s1&manual=Pedal&stop=Bourdon%208'&on=Pedal");
+        assert_eq!(pulled.status_code().0, 400, "Pedal already has a Bourdon 8'");
+        let second = {
+            let state = state.lock().expect("state");
+            let console = state.console().expect("organ");
+            console.stop_states().iter()
+                .find(|(_, name, manual, _, _)| *name == "Bourdon 8'" && *manual != "Pedal")
+                .map(|(id, ..)| id.0).expect("a Bourdon 8' on a manual")
+        };
+        let moved = respond(&state, &Method::Post, &format!("/api/organ/move?stop={second}&manual=0"));
+        assert_eq!(moved.status_code().0, 400, "nor may one move there");
+        assert_eq!(std::fs::read_to_string(&file).expect("reads"), before, "the file is untouched");
+    }
+
     /// A stop rule lands live and in the organ file, loads back the
     /// same, and resetting it removes the file's row.
     #[test]

@@ -45,18 +45,28 @@ impl State {
         true
     }
 
-    /// Move a stop to another manual — live under held keys, kept for
-    /// saving, and appended to the organ's file when it has one.
-    pub fn move_stop(&mut self, stop: StopId, manual: usize) -> bool {
-        let names = self.manual_names();
-        let Some(to_name) = names.get(manual).cloned() else {
+    /// Whether a manual already has another stop of this name. The
+    /// organ's file addresses stops by manual and name, so a second
+    /// one there would make its lines ambiguous — removing one could
+    /// remove the other.
+    fn stop_name_taken(&self, manual: &str, name: &str, except: Option<StopId>) -> bool {
+        let Control::Organ(console) = &self.control else {
             return false;
         };
-        let State {
-            engine, control, ..
-        } = &mut *self;
-        let Control::Organ(console) = control else {
-            return false;
+        console.stop_states().iter().any(|(id, other, on, _, _)| {
+            Some(*id) != except && other.eq_ignore_ascii_case(name) && on.eq_ignore_ascii_case(manual)
+        })
+    }
+
+    /// Move a stop to another manual — live under held keys, kept for
+    /// saving, and appended to the organ's file when it has one.
+    pub fn move_stop(&mut self, stop: StopId, manual: usize) -> Result<(), String> {
+        let names = self.manual_names();
+        let Some(to_name) = names.get(manual).cloned() else {
+            return Err("no such manual".into());
+        };
+        let Control::Organ(console) = &self.control else {
+            return Err("no organ is loaded".into());
         };
         let Some((stop_name, from_name)) = console
             .stop_states()
@@ -64,11 +74,20 @@ impl State {
             .find(|(id, ..)| *id == stop)
             .map(|(_, name, from, _, _)| (name.to_string(), from.to_string()))
         else {
-            return false;
+            return Err("no such stop".into());
         };
         if from_name == to_name {
-            return true;
+            return Ok(());
         }
+        if self.stop_name_taken(&to_name, &stop_name, Some(stop)) {
+            return Err(format!("{to_name} already has a stop named {stop_name:?}"));
+        }
+        let State {
+            engine, control, ..
+        } = &mut *self;
+        let Control::Organ(console) = control else {
+            return Err("no organ is loaded".into());
+        };
         let (stopped, starts) = console.move_stop(stop, manual);
         for handle in stopped {
             engine.send(Command::StopVoice { handle });
@@ -84,7 +103,7 @@ impl State {
         {
             tracing::warn!("move not saved: {err}");
         }
-        true
+        Ok(())
     }
 
     /// Keep a coupler on the console or take it off — live, and in the
@@ -332,6 +351,11 @@ impl State {
             .any(|name| name.eq_ignore_ascii_case(on))
         {
             return Err(format!("this organ has no manual named {on:?}"));
+        }
+        if let Some(stop) = stop
+            && self.stop_name_taken(on, stop, None)
+        {
+            return Err(format!("{on} already has a stop named {stop:?}"));
         }
         let path = self.organ_file()?;
         config::append_composite_pull(&path, from, source_manual, stop, on)?;
