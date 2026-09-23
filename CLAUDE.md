@@ -40,17 +40,18 @@ settings. Imported organs and samples remain untouched; customisation lives in l
 - Work in small, coherent, reviewable increments. State the scope and the relevant
   spec sections before implementing; avoid building every panel at once.
 - The seven Control flow rules outrank individual screen designs. Play is home;
-  the top-bar padlock separates perform and edit; Build opens through a stop in
-  edit mode; sheets and edits must leave audio running. Follow the spec's autosave,
-  global undo, snapshots and shared number behaviour.
-- Use the new five-panel shell: Play, Build, Route, Tuning, Library, with Setup
-  separate. Do not bring back the old Voice workspace or its settings hierarchy.
+  the top-bar padlock separates perform and edit; a stop's editor opens through
+  the stop in edit mode; sheets and edits must leave audio running. Follow the
+  spec's autosave, global undo, snapshots and shared number behaviour.
+- Use the new five-panel shell: Play, Organ, Sound, Tuning, Library, with
+  Settings separate (Alex, 2026-09-23: organ settings apart from Aristide's).
+  Do not bring back the old Voice workspace or its settings hierarchy.
 - Follow the new Visual rules without exceptions: flat and abstract, dark by
   default, three colour roles, one typeface/two weights/three sizes, about 60 px
   Play targets, meaningful marks only. Use a stock component library's defaults
   for everything outside the console. Do not inherit the old palette or tokens.
-- Play, Route, Library and Setup each get one implementation. For Build and
-  Tuning, first produce four structurally different clickable mocks as specified;
+- Play, Sound, Library and Settings each get one implementation. For the stop
+  editor and Tuning, first produce four structurally different clickable mocks as specified;
   let Alex pick by feel, then make four mutations of the chosen direction.
   Do not choose a winner on Alex's behalf or implement the old editor by default.
 - Design for one medium touchscreen first, with touch and mouse working throughout;
