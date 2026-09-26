@@ -4,6 +4,7 @@
 //! divisionals, the stepper, the crescendo), tremulant engagement, and
 //! the MIDI-learn gestures that teach a new keyboard or a new control.
 
+use std::collections::HashMap;
 use std::time::Instant;
 
 use aristide_engine::Command;
@@ -247,41 +248,35 @@ impl State {
         }
         // The keyboard may drive more than one manual — a confirmed
         // "keep both" — and each assignment carries its own shift.
-        for keyboard in self.keyboard.clone() {
-            let State {
-                engine, control, ..
-            } = &mut *self;
-            let Control::Organ(console) = control else {
-                return;
-            };
-            let landed: Option<i32> = match console.manual_hex(keyboard.manual) {
-                // The grid position asked of the manual's own layout,
-                // in the slanted reading that matches how QWERTY rows
-                // physically sit (see control::KEYBOARD_GRID) — so the
-                // board's shapes lie under the fingers unskewed.
-                Some(layout) => grid
-                    .map(|(col, row)| layout.key_at_slanted(col, row) + keyboard.transpose as i32),
-                None => piano.map(|note| note as i32 + keyboard.transpose as i32)
-                    .filter(|key| (0..=127).contains(key)),
-            };
-            let Some(key) = landed.and_then(|key| u16::try_from(key).ok()) else {
+        let landings = if pressed || !self.held_codes.contains_key(code) {
+            self.key_landings(piano, grid, pressed)
+        } else {
+            self.held_codes.remove(code).unwrap_or_default()
+        };
+        // Several codes can reach one key (Comma and KeyQ are both C4):
+        // a key already held by another code is neither retriggered nor,
+        // on release, silenced under the code still holding it.
+        let held_elsewhere = |held: &HashMap<String, Vec<(usize, u16)>>, landing| {
+            held.iter()
+                .any(|(other, keys)| other != code && keys.contains(&landing))
+        };
+        let State {
+            engine,
+            control,
+            held_codes,
+            ..
+        } = &mut *self;
+        let Control::Organ(console) = control else {
+            return;
+        };
+        for &(manual, key) in &landings {
+            if held_elsewhere(held_codes, (manual, key)) {
                 continue;
-            };
+            }
             if pressed {
-                // The compass rule, exactly as MIDI routing applies it: a
-                // key landing outside the manual says nothing, and is not
-                // tracked as held either. The keyboard never widens the
-                // manual to reach it — the legend draws it as unavailable.
-                let within = console
-                    .compass(keyboard.manual)
-                    .is_some_and(|(low, high)| (low..=high).contains(&(key as i16)));
-                if !within {
-                    continue;
-                }
                 // A clicked key has no velocity; full, as GO's
                 // on-screen console sends.
-                let (starts, retriggered) =
-                    console.note_on_manual(keyboard.manual, key, 127);
+                let (starts, retriggered) = console.note_on_manual(manual, key, 127);
                 for handle in retriggered {
                     engine.send(Command::StopVoice { handle });
                 }
@@ -289,8 +284,7 @@ impl State {
                     engine.send(start.command());
                 }
             } else {
-                let (stopped, starts, later) =
-                    console.note_off_manual(keyboard.manual, key);
+                let (stopped, starts, later) = console.note_off_manual(manual, key);
                 for handle in stopped {
                     engine.send(Command::StopVoice { handle });
                 }
@@ -304,6 +298,47 @@ impl State {
                 }
             }
         }
+        if pressed {
+            held_codes.insert(code.to_string(), landings);
+        }
+    }
+
+    /// The (manual, key) each keyboard assignment lands a computer key
+    /// on. A press obeys the compass rule, exactly as MIDI routing
+    /// applies it: a key landing outside the manual says nothing, and
+    /// the keyboard never widens the manual to reach it — the legend
+    /// draws it as unavailable.
+    fn key_landings(
+        &self,
+        piano: Option<u8>,
+        grid: Option<(u8, u8)>,
+        pressed: bool,
+    ) -> Vec<(usize, u16)> {
+        let Control::Organ(console) = &self.control else {
+            return Vec::new();
+        };
+        self.keyboard
+            .iter()
+            .filter_map(|keyboard| {
+                let landed: Option<i32> = match console.manual_hex(keyboard.manual) {
+                    // The grid position asked of the manual's own layout,
+                    // in the slanted reading that matches how QWERTY rows
+                    // physically sit (see control::KEYBOARD_GRID) — so the
+                    // board's shapes lie under the fingers unskewed.
+                    Some(layout) => grid.map(|(col, row)| {
+                        layout.key_at_slanted(col, row) + keyboard.transpose as i32
+                    }),
+                    None => piano
+                        .map(|note| note as i32 + keyboard.transpose as i32)
+                        .filter(|key| (0..=127).contains(key)),
+                };
+                let key = landed.and_then(|key| u16::try_from(key).ok())?;
+                let within = console
+                    .compass(keyboard.manual)
+                    .is_some_and(|(low, high)| (low..=high).contains(&(key as i16)));
+                (within || !pressed).then_some((keyboard.manual, key))
+            })
+            .collect()
     }
 
     /// Run one action by name, as if a binding had fired it — the menu

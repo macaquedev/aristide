@@ -1272,6 +1272,7 @@ mod tests {
             pending: None,
             key_bindings: Vec::new(),
             keyboard: Vec::new(),
+            held_codes: HashMap::new(),
             live_notes: HashMap::new(),
             channel_bend: HashMap::new(),
             trems: vec![TremControl {
@@ -1818,6 +1819,29 @@ mod tests {
             console.stop_states().iter().all(|(_, _, _, _, drawn)| !drawn),
             "and did what it was bound to: cancel"
         );
+    }
+
+    /// Comma and KeyQ both play C4. Held by one, the note ignores the
+    /// other: the second press does not retrigger it, and releasing
+    /// either leaves it sounding until both are up.
+    #[test]
+    fn two_computer_keys_on_one_note_hold_it_once() {
+        let Some((state, manual)) = demo_state("Montre 8'") else {
+            return;
+        };
+        assert!(bind_computer(&state, manual));
+        state.lock().expect("state").key("Comma", true);
+        assert_eq!(held_on(&state, manual), vec![60]);
+        state.lock().expect("state").key("KeyQ", true);
+        assert_eq!(
+            state.lock().expect("state").held_codes["KeyQ"],
+            vec![(manual, 60)],
+            "the second key lands on the same note"
+        );
+        state.lock().expect("state").key("Comma", false);
+        assert_eq!(held_on(&state, manual), vec![60], "KeyQ still holds it");
+        state.lock().expect("state").key("KeyQ", false);
+        assert!(held_on(&state, manual).is_empty());
     }
 
     /// On a microtonal manual the computer keyboard is a hex surface,

@@ -154,6 +154,10 @@ pub struct State {
     /// config — and like any device it may drive more than one manual,
     /// once the player has confirmed that is what they meant.
     pub keyboard: Vec<KeyboardInput>,
+    /// Computer keys held down: the (manual, key) landings each sounded.
+    /// Two codes can land on one key, and the second must neither
+    /// retrigger it nor, released first, silence it.
+    pub held_codes: HashMap<String, Vec<(usize, u16)>>,
     /// Live notes per (port, channel, incoming note): the (manual, key)
     /// landings each produced, so a later per-channel pitch bend can
     /// find them. Populated only for bend-enabled inputs.
@@ -358,6 +362,7 @@ impl State {
             pending: None,
             key_bindings: Vec::new(),
             keyboard: Vec::new(),
+            held_codes: HashMap::new(),
             live_notes: HashMap::new(),
             channel_bend: HashMap::new(),
             ltn_cache: HashMap::new(),
