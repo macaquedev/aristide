@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from 'react';
-import { Button, Drawer, Group, Loader, Modal, SegmentedControl, Select, Stack, Switch, Text, TextInput } from '@mantine/core';
-import { Folder, Plus } from 'lucide-react';
+import { useEffect, useRef, useState, type KeyboardEvent, type MouseEvent } from 'react';
+import { Button, Drawer, Group, Loader, Menu, Modal, SegmentedControl, Select, Stack, Switch, Text, TextInput } from '@mantine/core';
+import { Folder, Pencil, Plus, Trash2 } from 'lucide-react';
 import { canPickFiles, editInstrument, organFiles, pickFile, request, type Snapshot } from '../api';
 import { StopEditor } from './StopEditor';
 import './organ.css';
@@ -23,6 +23,8 @@ export function OrganPanel({ organ, state, stopId, select, offerUndo, openScope 
   const [selection, setSelection] = useState<Selection | undefined>(stopId === undefined ? undefined : { kind: 'stop', id: stopId });
   const [failure, setFailure] = useState<string>();
   const [confirm, setConfirm] = useState<{ title: string; message: string; run: () => void }>();
+  const [menu, setMenu] = useState<{ x: number; y: number; target: Selection }>();
+  const [renaming, setRenaming] = useState<Selection>();
   const [adding, setAdding] = useState<{ kind: 'stop'; manual: string } | { kind: 'division' } | { kind: 'coupler' }>();
   const reselect = useRef<Reselect>(undefined);
   const tree = useRef<HTMLElement>(null);
@@ -61,6 +63,31 @@ export function OrganPanel({ organ, state, stopId, select, offerUndo, openScope 
   const ask = (title: string, message: string, run: () => void) => setConfirm({ title, message, run });
   // A division holds one stop of each name: the organ file finds stops by division and name.
   const named = (manual: string) => stops.filter(s => s.manual === manual).map(s => s.name.toLowerCase());
+  const nameOf = (s: Selection) => s.kind === 'stop' ? stops.find(x => x.id === s.id)?.name
+    : s.kind === 'division' ? manuals.find(m => m.idx === s.idx)?.name : couplers.find(c => c.idx === s.idx)?.name;
+  const rename = (s: Selection, name: string) => {
+    if (s.kind === 'stop') {
+      const manual = stops.find(x => x.id === s.id)?.manual ?? '';
+      return change('organ/stop/rename', { stop: s.id, name }, 'The stop could not be renamed. Use a name no other stop has.', { kind: 'stop', name, manual });
+    }
+    if (s.kind === 'division') return change('organ/manual/rename', { manual: s.idx, name }, 'The division could not be renamed. Use a name no other division has.', { kind: 'division', name });
+    return change('organ/coupler/rename', { idx: s.idx, name }, 'The coupler could not be renamed. Use a name no other coupler has.', { kind: 'coupler', name });
+  };
+  const remove = (s: Selection) => {
+    const name = nameOf(s);
+    if (name === undefined) return;
+    if (s.kind === 'stop') ask(`Delete ${name}?`, 'Its samples stay in the sample set, so it can be added again.',
+      () => void change('organ/unpull', { stop: s.id }, 'This stop could not be deleted.'));
+    else if (s.kind === 'division') ask(`Delete ${name}?`, 'Its stops leave the organ with it. Their samples stay in the sample set.',
+      () => void change('organ/manual/remove', { manual: s.idx }, 'This division could not be deleted. Divisions that came with the sample set stay; delete their stops instead.'));
+    else ask(`Delete ${name}?`, 'A coupler that came with the sample set is taken off the console instead, and can be shown again.',
+      () => void change('organ/coupler/remove', { idx: s.idx }, 'This coupler could not be deleted.'));
+  };
+  const openMenu = (target: Selection) => (e: MouseEvent) => { e.preventDefault(); choose(target); setMenu({ x: e.clientX, y: e.clientY, target }); };
+  const onTreeKey = (e: KeyboardEvent) => {
+    if ((e.key === 'Delete' || e.key === 'Backspace') && current && !busy) { e.preventDefault(); remove(current); }
+    if (e.key === 'F2' && current && !busy) { e.preventDefault(); setRenaming(current); }
+  };
 
   const stop = current?.kind === 'stop' ? stops.find(s => s.id === current.id) : undefined;
   const shown = current && (current.kind === 'stop' ? `s${current.id}` : current.kind === 'division' ? `d${current.idx}` : `c${current.idx}`);
@@ -69,28 +96,26 @@ export function OrganPanel({ organ, state, stopId, select, offerUndo, openScope 
   const coupler = current?.kind === 'coupler' ? couplers.find(c => c.idx === current.idx) : undefined;
 
   const stopActions = stop && <>
-    <Rename label="Stop name" value={stop.name} disabled={busy}
-      save={name => change('organ/stop/rename', { stop: stop.id, name }, 'The stop could not be renamed. Use a name no other stop has.', { kind: 'stop', name, manual: stop.manual })}/>
+    <Rename label="Stop name" value={stop.name} disabled={busy} save={name => rename({ kind: 'stop', id: stop.id }, name)}/>
     <Select aria-label="Division" w={170} value={String(stop.midx)} allowDeselect={false} disabled={busy}
       data={manuals.map(m => ({ value: String(m.idx), label: m.name, disabled: m.idx !== stop.midx && named(m.name).includes(stop.name.toLowerCase()) }))}
       onChange={value => { const to = manuals.find(m => String(m.idx) === value); if (to && to.idx !== stop.midx) void change('organ/move', { stop: stop.id, manual: to.idx }, 'The stop could not be moved.', { kind: 'stop', name: stop.name, manual: to.name }); }}/>
-    <Button variant="subtle" color="red" disabled={busy} onClick={() => ask(`Remove ${stop.name}?`, 'Its samples stay in the sample set, so it can be added again.',
-      () => void change('organ/unpull', { stop: stop.id }, 'This stop could not be removed.'))}>Remove</Button>
+    <Button variant="subtle" color="red" disabled={busy} onClick={() => remove({ kind: 'stop', id: stop.id })}>Delete stop</Button>
   </>;
 
   return <div className="organ-panel">
-    <nav ref={tree} className="organ-tree" aria-label="Organ">
+    <nav ref={tree} className="organ-tree" aria-label="Organ" onKeyDown={onTreeKey}>
       {manuals.map(manual => <section key={manual.idx} aria-label={manual.name}>
         <Button className="organ-division" fullWidth justify="space-between" variant={division?.idx === manual.idx ? 'light' : 'subtle'} color={division?.idx === manual.idx ? undefined : 'gray'}
-          data-selected={division?.idx === manual.idx} onClick={() => choose({ kind: 'division', idx: manual.idx })}>{manual.name}</Button>
+          data-selected={division?.idx === manual.idx} onClick={() => choose({ kind: 'division', idx: manual.idx })} onContextMenu={openMenu({ kind: 'division', idx: manual.idx })}>{manual.name}</Button>
         <nav aria-label={`${manual.name} stops`}>{stops.filter(s => s.midx === manual.idx).map(s => <Button key={s.id} fullWidth justify="space-between" variant={stop?.id === s.id ? 'light' : 'subtle'} color={stop?.id === s.id ? undefined : 'gray'}
-          aria-current={stop?.id === s.id ? 'true' : undefined} data-selected={stop?.id === s.id} onClick={() => choose({ kind: 'stop', id: s.id })}>{s.name}{s.custom && <span className="modified" aria-label="custom">◇</span>}</Button>)}</nav>
+          aria-current={stop?.id === s.id ? 'true' : undefined} data-selected={stop?.id === s.id} onClick={() => choose({ kind: 'stop', id: s.id })} onContextMenu={openMenu({ kind: 'stop', id: s.id })}>{s.name}{s.custom && <span className="modified" aria-label="custom">◇</span>}</Button>)}</nav>
         <Button className="organ-add" variant="subtle" color="gray" size="compact-sm" leftSection={<Plus size={14}/>} disabled={busy} onClick={() => setAdding({ kind: 'stop', manual: manual.name })}>Add stop</Button>
       </section>)}
       <section aria-label="Couplers">
         <Text size="xs" c="dimmed" className="organ-heading">Couplers</Text>
         {couplers.map(c => <Button key={c.idx} fullWidth justify="space-between" variant={coupler?.idx === c.idx ? 'light' : 'subtle'} color={coupler?.idx === c.idx ? undefined : 'gray'}
-          data-selected={coupler?.idx === c.idx} onClick={() => choose({ kind: 'coupler', idx: c.idx })} rightSection={c.hidden ? <Text component="span" size="xs" c="dimmed">Hidden</Text> : undefined}>{c.name}</Button>)}
+          data-selected={coupler?.idx === c.idx} onClick={() => choose({ kind: 'coupler', idx: c.idx })} onContextMenu={openMenu({ kind: 'coupler', idx: c.idx })} rightSection={c.hidden ? <Text component="span" size="xs" c="dimmed">Hidden</Text> : undefined}>{c.name}</Button>)}
         <Button className="organ-add" variant="subtle" color="gray" size="compact-sm" leftSection={<Plus size={14}/>} disabled={busy || manuals.length < 2} onClick={() => setAdding({ kind: 'coupler' })}>Add coupler</Button>
       </section>
       <Button variant="default" leftSection={<Plus size={16}/>} disabled={busy} onClick={() => setAdding({ kind: 'division' })}>Add division</Button>
@@ -100,17 +125,15 @@ export function OrganPanel({ organ, state, stopId, select, offerUndo, openScope 
       {busy && <Group className="organ-busy" gap="xs" role="status"><Loader size="xs"/><Text size="sm">Rebuilding the organ</Text></Group>}
       {stop && <StopEditor key={stop.id} organ={organ} stops={stops} stopId={stop.id} actions={stopActions} offerUndo={offerUndo} openScope={openScope}/>}
       {division && <DivisionEditor division={division} count={manuals.length} stops={stops.filter(s => s.midx === division.idx).length} busy={busy}
-        rename={name => change('organ/manual/rename', { manual: division.idx, name }, 'The division could not be renamed. Use a name no other division has.', { kind: 'division', name })}
+        rename={name => rename({ kind: 'division', idx: division.idx }, name)}
         kind={kind => void change('organ/manual/kind', { manual: division.idx, kind }, 'The keyboard type could not be changed.', { kind: 'division', name: division.name })}
         order={to => void change('organ/manual/order', { manual: division.idx, to }, 'The division could not be moved.', { kind: 'division', name: division.name })}
-        remove={() => ask(`Remove ${division.name}?`, 'Its stops leave the organ with it. Their samples stay in the sample set.',
-          () => void change('organ/manual/remove', { manual: division.idx }, 'This division could not be removed. Divisions that came with the sample set stay; remove their stops instead.'))}/>}
+        remove={() => remove({ kind: 'division', idx: division.idx })}/>}
       {coupler && <CouplerEditor coupler={coupler} manuals={manuals} busy={busy}
-        rename={name => change('organ/coupler/rename', { idx: coupler.idx, name }, 'The coupler could not be renamed. Use a name no other coupler has.', { kind: 'coupler', name })}
+        rename={name => rename({ kind: 'coupler', idx: coupler.idx }, name)}
         route={route => void change('organ/coupler/routes', { idx: coupler.idx, routes: JSON.stringify([route]) }, 'The coupler could not be changed.', { kind: 'coupler', name: coupler.name })}
         keep={keep => void change('organ/coupler', { idx: coupler.idx, keep: keep ? 1 : 0 }, 'The coupler could not be changed.')}
-        remove={() => ask(`Remove ${coupler.name}?`, 'A coupler that came with the sample set is taken off the console instead, and can be shown again.',
-          () => void change('organ/coupler/remove', { idx: coupler.idx }, 'This coupler could not be removed.'))}/>}
+        remove={() => remove({ kind: 'coupler', idx: coupler.idx })}/>}
       {!current && !busy && <Stack align="center" p="xl"><Text>This organ has no stops yet.</Text><Button disabled={!manuals.length} onClick={() => manuals[0] && setAdding({ kind: 'stop', manual: manuals[0].name })}>Add stop</Button></Stack>}
     </div>
 
@@ -125,8 +148,16 @@ export function OrganPanel({ organ, state, stopId, select, offerUndo, openScope 
 
     <Modal opened={Boolean(confirm)} onClose={() => setConfirm(undefined)} title={confirm?.title}>
       <Stack><Text>{confirm?.message}</Text><Group justify="end"><Button variant="default" onClick={() => setConfirm(undefined)}>Cancel</Button>
-        <Button color="red" onClick={() => { confirm?.run(); setConfirm(undefined); }}>Remove</Button></Group></Stack>
+        <Button color="red" data-autofocus onClick={() => { confirm?.run(); setConfirm(undefined); }}>Delete</Button></Group></Stack>
     </Modal>
+    <Menu opened={Boolean(menu)} onChange={open => { if (!open) setMenu(undefined); }} position="bottom-start" withinPortal>
+      <Menu.Target><div className="organ-menu-anchor" style={{ left: menu?.x ?? 0, top: menu?.y ?? 0 }}/></Menu.Target>
+      <Menu.Dropdown>
+        <Menu.Item leftSection={<Pencil size={16}/>} disabled={busy} onClick={() => menu && setRenaming(menu.target)}>Rename</Menu.Item>
+        <Menu.Item leftSection={<Trash2 size={16}/>} color="red" disabled={busy} onClick={() => menu && remove(menu.target)}>Delete</Menu.Item>
+      </Menu.Dropdown>
+    </Menu>
+    <RenameModal target={renaming && nameOf(renaming)} close={() => setRenaming(undefined)} save={name => { if (renaming) void rename(renaming, name); setRenaming(undefined); }}/>
     <Modal opened={Boolean(failure)} onClose={() => setFailure(undefined)} title="Organ not changed">
       <Stack><Text>{failure}</Text><Button onClick={() => setFailure(undefined)}>Close</Button></Stack>
     </Modal>
@@ -142,6 +173,18 @@ function Rename({ label, value, disabled, save, visible }: { label: string; valu
     onBlur={commit} onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur(); if (e.key === 'Escape') { setDraft(value); e.currentTarget.blur(); } }}/>;
 }
 
+function RenameModal({ target, close, save }: { target?: string; close: () => void; save: (name: string) => void }) {
+  const [name, setName] = useState('');
+  useEffect(() => { if (target !== undefined) setName(target); }, [target]);
+  const trimmed = name.trim();
+  return <Modal opened={target !== undefined} onClose={close} title={`Rename ${target ?? ''}`}>
+    <form onSubmit={e => { e.preventDefault(); if (trimmed && trimmed !== target) save(trimmed); else close(); }}><Stack>
+      <TextInput label="Name" value={name} onChange={e => setName(e.currentTarget.value)} data-autofocus onFocus={e => e.currentTarget.select()}/>
+      <Group justify="end"><Button variant="default" onClick={close}>Cancel</Button><Button type="submit" disabled={!trimmed}>Rename</Button></Group>
+    </Stack></form>
+  </Modal>;
+}
+
 function DivisionEditor({ division, count, stops, busy, rename, kind, order, remove }: {
   division: Snapshot['manuals'][number]; count: number; stops: number; busy: boolean;
   rename: (name: string) => Promise<boolean>; kind: (kind: string) => void; order: (to: number) => void; remove: () => void;
@@ -154,7 +197,7 @@ function DivisionEditor({ division, count, stops, busy, rename, kind, order, rem
         data={[{ value: 'manual', label: 'Manual' }, { value: 'pedal', label: 'Pedal' }]}/></Stack></Group>
     <Group><Button variant="default" disabled={busy || division.idx === 0} onClick={() => order(division.idx - 1)}>Move up</Button>
       <Button variant="default" disabled={busy || division.idx === count - 1} onClick={() => order(division.idx + 1)}>Move down</Button>
-      <Button variant="subtle" color="red" disabled={busy} onClick={remove}>Remove division</Button></Group>
+      <Button variant="subtle" color="red" disabled={busy} onClick={remove}>Delete division</Button></Group>
   </Stack>;
 }
 
@@ -178,7 +221,7 @@ function CouplerEditor({ coupler, manuals, busy, rename, route, keep, remove }: 
         onChange={v => v !== null && route({ ...now, shift: Number(v) })}/>
     </Group> : <Text size="sm" c="dimmed">This coupler has several routes; they are kept as the sample set defines them.</Text>}
     <Switch label="On the console" checked={!coupler.hidden} disabled={busy} onChange={e => keep(e.currentTarget.checked)}/>
-    <Group><Button variant="subtle" color="red" disabled={busy} onClick={remove}>Remove coupler</Button></Group>
+    <Group><Button variant="subtle" color="red" disabled={busy} onClick={remove}>Delete coupler</Button></Group>
   </Stack>;
 }
 

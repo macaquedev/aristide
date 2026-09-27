@@ -55,8 +55,8 @@ test('Organ adds, renames, moves and removes divisions, stops and couplers', asy
   await expect.poll(async () => (await snapshot(page)).stops.filter(s => s.manual === 'Echo').length, { timeout: 20_000 }).toBe(0);
   await settled(page);
   await expect(page.locator('.roll-stop-name').first()).toContainText('Bourdon 8');
-  await page.getByRole('button', { name: 'Remove', exact: true }).click();
-  await page.getByRole('dialog').getByRole('button', { name: 'Remove', exact: true }).click();
+  await page.getByRole('button', { name: 'Delete stop', exact: true }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Delete', exact: true }).click();
   await expect.poll(async () => (await snapshot(page)).stops.length, { timeout: 20_000 }).toBe(start.stops.length);
   await settled(page);
   expect((await snapshot(page)).stops.map(s => `${s.manual}/${s.name}`).sort()).toEqual(start.stops.map(s => `${s.manual}/${s.name}`).sort());
@@ -74,15 +74,15 @@ test('Organ adds, renames, moves and removes divisions, stops and couplers', asy
   await settled(page);
   await expect(page.getByRole('textbox', { name: 'Coupler name' })).toHaveValue('Echo to test');
   await page.screenshot({ path: 'test-results/organ-coupler.png', fullPage: true });
-  await page.getByRole('button', { name: 'Remove coupler', exact: true }).click();
-  await page.getByRole('dialog').getByRole('button', { name: 'Remove', exact: true }).click();
+  await page.getByRole('button', { name: 'Delete coupler', exact: true }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Delete', exact: true }).click();
   await expect.poll(async () => (await snapshot(page)).couplers.some(c => c.name === 'Echo to test'), { timeout: 20_000 }).toBe(false);
   await settled(page);
 
   // Remove the division; the tab stays on Organ through every rebuild.
   await tree.getByRole('button', { name: 'Echo', exact: true }).click();
-  await page.getByRole('button', { name: 'Remove division', exact: true }).click();
-  await page.getByRole('dialog').getByRole('button', { name: 'Remove', exact: true }).click();
+  await page.getByRole('button', { name: 'Delete division', exact: true }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Delete', exact: true }).click();
   await expect.poll(async () => (await snapshot(page)).manuals.some(m => m.name === 'Echo'), { timeout: 20_000 }).toBe(false);
   await settled(page);
   await expect(page.getByRole('button', { name: 'Organ', exact: true })).toHaveAttribute('aria-current', 'page');
@@ -90,4 +90,39 @@ test('Organ adds, renames, moves and removes divisions, stops and couplers', asy
   await page.setViewportSize({ width: 390, height: 844 });
   await page.screenshot({ path: 'test-results/organ-phone.png', fullPage: true });
   expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(0);
+});
+
+test('A stop renames and deletes from its menu and the Delete key', async ({ page }) => {
+  test.setTimeout(90_000);
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Organ', exact: true }).click();
+  const tree = page.getByRole('navigation', { name: 'Organ' });
+  const start = await snapshot(page);
+  const first = start.stops[0];
+
+  await tree.getByRole('button', { name: first.name, exact: true }).click({ button: 'right' });
+  await expect(page.getByRole('menuitem', { name: 'Delete' })).toBeVisible();
+  await page.waitForTimeout(300);
+  await page.screenshot({ path: 'test-results/organ-stop-menu.png' });
+  await page.getByRole('menuitem', { name: 'Rename' }).click();
+  const dialog = page.getByRole('dialog', { name: `Rename ${first.name}` });
+  await dialog.getByRole('textbox', { name: 'Name' }).fill('Menu renamed');
+  await dialog.getByRole('button', { name: 'Rename' }).click();
+  await expect.poll(async () => (await snapshot(page)).stops.some(s => s.name === 'Menu renamed')).toBe(true);
+  await settled(page);
+
+  // The Delete key asks first; Cancel keeps the stop.
+  await tree.getByRole('button', { name: 'Menu renamed', exact: true }).click();
+  await page.keyboard.press('Delete');
+  await expect(page.getByRole('dialog', { name: 'Delete Menu renamed?' })).toBeVisible();
+  await page.waitForTimeout(300);
+  await page.screenshot({ path: 'test-results/organ-stop-delete.png' });
+  await page.getByRole('dialog').getByRole('button', { name: 'Cancel' }).click();
+  expect((await snapshot(page)).stops.length).toBe(start.stops.length);
+
+  await tree.getByRole('button', { name: 'Menu renamed', exact: true }).click({ button: 'right' });
+  await page.getByRole('menuitem', { name: 'Rename' }).click();
+  await page.getByRole('dialog').getByRole('textbox', { name: 'Name' }).fill(first.name);
+  await page.getByRole('dialog').getByRole('textbox', { name: 'Name' }).press('Enter');
+  await expect.poll(async () => (await snapshot(page)).stops.some(s => s.name === first.name)).toBe(true);
 });

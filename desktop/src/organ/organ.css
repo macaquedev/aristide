@@ -19,3 +19,4 @@
 .stop-events-row { min-width: 0; }
 .stop-events-row .roll-event-strip { flex: 1; min-width: 0; }
 @media (max-width: 760px) { .stop-events-row { flex-wrap: wrap; } }
+.organ-menu-anchor { position: fixed; width: 0; height: 0; pointer-events: none; }
