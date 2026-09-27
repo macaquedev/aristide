@@ -196,6 +196,9 @@ pub enum LearnTarget {
     /// adding one (a pedalboard when `pedal`). One press names its
     /// device and channel; with `range`, a second fixes its compass.
     Console { keyboard: usize, pedal: bool, range: bool },
+    /// One of the loaded organ's manuals: the keyboard pressed plays it
+    /// from now on, found among the console's or added to it.
+    Division { manual: usize },
 }
 
 /// Listening forever would leave a live console silently swallowing the

@@ -224,7 +224,7 @@ impl State {
         // keyboard answering, and plays nothing.
         if self
             .learning()
-            .is_some_and(|learn| matches!(learn.target, LearnTarget::Console { .. }))
+            .is_some_and(|learn| !matches!(learn.target, LearnTarget::Manual { .. }))
         {
             if pressed && let Some(note) = control::key_note(code) {
                 self.learn_key(COMPUTER_KEYBOARD, None, note);

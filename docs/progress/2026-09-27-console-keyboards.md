@@ -43,29 +43,35 @@ the highest key.
 
 ## UI
 
+Alex, same day: every virtual organ is different, so show the organ's own
+manuals and discover them the Hauptwerk way.
+
 - Settings has tabs: Console, Speakers, Appearance.
-- Console lists the keyboards with name (editable), device, channel, range
-  (Detect, reset to the organ's), the loaded organ's divisions each plays, and
-  Remove. Every row also has Detect. With no keyboards: Detect console or Use
-  computer keyboard.
-- Detect console is a sheet: "Press any key on your lowest manual", then the
-  next manual up, "That was the top manual", then "Press any pedal" or "No
-  pedalboard". Done removes keyboards the console no longer has.
-- Organ › division: "Played from", with Automatic (named keyboard), any console
-  keyboard, or Nothing.
+- Console lists the loaded organ's manuals. Each has Detect ("Press any key
+  on the keyboard for Great"), Played from (the console keyboard, Automatic,
+  or Nothing) and the device it resolves to. The organ's own old inputs show
+  as extra lines with Remove.
+- Detect all is a sheet that walks the organ's manuals in order, with Skip.
+- A press on a keyboard the console lacks adds it (a pedalboard for a pedal
+  division); a keyboard already playing another of this organ's manuals moves
+  to the one pressed (`/api/console/learn?manual=`).
+- Your keyboards, below, holds what was found: name, device, channel, range
+  (Detect lowest and highest, or the organ's), Remove. The next organ plays
+  from them in order until it is detected itself.
+- The Organ tab no longer has Played from; this is its one home.
 
 ## Validation
 
 `cargo test -p aristide-server` (console order, detection, slip, move, map,
 rename, removal, legacy precedence, config round trip);
 `ARISTIDE_LIVE=1 bunx playwright test console-live` against a server with its
-own `XDG_CONFIG_HOME` drives detection with the computer keyboard, the move
-and the Organ choice, and holds a note throughout.
+own `XDG_CONFIG_HOME` drives per-manual detection with the computer keyboard
+and Detect all, and holds a note throughout.
 
 ## Gaps
 
 - The first-run "Learn the console" step does not exist yet; it should reuse
-  this sheet.
+  Detect all.
 - Pistons, swell pedals and toe studs (`/api/control/*`) have no new UI.
   They stay per organ.
 - Detection with real MIDI hardware has only been exercised through unit

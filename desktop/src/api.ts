@@ -20,7 +20,7 @@ export type Snapshot = {
   memory?: { resident_mb: number; samples: number };
   manual_tuning?: { idx: number; temperament: string; reference: { hz: number } }[];
   midi: { ports: { id: number; name: string; virtual?: boolean }[]; manuals: MidiManual[]; learning?: { manual: number; slot: number; step: string } };
-  console?: { keyboards: ConsoleKeyboard[]; heard: number; learning?: { keyboard: number; pedal: boolean; range: boolean; step: 'low' | 'high'; repeat?: string } };
+  console?: { keyboards: ConsoleKeyboard[]; heard: number; learning?: { keyboard: number | null; manual: number | null; pedal: boolean; range: boolean; step: 'low' | 'high'; repeat?: string } };
   keyboard?: { manual: number };
 };
 export type MidiManual = {

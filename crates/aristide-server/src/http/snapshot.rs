@@ -630,7 +630,10 @@ struct ConsoleKeyboardView {
 
 #[derive(Serialize)]
 struct ConsoleLearningView {
-    keyboard: usize,
+    /// The console keyboard being taught, or the organ's manual whose
+    /// keyboard is being found.
+    keyboard: Option<usize>,
+    manual: Option<usize>,
     pedal: bool,
     range: bool,
     step: &'static str,
@@ -1009,7 +1012,7 @@ fn snapshot(state: &State) -> Snapshot {
                 slot,
                 step: if learn.heard.is_some() { "high" } else { "low" },
             }),
-            crate::bindings::LearnTarget::Console { .. } => None,
+            _ => None,
         }),
     };
     let manual_count = state.manual_names().len();
@@ -1038,13 +1041,22 @@ fn snapshot(state: &State) -> Snapshot {
         learning: state.learn.as_ref().and_then(|learn| match learn.target {
             crate::bindings::LearnTarget::Console { keyboard, pedal, range } => {
                 Some(ConsoleLearningView {
-                    keyboard,
+                    keyboard: Some(keyboard),
+                    manual: None,
                     pedal,
                     range,
                     step: if learn.heard.is_some() { "high" } else { "low" },
                     repeat: learn.repeat.clone(),
                 })
             }
+            crate::bindings::LearnTarget::Division { manual } => Some(ConsoleLearningView {
+                keyboard: None,
+                manual: Some(manual),
+                pedal: console.is_some_and(|console| console.manual_pedal(manual)),
+                range: false,
+                step: "low",
+                repeat: None,
+            }),
             crate::bindings::LearnTarget::Manual { .. } => None,
         }),
     };

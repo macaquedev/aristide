@@ -71,9 +71,19 @@ pub(super) fn remove(state: &Mutex<State>, query: &str) -> Reply {
 
 // Detection: wait for a key on `keyboard` (past the end adds one on the
 // first press, a pedalboard with pedal=1). range=1 waits for the lowest
-// key and then the highest. No keyboard stops listening.
+// key and then the highest. manual=<n> instead waits for whichever
+// keyboard should play that manual of the loaded organ. Neither stops
+// listening.
 pub(super) fn learn(state: &Mutex<State>, query: &str) -> Reply {
     let mut state = state.lock().expect("state poisoned");
+    if let Some(manual) = index(query, "manual") {
+        if manual >= state.manual_names().len() {
+            return bad_request("no such manual");
+        }
+        tracing::info!("console: listening for the keyboard to play manual {manual}");
+        state.listen_division(manual);
+        return json(state_json_locked(&state));
+    }
     match index(query, "keyboard") {
         Some(keyboard) => {
             tracing::info!("console: listening for keyboard {keyboard}");

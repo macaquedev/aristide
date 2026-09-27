@@ -1,53 +1,84 @@
 import { useEffect, useRef, useState } from 'react';
 import { ActionIcon, Badge, Button, Drawer, Group, Loader, Select, Stack, Table, Text, TextInput, Tooltip } from '@mantine/core';
-import { Plus, RotateCcw, Trash2 } from 'lucide-react';
+import { RotateCcw, Trash2 } from 'lucide-react';
 import { COMPUTER_KEYBOARD, type ConsoleKeyboard, type Snapshot } from '../api';
 import { noteName } from '../tuning/model';
 
 type Send = (path: string, values?: Record<string, string | number>) => Promise<Snapshot>;
+type Act = (path: string, values: Record<string, string | number>, message: string) => Promise<Snapshot | undefined>;
+type Division = Snapshot['manuals'][number];
 
 const channels = [{ value: 'any', label: 'Any' }, ...Array.from({ length: 16 }, (_, i) => ({ value: String(i + 1), label: String(i + 1) }))];
+const describe = (keyboard?: ConsoleKeyboard) => !keyboard ? '' : !keyboard.device ? 'No device'
+  : `${keyboard.device}${keyboard.channel ? ` · channel ${keyboard.channel}` : ''}${keyboard.connected ? '' : ' (not connected)'}`;
 
-/** Settings › Console: the player's own keyboards, taught once for every organ. */
+/** Settings › Console: which of the player's keyboards plays each manual of the loaded organ,
+ * found by pressing a key on it, as Hauptwerk's auto-detect does. */
 export function ConsoleSettings({ state, send }: { state: Snapshot; send: Send }) {
   const [detecting, setDetecting] = useState(false);
   const [failure, setFailure] = useState<string>();
   const keyboards = state.console?.keyboards ?? [];
-  const learning = detecting ? undefined : state.console?.learning;
-  const act = (path: string, values: Record<string, string | number>, message: string) => {
+  const act: Act = (path, values, message) => {
     setFailure(undefined);
     return send(path, values).catch(() => { setFailure(message); return undefined; });
   };
-  const useComputer = async () => {
-    const added = await act('console/add', {}, 'The keyboard could not be added.');
-    if (added?.console) await act('console/set', { keyboard: added.console.keyboards.length - 1, device: COMPUTER_KEYBOARD }, 'The computer keyboard could not be chosen.');
-  };
-  return <Stack>
-    <Group justify="space-between">
-      <Text fw={600}>Keyboards</Text>
-      <Group>
-        <Button variant="default" onClick={() => void act('midi/rescan', {}, 'MIDI devices could not be rescanned.')}>Rescan MIDI</Button>
-        <Button onClick={() => setDetecting(true)}>Detect console</Button>
+  return <Stack gap="xl">
+    <Stack>
+      <Group justify="space-between">
+        <Text fw={600}>{state.organ ?? 'No organ loaded'}</Text>
+        <Group>
+          <Button variant="default" onClick={() => void act('midi/rescan', {}, 'MIDI devices could not be rescanned.')}>Rescan MIDI</Button>
+          {state.organ && <Button onClick={() => setDetecting(true)}>Detect all</Button>}
+        </Group>
       </Group>
-    </Group>
-    {keyboards.length === 0
-      ? <Stack align="flex-start" gap="xs"><Text c="dimmed">No keyboards yet.</Text>
-          <Group><Button onClick={() => setDetecting(true)}>Detect console</Button><Button variant="default" onClick={() => void useComputer()}>Use computer keyboard</Button></Group></Stack>
-      : <Table.ScrollContainer minWidth={760}><Table verticalSpacing="sm">
-          <Table.Thead><Table.Tr><Table.Th>Keyboard</Table.Th><Table.Th>Device</Table.Th><Table.Th>Channel</Table.Th><Table.Th>Range</Table.Th>{state.organ && <Table.Th>Plays</Table.Th>}<Table.Th/></Table.Tr></Table.Thead>
-          <Table.Tbody>{keyboards.map(keyboard => <KeyboardRow key={`${keyboard.idx}-${keyboard.name}`} keyboard={keyboard} state={state} act={act}
-            learning={learning?.keyboard === keyboard.idx ? learning : undefined}/>)}</Table.Tbody>
-        </Table></Table.ScrollContainer>}
-    {keyboards.length > 0 && <Group>
-      <Button variant="default" leftSection={<Plus size={16}/>} onClick={() => void act('console/add', {}, 'The keyboard could not be added.')}>Manual</Button>
-      <Button variant="default" leftSection={<Plus size={16}/>} onClick={() => void act('console/add', { pedal: 1 }, 'The keyboard could not be added.')}>Pedalboard</Button>
-    </Group>}
+      {state.organ
+        ? <Table.ScrollContainer minWidth={640}><Table verticalSpacing="sm">
+            <Table.Thead><Table.Tr><Table.Th>Manual</Table.Th><Table.Th>Played from</Table.Th><Table.Th>Device</Table.Th><Table.Th/></Table.Tr></Table.Thead>
+            <Table.Tbody>{state.manuals.map(division => <DivisionRow key={division.idx} division={division} state={state} act={act}/>)}</Table.Tbody>
+          </Table></Table.ScrollContainer>
+        : <Text c="dimmed">Load an organ to choose the keyboard for each of its manuals.</Text>}
+    </Stack>
+    {keyboards.length > 0 && <Stack>
+      <Text fw={600}>Your keyboards</Text>
+      <Table.ScrollContainer minWidth={640}><Table verticalSpacing="sm">
+        <Table.Thead><Table.Tr><Table.Th>Name</Table.Th><Table.Th>Device</Table.Th><Table.Th>Channel</Table.Th><Table.Th>Range</Table.Th><Table.Th/></Table.Tr></Table.Thead>
+        <Table.Tbody>{keyboards.map(keyboard => <KeyboardRow key={`${keyboard.idx}-${keyboard.name}`} keyboard={keyboard} state={state} act={act}
+          learning={state.console?.learning?.keyboard === keyboard.idx ? state.console.learning : undefined}/>)}</Table.Tbody>
+      </Table></Table.ScrollContainer>
+    </Stack>}
     {failure && <Text c="red">{failure}</Text>}
-    <DetectConsole opened={detecting} state={state} send={send} close={() => setDetecting(false)}/>
+    <DetectAll opened={detecting} state={state} send={send} close={() => setDetecting(false)}/>
   </Stack>;
 }
 
-type Act = (path: string, values: Record<string, string | number>, message: string) => Promise<Snapshot | undefined>;
+function DivisionRow({ division, state, act }: { division: Division; state: Snapshot; act: Act }) {
+  const keyboards = state.console?.keyboards ?? [];
+  const midi = state.midi.manuals.find(m => m.idx === division.idx);
+  const current = midi?.keyboard ?? undefined;
+  const own = midi?.inputs ?? [];
+  const listening = state.console?.learning?.manual === division.idx;
+  const value = midi?.automatic ? 'auto' : current === undefined ? 'none' : keyboards[current]?.name ?? 'auto';
+  const automatic = current !== undefined ? `${keyboards[current]?.name} (automatic)` : own.length ? 'This organ’s own' : 'Nothing (automatic)';
+  const choose = (keyboard: string) => act('console/map', { manual: division.idx, keyboard }, `${division.name} could not be changed.`);
+  return <Table.Tr data-learning={listening}>
+    <Table.Td><Group gap="xs" wrap="nowrap"><Text fw={600}>{division.name}</Text>{division.pedal && !/pedal/i.test(division.name) && <Badge variant="default" size="sm">Pedal</Badge>}</Group></Table.Td>
+    {listening ? <Table.Td colSpan={2}><Group gap="sm" wrap="nowrap"><Loader size="xs"/>
+        <Text>Press any key on the keyboard for {division.name}.</Text>
+        <Button size="xs" variant="default" onClick={() => void act('console/learn', {}, 'Detection could not stop.')}>Cancel</Button></Group></Table.Td>
+      : <>
+        <Table.Td><Select aria-label={`${division.name} played from`} w={220} value={value} allowDeselect={false} disabled={!keyboards.length && !own.length}
+          data={[{ value: 'auto', label: automatic }, ...keyboards.map(k => ({ value: k.name, label: k.name })), { value: 'none', label: 'Nothing' }]}
+          onChange={v => v && void choose(v)}/></Table.Td>
+        <Table.Td><Stack gap={2}>
+          <Text size="sm" c={current === undefined ? 'dimmed' : undefined}>{current === undefined ? (own.length ? '' : '—') : describe(keyboards[current])}</Text>
+          {own.map(input => <Group key={input.slot} gap={4} wrap="nowrap"><Text size="sm">{input.device}{input.channel ? ` · channel ${input.channel}` : ''}</Text>
+            <Button size="compact-xs" variant="subtle" color="gray" onClick={() => void act('midi/unbind', { manual: division.idx, slot: input.slot }, 'That input could not be removed.')}>Remove</Button></Group>)}
+        </Stack></Table.Td>
+      </>}
+    <Table.Td>{!listening && <Button variant="default" onClick={() => void act('console/learn', { manual: division.idx }, 'Detection could not start.')}>Detect</Button>}</Table.Td>
+  </Table.Tr>;
+}
+
 type Learning = NonNullable<NonNullable<Snapshot['console']>['learning']>;
 
 function KeyboardRow({ keyboard, state, learning, act }: { keyboard: ConsoleKeyboard; state: Snapshot; learning?: Learning; act: Act }) {
@@ -56,27 +87,18 @@ function KeyboardRow({ keyboard, state, learning, act }: { keyboard: ConsoleKeyb
   const devices = [{ value: 'none', label: 'None' }, ...[...new Set([COMPUTER_KEYBOARD, ...ports])].map(name => ({ value: name, label: name })),
     ...(keyboard.device && !ports.includes(keyboard.device) && !computer ? [{ value: keyboard.device, label: `${keyboard.device} (not connected)` }] : [])];
   const set = (values: Record<string, string | number>) => act('console/set', { keyboard: keyboard.idx, ...values }, `${keyboard.name} could not be changed.`);
-  const listen = (range: boolean) => act('console/learn', { keyboard: keyboard.idx, ...(range ? { range: 1 } : {}) }, 'Detection could not start.');
-  const plays = keyboard.plays.map(i => state.manuals.find(m => m.idx === i)?.name).filter(Boolean).join(', ');
   const range = keyboard.low !== null && keyboard.high !== null ? `${noteName(keyboard.low)}–${noteName(keyboard.high)}` : computer ? '—' : 'Organ’s own';
-  return <Table.Tr data-learning={Boolean(learning)}>
+  return <Table.Tr>
     <Table.Td><Group gap="xs" wrap="nowrap"><KeyboardName keyboard={keyboard} rename={name => set({ name })}/>{keyboard.pedal && <Badge variant="default" size="sm">Pedal</Badge>}</Group></Table.Td>
-    {learning ? <Table.Td colSpan={state.organ ? 4 : 3}>
-      <Group gap="sm" wrap="nowrap"><Loader size="xs"/>
-        <Text>{learning.repeat ? `That key is on ${learning.repeat}. ` : ''}{learning.range ? (learning.step === 'low' ? 'Press the lowest key.' : 'Now the highest key.') : `Press any key on ${keyboard.name}.`}</Text>
+    <Table.Td><Select aria-label={`${keyboard.name} device`} w={220} value={keyboard.device || 'none'} data={devices} allowDeselect={false} onChange={v => v && void set({ device: v === 'none' ? '' : v })}/></Table.Td>
+    <Table.Td><Select aria-label={`${keyboard.name} channel`} w={84} disabled={computer || !keyboard.device} value={keyboard.channel === null ? 'any' : String(keyboard.channel)} data={channels} allowDeselect={false}
+      onChange={v => v && void set({ ch: v })}/></Table.Td>
+    <Table.Td>{learning ? <Group gap="sm" wrap="nowrap"><Loader size="xs"/><Text size="sm">{learning.step === 'low' ? 'Press the lowest key.' : 'Now the highest key.'}</Text>
         <Button size="xs" variant="default" onClick={() => void act('console/learn', {}, 'Detection could not stop.')}>Cancel</Button></Group>
-    </Table.Td> : <>
-      <Table.Td><Group gap="xs" wrap="nowrap">
-        <Select aria-label={`${keyboard.name} device`} w={220} value={keyboard.device || 'none'} data={devices} allowDeselect={false} onChange={v => v && void set({ device: v === 'none' ? '' : v })}/>
-        <Button size="xs" variant="default" onClick={() => void listen(false)}>Detect</Button></Group></Table.Td>
-      <Table.Td><Select aria-label={`${keyboard.name} channel`} w={84} disabled={computer || !keyboard.device} value={keyboard.channel === null ? 'any' : String(keyboard.channel)} data={channels} allowDeselect={false}
-        onChange={v => v && void set({ ch: v })}/></Table.Td>
-      <Table.Td><Group gap={4} wrap="nowrap"><Text size="sm" style={{ whiteSpace: 'nowrap' }}>{range}</Text>
-        {!computer && keyboard.device && <Button size="xs" variant="subtle" onClick={() => void listen(true)}>Detect</Button>}
+      : <Group gap={4} wrap="nowrap"><Text size="sm" style={{ whiteSpace: 'nowrap' }}>{range}</Text>
+        {!computer && keyboard.device && <Button size="xs" variant="subtle" onClick={() => void act('console/learn', { keyboard: keyboard.idx, range: 1 }, 'Detection could not start.')}>Detect</Button>}
         {keyboard.low !== null && <Tooltip label="Use the organ’s range"><ActionIcon variant="subtle" color="gray" aria-label={`Reset ${keyboard.name} range`} onClick={() => void set({ range: 'organ' })}><RotateCcw size={16}/></ActionIcon></Tooltip>}
-      </Group></Table.Td>
-      {state.organ && <Table.Td><Text size="sm" c={plays ? undefined : 'dimmed'}>{plays || 'Nothing'}</Text></Table.Td>}
-    </>}
+      </Group>}</Table.Td>
     <Table.Td><ActionIcon variant="subtle" color="red" aria-label={`Remove ${keyboard.name}`} onClick={() => void act('console/remove', { keyboard: keyboard.idx }, `${keyboard.name} could not be removed.`)}><Trash2 size={18}/></ActionIcon></Table.Td>
   </Table.Tr>;
 }
@@ -89,79 +111,54 @@ function KeyboardName({ keyboard, rename }: { keyboard: ConsoleKeyboard; rename:
     onBlur={commit} onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur(); if (e.key === 'Escape') { setName(keyboard.name); e.currentTarget.blur(); } }}/>;
 }
 
-type Phase = 'hand' | 'pedal' | 'done';
-
-/** Press a key on each manual, bottom to top, then a pedal. Detected keyboards
- * take the console's places in order; Done removes any the console no longer has. */
-function DetectConsole({ opened, state, send, close }: { opened: boolean; state: Snapshot; send: Send; close: () => void }) {
-  const [phase, setPhase] = useState<Phase>('hand');
-  const [heard, setHeard] = useState<string[]>([]);
+/** Each of the organ's manuals in turn: press a key on the keyboard that should play it. */
+function DetectAll({ opened, state, send, close }: { opened: boolean; state: Snapshot; send: Send; close: () => void }) {
+  const [step, setStep] = useState(0);
   const [missed, setMissed] = useState(false);
-  const counts = useRef({ hand: 0, pedal: 0 });
   const baseline = useRef<number>(undefined);
   // A poll answered before the learn request can show no wait yet; only a wait seen to end is a miss.
   const seen = useRef(false);
-  const keyboards = state.console?.keyboards ?? [];
-  const console_ = state.console;
+  const manuals = state.manuals;
+  const division = manuals[step];
 
-  const listen = (next: Exclude<Phase, 'done'>) => {
-    const places = keyboards.filter(k => k.pedal === (next === 'pedal'));
-    const target = places[counts.current[next]]?.idx ?? keyboards.length;
+  const listen = (index: number) => {
     setMissed(false);
     seen.current = false;
-    baseline.current = console_?.heard ?? 0;
-    void send('console/learn', { keyboard: target, ...(next === 'pedal' ? { pedal: 1 } : {}) });
+    if (index >= manuals.length) { baseline.current = undefined; void send('console/learn').catch(() => {}); return; }
+    baseline.current = state.console?.heard ?? 0;
+    void send('console/learn', { manual: manuals[index].idx }).catch(() => {});
   };
-  const stop = () => { baseline.current = undefined; void send('console/learn').catch(() => {}); };
+  const go = (index: number) => { setStep(index); listen(index); };
 
+  useEffect(() => { if (opened) go(0); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [opened]);
   useEffect(() => {
-    if (!opened) return;
-    counts.current = { hand: 0, pedal: 0 };
-    setHeard([]); setPhase('hand'); listen('hand');
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [opened]);
-
-  useEffect(() => {
+    const console_ = state.console;
     if (!opened || baseline.current === undefined || !console_) return;
-    if (console_.heard > baseline.current) {
-      baseline.current = undefined;
-      const newest = phase === 'pedal'
-        ? console_.keyboards.filter(k => k.pedal)[counts.current.pedal]
-        : console_.keyboards.filter(k => !k.pedal)[counts.current.hand];
-      setHeard(list => [...list, newest ? `${newest.name}: ${newest.device}${newest.channel ? `, channel ${newest.channel}` : ''}` : '']);
-      if (phase === 'pedal') { counts.current.pedal += 1; setPhase('done'); }
-      else { counts.current.hand += 1; listen('hand'); }
-    } else if (console_.learning) seen.current = true;
+    if (console_.heard > baseline.current) go(step + 1);
+    else if (console_.learning) seen.current = true;
     else if (seen.current) { baseline.current = undefined; setMissed(true); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [console_, opened]);
+  }, [state.console, opened]);
 
-  const toPedal = () => { stop(); setPhase('pedal'); listen('pedal'); };
-  const finish = async () => {
-    stop();
-    const latest = await send('console/learn');
-    const all = latest.console?.keyboards ?? [];
-    const extra = [...all.filter(k => !k.pedal).slice(counts.current.hand), ...all.filter(k => k.pedal).slice(counts.current.pedal)]
-      .map(k => k.idx).sort((a, b) => b - a);
-    for (const keyboard of extra) await send('console/remove', { keyboard });
-    close();
-  };
-  const cancel = () => { stop(); close(); };
-  const repeat = console_?.learning?.repeat;
-  const prompt = phase === 'pedal' ? 'Press any pedal.'
-    : counts.current.hand === 0 ? 'Press any key on your lowest manual.' : 'Press any key on the next manual up.';
-
-  return <Drawer opened={opened} onClose={cancel} position="right" title="Detect console" closeButtonProps={{ 'aria-label': 'Close' }}>
+  const finish = () => { baseline.current = undefined; void send('console/learn').catch(() => {}); close(); };
+  const keyboards = state.console?.keyboards ?? [];
+  return <Drawer opened={opened} onClose={finish} position="right" title="Detect all" closeButtonProps={{ 'aria-label': 'Close' }}>
     <Stack>
-      {heard.map((line, i) => <Text key={i} size="sm">✓ {line}</Text>)}
-      {phase !== 'done' && <Group gap="sm"><Loader size="sm"/><Text fw={600}>{missed ? 'Nothing heard.' : repeat ? `That was ${repeat}. ${prompt}` : prompt}</Text></Group>}
-      {phase !== 'done' && <Text size="sm" c="dimmed">A letter key picks the computer keyboard.</Text>}
-      {missed && <Button variant="default" onClick={() => listen(phase === 'pedal' ? 'pedal' : 'hand')}>Try again</Button>}
-      {phase === 'hand' && counts.current.hand > 0 && <Button variant="default" onClick={toPedal}>That was the top manual</Button>}
-      {phase === 'pedal' && <Button variant="default" onClick={() => { stop(); setPhase('done'); }}>No pedalboard</Button>}
-      {phase === 'done' && <Text fw={600}>Console detected.</Text>}
-      <Group justify="flex-end"><Button variant="default" onClick={cancel}>Cancel</Button>
-        <Button disabled={phase !== 'done'} onClick={() => void finish()}>Done</Button></Group>
+      {manuals.map((manual, index) => {
+        const keyboard = state.midi.manuals.find(m => m.idx === manual.idx)?.keyboard;
+        const found = keyboard === null || keyboard === undefined ? undefined : keyboards[keyboard];
+        return <Group key={manual.idx} justify="space-between" wrap="nowrap">
+          <Text fw={index === step ? 600 : undefined}>{manual.name}</Text>
+          {index < step && <Text size="sm" c={found ? undefined : 'dimmed'}>{found ? `✓ ${found.name}` : 'Nothing'}</Text>}
+        </Group>;
+      })}
+      {division ? <>
+        <Group gap="sm" wrap="nowrap"><Loader size="sm"/><Text fw={600}>{missed ? 'Nothing heard.' : `Press any key on the keyboard for ${division.name}.`}</Text></Group>
+        <Text size="sm" c="dimmed">A letter key picks the computer keyboard.</Text>
+        <Group>{missed && <Button variant="default" onClick={() => listen(step)}>Try again</Button>}
+          <Button variant="default" onClick={() => go(step + 1)}>Skip</Button></Group>
+      </> : <Text fw={600}>Every manual has its keyboard.</Text>}
+      <Group justify="flex-end"><Button onClick={finish}>{division ? 'Stop' : 'Done'}</Button></Group>
     </Stack>
   </Drawer>;
 }

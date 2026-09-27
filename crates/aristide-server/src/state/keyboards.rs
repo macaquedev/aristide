@@ -308,6 +308,56 @@ impl State {
     /// One key heard while a console keyboard listens. A key from a
     /// keyboard the console already has is a slip — pressing the same
     /// manual twice — and the wait goes on with that keyboard named.
+    /// Wait for a key on whichever keyboard should play `manual`.
+    pub fn listen_division(&mut self, manual: usize) {
+        self.pending = None;
+        self.learn = Some(Learn {
+            target: LearnTarget::Division { manual },
+            heard: None,
+            repeat: None,
+            started: Instant::now(),
+        });
+    }
+
+    /// The keyboard pressed now plays `manual`: a console keyboard already
+    /// on that device and channel, else a new one. One keyboard plays one
+    /// of the organ's manuals, so any other it played falls silent.
+    fn learn_division_key(&mut self, manual: usize, device: &str, channel: Option<u8>) {
+        self.learn = None;
+        self.console_heard += 1;
+        let channel = if device == COMPUTER_KEYBOARD {
+            None
+        } else {
+            channel
+        };
+        let known = self.midi_config.console.iter().position(|k| {
+            k.input.device == device && channels_overlap(k.input.channel, channel)
+        });
+        let index = match known {
+            Some(index) => index,
+            None => {
+                let index = self.add_console_keyboard(self.manual_is_pedal(manual));
+                let _ = self.edit_console_keyboard(
+                    index,
+                    KeyboardEdit {
+                        device: Some(device.to_string()),
+                        channel: Some(channel),
+                        ..Default::default()
+                    },
+                );
+                index
+            }
+        };
+        let name = self.midi_config.console[index].name.clone();
+        tracing::info!("console: {name} ({device}) plays manual {manual}");
+        for other in 0..self.manual_names().len() {
+            if other != manual && self.played_from(other).keyboard == Some(index) {
+                let _ = self.map_manual(other, Some(KeyboardChoice::Nothing));
+            }
+        }
+        let _ = self.map_manual(manual, Some(KeyboardChoice::Console(name)));
+    }
+
     pub(super) fn learn_console_key(
         &mut self,
         mut learn: Learn,
@@ -315,6 +365,10 @@ impl State {
         channel: Option<u8>,
         key: u8,
     ) {
+        if let LearnTarget::Division { manual } = learn.target {
+            self.learn_division_key(manual, device, channel);
+            return;
+        }
         let LearnTarget::Console {
             keyboard,
             pedal,

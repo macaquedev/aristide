@@ -2432,6 +2432,39 @@ mod tests {
         assert!(state_json(&state).contains("\"console\":{\"keyboards\":[],\"heard\""));
     }
 
+    /// Hauptwerk's auto-detect, per division of the organ: press a key on
+    /// the keyboard that should play it. A keyboard the console lacks is
+    /// added; one already playing another division moves here.
+    #[test]
+    fn a_division_is_played_from_the_keyboard_pressed() {
+        let Some(state) = demo_state() else { return };
+        let (pedal, hand) = {
+            let locked = state.lock().expect("state");
+            let Control::Organ(console) = &locked.control else { panic!("organ expected") };
+            let count = console.manual_states().len();
+            (
+                (0..count).find(|&m| console.manual_pedal(m)).expect("a pedal"),
+                (0..count).find(|&m| !console.manual_pedal(m)).expect("a hand manual"),
+            )
+        };
+        respond(&state, &Method::Post, &format!("/api/console/learn?manual={pedal}"));
+        assert!(state_json(&state).contains(&format!("\"learning\":{{\"keyboard\":null,\"manual\":{pedal}")));
+        respond(&state, &Method::Post, "/api/key?code=KeyZ&on=1");
+        let locked = state.lock().expect("state");
+        assert_eq!(locked.console_keyboards().len(), 1);
+        assert!(locked.console_keyboards()[0].pedal, "a pedal's keyboard is a pedalboard");
+        assert_eq!(locked.played_from(pedal), crate::PlayedFrom { keyboard: Some(0), automatic: false });
+        assert!(locked.learn.is_none());
+        drop(locked);
+
+        respond(&state, &Method::Post, &format!("/api/console/learn?manual={hand}"));
+        respond(&state, &Method::Post, "/api/key?code=KeyX&on=1");
+        let locked = state.lock().expect("state");
+        assert_eq!(locked.console_keyboards().len(), 1, "the same keyboard, not a new one");
+        assert_eq!(locked.played_from(hand).keyboard, Some(0));
+        assert_eq!(locked.played_from(pedal), crate::PlayedFrom { keyboard: None, automatic: false });
+    }
+
     /// A manual the organ wired for itself before the console existed
     /// keeps playing from exactly that, not from the console as well.
     #[test]

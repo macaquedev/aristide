@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Button, Drawer, Group, Loader, Modal, SegmentedControl, Select, Stack, Switch, Text, TextInput } from '@mantine/core';
 import { Folder, Plus } from 'lucide-react';
-import { canPickFiles, editInstrument, endpoint, organFiles, pickFile, request, type Snapshot } from '../api';
+import { canPickFiles, editInstrument, organFiles, pickFile, request, type Snapshot } from '../api';
 import { StopEditor } from './StopEditor';
 import './organ.css';
 
@@ -99,7 +99,7 @@ export function OrganPanel({ organ, state, stopId, select, offerUndo, openScope 
     <div className="organ-detail">
       {busy && <Group className="organ-busy" gap="xs" role="status"><Loader size="xs"/><Text size="sm">Rebuilding the organ</Text></Group>}
       {stop && <StopEditor key={stop.id} organ={organ} stops={stops} stopId={stop.id} actions={stopActions} offerUndo={offerUndo} openScope={openScope}/>}
-      {division && <DivisionEditor state={state} division={division} count={manuals.length} stops={stops.filter(s => s.midx === division.idx).length} busy={busy}
+      {division && <DivisionEditor division={division} count={manuals.length} stops={stops.filter(s => s.midx === division.idx).length} busy={busy}
         rename={name => change('organ/manual/rename', { manual: division.idx, name }, 'The division could not be renamed. Use a name no other division has.', { kind: 'division', name })}
         kind={kind => void change('organ/manual/kind', { manual: division.idx, kind }, 'The keyboard type could not be changed.', { kind: 'division', name: division.name })}
         order={to => void change('organ/manual/order', { manual: division.idx, to }, 'The division could not be moved.', { kind: 'division', name: division.name })}
@@ -142,8 +142,8 @@ function Rename({ label, value, disabled, save, visible }: { label: string; valu
     onBlur={commit} onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur(); if (e.key === 'Escape') { setDraft(value); e.currentTarget.blur(); } }}/>;
 }
 
-function DivisionEditor({ state, division, count, stops, busy, rename, kind, order, remove }: {
-  state: Snapshot; division: Snapshot['manuals'][number]; count: number; stops: number; busy: boolean;
+function DivisionEditor({ division, count, stops, busy, rename, kind, order, remove }: {
+  division: Snapshot['manuals'][number]; count: number; stops: number; busy: boolean;
   rename: (name: string) => Promise<boolean>; kind: (kind: string) => void; order: (to: number) => void; remove: () => void;
 }) {
   const last = division.first_key !== undefined && division.key_count !== undefined ? division.first_key + division.key_count - 1 : undefined;
@@ -151,8 +151,7 @@ function DivisionEditor({ state, division, count, stops, busy, rename, kind, ord
     <div><Text className="roll-stop-name" fw={600}>{division.name}</Text><Text size="xs" c="dimmed">{stops} {stops === 1 ? 'stop' : 'stops'}{last !== undefined && ` · keys ${division.first_key}–${last}`}</Text></div>
     <Group align="end"><Rename label="Division name" visible="Name" value={division.name} disabled={busy} save={rename}/>
       <Stack gap={4}><Text size="sm" fw={500}>Keyboard</Text><SegmentedControl aria-label="Keyboard" disabled={busy} value={division.pedal ? 'pedal' : 'manual'} onChange={kind}
-        data={[{ value: 'manual', label: 'Manual' }, { value: 'pedal', label: 'Pedal' }]}/></Stack>
-      <PlayedFrom state={state} manual={division.idx}/></Group>
+        data={[{ value: 'manual', label: 'Manual' }, { value: 'pedal', label: 'Pedal' }]}/></Stack></Group>
     <Group><Button variant="default" disabled={busy || division.idx === 0} onClick={() => order(division.idx - 1)}>Move up</Button>
       <Button variant="default" disabled={busy || division.idx === count - 1} onClick={() => order(division.idx + 1)}>Move down</Button>
       <Button variant="subtle" color="red" disabled={busy} onClick={remove}>Remove division</Button></Group>
@@ -240,28 +239,4 @@ function AddCoupler({ opened, manuals, close, add }: { opened: boolean; manuals:
       <Button type="submit" disabled={route.from === route.to}>Add coupler</Button>
     </Stack></form>
   </Drawer>;
-}
-
-/** Which of the player's console keyboards plays a division: the console's order unless this organ chooses. */
-function PlayedFrom({ state, manual }: { state: Snapshot; manual: number }) {
-  const [failure, setFailure] = useState(false);
-  const keyboards = state.console?.keyboards ?? [];
-  const midi = state.midi.manuals.find(m => m.idx === manual);
-  const current = midi?.keyboard ?? undefined;
-  const own = midi?.inputs ?? [];
-  const map = (values: Record<string, string | number>) => {
-    setFailure(false);
-    request('POST', endpoint(values.slot === undefined ? 'console/map' : 'midi/unbind', { manual, ...values })).catch(() => setFailure(true));
-  };
-  const automatic = current !== undefined ? `Automatic (${keyboards[current]?.name})` : own.length ? 'Automatic (this organ’s own)' : 'Automatic (none)';
-  const value = midi?.automatic ? 'auto' : current === undefined ? 'none' : keyboards[current]?.name ?? 'auto';
-  return <Stack gap={4}>
-    <Select label="Played from" w={220} value={value} allowDeselect={false} disabled={!keyboards.length && !own.length}
-      data={[{ value: 'auto', label: automatic }, ...keyboards.map(k => ({ value: k.name, label: k.name })), { value: 'none', label: 'Nothing' }]}
-      onChange={v => v && map({ keyboard: v })}/>
-    {!keyboards.length && <Text size="xs" c="dimmed">Add your keyboards in Settings › Console.</Text>}
-    {own.map(input => <Group key={input.slot} gap={4}><Text size="xs" c="dimmed">Also {input.device}{input.channel ? `, channel ${input.channel}` : ''}</Text>
-      <Button size="compact-xs" variant="subtle" color="gray" onClick={() => map({ slot: input.slot })}>Remove</Button></Group>)}
-    {failure && <Text size="xs" c="red">That keyboard could not be chosen.</Text>}
-  </Stack>;
 }
