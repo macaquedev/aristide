@@ -81,7 +81,8 @@ const HEADER: &str = "\
 # A [[library]] entry is one organ this machine has loaded — the
 # console's picker lists them as Recent, most recent first. Removing
 # one only removes it from that list; the organ's file and its
-# assignments below are kept.
+# assignments below are kept. `played` is when it last loaded (Unix
+# seconds).
 # `last_instrument` records the last successfully loaded session, including
 # all source paths when the instrument has not yet been named. Nothing loads
 # at startup: the app opens on the Library.
@@ -237,6 +238,9 @@ impl SamplePrefs {
 pub struct LibraryEntry {
     pub name: String,
     pub path: PathBuf,
+    /// When this organ last loaded, in seconds since the Unix epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub played: Option<u64>,
 }
 
 impl MidiConfig {
@@ -249,6 +253,10 @@ impl MidiConfig {
             LibraryEntry {
                 name: name.to_string(),
                 path: path.to_path_buf(),
+                played: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()
+                    .map(|elapsed| elapsed.as_secs()),
             },
         );
     }
@@ -594,6 +602,22 @@ pub fn default_path() -> Option<PathBuf> {
 /// tracks them by path like any other organ.
 pub fn organs_dir() -> Option<PathBuf> {
     Some(default_path()?.parent()?.join("organs"))
+}
+
+/// Whether `path` is an organ file Aristide keeps in [`organs_dir`]:
+/// the player's own, so deleting it from the Library deletes the file.
+/// Anything elsewhere (a sample set, a file the player placed) is only
+/// ever taken off the list.
+pub fn is_owned_organ(path: &Path) -> bool {
+    let Some(dir) = organs_dir().and_then(|dir| dir.canonicalize().ok()) else {
+        return false;
+    };
+    aristide_formats::instrument::is_definition(path)
+        && path
+            .canonicalize()
+            .ok()
+            .and_then(|path| path.parent().map(Path::to_path_buf))
+            .is_some_and(|parent| parent == dir)
 }
 
 /// Where decoded-sample caches live: `cache/` next to `midi.toml`.

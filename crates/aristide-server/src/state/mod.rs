@@ -721,6 +721,95 @@ impl State {
         });
     }
 
+    /// Whether the library entry at `path` is the organ playing now.
+    pub fn is_loaded(&self, path: &std::path::Path) -> bool {
+        self.setup.sources.iter().any(|(_, source)| source == path)
+            || self.composite_path.as_ref().is_some_and(|file| {
+                file == path || file.canonicalize().ok().as_deref() == Some(path)
+            })
+    }
+
+    /// Rename an organ from the Library, loaded or not. The name lands
+    /// where the loader reads it back — the organ file, or a sample
+    /// set's sidecar — and the assignments keyed by the old name move
+    /// with it. Two organs sharing a name would share their wiring, so
+    /// a name already in the library is refused.
+    pub fn rename_library_organ(
+        &mut self,
+        path: &std::path::Path,
+        name: &str,
+    ) -> Result<(), String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("the organ needs a name".into());
+        }
+        let Some(old) = self
+            .midi_config
+            .library
+            .iter()
+            .find(|entry| entry.path == path)
+            .map(|entry| entry.name.clone())
+        else {
+            return Err("that organ is not in the library".into());
+        };
+        if old == name {
+            return Ok(());
+        }
+        if self
+            .midi_config
+            .library
+            .iter()
+            .any(|entry| entry.path != path && entry.name == name)
+        {
+            return Err(format!("another organ is already called {name:?}"));
+        }
+        if self.is_loaded(path) {
+            return self.rename_organ(name);
+        }
+        if aristide_formats::instrument::is_definition(path) {
+            config::write_composite_name(path, name)?;
+        } else {
+            config::write_sidecar_name(path, name)?;
+        }
+        if !self.midi_config.organs.contains_key(name)
+            && let Some(wiring) = self.midi_config.organs.remove(&old)
+        {
+            self.midi_config.organs.insert(name.to_string(), wiring);
+        }
+        for entry in &mut self.midi_config.library {
+            if entry.path == path {
+                entry.name = name.to_string();
+            }
+        }
+        tracing::info!("library organ renamed: {old:?} → {name:?}");
+        self.persist();
+        Ok(())
+    }
+
+    /// Delete an organ from the Library. An organ file Aristide keeps
+    /// (see [`config::is_owned_organ`]) is deleted with its settings;
+    /// a sample set or a file elsewhere only leaves the list, and no
+    /// sample is ever touched. The organ playing now cannot go.
+    pub fn delete_library_organ(&mut self, path: &std::path::Path) -> Result<(), String> {
+        if self.is_loaded(path) {
+            return Err("the organ that is playing cannot be deleted".into());
+        }
+        if !self.midi_config.library.iter().any(|entry| entry.path == path) {
+            return Err("that organ is not in the library".into());
+        }
+        if config::is_owned_organ(path) {
+            match std::fs::remove_file(path) {
+                Ok(()) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => return Err(format!("{}: {err}", path.display())),
+            }
+            tracing::info!("organ file deleted: {}", path.display());
+        }
+        self.midi_config.last_instrument.retain(|file| file != path);
+        self.forget_organ(path);
+        Ok(())
+    }
+
     /// Drop an organ from the picker's library and save the change.
     pub fn forget_organ(&mut self, path: &std::path::Path) -> bool {
         let removed = self.midi_config.forget(path);

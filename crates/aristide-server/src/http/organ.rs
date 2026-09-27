@@ -424,6 +424,104 @@ pub(super) fn library_forget(state: &Mutex<State>, query: &str) -> Reply {
     }
 }
 
+// Rename a Library organ, loaded or not.
+pub(super) fn library_rename(state: &Mutex<State>, query: &str) -> Reply {
+    let (Some(path), Some(name)) = (
+        param(query, "path").map(unescape),
+        param(query, "name").map(unescape),
+    ) else {
+        return bad_request("missing path or name");
+    };
+    let mut state = state.lock().expect("state poisoned");
+    match state.rename_library_organ(std::path::Path::new(&path), &name) {
+        Ok(()) => json(state_json_locked(&state)),
+        Err(err) => bad_request(&err),
+    }
+}
+
+// Delete a Library organ that is not playing: Aristide's own organ
+// file goes, anything else only leaves the list.
+pub(super) fn library_delete(state: &Mutex<State>, query: &str) -> Reply {
+    let Some(path) = param(query, "path").map(unescape) else {
+        return bad_request("missing path");
+    };
+    let mut state = state.lock().expect("state poisoned");
+    match state.delete_library_organ(std::path::Path::new(&path)) {
+        Ok(()) => json(state_json_locked(&state)),
+        Err(err) => bad_request(&err),
+    }
+}
+
+// What each Library organ is: its format and where its samples live.
+// Read from disk on request, not on every state poll.
+pub(super) fn library_details(state: &Mutex<State>, _query: &str) -> Reply {
+    let paths: Vec<std::path::PathBuf> = state
+        .lock()
+        .expect("state poisoned")
+        .midi_config
+        .present()
+        .map(|entry| entry.path.clone())
+        .collect();
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let rows: Vec<String> = paths
+        .iter()
+        .map(|path| {
+            let (format, location) = describe_organ(path);
+            let location = location.map(|dir| {
+                match home.as_deref().and_then(|home| dir.strip_prefix(home).ok()) {
+                    Some(rest) => format!("~/{}", rest.display()),
+                    None => dir.display().to_string(),
+                }
+            });
+            format!(
+                "{{\"path\":{},\"format\":{},\"location\":{}}}",
+                json_string(&path.display().to_string()),
+                json_string(format),
+                location.as_deref().map_or("null".to_string(), json_string),
+            )
+        })
+        .collect();
+    json(format!("[{}]", rows.join(",")))
+}
+
+/// An organ's sample format and the folder its samples live in. A
+/// composite with one source describes that source; one with several
+/// is an Aristide organ with no single home.
+fn describe_organ(path: &std::path::Path) -> (&'static str, Option<std::path::PathBuf>) {
+    use aristide_formats::{hauptwerk, instrument};
+    if hauptwerk::is_definition(path) {
+        // <package>/OrganDefinitions/<organ>.Organ_Hauptwerk_xml
+        let package = path.parent().and_then(std::path::Path::parent);
+        return ("Hauptwerk", package.map(std::path::Path::to_path_buf));
+    }
+    if !instrument::is_definition(path) {
+        return ("GrandOrgue", path.parent().map(std::path::Path::to_path_buf));
+    }
+    let definition = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| toml::from_str::<instrument::Definition>(&text).ok());
+    let Some(definition) = definition else {
+        return ("Aristide", None);
+    };
+    let mut sources = definition.sources.values();
+    match (sources.next(), sources.next()) {
+        (Some(source), None) => {
+            let set = source.path();
+            let set = if set.is_absolute() {
+                set.to_path_buf()
+            } else {
+                path.parent().unwrap_or(std::path::Path::new("")).join(set)
+            };
+            if instrument::is_definition(&set) {
+                ("Aristide", None)
+            } else {
+                describe_organ(&set)
+            }
+        }
+        _ => ("Aristide", None),
+    }
+}
+
 // The picker's file browser: subdirectories and loadable organ
 // files under `dir` (the home directory when absent). The bind
 // is localhost-only, which is the access control here as for

@@ -120,6 +120,9 @@ pub(crate) fn respond(
         (Method::Post, "/api/organ/new") => organ::create,
         (Method::Post, "/api/organ/rename") => organ::rename,
         (Method::Post, "/api/library/forget") => organ::library_forget,
+        (Method::Post, "/api/library/rename") => organ::library_rename,
+        (Method::Post, "/api/library/delete") => organ::library_delete,
+        (Method::Get, "/api/library") => organ::library_details,
         (Method::Post, "/api/prefs/samples") => prefs::samples,
         (Method::Get, "/api/browse") => organ::browse,
         (Method::Post, "/api/organ/save") => organ::save,
@@ -2626,7 +2629,7 @@ mod tests {
         let body = state_json(&state);
         assert!(
             body.contains(&format!(
-                "\"library\":[{{\"name\":\"Demo\",\"path\":{}}}]",
+                "\"library\":[{{\"name\":\"Demo\",\"path\":{},",
                 json_string(&set.display().to_string())
             )),
             "library present: {body}"
@@ -2639,6 +2642,74 @@ mod tests {
             &format!("/api/library/forget?path={}", set.display()),
         );
         assert!(state_json(&state).contains("\"library\":[]"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The Library renames an organ that isn't loaded: its file takes
+    /// the name, its wiring follows, and a name another organ already
+    /// has is refused.
+    #[test]
+    fn the_library_renames_an_organ_that_is_not_loaded() {
+        let dir = std::env::temp_dir().join("aristide-library-rename-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        let organ = dir.join("chapel.toml");
+        std::fs::write(&organ, "# mine\nname = \"Chapel\"\n").expect("fixture organ");
+        let other = dir.join("abbey.organ");
+        std::fs::write(&other, "[Organ]").expect("fixture set");
+        let state = tone_state();
+        {
+            let mut state = state.lock().expect("state poisoned");
+            state.midi_config.remember("Chapel", &organ);
+            state.midi_config.remember("Abbey", &other);
+            state.midi_config.organs.insert("Chapel".into(), Default::default());
+        }
+        let rename = |name: &str| {
+            let url = format!("/api/library/rename?path={}&name={name}", organ.display());
+            respond(&state, &Method::Post, &url).status_code().0
+        };
+        assert_eq!(rename("Abbey"), 400, "a taken name is refused");
+        assert_eq!(rename("Chapel%20Royal"), 200);
+        let text = std::fs::read_to_string(&organ).expect("organ file");
+        assert!(
+            text.contains("# mine") && text.contains("name = \"Chapel Royal\""),
+            "{text}"
+        );
+        let state = state.lock().expect("state poisoned");
+        assert!(state.midi_config.organs.contains_key("Chapel Royal"), "wiring follows");
+        assert!(!state.midi_config.organs.contains_key("Chapel"));
+        assert_eq!(state.midi_config.library[1].name, "Chapel Royal");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Deleting a sample set from the Library only takes it off the
+    /// list: the set is never touched. The playing organ can't go.
+    #[test]
+    fn deleting_a_set_from_the_library_keeps_its_files() {
+        let dir = std::env::temp_dir().join("aristide-library-delete-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        let set = dir.join("demo.organ");
+        let playing = dir.join("playing.organ");
+        std::fs::write(&set, "[Organ]").expect("fixture set");
+        std::fs::write(&playing, "[Organ]").expect("fixture set");
+        let state = tone_state();
+        {
+            let mut state = state.lock().expect("state poisoned");
+            state.midi_config.remember("Demo", &set);
+            state.midi_config.remember("Playing", &playing);
+            state.setup.sources = vec![("Playing".into(), playing.clone())];
+        }
+        let body = state_json(&state);
+        assert!(body.contains("\"loaded\":true,\"owned\":false"), "{body}");
+        let delete = |path: &Path| {
+            let url = format!("/api/library/delete?path={}", path.display());
+            respond(&state, &Method::Post, &url).status_code().0
+        };
+        assert_eq!(delete(&playing), 400, "the playing organ stays");
+        assert_eq!(delete(&set), 200);
+        assert!(set.exists(), "the sample set is untouched");
+        assert!(!state_json(&state).contains("\"name\":\"Demo\""), "gone from the list");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

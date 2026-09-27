@@ -113,7 +113,7 @@ struct Snapshot {
     load_error: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     load_warnings: Vec<String>,
-    library: Vec<LibraryView>,
+    library: Vec<LibraryEntryView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tuning: Option<TuningView>,
     /// Present whenever an organ is loaded, `null` when no pipe could
@@ -426,6 +426,18 @@ struct TremView {
 struct LibraryView {
     name: String,
     path: String,
+}
+
+/// A Library row: `owned` means deleting it deletes Aristide's own
+/// organ file; otherwise it only leaves the list.
+#[derive(Serialize)]
+struct LibraryEntryView {
+    name: String,
+    path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    played: Option<u64>,
+    loaded: bool,
+    owned: bool,
 }
 
 /// A tuning as its JSON object; a scale rides along when one stands in
@@ -1017,9 +1029,12 @@ fn snapshot(state: &State) -> Snapshot {
         library: state
             .midi_config
             .present()
-            .map(|entry| LibraryView {
+            .map(|entry| LibraryEntryView {
                 name: entry.name.clone(),
                 path: entry.path.display().to_string(),
+                played: entry.played,
+                loaded: state.is_loaded(&entry.path),
+                owned: crate::config::is_owned_organ(&entry.path),
             })
             .collect(),
         tuning,
