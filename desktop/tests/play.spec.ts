@@ -1,12 +1,13 @@
 import { test, expect, type Page } from '@playwright/test';
 
-async function rig(page: Page) {
+async function rig(page: Page, extraStops: object[] = []) {
   const requests: string[] = [];
   const state = {
     organ: 'Test organ',
     stops: [
       { id: 1, name: 'Bourdon', midx: 0, manual: 'Great', on: false, pitch: { native: 8, footage: null, cents: 0, gain: 0, own: false }, ranks: [{ id: 1, name: 'Bourdon' }] },
       { id: 2, name: 'Principal', midx: 1, manual: 'Pedal', on: false, pitch: { native: 16, footage: null, cents: 0, gain: 0, own: false }, ranks: [{ id: 2, name: 'Principal' }] },
+      ...extraStops,
     ],
     manuals: [{ idx: 0, name: 'Great', pedal: false, held: [] }, { idx: 1, name: 'Pedal', pedal: true, held: [] }],
     couplers: [], trems: [], generals: [] as number[], setter: false, gain: 0.178,
@@ -141,4 +142,14 @@ test('with no organ loaded the app opens on the Library', async ({ page }) => {
   await page.goto('/');
   await expect(page.getByRole('button', { name: 'Library', exact: true })).toHaveAttribute('aria-current', 'page');
   await expect(page.getByRole('button', { name: 'Load Test organ' })).toBeVisible();
+});
+
+test('stop pitches show footage as organ fractions', async ({ page }) => {
+  await rig(page, [
+    { id: 3, name: 'Twelfth', midx: 0, manual: 'Great', on: false, pitch: { native: 8 / 3, footage: null, cents: 0, gain: 0, own: false }, ranks: [{ id: 3, name: 'Twelfth' }] },
+    { id: 4, name: 'Septième', midx: 0, manual: 'Great', on: false, pitch: { native: 8, footage: 8 / 7, cents: 0, gain: 0, own: false }, ranks: [{ id: 4, name: 'Septième' }] },
+  ]);
+  await expect(page.getByRole('button', { name: 'Twelfth' })).toContainText('2⅔′');
+  await expect(page.getByRole('button', { name: 'Septième' })).toContainText('1⅐′');
+  await page.screenshot({ path: 'test-results/footage.png' });
 });
