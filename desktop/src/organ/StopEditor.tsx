@@ -198,15 +198,17 @@ export function StopEditor({ organ, stops, stopId: current, actions, offerUndo, 
     addStamp={anchor => { setStampError(''); setStampEditor({ anchor, ms: Math.max(...model.stamps.filter(s => s.anchor === anchor).map(s => s.ms)) + 50 }); }}/>;
   const zoom = (axis: 'span' | 'pitchSpan', factor: number) => setViews(v => Object.fromEntries(Object.entries(v).map(([key, value]) => [key, { ...value, [axis]: Math.max(axis === 'span' ? 10 : 8, Math.min(axis === 'span' ? 10000 : 19200, value[axis] * factor)) }])) as Record<Anchor, RollView>);
   const divisions = [...new Map(stops.map(s => [s.midx, s.manual])).entries()];
-  const ownTuning = stops.find(s => s.id === rule.stop.id)?.tuning?.follow === 'own';
+  // Renames and moves land live without reopening the rule.
+  const live = stops.find(s => s.id === rule.stop.id);
+  const ownTuning = live?.tuning?.follow === 'own';
 
   return <>
     <Stack ref={root} className="piano-study organ-stop-editor" gap="md"
       onPointerMoveCapture={e => { pointer.current = e.pointerType === 'touch' ? null : { x: e.clientX, y: e.clientY }; }} onPointerLeave={() => { pointer.current = null; }}>
       <Group justify="space-between" align="start">
         <div>
-          <Text className="roll-stop-name" fw={600}>{rule.stop.name} {rule.custom && <span className="modified" aria-label="custom">◇</span>}</Text>
-          <Text c="dimmed" size="xs">{rule.stop.manual} · {rule.voices} {rule.voices === 1 ? 'voice' : 'voices'} per key</Text>
+          <Text className="roll-stop-name" fw={600}>{live?.name ?? rule.stop.name} {rule.custom && <span className="modified" aria-label="custom">◇</span>}</Text>
+          <Text c="dimmed" size="xs">{live?.manual ?? rule.stop.manual} · {rule.voices} {rule.voices === 1 ? 'voice' : 'voices'} per key</Text>
         </div>
         <SegmentedControl aria-label="Stop view" value={view} onChange={value => setView(value as 'events' | 'tuning')}
           data={[{ value: 'events', label: 'Events' }, { value: 'tuning', label: <span>Tuning{ownTuning && <span className="modified" aria-label="own tuning"> ◇</span>}</span> }]}/>
