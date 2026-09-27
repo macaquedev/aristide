@@ -356,6 +356,7 @@ fn load_sources(
             if paths.len() == 1 {
                 composite_midi = Some((path.clone(), assembled.midi, assembled.combinations));
                 setup.adopted = assembled.adopted;
+                setup.stop_order = assembled.console_order;
                 // Assembled stops are ids in placement order, so the
                 // provenance vec zips onto them by index.
                 single_provenance = assembled

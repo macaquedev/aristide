@@ -98,10 +98,78 @@ impl State {
         self.setup
             .moves
             .push((stop_name.clone(), from_name.clone(), to_name.clone()));
+        // It leaves its old place in the order and lands last on the new
+        // division until an order says otherwise.
+        let mut orders_changed = Vec::new();
+        for (manual, names) in &mut self.setup.stop_order {
+            let before = names.len();
+            names.retain(|name| !name.eq_ignore_ascii_case(&stop_name));
+            if manual.eq_ignore_ascii_case(&to_name) && !names.is_empty() {
+                names.push(stop_name.clone());
+            }
+            if names.len() != before || manual.eq_ignore_ascii_case(&to_name) {
+                orders_changed.push((manual.clone(), names.clone()));
+            }
+        }
         if let Some(path) = &self.composite_path
             && let Err(err) = config::append_composite_move(path, &stop_name, &from_name, &to_name)
         {
             tracing::warn!("move not saved: {err}");
+        }
+        if let Some(path) = &self.composite_path {
+            for (manual, names) in orders_changed {
+                if let Err(err) = config::write_composite_stop_order(path, &manual, &names) {
+                    tracing::warn!("stop order not saved: {err}");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Where a stop sits in its division's saved order; unlisted stops
+    /// sort after every listed one, keeping their loaded order.
+    pub fn stop_position(&self, manual: &str, name: &str) -> usize {
+        self.setup
+            .stop_order
+            .iter()
+            .find(|(listed, _)| listed.eq_ignore_ascii_case(manual))
+            .and_then(|(_, names)| names.iter().position(|n| n.eq_ignore_ascii_case(name)))
+            .unwrap_or(usize::MAX)
+    }
+
+    /// Set a division's stop order: every stop on it, top first. Display
+    /// only — nothing rebuilds — and kept in the organ's file.
+    pub fn set_stop_order(&mut self, manual: usize, stops: &[StopId]) -> Result<(), String> {
+        let Some(manual_name) = self.manual_names().get(manual).cloned() else {
+            return Err("no such manual".into());
+        };
+        let Control::Organ(console) = &self.control else {
+            return Err("no organ is loaded".into());
+        };
+        let on_manual: Vec<(StopId, String)> = console
+            .stop_states()
+            .into_iter()
+            .filter(|(_, _, _, index, _)| *index == manual)
+            .map(|(id, name, ..)| (id, name.to_string()))
+            .collect();
+        let mut names = Vec::with_capacity(stops.len());
+        for id in stops {
+            let Some((_, name)) = on_manual.iter().find(|(stop, _)| stop == id) else {
+                return Err(format!("stop {} is not on {manual_name:?}; the organ changed, try again", id.0));
+            };
+            if names.contains(name) {
+                return Err(format!("{name:?} is listed twice"));
+            }
+            names.push(name.clone());
+        }
+        if names.len() != on_manual.len() {
+            return Err(format!("the order must list every stop on {manual_name:?}"));
+        }
+        let path = self.organ_file()?;
+        config::write_composite_stop_order(&path, &manual_name, &names)?;
+        self.setup.stop_order.retain(|listed, _| !listed.eq_ignore_ascii_case(&manual_name));
+        if !names.is_empty() {
+            self.setup.stop_order.insert(manual_name, names);
         }
         Ok(())
     }
@@ -448,6 +516,14 @@ impl State {
         for (moved, ..) in &mut self.setup.moves {
             if moved.eq_ignore_ascii_case(&old) {
                 *moved = new.to_string();
+            }
+        }
+        // The file renames the name in every division's order; so does this.
+        for names in self.setup.stop_order.values_mut() {
+            for name in names.iter_mut() {
+                if name.eq_ignore_ascii_case(&old) {
+                    *name = new.to_string();
+                }
             }
         }
         Ok(())

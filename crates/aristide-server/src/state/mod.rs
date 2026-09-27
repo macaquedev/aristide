@@ -308,6 +308,10 @@ pub struct Setup {
     /// saved under a different name — the copy is the player's and
     /// takes every edit.
     pub adopted: bool,
+    /// Per manual name: its stops' display order, by console name —
+    /// the organ file's `[console.order]`. Names that no longer
+    /// resolve have no effect; unlisted stops follow in loaded order.
+    pub stop_order: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 /// Everything a completed load hands to the running `State`: the new

@@ -102,6 +102,7 @@ pub(crate) fn respond(
         (Method::Post, "/api/organ/pull") => stops::pull,
         (Method::Post, "/api/organ/unpull") => stops::unpull,
         (Method::Post, "/api/organ/stop/rename") => stops::rename,
+        (Method::Post, "/api/organ/stop/order") => stops::order,
         (Method::Post, "/api/organ/stop/voice") => stops::voice,
         (Method::Post, "/api/organ/voicing") => stops::voicing,
         (Method::Post, "/api/organ/stop/compass") => stops::compass,
@@ -1466,6 +1467,54 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&file).expect("reads"), before, "the file is untouched");
     }
 
+    /// A division's stop order is display only: live in the snapshot, kept
+    /// in the file, following a rename and a move, and refusing a stale list.
+    #[test]
+    fn stop_order_is_live_saved_and_follows_edits() {
+        let Some(state) = demo_state() else { return };
+        let demo = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testsets/grandorgue-demo/demo.organ");
+        let dir = std::env::temp_dir().join("aristide-stop-order-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let organ = aristide_formats::grandorgue::load(&demo).expect("demo parses").organ;
+        let canonical = demo.canonicalize().expect("canonicalizes");
+        let file = crate::config::create_wrapper_organ(&dir, "Ordered", &canonical, &organ, None)
+            .expect("organ file written");
+        state.lock().expect("state").composite_path = Some(file.clone());
+        let on_manual = |manual: usize| -> Vec<(u32, String)> {
+            let body: serde_json::Value = serde_json::from_str(&state_json(&state)).expect("json");
+            body["stops"].as_array().expect("stops").iter()
+                .filter(|s| s["midx"].as_u64() == Some(manual as u64))
+                .map(|s| (s["id"].as_u64().expect("id") as u32, s["name"].as_str().expect("name").to_string()))
+                .collect()
+        };
+        let before = on_manual(1);
+        assert!(before.len() > 2);
+        let reversed: Vec<String> = before.iter().rev().map(|(id, _)| id.to_string()).collect();
+        let reply = respond(&state, &Method::Post, &format!("/api/organ/stop/order?manual=1&stops={}", reversed.join(",")));
+        assert_eq!(reply.status_code().0, 200);
+        assert!(!state.lock().expect("state").is_loading(), "no rebuild");
+        let after = on_manual(1);
+        assert_eq!(after, before.iter().rev().cloned().collect::<Vec<_>>());
+        let manual_name = state.lock().expect("state").manual_names()[1].clone();
+        let saved = aristide_formats::instrument::load(&file).expect("file loads");
+        assert_eq!(saved.console_order[&manual_name], after.iter().map(|(_, n)| n.clone()).collect::<Vec<_>>());
+
+        let (top, top_name) = after[0].clone();
+        respond(&state, &Method::Post, &format!("/api/organ/stop/rename?stop={top}&name=Renamed"));
+        assert_eq!(on_manual(1)[0].1, "Renamed", "a rename keeps its place");
+
+        let partial = respond(&state, &Method::Post, &format!("/api/organ/stop/order?manual=1&stops={top}"));
+        assert_eq!(partial.status_code().0, 400, "every stop must be listed");
+
+        let moved = respond(&state, &Method::Post, &format!("/api/organ/move?stop={top}&manual=0"));
+        assert_eq!(moved.status_code().0, 200);
+        assert!(on_manual(1).iter().all(|(id, _)| *id != top));
+        assert!(on_manual(0).iter().any(|(id, _)| *id == top));
+        let saved = aristide_formats::instrument::load(&file).expect("file loads");
+        assert!(!saved.console_order[&manual_name].iter().any(|n| n == "Renamed" || *n == top_name));
+    }
+
     /// A stop rule lands live and in the organ file, loads back the
     /// same, and resetting it removes the file's row.
     #[test]
@@ -2457,7 +2506,6 @@ mod tests {
         state.lock().expect("state").setup.adopted = true;
         for path in [
             "/api/organ/panel/place?panel=shoes&x=0&y=0",
-            "/api/organ/stop/order?manual=0&stops=1",
             "/api/organ/stop/label?stop=1&label=8",
             "/api/organ/coupler/keys?idx=0&mode=always",
             "/api/organ/coupled_keys?on=1",

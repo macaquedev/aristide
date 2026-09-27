@@ -44,6 +44,33 @@ pub(super) fn move_to_manual(state: &Mutex<State>, query: &str) -> Reply {
     }
 }
 
+// A division's stop order, top first: `manual=<index>&stops=<id>,<id>,…`
+// listing every stop on it. Display only — no rebuild.
+pub(super) fn order(state: &Mutex<State>, query: &str) -> Reply {
+    let mut state = state.lock().expect("state poisoned");
+    if state.is_loading() {
+        return bad_request("an organ is already loading");
+    }
+    let Some(manual) = param(query, "manual").and_then(|v| v.parse::<usize>().ok()) else {
+        return bad_request("missing manual");
+    };
+    let Some(stops) = param(query, "stops").map(unescape) else {
+        return bad_request("missing stops");
+    };
+    let stops: Result<Vec<_>, _> = stops
+        .split(',')
+        .filter(|id| !id.is_empty())
+        .map(|id| id.trim().parse::<u32>().map(aristide_model::StopId))
+        .collect();
+    let Ok(stops) = stops else {
+        return bad_request("stops must be stop ids separated by commas");
+    };
+    match state.set_stop_order(manual, &stops) {
+        Ok(()) => json(state_json_locked(&state)),
+        Err(err) => bad_request(&err),
+    }
+}
+
 pub(super) fn pull(state: &Mutex<State>, query: &str) -> Reply {
     let mut state = state.lock().expect("state poisoned");
     if state.is_loading() {

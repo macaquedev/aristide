@@ -3709,6 +3709,31 @@ fn console_layout_mut(doc: &mut toml_edit::DocumentMut) -> Option<&mut toml_edit
         .and_then(|layout| layout.as_table_mut())
 }
 
+/// A division's stop display order in `[console.order]`, by console
+/// name; an empty list drops the division's entry.
+pub fn write_composite_stop_order(path: &Path, manual: &str, stops: &[String]) -> Result<(), String> {
+    let mut doc = composite_doc(path)?;
+    let console = doc
+        .entry("console")
+        .or_insert(toml_edit::table())
+        .as_table_mut()
+        .ok_or("[console] is not a table")?;
+    let order = console
+        .entry("order")
+        .or_insert(toml_edit::table())
+        .as_table_mut()
+        .ok_or("[console.order] is not a table")?;
+    if stops.is_empty() {
+        order.remove(manual);
+    } else {
+        order.insert(manual, toml_edit::value(stops.iter().map(String::as_str).collect::<toml_edit::Array>()));
+    }
+    if order.is_empty() {
+        console.remove("order");
+    }
+    write_atomically(path, doc.to_string())
+}
+
 fn console_order_mut(doc: &mut toml_edit::DocumentMut) -> Option<&mut toml_edit::Table> {
     doc.get_mut("console")
         .and_then(|console| console.get_mut("order"))

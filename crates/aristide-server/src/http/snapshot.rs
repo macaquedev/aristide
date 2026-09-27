@@ -730,8 +730,9 @@ struct CompassView {
 fn snapshot(state: &State) -> Snapshot {
     let console = state.console();
     let stops = console.map(|console| {
-        console
-            .stop_states()
+        let mut states = console.stop_states();
+        states.sort_by_key(|(_, name, manual, ..)| state.stop_position(manual, name));
+        states
             .into_iter()
             .map(|(id, name, manual, manual_index, drawn)| {
                 let voicing = state.stop_voicing.get(&id).copied().unwrap_or_default();
