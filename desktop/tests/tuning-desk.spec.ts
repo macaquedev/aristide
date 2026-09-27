@@ -5,7 +5,7 @@ for (const layout of ['channel', 'rack', 'inspector', 'tabbed']) {
     const requests: string[] = [];
     page.on('request', r => { if (r.url().includes('/api/')) requests.push(r.url()); });
     await page.goto(`/?study=1&panel=tuning&layout=${layout}`);
-    await page.getByRole('button', { name: '415', exact: true }).click();
+    await page.getByRole('button', { name: 'As recorded (415)', exact: true }).click();
     await expect(page.getByRole('button', { name: 'Reference pitch: 415 Hz', exact: true })).toBeVisible();
     await page.getByRole('button', { name: 'Grand-orgue', exact: true }).click();
     await expect(page.getByRole('button', { name: 'Reference pitch: 415 Hz', exact: true })).toBeDisabled();

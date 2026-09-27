@@ -6,6 +6,9 @@ export { tuningDeskLayouts } from '../tuning/TuningDesk';
 
 type StudyScope = { id: string; name: string; parent?: string; anchor?: Anchor; shape?: Shape };
 
+// A study organ recorded at a′ = 415.
+const studyRecordedHz = 415;
+
 const initialScopes: StudyScope[] = [
   { id: 'instrument', name: 'Whole instrument', anchor: defaultAnchor, shape: equalTemperament },
   { id: 'great', name: 'Grand-orgue', parent: 'instrument' },
@@ -22,7 +25,7 @@ function resolved(scopes: StudyScope[], scope: StudyScope): DeskScope {
     while (current && !current[key]) current = scopes.find(s => s.id === current!.parent);
     return current![key]!;
   };
-  return { id: scope.id, name: scope.name, parent: scope.parent, own: { anchor: Boolean(scope.anchor), scale: Boolean(scope.shape) }, anchor: inherit('anchor'), shape: inherit('shape') };
+  return { id: scope.id, name: scope.name, parent: scope.parent, own: { anchor: Boolean(scope.anchor), scale: Boolean(scope.shape) }, anchor: inherit('anchor'), shape: inherit('shape'), recorded: studyRecordedHz };
 }
 
 /** Silent, unsaved study data behind the same desk the connected panel uses. */

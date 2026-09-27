@@ -15,8 +15,11 @@ test('the connected Tuning panel edits the engine', async ({ page }) => {
 
   await choose('Temperament', 'Quarter-comma meantone');
   await expect(page.getByText('Wolf G♯–E♭ · 737.6 ¢', { exact: true })).toBeVisible();
-  await page.getByRole('button', { name: '415', exact: true }).click();
-  await expect(page.getByRole('button', { name: 'Reference pitch: 415 Hz', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: '440', exact: true }).click();
+  const asRecorded = page.getByRole('button', { name: /^As recorded \(/ });
+  const recorded = (await asRecorded.textContent())!.match(/\((.+)\)/)![1];
+  await asRecorded.click();
+  await expect(page.getByRole('button', { name: `Reference pitch: ${recorded} Hz`, exact: true })).toBeVisible();
   await page.screenshot({ path: 'test-results/live-instrument.png', fullPage: true });
 
   const division = page.getByRole('navigation', { name: 'Tuning scopes' }).getByRole('button').filter({ hasText: /Manual|Pedal|Great|Positif|Récit/ }).nth(1);
@@ -26,7 +29,7 @@ test('the connected Tuning panel edits the engine', async ({ page }) => {
   await page.getByRole('switch', { name: 'Scale follows Whole instrument' }).click();
   await expect(page.getByRole('switch', { name: 'Scale follows Whole instrument' })).not.toBeChecked();
   await choose('Temperament', 'Vallotti');
-  await expect(page.getByRole('button', { name, exact: true })).toContainText('415 Hz · Vallotti');
+  await expect(page.getByRole('button', { name, exact: true })).toContainText(`${recorded} Hz · Vallotti`);
   await page.getByRole('button', { name: 'Whole instrument', exact: true }).click();
   await page.getByRole('button', { name: '440', exact: true }).click();
   await expect(page.getByRole('button', { name, exact: true })).toContainText('440 Hz · Vallotti');

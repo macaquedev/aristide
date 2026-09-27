@@ -8,7 +8,8 @@ import { TuningGraph } from './TuningGraph';
 import './tuning-desk.css';
 
 export type Part = 'anchor' | 'scale';
-export type DeskScope = { id: string; name: string; parent?: string; own: Record<Part, boolean>; anchor: Anchor; shape: Shape };
+/** `recorded` is the Hz the recording sounds on the anchor's key, when the organ says. */
+export type DeskScope = { id: string; name: string; parent?: string; own: Record<Part, boolean>; anchor: Anchor; shape: Shape; recorded?: number };
 export type DeskProps = {
   layout: string; scopes: DeskScope[]; selected: string; select: (id: string) => void;
   setAnchor: (id: string, anchor: Anchor) => void; setShape: (id: string, shape: Shape) => void; setOwn: (id: string, part: Part, own: boolean) => void;
@@ -83,12 +84,13 @@ export function TuningDesk({ layout, scopes, selected, select, setAnchor, setSha
     checked={!scope.own[part]} disabled={readOnly} onChange={e => setOwn(scope.id, part, !e.currentTarget.checked)}/>;
   const module = (name: string, content: ReactNode, className = '', part?: Part) => <section className={`tuning-module ${className}`} aria-label={name}>
     <Group className="tuning-module-title" justify="space-between" gap="xs"><Text size="xs" c="dimmed">{name}</Text>{part && followSwitch(part)}</Group>{content}</section>;
+  const presets = [...(scope.recorded === undefined ? [] : [{ label: `As recorded (${Number(scope.recorded.toFixed(2))})`, hz: scope.recorded }]), { label: '440', hz: 440 }];
   const referenceKey = <div><Text size="xs" c="dimmed">Reference key</Text><NumberControl label="Reference key" value={anchor.key} unit={keyLabel(anchor.key)}
     min={finite ? keyRange![0] : 0} max={finite ? keyRange![1] : 127} disabled={anchorLocked}
     change={value => changeAnchor({ key: Math.round(value) })} assign={() => assign(`tuning/${scope.id}/referenceKey`)}/></div>;
   const reference = module('Reference', <Stack gap="xs">
     <div className="tuning-reference-number"><NumberControl label="Reference pitch" value={Number(anchor.hz.toFixed(2))} unit="Hz" min={1} disabled={anchorLocked} change={hz => changeAnchor({ hz })} assign={() => assign(`tuning/${scope.id}/hz`)}/></div>
-    <Group gap={4} grow>{[392, 415, 440, 466].map(hz => <Button key={hz} size="compact-sm" variant={anchor.hz === hz ? 'light' : 'default'} disabled={anchorLocked} onClick={() => changeAnchor({ hz })}>{hz}</Button>)}</Group>
+    <Group gap={4} wrap="nowrap">{presets.map(({ label, hz }) => <Button key={label} size="compact-sm" style={{ flex: hz === 440 ? 'none' : 1 }} variant={Math.abs(anchor.hz - hz) < .005 ? 'light' : 'default'} disabled={anchorLocked} onClick={() => changeAnchor({ hz })}>{label}</Button>)}</Group>
     {referenceKey}</Stack>, 'reference-module', 'anchor');
   const fine = module('Fine offset', <Stack gap="xs"><NumberControl label="Fine offset" value={anchor.offset} unit="¢" step={.1} disabled={anchorLocked} change={offset => changeAnchor({ offset })} assign={() => assign(`tuning/${scope.id}/fine`)}/>
     <Button size="compact-sm" variant="subtle" disabled={anchorLocked || anchor.offset === 0} onClick={() => changeAnchor({ offset: 0 })}>Reset offset</Button></Stack>, 'fine-module');

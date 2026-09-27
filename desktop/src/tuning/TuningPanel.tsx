@@ -6,7 +6,7 @@ import { CUSTOM, RECORDED, type Anchor, type Shape } from './model';
 import { ScalaSheet } from './ScalaSheet';
 
 type TuningView = {
-  temperament: string; edo: number; reference: { key: number; hz: number }; root: number; offsets?: number[]; offset_cents: number;
+  temperament: string; edo: number; reference: { key: number; hz: number }; recorded_hz: number; root: number; offsets?: number[]; offset_cents: number;
   system: 'temperament' | 'equal' | 'steps' | 'scale'; period: number | null; steps?: number[]; start_key?: number;
   scale?: { scl: string; kbm: string | null; name: string };
 };
@@ -75,14 +75,14 @@ export function TuningPanel({ organ, offerUndo, scope, stop, openScope }: {
   };
 
   const all: DeskScope[] = scopes ? [
-    { id: 'instrument', name: 'Whole instrument', own: { anchor: true, scale: true }, anchor: toAnchor(scopes.instrument), shape: toShape(scopes.instrument) },
+    { id: 'instrument', name: 'Whole instrument', own: { anchor: true, scale: true }, anchor: toAnchor(scopes.instrument), shape: toShape(scopes.instrument), recorded: scopes.instrument.recorded_hz },
     ...scopes.manuals.flatMap(manual => [
-      { id: `manual:${manual.idx}`, name: manual.name, parent: 'instrument', own: manual.own, anchor: toAnchor(manual.tuning), shape: toShape(manual.tuning) },
+      { id: `manual:${manual.idx}`, name: manual.name, parent: 'instrument', own: manual.own, anchor: toAnchor(manual.tuning), shape: toShape(manual.tuning), recorded: manual.tuning.recorded_hz },
       ...scopes.stops.filter(stop => stop.midx === manual.idx).flatMap(stop => [
-        { id: `stop:${stop.id}`, name: stop.name, parent: `manual:${manual.idx}`, own: stop.own, anchor: toAnchor(stop.tuning), shape: toShape(stop.tuning) },
+        { id: `stop:${stop.id}`, name: stop.name, parent: `manual:${manual.idx}`, own: stop.own, anchor: toAnchor(stop.tuning), shape: toShape(stop.tuning), recorded: stop.tuning.recorded_hz },
         // A single-rank stop is its rank: only a mixture's ranks are listed.
         ...(stop.ranks.length > 1 ? stop.ranks.map(rank => ({
-          id: `rank:${stop.id}:${rank.id}`, name: rank.name || `Rank ${rank.id}`, parent: `stop:${stop.id}`, own: rank.own, anchor: toAnchor(rank.tuning), shape: toShape(rank.tuning) })) : []),
+          id: `rank:${stop.id}:${rank.id}`, name: rank.name || `Rank ${rank.id}`, parent: `stop:${stop.id}`, own: rank.own, anchor: toAnchor(rank.tuning), shape: toShape(rank.tuning), recorded: rank.tuning.recorded_hz })) : []),
       ]),
     ]),
   ] : [];
