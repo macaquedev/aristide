@@ -1,4 +1,5 @@
 import { invoke, isTauri } from '@tauri-apps/api/core';
+import { open } from '@tauri-apps/plugin-dialog';
 
 export type Stop = {
   id: number; name: string; midx: number; manual: string; on: boolean;
@@ -23,8 +24,29 @@ export type Snapshot = {
 };
 
 export type LibraryEntry = { name: string; path: string; played?: number; loaded?: boolean; owned?: boolean };
-export type Browse = { dir: string; parent: string | null; entries: { name: string; path: string; dir: boolean }[] };
 export const native = isTauri();
+// GTK matches extensions case-sensitively; sample sets ship in either case.
+const extensions = (...names: string[]) => names.flatMap(name => [...new Set([name, name.toLowerCase(), name.toUpperCase()])]);
+export const organFiles = [
+  { name: 'GrandOrgue and Hauptwerk organs', extensions: extensions('organ', 'Organ_Hauptwerk_xml') },
+  { name: 'Aristide organs', extensions: ['toml'] },
+];
+export const scaleFiles = [{ name: 'Scala scales', extensions: extensions('scl') }];
+export const mappingFiles = [{ name: 'Scala keyboard mappings', extensions: extensions('kbm') }];
+
+type Filters = { name: string; extensions: string[] }[];
+// Browser tests stand in for the system dialog, which they cannot drive.
+const testPicker = (globalThis as { aristidePickFile?: (title: string, filters: Filters) => Promise<string | undefined> }).aristidePickFile;
+export const canPickFiles = native || Boolean(testPicker);
+
+/** The operating system's file picker; only the desktop app has one. */
+export async function pickFile(title: string, filters: Filters) {
+  if (testPicker) return testPicker(title, filters);
+  if (!native) return undefined;
+  const path = await open({ title, filters, multiple: false, directory: false });
+  return typeof path === 'string' ? path : undefined;
+}
+
 export const endpoint = (path: string, values: Record<string, string | number> = {}) =>
   `/api/${path}${Object.keys(values).length ? `?${new URLSearchParams(Object.entries(values).map(([k, v]) => [k, String(v)]))}` : ''}`;
 

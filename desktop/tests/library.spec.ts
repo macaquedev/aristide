@@ -2,6 +2,7 @@ import { test, expect, type Page } from '@playwright/test';
 
 async function rig(page: Page, loaded = false) {
   const requests: string[] = [];
+  await page.addInitScript(() => { (globalThis as { aristidePickFile?: () => Promise<string> }).aristidePickFile = async () => '/sets/abbey.organ'; });
   const state = {
     ...(loaded ? { organ: 'Village' } : {}),
     stops: [], manuals: [], couplers: [], trems: [], generals: [], setter: false, gain: 0.178, midi: { ports: [], manuals: [] },
@@ -79,4 +80,10 @@ test('New organ asks for a name and creates a blank organ', async ({ page }) => 
   await page.getByRole('button', { name: 'Create' }).click();
   await expect(page.getByRole('button', { name: 'Create' })).toHaveCount(0);
   expect(requests).toEqual(['/api/organ/new?name=Chapel']);
+});
+
+test('Load from GrandOrgue/Hauptwerk loads the file chosen in the system picker', async ({ page }) => {
+  const requests = await rig(page);
+  await page.getByRole('button', { name: 'Load from GrandOrgue/Hauptwerk' }).click();
+  await expect.poll(() => requests).toEqual(['/api/organ/load?path=/sets/abbey.organ']);
 });

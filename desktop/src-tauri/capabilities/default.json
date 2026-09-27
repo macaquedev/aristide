@@ -3,5 +3,5 @@
   "identifier": "desktop",
   "description": "Local Aristide windows",
   "windows": ["main", "panel-*"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "dialog:allow-open"]
 }

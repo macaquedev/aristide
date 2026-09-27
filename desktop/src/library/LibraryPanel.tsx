@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ActionIcon, Badge, Button, Drawer, Group, Loader, Menu, Modal, Paper, Stack, Text, TextInput, UnstyledButton } from '@mantine/core';
-import { ChevronRight, EllipsisVertical, FileMusic, FilePlus, Folder, FolderUp, Pencil, Plus, Search, Trash2 } from 'lucide-react';
-import { endpoint, request, type Browse, type LibraryEntry, type Snapshot } from '../api';
+import { ActionIcon, Badge, Button, Group, Loader, Menu, Modal, Paper, Stack, Text, TextInput, UnstyledButton } from '@mantine/core';
+import { EllipsisVertical, FilePlus, FolderOpen, Pencil, Search, Trash2 } from 'lucide-react';
+import { canPickFiles, organFiles, pickFile, request, type LibraryEntry, type Snapshot } from '../api';
 import './library.css';
 
 type Details = { path: string; format: string; location: string | null };
@@ -11,7 +11,6 @@ export function LibraryPanel({ state, send, load, create, play }: { state?: Snap
   const library = state?.library ?? [];
   const [details, setDetails] = useState<Record<string, Details>>({});
   const [query, setQuery] = useState('');
-  const [adding, setAdding] = useState(false);
   const [naming, setNaming] = useState(false);
   const [renaming, setRenaming] = useState<string>();
   const [deleting, setDeleting] = useState<LibraryEntry>();
@@ -37,7 +36,8 @@ export function LibraryPanel({ state, send, load, create, play }: { state?: Snap
       <Group gap="xs">
         {library.length > 6 && <TextInput aria-label="Search organs" placeholder="Search" leftSection={<Search size={16}/>} value={query} onChange={e => setQuery(e.currentTarget.value)}/>}
         <Button variant="default" leftSection={<FilePlus size={18}/>} onClick={() => setNaming(true)} disabled={naming || Boolean(state?.loading)}>New organ</Button>
-        <Button leftSection={<Plus size={18}/>} onClick={() => setAdding(true)}>Load from GrandOrgue/Hauptwerk</Button>
+        <Button leftSection={<FolderOpen size={18}/>} disabled={!canPickFiles} title={canPickFiles ? undefined : 'Open the Aristide desktop app to choose a file'}
+          onClick={() => void pickFile('Load from GrandOrgue/Hauptwerk', organFiles).then(path => path && load(path))}>Load from GrandOrgue/Hauptwerk</Button>
       </Group>
     </Group>
     {state?.loading && <Paper withBorder p="md"><Group><Loader size="sm"/><Text>{state.loading}</Text></Group></Paper>}
@@ -55,7 +55,6 @@ export function LibraryPanel({ state, send, load, create, play }: { state?: Snap
       <Text fw={600}>No organs yet</Text>
       <Text c="dimmed" size="sm">GrandOrgue and unencrypted Hauptwerk organs</Text>
     </Stack>}
-    <AddOrgan opened={adding} close={() => setAdding(false)} load={path => { setAdding(false); load(path); }}/>
     <Modal opened={Boolean(deleting)} onClose={() => setDeleting(undefined)} title={`Are you sure you want to delete ${deleting?.name}?`}>
       <Stack>
         <Text>{deleting?.owned
@@ -114,37 +113,6 @@ function NameForm({ name, action, failure, submit: save, done }: { name: string;
     <Button type="submit" disabled={!value.trim()}>{action}</Button>
     <Button variant="default" onClick={done}>Cancel</Button>
   </form>;
-}
-
-function AddOrgan({ opened, close, load }: { opened: boolean; close: () => void; load: (path: string) => void }) {
-  const [browse, setBrowse] = useState<Browse>();
-  const [path, setPath] = useState('');
-  const [failure, setFailure] = useState(false);
-  const visit = async (dir = '') => {
-    setFailure(false);
-    try { const value = await request<Browse>('GET', endpoint('browse', { dir })); setBrowse(value); setPath(value.dir); }
-    catch { setFailure(true); }
-  };
-  useEffect(() => { if (opened && !browse) void visit(); }, [opened]);
-  const entries = browse?.entries.filter(e => e.dir || !/\.(scl|kbm)$/i.test(e.name)) ?? [];
-  return <Drawer opened={opened} onClose={close} title="Load from GrandOrgue/Hauptwerk" position="right" size="lg">
-    <Stack gap="sm">
-      <form onSubmit={e => { e.preventDefault(); void visit(path); }}>
-        <Group wrap="nowrap"><TextInput aria-label="Folder" value={path} onChange={e => setPath(e.currentTarget.value)} style={{ flex: 1 }}/><Button type="submit" variant="default">Go</Button></Group>
-      </form>
-      {failure && <Text c="dimmed">That folder could not be opened.</Text>}
-      <Paper withBorder className="library-list">
-        {browse?.parent && <UnstyledButton className="browse-row" onClick={() => void visit(browse.parent!)}><FolderUp size={20}/><Text>Parent folder</Text></UnstyledButton>}
-        {entries.map(entry => <UnstyledButton key={entry.path} className="browse-row" data-organ={!entry.dir || undefined}
-          onClick={() => entry.dir ? void visit(entry.path) : load(entry.path)}>
-          {entry.dir ? <Folder size={20}/> : <FileMusic size={20}/>}
-          <Text fw={entry.dir ? undefined : 600} truncate="end" style={{ flex: 1 }}>{entry.name}</Text>
-          {entry.dir ? <ChevronRight size={18}/> : <Text size="sm" c="dimmed">Load</Text>}
-        </UnstyledButton>)}
-        {browse && !entries.length && <Text c="dimmed" p="md">No folders or organs here</Text>}
-      </Paper>
-    </Stack>
-  </Drawer>;
 }
 
 function played(seconds?: number) {

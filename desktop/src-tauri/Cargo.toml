@@ -12,6 +12,7 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 aristide-server = { path = "../../crates/aristide-server" }
 tracing-subscriber.workspace = true
+tauri-plugin-dialog = "~2.7"
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]

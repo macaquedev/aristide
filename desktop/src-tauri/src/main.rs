@@ -25,6 +25,7 @@ async fn api_request(
 fn main() {
     let _ = tracing_subscriber::fmt::try_init();
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             app.manage(Arc::new(DesktopRuntime::start()?));
             Ok(())

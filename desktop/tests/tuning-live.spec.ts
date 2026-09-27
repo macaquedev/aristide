@@ -10,6 +10,8 @@ test('the connected Tuning panel edits the engine', async ({ page }) => {
     await page.getByRole('combobox', { name: label, exact: true }).click();
     await page.getByRole('option', { name: value, exact: true }).click();
   };
+  const scales = process.env.ARISTIDE_SCALES ?? fileURLToPath(new URL('../../scales', import.meta.url));
+  await page.addInitScript(file => { (globalThis as { aristidePickFile?: () => Promise<string> }).aristidePickFile = async () => file; }, `${scales}/bohlen-pierce-eq.scl`);
   await page.goto('/');
   await page.getByRole('button', { name: 'Tuning', exact: true }).click();
 
@@ -37,9 +39,8 @@ test('the connected Tuning panel edits the engine', async ({ page }) => {
   await page.getByRole('button', { name, exact: true }).click();
   await page.getByRole('button', { name: 'Import Scala', exact: true }).click();
   const sheet = page.getByRole('dialog', { name: 'Import Scala' });
-  await sheet.getByRole('textbox', { name: 'Folder' }).fill(process.env.ARISTIDE_SCALES ?? fileURLToPath(new URL('../../scales', import.meta.url)));
-  await sheet.getByRole('button', { name: 'Go', exact: true }).click();
-  await sheet.getByRole('button', { name: 'bohlen-pierce-eq.scl', exact: true }).click();
+  await sheet.getByRole('button', { name: 'Choose .scl', exact: true }).click();
+  await expect(sheet).toContainText('bohlen-pierce-eq.scl');
   await sheet.getByRole('button', { name: 'Use scale', exact: true }).click();
   await expect(page.getByText(/^13 steps · Repeat 1901\.9[56] ¢$/).first()).toBeVisible();
   await expect(page.getByRole('button', { name, exact: true })).toContainText('Bohlen-Pierce');

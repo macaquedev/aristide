@@ -16,7 +16,12 @@ organs should appear in a proper list, and delete should ask "are you sure".
   sample files stay; anything else only leaves the Library. The playing organ
   cannot be deleted.
 - A search field appears once there are more than six organs.
-- Load from GrandOrgue/Hauptwerk is the same folder browser in a drawer, restyled as a list.
+- Load from GrandOrgue/Hauptwerk opens the operating system's file picker
+  (`tauri-plugin-dialog` 2.7, kept on Tauri 2.11). Organ's "Add a sample set"
+  and Tuning's Import Scala use it too; the in-app folder browsers are gone.
+  In a plain browser there is no system picker, so those buttons are disabled;
+  tests inject `globalThis.aristidePickFile` in its place. `/api/browse` stays
+  on the server for API clients but the UI no longer calls it.
 - New organ asks for a name inline, creates a blank organ (`/api/organ/new`),
   loads it and opens Organ, where divisions and stops are added.
 - Below 700 px the folder is hidden so the format and last play stay readable.

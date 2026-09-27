@@ -1,15 +1,12 @@
 .library { padding: 24px 16px; max-width: 880px; margin-inline: auto; width: 100%; }
 .library-list { overflow: hidden; }
 .library-row { display: flex; align-items: center; gap: 8px; padding-right: 8px; min-height: 72px; }
-.library-row + .library-row, .browse-row + .browse-row { border-top: 1px solid var(--mantine-color-default-border); }
-.library-row:hover, .browse-row:hover { background: var(--mantine-color-default-hover); }
+.library-row + .library-row { border-top: 1px solid var(--mantine-color-default-border); }
+.library-row:hover { background: var(--mantine-color-default-hover); }
 .library-open { flex: 1; min-width: 0; align-self: stretch; display: flex; flex-direction: column; justify-content: center; gap: 2px; padding: 12px 16px; }
 .library-open:disabled { opacity: .5; cursor: default; }
 .library-rename { flex: 1; display: flex; align-items: flex-start; gap: 8px; padding: 14px 8px 14px 16px; }
 .library-rename > :first-child { flex: 1; }
-.browse-row { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 56px; padding: 8px 16px; color: var(--mantine-color-dimmed); }
-.browse-row[data-organ] { color: var(--mantine-color-text); }
-.browse-row .mantine-Text-root { color: var(--mantine-color-text); }
 .library-meta { display: flex; min-width: 0; overflow: hidden; white-space: nowrap; }
 .library-meta > span { flex: none; }
 .library-meta > span + span::before { content: '·'; padding-inline: 6px; }

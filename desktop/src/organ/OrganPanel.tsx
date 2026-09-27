@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Button, Drawer, Group, Loader, Modal, SegmentedControl, Select, Stack, Switch, Text, TextInput } from '@mantine/core';
-import { ArrowLeft, Folder, Plus } from 'lucide-react';
-import { editInstrument, endpoint, request, type Browse, type Snapshot } from '../api';
+import { Folder, Plus } from 'lucide-react';
+import { canPickFiles, editInstrument, organFiles, pickFile, request, type Snapshot } from '../api';
 import { StopEditor } from './StopEditor';
 import './organ.css';
 
@@ -188,12 +188,11 @@ function AddStop({ opened, manual, taken, close, pull, addSource }: {
 }) {
   const [offerings, setOfferings] = useState<Offerings>();
   const [failed, setFailed] = useState(false);
-  const [browsing, setBrowsing] = useState(false);
   const load = () => { setFailed(false); request<Offerings>('GET', '/api/organ/offerings').then(setOfferings, () => setFailed(true)); };
-  useEffect(() => { if (opened) { setBrowsing(false); load(); } }, [opened]);
+  useEffect(() => { if (opened) load(); }, [opened]);
   const done = (ok: boolean) => { if (ok) close(); };
   return <Drawer closeButtonProps={{ 'aria-label': 'Close' }} opened={opened} onClose={close} title={`Add stop to ${manual}`} position="right" size="md">
-    {browsing ? <SetBrowser back={() => setBrowsing(false)} choose={path => void addSource(path).then(ok => { if (ok) { setBrowsing(false); load(); } })}/> : <Stack gap="md">
+    <Stack gap="md">
       {failed && <Text>The sample sets could not be read. Close this and try again.</Text>}
       {!offerings && !failed && <Group><Loader size="xs"/><Text size="sm" c="dimmed">Reading sample sets</Text></Group>}
       {offerings?.sources.map(source => <Stack key={source.alias} gap={6}>
@@ -206,24 +205,10 @@ function AddStop({ opened, manual, taken, close, pull, addSource }: {
             rightSection={here ? <Text component="span" size="xs" c="dimmed">In {manual}</Text> : s.pulled ? <Text component="span" size="xs" c="dimmed">In organ</Text> : undefined}>{s.name}</Button>; })}
         </Stack>)}
       </Stack>)}
-      <Button variant="default" leftSection={<Folder size={16}/>} onClick={() => setBrowsing(true)}>Add a sample set</Button>
-    </Stack>}
+      <Button variant="default" leftSection={<Folder size={16}/>} disabled={!canPickFiles}
+        onClick={() => void pickFile('Add a sample set', organFiles.slice(0, 1)).then(path => { if (path) void addSource(path).then(ok => { if (ok) load(); }); })}>Add a sample set</Button>
+    </Stack>
   </Drawer>;
-}
-
-function SetBrowser({ back, choose }: { back: () => void; choose: (path: string) => void }) {
-  const [browse, setBrowse] = useState<Browse>();
-  const [failure, setFailure] = useState(false);
-  const visit = (dir = '') => request<Browse>('GET', endpoint('browse', { dir })).then(b => { setBrowse(b); setFailure(false); }, () => setFailure(true));
-  useEffect(() => { void visit(); }, []);
-  return <Stack gap="xs">
-    <Button variant="subtle" justify="start" leftSection={<ArrowLeft size={16}/>} onClick={back}>Sample sets</Button>
-    {browse && <Text size="xs" c="dimmed">{browse.dir}</Text>}
-    {failure && <Text>That folder could not be opened.</Text>}
-    {browse?.parent && <Button variant="default" justify="start" leftSection={<ArrowLeft size={16}/>} onClick={() => void visit(browse.parent!)}>Parent folder</Button>}
-    {browse?.entries.filter(e => e.dir || !/\.(toml|scl|kbm)$/i.test(e.name)).map(entry => <Button key={entry.path} justify="start" variant="default"
-      leftSection={entry.dir ? <Folder size={16}/> : undefined} onClick={() => entry.dir ? void visit(entry.path) : choose(entry.path)}>{entry.name}</Button>)}
-  </Stack>;
 }
 
 function AddDivision({ opened, close, add }: { opened: boolean; close: () => void; add: (name: string, pedal: boolean) => Promise<boolean> }) {
