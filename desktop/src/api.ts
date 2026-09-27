@@ -19,17 +19,15 @@ export type Snapshot = {
   library: LibraryEntry[];
   memory?: { resident_mb: number; samples: number };
   manual_tuning?: { idx: number; temperament: string; reference: { hz: number } }[];
-  midi: { ports: { id: number; name: string; virtual?: boolean }[]; manuals: MidiManual[]; learning?: { manual: number; slot: number; step: string } };
-  console?: { keyboards: ConsoleKeyboard[]; heard: number; learning?: { keyboard: number | null; manual: number | null; pedal: boolean; range: boolean; step: 'low' | 'high'; repeat?: string } };
+  midi: {
+    ports: { id: number; name: string; virtual?: boolean }[]; manuals: MidiManual[]; detected?: number;
+    learning?: { manual: number; slot: number; step: 'low' | 'high'; detect?: boolean };
+  };
   keyboard?: { manual: number };
 };
 export type MidiManual = {
-  idx: number; name: string; keyboard?: number | null; automatic?: boolean;
+  idx: number; name: string;
   inputs: { slot: number; device: string; channel: number | null; connected: boolean }[];
-};
-export type ConsoleKeyboard = {
-  idx: number; name: string; pedal: boolean; device: string; channel: number | null; connected: boolean;
-  low: number | null; high: number | null; transpose: number; plays: number[];
 };
 export const COMPUTER_KEYBOARD = 'Computer keyboard';
 
