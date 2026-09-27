@@ -15,13 +15,14 @@ export type Snapshot = {
   trems: { idx: number; name: string; on: boolean }[];
   generals: number[]; setter: boolean; gain: number;
   combinations?: { matching_generals: number[]; divisionals: Record<string, number[]>; matching_divisionals: Record<string, number[]>; frame: number; frames: number };
-  library: { name: string; path: string }[];
+  library: LibraryEntry[];
   memory?: { resident_mb: number; samples: number };
   manual_tuning?: { idx: number; temperament: string; reference: { hz: number } }[];
   midi: { ports: { id: number; name: string }[]; manuals: { idx: number; name: string; inputs: { device: string; connected: boolean }[] }[]; learning?: { manual: number; slot: number; step: string } };
   keyboard?: { manual: number };
 };
 
+export type LibraryEntry = { name: string; path: string; played?: number; loaded?: boolean; owned?: boolean };
 export type Browse = { dir: string; parent: string | null; entries: { name: string; path: string; dir: boolean }[] };
 export const native = isTauri();
 export const endpoint = (path: string, values: Record<string, string | number> = {}) =>

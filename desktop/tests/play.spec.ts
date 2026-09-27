@@ -140,5 +140,5 @@ test('with no organ loaded the app opens on the Library', async ({ page }) => {
   } }));
   await page.goto('/');
   await expect(page.getByRole('button', { name: 'Library', exact: true })).toHaveAttribute('aria-current', 'page');
-  await expect(page.getByRole('button', { name: /Test organ/ })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Load Test organ' })).toBeVisible();
 });

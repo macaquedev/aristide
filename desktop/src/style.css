@@ -24,8 +24,6 @@ main { flex: 1; min-width: 0; }
 .spacer { flex: 1; }
 .modified, .stop-mark { color: var(--mantine-color-violet-4); }
 .stop[aria-pressed="true"] .stop-mark { color: inherit; }
-.library-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 16px; }
-.library-card { text-align: left; cursor: pointer; min-height: 120px; }
 [data-density="compact"] { --stop-height: 48px; }
 [data-density="compact"] .stops { gap: 4px; }
 [data-density="compact"] .pistons button { min-height: 44px; }

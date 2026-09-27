@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ActionIcon, Button, Card, Drawer, Group, Loader, Modal, NumberInput, SegmentedControl, Stack, Text, TextInput, Tooltip, useMantineColorScheme } from '@mantine/core';
-import { ArrowLeft, ChevronLeft, ChevronRight, Folder, Settings, Trash2, Undo2 } from 'lucide-react';
-import { endpoint, request, native, type Browse, type Snapshot, type Stop } from './api';
+import { ActionIcon, Button, Card, Group, Loader, Modal, NumberInput, SegmentedControl, Stack, Text, TextInput, Tooltip, useMantineColorScheme } from '@mantine/core';
+import { ArrowLeft, ChevronLeft, ChevronRight, Settings, Trash2, Undo2 } from 'lucide-react';
+import { endpoint, request, native, type Snapshot, type Stop } from './api';
 import { useEngine } from './engine';
 import { TuningPanel } from './tuning/TuningPanel';
 import { SoundPanel, type Routing } from './sound/SoundPanel';
 import { OrganPanel } from './organ/OrganPanel';
+import { LibraryPanel } from './library/LibraryPanel';
 
 const panels = ['Play', 'Organ', 'Sound', 'Tuning', 'Library'] as const;
 type Panel = typeof panels[number] | 'Settings';
@@ -64,7 +65,8 @@ export function App() {
         {!native && <><Text c="dimmed">Prototypes · no audio</Text><PreviewLinks/></>}
       </Stack>}
       {panel === 'Play' && state && <Play state={state} command={command} openLibrary={() => setPanel('Library')} openStop={stop => { setSelected(stop.id); setPanel('Organ'); }}/>} 
-      {panel === 'Library' && <Library state={state} command={command} pick={() => { picked.current = true; }}/>}
+      {panel === 'Library' && <LibraryPanel state={state} send={engine.send} play={() => setPanel('Play')}
+        load={path => { picked.current = true; command('organ/load', { path }); }}/>}
       {panel === 'Settings' && <Stack p="lg"><Group><Button variant="subtle" leftSection={<ArrowLeft size={18}/>} onClick={() => setPanel('Play')}>Play</Button><Text fw={600}>Settings</Text></Group>
         <Appearance density={density} changeDensity={value => { setDensity(value); localStorage.setItem('aristide-density', value); }}/>
         {state && <ConsoleSettings state={state} command={command}/>}
@@ -120,32 +122,6 @@ function StopButton({ stop, toggle, open }: { stop: Stop; toggle: () => void; op
     onClick={() => { if (!consumed.current) toggle(); consumed.current = false; }}>
     <span className="stop-name">{stop.name}{stop.custom && <span className="stop-mark" aria-label="custom"> ◇</span>}</span><span className="stop-pitch">{footage ? `${Number(footage.toFixed(2))}′` : `${stop.ranks.length} ranks`}</span>
   </button>;
-}
-
-function Library({ state, command, pick }: { state?: Snapshot; command: Command; pick: () => void }) {
-  const [browse, setBrowse] = useState<Browse>();
-  const [opened, setOpened] = useState(false);
-  const [path, setPath] = useState('');
-  const [failure, setFailure] = useState(false);
-  const visit = async (dir = '') => {
-    setOpened(true); setFailure(false);
-    try { const value = await request<Browse>('GET', endpoint('browse', { dir })); setBrowse(value); setPath(value.dir); }
-    catch { setFailure(true); }
-  };
-  return <Stack p="lg"><Group justify="space-between"><Text fw={600}>Library</Text><Button onClick={() => void visit()}>Add organ</Button></Group>
-    {state?.loading && <Group><Loader size="sm"/><Text>{state.loading}</Text></Group>}
-    <div className="library-grid">{state?.library.map(organ => <Card key={organ.path} withBorder component="button" className="library-card" onClick={() => { pick(); command('organ/load', { path: organ.path }); }}>
-      <Text fw={600}>{organ.name}</Text><Text c="dimmed">Open organ</Text></Card>)}</div>
-    {!state?.library.length && <Text c="dimmed">GrandOrgue · Unencrypted Hauptwerk</Text>}
-    <Drawer opened={opened} onClose={() => setOpened(false)} title="Add an organ" position="right" size="lg"><Stack>
-      <form onSubmit={e => { e.preventDefault(); void visit(path); }}><Group wrap="nowrap"><TextInput aria-label="Folder" value={path} onChange={e => setPath(e.currentTarget.value)} style={{ flex: 1 }}/><Button type="submit">Go</Button></Group></form>
-      {failure && <Text>That folder could not be opened. Choose another folder.</Text>}
-      {browse?.parent && <Button variant="default" leftSection={<ArrowLeft size={18}/>} onClick={() => void visit(browse.parent!)}>Parent folder</Button>}
-      {browse?.entries.filter(e => e.dir || !/\.(scl|kbm)$/i.test(e.name)).map(entry => <Button key={entry.path} justify="start" variant="default" leftSection={entry.dir ? <Folder size={18}/> : undefined} onClick={() => {
-        if (entry.dir) void visit(entry.path); else { pick(); command('organ/load', { path: entry.path }); setOpened(false); }
-      }}>{entry.name}</Button>)}
-    </Stack></Drawer>
-  </Stack>;
 }
 
 function Appearance({ density, changeDensity }: { density: string; changeDensity: (value: string) => void }) {

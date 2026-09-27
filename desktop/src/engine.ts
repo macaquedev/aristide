@@ -22,6 +22,8 @@ export function useEngine() {
       return value;
     });
   }, []);
+  // A control whose failure the caller handles itself.
+  const send = useCallback((path: string, values: Record<string, string | number> = {}) => update('POST', endpoint(path, values)), [update]);
   const command = useCallback((path: string, values: Record<string, string | number> = {}) => {
     void update('POST', endpoint(path, values)).catch(() => { setDismissedError(undefined); setError('change-failed'); });
   }, [update]);
@@ -66,5 +68,5 @@ export function useEngine() {
     window.addEventListener('blur', release);
     return () => { release(); window.removeEventListener('keydown', keyDown); window.removeEventListener('keyup', keyUp); window.removeEventListener('blur', release); };
   }, [command, ready]);
-  return { snapshot, ready, error: error === dismissedError ? undefined : error, dismissError: () => setDismissedError(error), command };
+  return { snapshot, ready, send, error: error === dismissedError ? undefined : error, dismissError: () => setDismissedError(error), command };
 }
