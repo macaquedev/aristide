@@ -20,3 +20,9 @@
 .stop-events-row .roll-event-strip { flex: 1; min-width: 0; }
 @media (max-width: 760px) { .stop-events-row { flex-wrap: wrap; } }
 .organ-menu-anchor { position: fixed; width: 0; height: 0; pointer-events: none; }
+.organ-tree [data-stop] { user-select: none; }
+.organ-tree .organ-grip { color: var(--mantine-color-dimmed); touch-action: none; cursor: grab; }
+.organ-tree[data-dragging] { cursor: grabbing; }
+.organ-tree [data-lifted] { opacity: .45; }
+.organ-tree [data-drop="before"] { box-shadow: inset 0 2px 0 var(--mantine-primary-color-filled); }
+.organ-tree [data-drop="after"] { box-shadow: inset 0 -2px 0 var(--mantine-primary-color-filled); }

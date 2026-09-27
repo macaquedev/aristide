@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState, type KeyboardEvent, type MouseEvent } from 'react';
+import { useEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type PointerEvent } from 'react';
 import { Button, Drawer, Group, Loader, Menu, Modal, SegmentedControl, Select, Stack, Switch, Text, TextInput } from '@mantine/core';
-import { Folder, Pencil, Plus, Trash2 } from 'lucide-react';
-import { canPickFiles, editInstrument, organFiles, pickFile, request, type Snapshot } from '../api';
+import { Folder, GripVertical, Pencil, Plus, Trash2 } from 'lucide-react';
+import { canPickFiles, editInstrument, organFiles, pickFile, request, type Snapshot, type Stop } from '../api';
 import { StopEditor } from './StopEditor';
 import './organ.css';
 
@@ -10,6 +10,17 @@ type Selection = { kind: 'stop'; id: number } | { kind: 'division'; idx: number 
 type Reselect = { kind: 'stop'; name: string; manual: string } | { kind: 'division'; name: string } | { kind: 'coupler'; name: string };
 type Offerings = { sources: { alias: string; path: string; name?: string; error?: string; manuals?: { name: string; pedal: boolean; pulled: boolean; stops: { name: string; pulled: boolean }[] }[] }[] };
 type Params = Record<string, string | number>;
+/** Where a dragged stop would land: before the stop at `index` in division `midx`. */
+type Drop = { midx: number; index: number };
+
+/** The drop position under a point in the organ tree, by row midpoints. */
+function dropAt(x: number, y: number): Drop | undefined {
+  const section = document.elementFromPoint(x, y)?.closest<HTMLElement>('[data-midx]');
+  if (!section) return undefined;
+  const rows = [...section.querySelectorAll<HTMLElement>('[data-stop]')];
+  const index = rows.filter(row => { const box = row.getBoundingClientRect(); return box.top + box.height / 2 < y; }).length;
+  return { midx: Number(section.dataset.midx), index };
+}
 
 const pitches = [{ value: '0', label: 'Unison' }, { value: '12', label: 'Octave up' }, { value: '-12', label: 'Octave down' }];
 const pitchName = (shift: number) => pitches.find(p => Number(p.value) === shift)?.label ?? `${shift > 0 ? '+' : ''}${shift} keys`;
@@ -25,6 +36,8 @@ export function OrganPanel({ organ, state, stopId, select, offerUndo, openScope 
   const [confirm, setConfirm] = useState<{ title: string; message: string; run: () => void }>();
   const [menu, setMenu] = useState<{ x: number; y: number; target: Selection }>();
   const [renaming, setRenaming] = useState<Selection>();
+  const [drag, setDrag] = useState<{ id: number; to?: Drop }>();
+  const dragged = useRef(false);
   const [adding, setAdding] = useState<{ kind: 'stop'; manual: string } | { kind: 'division' } | { kind: 'coupler' }>();
   const reselect = useRef<Reselect>(undefined);
   const tree = useRef<HTMLElement>(null);
@@ -84,6 +97,57 @@ export function OrganPanel({ organ, state, stopId, select, offerUndo, openScope 
       () => void change('organ/coupler/remove', { idx: s.idx }, 'This coupler could not be deleted.'));
   };
   const openMenu = (target: Selection) => (e: MouseEvent) => { e.preventDefault(); choose(target); setMenu({ x: e.clientX, y: e.clientY, target }); };
+  const drop = (s: Stop, at: Drop) => {
+    const target = manuals.find(m => m.idx === at.midx);
+    if (!target) return;
+    const ids = stops.filter(x => x.midx === at.midx).map(x => x.id);
+    const from = ids.indexOf(s.id);
+    const next = ids.filter(id => id !== s.id);
+    next.splice(from >= 0 && from < at.index ? at.index - 1 : at.index, 0, s.id);
+    const order = () => change('organ/stop/order', { manual: at.midx, stops: next.join(',') }, `${s.name} could not be placed there.`);
+    if (at.midx === s.midx) {
+      if (next.some((id, i) => id !== ids[i])) void order();
+    } else if (named(target.name).includes(s.name.toLowerCase())) {
+      setFailure(`${target.name} already has a stop named ${s.name}. Rename one of them first.`);
+    } else {
+      void change('organ/move', { stop: s.id, manual: at.midx }, `${s.name} could not be moved to ${target.name}.`).then(ok => { if (ok) void order(); });
+    }
+  };
+  // Mouse drags from anywhere on the row; touch from the grip, so the list still scrolls.
+  const startDrag = (s: Stop) => (e: PointerEvent<HTMLButtonElement>) => {
+    dragged.current = false;
+    if (busy || e.button !== 0) return;
+    if (e.pointerType !== 'mouse' && !(e.target as HTMLElement).closest('.organ-grip')) return;
+    const [x0, y0] = [e.clientX, e.clientY];
+    let to: Drop | undefined;
+    const move = (ev: globalThis.PointerEvent) => {
+      if (!dragged.current && Math.hypot(ev.clientX - x0, ev.clientY - y0) < 6) return;
+      dragged.current = true;
+      const box = tree.current?.getBoundingClientRect();
+      if (box && ev.clientY < box.top + 40) tree.current?.scrollBy(0, -12);
+      if (box && ev.clientY > box.bottom - 40) tree.current?.scrollBy(0, 12);
+      to = dropAt(ev.clientX, ev.clientY);
+      setDrag({ id: s.id, to });
+    };
+    const finish = (commit: boolean) => () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', cancel);
+      window.removeEventListener('keydown', escape);
+      setDrag(undefined);
+      if (commit && dragged.current && to) drop(s, to);
+    };
+    const up = finish(true);
+    const cancel = finish(false);
+    const escape = (ev: globalThis.KeyboardEvent) => { if (ev.key === 'Escape') cancel(); };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', cancel);
+    window.addEventListener('keydown', escape);
+  };
+  const dropMark = (midx: number, index: number, count: number) => drag?.to?.midx !== midx ? undefined
+    : drag.to.index === index ? 'before' : index === count - 1 && drag.to.index === count ? 'after' : undefined;
+
   const onTreeKey = (e: KeyboardEvent) => {
     if ((e.key === 'Delete' || e.key === 'Backspace') && current && !busy) { e.preventDefault(); remove(current); }
     if (e.key === 'F2' && current && !busy) { e.preventDefault(); setRenaming(current); }
@@ -104,14 +168,18 @@ export function OrganPanel({ organ, state, stopId, select, offerUndo, openScope 
   </>;
 
   return <div className="organ-panel">
-    <nav ref={tree} className="organ-tree" aria-label="Organ" onKeyDown={onTreeKey}>
-      {manuals.map(manual => <section key={manual.idx} aria-label={manual.name}>
+    <nav ref={tree} className="organ-tree" aria-label="Organ" onKeyDown={onTreeKey} data-dragging={drag ? true : undefined}>
+      {manuals.map(manual => { const own = stops.filter(s => s.midx === manual.idx); return <section key={manual.idx} aria-label={manual.name} data-midx={manual.idx}>
         <Button className="organ-division" fullWidth justify="space-between" variant={division?.idx === manual.idx ? 'light' : 'subtle'} color={division?.idx === manual.idx ? undefined : 'gray'}
-          data-selected={division?.idx === manual.idx} onClick={() => choose({ kind: 'division', idx: manual.idx })} onContextMenu={openMenu({ kind: 'division', idx: manual.idx })}>{manual.name}</Button>
-        <nav aria-label={`${manual.name} stops`}>{stops.filter(s => s.midx === manual.idx).map(s => <Button key={s.id} fullWidth justify="space-between" variant={stop?.id === s.id ? 'light' : 'subtle'} color={stop?.id === s.id ? undefined : 'gray'}
-          aria-current={stop?.id === s.id ? 'true' : undefined} data-selected={stop?.id === s.id} onClick={() => choose({ kind: 'stop', id: s.id })} onContextMenu={openMenu({ kind: 'stop', id: s.id })}>{s.name}{s.custom && <span className="modified" aria-label="custom">◇</span>}</Button>)}</nav>
+          data-selected={division?.idx === manual.idx} data-drop={!own.length && drag?.to?.midx === manual.idx ? 'after' : undefined}
+          onClick={() => choose({ kind: 'division', idx: manual.idx })} onContextMenu={openMenu({ kind: 'division', idx: manual.idx })}>{manual.name}</Button>
+        <nav aria-label={`${manual.name} stops`}>{own.map((s, i) => <Button key={s.id} fullWidth justify="space-between" variant={stop?.id === s.id ? 'light' : 'subtle'} color={stop?.id === s.id ? undefined : 'gray'}
+          aria-current={stop?.id === s.id ? 'true' : undefined} data-selected={stop?.id === s.id} data-stop={s.id} data-drop={dropMark(manual.idx, i, own.length)} data-lifted={drag?.id === s.id ? true : undefined}
+          rightSection={<GripVertical className="organ-grip" size={16} aria-hidden/>} onPointerDown={startDrag(s)}
+          onClick={() => { if (dragged.current) { dragged.current = false; return; } choose({ kind: 'stop', id: s.id }); }} onContextMenu={openMenu({ kind: 'stop', id: s.id })}>
+          {s.name}{s.custom && <span className="modified" aria-label="custom">◇</span>}</Button>)}</nav>
         <Button className="organ-add" variant="subtle" color="gray" size="compact-sm" leftSection={<Plus size={14}/>} disabled={busy} onClick={() => setAdding({ kind: 'stop', manual: manual.name })}>Add stop</Button>
-      </section>)}
+      </section>; })}
       <section aria-label="Couplers">
         <Text size="xs" c="dimmed" className="organ-heading">Couplers</Text>
         {couplers.map(c => <Button key={c.idx} fullWidth justify="space-between" variant={coupler?.idx === c.idx ? 'light' : 'subtle'} color={coupler?.idx === c.idx ? undefined : 'gray'}

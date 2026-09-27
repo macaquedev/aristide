@@ -126,3 +126,52 @@ test('A stop renames and deletes from its menu and the Delete key', async ({ pag
   await page.getByRole('dialog').getByRole('textbox', { name: 'Name' }).press('Enter');
   await expect.poll(async () => (await snapshot(page)).stops.some(s => s.name === first.name)).toBe(true);
 });
+
+test('Stops drag to reorder and to another division', async ({ page }) => {
+  test.setTimeout(90_000);
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Organ', exact: true }).click();
+  const tree = page.getByRole('navigation', { name: 'Organ' });
+  const start = await snapshot(page);
+  const [pedal, manual] = start.manuals;
+  const order = async (midx: number) => (await snapshot(page)).stops.filter(s => s.midx === midx).map(s => s.name);
+  const drag = async (from: string, to: string, where: 'top' | 'bottom') => {
+    const row = tree.getByRole('button', { name: to, exact: true });
+    await row.scrollIntoViewIfNeeded();
+    const source = await tree.getByRole('button', { name: from, exact: true }).boundingBox();
+    if (!source) throw new Error('row not laid out');
+    await page.mouse.move(source.x + 40, source.y + source.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(source.x + 40, source.y + source.height / 2 + 10, { steps: 3 });
+    // The tree scrolls under a drag near its edges; aim at where the target is now.
+    for (let i = 0; i < 2; i++) {
+      const target = await row.boundingBox();
+      if (!target) throw new Error('row not laid out');
+      await page.mouse.move(target.x + 40, target.y + (where === 'top' ? 4 : target.height - 4), { steps: 4 });
+    }
+    return async () => page.mouse.up();
+  };
+
+  // Last stop of the first manual to its top.
+  const before = await order(manual.idx);
+  const last = before[before.length - 1];
+  const release = await drag(last, before[0], 'top');
+  await page.screenshot({ path: 'test-results/organ-drag.png' });
+  await release();
+  await expect.poll(() => order(manual.idx)).toEqual([last, ...before.slice(0, -1)]);
+  expect((await snapshot(page)).loading ?? '').toBe('');
+
+  // A stop whose name the Pedal lacks moves there, after the Pedal's first stop.
+  const pedalNames = await order(pedal.idx);
+  const travelling = before.find(name => !pedalNames.includes(name))!;
+  await (await drag(travelling, pedalNames[0], 'bottom'))();
+  await expect.poll(() => order(pedal.idx)).toEqual([pedalNames[0], travelling, ...pedalNames.slice(1)]);
+  await expect(tree.getByRole('region', { name: pedal.name }).getByRole('button', { name: travelling, exact: true })).toBeVisible();
+
+  // And back, restoring the first manual's order.
+  await (await drag(travelling, before[before.indexOf(travelling) + 1] ?? before[0], 'top'))();
+  await expect.poll(async () => (await order(manual.idx)).includes(travelling)).toBe(true);
+  const restore = before.map(name => (start.stops.find(s => s.midx === manual.idx && s.name === name))!.id);
+  await page.request.post(`/api/organ/stop/order?manual=${manual.idx}&stops=${restore.join(',')}`);
+  await expect.poll(() => order(manual.idx)).toEqual(before);
+});
