@@ -4,6 +4,7 @@ Newest first. One entry per work session; keep entries factual and short.
 Milestones refer to DESIGN.md. Older UI entries are historical; the current
 implementation scope is described by the newest notes.
 
+- [2026-09-27 — console keyboards, taught once for every organ](progress/2026-09-27-console-keyboards.md)
 - [2026-09-27 — the Library as a list, with rename and delete](progress/2026-09-27-library-list.md)
 - [2026-09-23 — the Route panel: speaker groups and a send matrix](progress/2026-09-23-route-panel.md)
 - [2026-09-22 — visual study navigation, concise UI](progress/2026-09-22-visual-studies.md)

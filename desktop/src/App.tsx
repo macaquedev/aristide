@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ActionIcon, Button, Card, Group, Loader, Modal, NumberInput, SegmentedControl, Stack, Text, TextInput, Tooltip, useMantineColorScheme } from '@mantine/core';
-import { ArrowLeft, ChevronLeft, ChevronRight, Settings, Trash2, Undo2 } from 'lucide-react';
-import { endpoint, request, native, type Snapshot, type Stop } from './api';
+import { ActionIcon, Button, Group, Loader, Modal, Stack, Text, Tooltip } from '@mantine/core';
+import { ChevronLeft, ChevronRight, Settings, Undo2 } from 'lucide-react';
+import { native, type Snapshot, type Stop } from './api';
 import { formatFootage } from './footage';
 import { useEngine } from './engine';
 import { TuningPanel } from './tuning/TuningPanel';
-import { SoundPanel, type Routing } from './sound/SoundPanel';
+import { SoundPanel } from './sound/SoundPanel';
 import { OrganPanel } from './organ/OrganPanel';
 import { LibraryPanel } from './library/LibraryPanel';
+import { SettingsPanel } from './settings/SettingsPanel';
 
 const panels = ['Play', 'Organ', 'Sound', 'Tuning', 'Library'] as const;
 type Panel = typeof panels[number] | 'Settings';
@@ -69,10 +70,8 @@ export function App() {
       {panel === 'Library' && <LibraryPanel state={state} send={engine.send} play={() => setPanel('Play')}
         load={path => { landing.current = 'Play'; command('organ/load', { path }); }}
         create={name => { landing.current = 'Organ'; return engine.send('organ/new', { name }).catch(error => { landing.current = undefined; throw error; }); }}/>}
-      {panel === 'Settings' && <Stack p="lg"><Group><Button variant="subtle" leftSection={<ArrowLeft size={18}/>} onClick={() => setPanel('Play')}>Play</Button><Text fw={600}>Settings</Text></Group>
-        <Appearance density={density} changeDensity={value => { setDensity(value); localStorage.setItem('aristide-density', value); }}/>
-        {state && <ConsoleSettings state={state} command={command}/>}
-        {state && <SpeakerSettings/>}</Stack>}
+      {panel === 'Settings' && <SettingsPanel state={state} send={engine.send} back={() => setPanel('Play')}
+        density={density} changeDensity={value => { setDensity(value); localStorage.setItem('aristide-density', value); }}/>}
       {panel === 'Tuning' && (state?.organ ? <TuningPanel key={tuningScope} organ={state.organ} offerUndo={offerUndo} scope={tuningScope}/> : <Stack align="center" p="xl"><Text>Choose an organ to tune.</Text><Button onClick={() => setPanel('Library')}>Open Library</Button></Stack>)}
       {panel === 'Sound' && (state?.organ ? <SoundPanel organ={state.organ} offerUndo={offerUndo} openSettings={() => setPanel('Settings')}/> : <Stack align="center" p="xl"><Text>Choose an organ first.</Text><Button onClick={() => setPanel('Library')}>Open Library</Button></Stack>)}
       {panel === 'Organ' && (state?.organ ? <OrganPanel organ={state.organ} state={state} stopId={state.stops.some(s => s.id === selected) ? selected : undefined}
@@ -124,56 +123,4 @@ function StopButton({ stop, toggle, open }: { stop: Stop; toggle: () => void; op
     onClick={() => { if (!consumed.current) toggle(); consumed.current = false; }}>
     <span className="stop-name">{stop.name}{stop.custom && <span className="stop-mark" aria-label="custom"> ◇</span>}</span><span className="stop-pitch">{footage ? formatFootage(footage) : `${stop.ranks.length} ranks`}</span>
   </button>;
-}
-
-function Appearance({ density, changeDensity }: { density: string; changeDensity: (value: string) => void }) {
-  const { colorScheme, setColorScheme } = useMantineColorScheme();
-  return <Card withBorder><Stack><Text fw={600}>Appearance</Text><Group><Text>Colour</Text><SegmentedControl value={colorScheme} onChange={value => setColorScheme(value as 'dark' | 'light')} data={[{ value: 'dark', label: 'Dark' }, { value: 'light', label: 'Light' }]}/></Group>
-    <Group><Text>Density</Text><SegmentedControl value={density} onChange={changeDensity} data={[{ value: 'comfortable', label: 'Comfortable' }, { value: 'compact', label: 'Compact' }]}/></Group></Stack></Card>;
-}
-
-function ConsoleSettings({ state, command }: { state: Snapshot; command: Command }) {
-  return <Card withBorder><Stack><Group justify="space-between"><Text fw={600}>Console</Text><Button variant="default" onClick={() => command('midi/rescan')}>Rescan MIDI</Button></Group>
-    {state.midi.manuals.map(manual => <Group key={manual.idx} justify="space-between"><Stack gap={0}><Text>{manual.name}</Text><Text size="xs" c="dimmed">{manual.inputs.map(i => `${i.device}${i.connected ? '' : ' (disconnected)'}`).join(', ') || 'No console assigned'}</Text></Stack>
-      <Group><Button variant="default" onClick={() => command('midi/learn', { manual: manual.idx, slot: 0 })}>Learn keys</Button>
-        <Button variant="default" onClick={() => command('midi/bind', { manual: manual.idx, slot: manual.inputs.length, device: 'Computer keyboard' })}>Use computer keyboard</Button></Group>
-    </Group>)}
-    {state.midi.learning && <Group><Text>Press a key on your console.</Text><Button variant="default" onClick={() => command('midi/learn')}>Cancel learning</Button></Group>}
-  </Stack></Card>;
-}
-
-function SpeakerSettings() {
-  const [routing, setRouting] = useState<Routing>();
-  const [name, setName] = useState('');
-  const [output, setOutput] = useState<[number, number]>([3, 4]);
-  const [failure, setFailure] = useState(false);
-  useEffect(() => { request<Routing>('GET', '/api/routing').then(setRouting, () => setRouting(undefined)); }, []);
-  const change = (values: Record<string, string | number>) => {
-    setFailure(false);
-    return request<Routing>('POST', endpoint('speakers', values)).then(setRouting, () => { setFailure(true); throw new Error('speakers'); });
-  };
-  const channel = (value: string | number) => Math.max(1, Math.min(64, Math.round(Number(value) || 1)));
-  const defined = routing?.speakers.filter(s => s.defined && s.output) ?? [];
-  return <Card withBorder><Stack>
-    <Group justify="space-between"><Text fw={600}>Speakers</Text>{routing && <Text size="xs" c="dimmed">Device outputs: {routing.channels}</Text>}</Group>
-    {defined.map(speaker => <Group key={speaker.name} wrap="nowrap">
-      <Stack gap={0} style={{ flex: 1 }}><Text>{speaker.name}</Text>{!speaker.available && <Text size="xs" c="dimmed">Not on this device · plays through Main</Text>}</Stack>
-      {speaker.name === 'Main' ? <Text c="dimmed">1 / 2</Text> : <>
-        <NumberInput w={84} aria-label={`${speaker.name} left channel`} min={1} max={64} value={speaker.output![0]}
-          onChange={v => void change({ name: speaker.name, left: channel(v), right: speaker.output![1] }).catch(() => {})}/>
-        <NumberInput w={84} aria-label={`${speaker.name} right channel`} min={1} max={64} value={speaker.output![1]}
-          onChange={v => void change({ name: speaker.name, left: speaker.output![0], right: channel(v) }).catch(() => {})}/>
-        <ActionIcon size="lg" variant="subtle" color="red" aria-label={`Remove ${speaker.name}`} onClick={() => void change({ name: speaker.name, remove: 1 }).catch(() => {})}><Trash2 size={18}/></ActionIcon>
-      </>}
-    </Group>)}
-    <form onSubmit={e => { e.preventDefault(); if (name.trim()) void change({ name: name.trim(), left: output[0], right: output[1] }).then(() => setName(''), () => {}); }}>
-      <Group wrap="nowrap" align="end">
-        <TextInput style={{ flex: 1 }} label="New group" placeholder="Name" value={name} onChange={e => setName(e.currentTarget.value)}/>
-        <NumberInput w={84} label="Left" min={1} max={64} value={output[0]} onChange={v => setOutput([channel(v), output[1]])}/>
-        <NumberInput w={84} label="Right" min={1} max={64} value={output[1]} onChange={v => setOutput([output[0], channel(v)])}/>
-        <Button type="submit" disabled={!name.trim()}>Add</Button>
-      </Group>
-    </form>
-    {failure && <Text>That speaker group could not be saved. Use a new name without commas or colons.</Text>}
-  </Stack></Card>;
 }

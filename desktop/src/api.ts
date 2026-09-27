@@ -19,9 +19,19 @@ export type Snapshot = {
   library: LibraryEntry[];
   memory?: { resident_mb: number; samples: number };
   manual_tuning?: { idx: number; temperament: string; reference: { hz: number } }[];
-  midi: { ports: { id: number; name: string }[]; manuals: { idx: number; name: string; inputs: { device: string; connected: boolean }[] }[]; learning?: { manual: number; slot: number; step: string } };
+  midi: { ports: { id: number; name: string; virtual?: boolean }[]; manuals: MidiManual[]; learning?: { manual: number; slot: number; step: string } };
+  console?: { keyboards: ConsoleKeyboard[]; heard: number; learning?: { keyboard: number; pedal: boolean; range: boolean; step: 'low' | 'high'; repeat?: string } };
   keyboard?: { manual: number };
 };
+export type MidiManual = {
+  idx: number; name: string; keyboard?: number | null; automatic?: boolean;
+  inputs: { slot: number; device: string; channel: number | null; connected: boolean }[];
+};
+export type ConsoleKeyboard = {
+  idx: number; name: string; pedal: boolean; device: string; channel: number | null; connected: boolean;
+  low: number | null; high: number | null; transpose: number; plays: number[];
+};
+export const COMPUTER_KEYBOARD = 'Computer keyboard';
 
 export type LibraryEntry = { name: string; path: string; played?: number; loaded?: boolean; owned?: boolean };
 export const native = isTauri();

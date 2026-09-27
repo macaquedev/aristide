@@ -20,6 +20,7 @@ test('the connected Sound panel routes sources to speaker groups', async ({ page
   await page.request.post(`/api/routing?stop=${start.stops.find((s: { midx: number }) => s.midx === 1).id}&follow=1`);
 
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByRole('tab', { name: 'Speakers' }).click();
   await page.getByRole('textbox', { name: 'New group' }).fill('Rear');
   await page.getByRole('button', { name: 'Add', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Remove Rear', exact: true })).toBeVisible();
