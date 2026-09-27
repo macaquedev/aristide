@@ -62,6 +62,8 @@ export function TuningDesk({ layout, scopes, selected, select, setAnchor, setSha
     return current ?? scope;
   };
   const changeAnchor = (change: Partial<Anchor>) => { if (!anchorLocked) setAnchor(scope.id, { ...anchor, ...change }); };
+  // A new reference key takes the pitch it already sounds, so the organ stays where it is.
+  const moveReferenceKey = (key: number) => changeAnchor({ key, hz: keyHz(shape, { ...anchor, offset: 0 }, key) ?? anchor.hz });
   const changeShape = (next: Shape) => { if (!scaleLocked) setShape(scope.id, next); };
   const changeNote = (index: number, value: number) => {
     if (!editableNotes || index === fixedStep) return;
@@ -87,7 +89,7 @@ export function TuningDesk({ layout, scopes, selected, select, setAnchor, setSha
   const presets = [...(scope.recorded === undefined ? [] : [{ label: `As recorded (${Number(scope.recorded.toFixed(2))})`, hz: scope.recorded }]), { label: '440', hz: 440 }];
   const referenceKey = <div><Text size="xs" c="dimmed">Reference key</Text><NumberControl label="Reference key" value={anchor.key} unit={keyLabel(anchor.key)}
     min={finite ? keyRange![0] : 0} max={finite ? keyRange![1] : 127} disabled={anchorLocked}
-    change={value => changeAnchor({ key: Math.round(value) })} assign={() => assign(`tuning/${scope.id}/referenceKey`)}/></div>;
+    change={value => moveReferenceKey(Math.round(value))} assign={() => assign(`tuning/${scope.id}/referenceKey`)}/></div>;
   const reference = module('Reference', <Stack gap="xs">
     <div className="tuning-reference-number"><NumberControl label="Reference pitch" value={Number(anchor.hz.toFixed(2))} unit="Hz" min={1} disabled={anchorLocked} change={hz => changeAnchor({ hz })} assign={() => assign(`tuning/${scope.id}/hz`)}/></div>
     <Group gap={4} wrap="nowrap">{presets.map(({ label, hz }) => <Button key={label} size="compact-sm" style={{ flex: hz === 440 ? 'none' : 1 }} variant={Math.abs(anchor.hz - hz) < .005 ? 'light' : 'default'} disabled={anchorLocked} onClick={() => changeAnchor({ hz })}>{label}</Button>)}</Group>
