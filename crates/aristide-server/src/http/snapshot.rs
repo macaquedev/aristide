@@ -435,6 +435,9 @@ struct TuningView {
     temperament: String,
     edo: u16,
     reference: ReferenceView,
+    /// What the recording sounds on the reference key: the Hz that
+    /// plays the organ as recorded there.
+    recorded_hz: F64,
     transpose: i8,
     pipes: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1232,6 +1235,7 @@ fn tuning_view(tuning: &crate::tuning::Tuning) -> TuningView {
             key: tuning.reference.key,
             hz: F64(tuning.reference.hz),
         },
+        recorded_hz: F64(tuning.home_reference(tuning.reference.key).hz),
         transpose: tuning.transpose,
         pipes: tuning.pipes.name().to_string(),
         scale: tuning.scale.as_ref().map(|scale| ScaleView {
