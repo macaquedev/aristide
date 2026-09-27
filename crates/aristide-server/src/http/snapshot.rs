@@ -133,6 +133,8 @@ struct Snapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     reverb: Option<F32>,
     midi: MidiView,
+    /// The player's console keyboards, whatever organ is loaded.
+    console: ConsoleView,
     controls: Vec<ControlView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     control_learning: Option<usize>,
@@ -599,10 +601,52 @@ struct PortView {
     is_virtual: Option<bool>,
 }
 
+/// The console keyboards, bottom first, and the detection waiting for
+/// one to be played.
+#[derive(Serialize)]
+struct ConsoleView {
+    keyboards: Vec<ConsoleKeyboardView>,
+    /// Keyboards detection has heard since the server started.
+    heard: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    learning: Option<ConsoleLearningView>,
+}
+
+#[derive(Serialize)]
+struct ConsoleKeyboardView {
+    idx: usize,
+    name: String,
+    pedal: bool,
+    /// Empty while no device plays it.
+    device: String,
+    channel: Option<u8>,
+    connected: bool,
+    low: Option<u8>,
+    high: Option<u8>,
+    transpose: i8,
+    /// The loaded organ's manuals it plays.
+    plays: Vec<usize>,
+}
+
+#[derive(Serialize)]
+struct ConsoleLearningView {
+    keyboard: usize,
+    pedal: bool,
+    range: bool,
+    step: &'static str,
+    /// The keyboard the last press came from, when it was already known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repeat: Option<String>,
+}
+
 #[derive(Serialize)]
 struct MidiManualView {
     idx: usize,
     name: String,
+    /// The console keyboard playing it, and whether by the console's
+    /// order rather than the organ's own choice.
+    keyboard: Option<usize>,
+    automatic: bool,
     inputs: Vec<InputView>,
     /// What the set itself declares, so the dialog can say how far a
     /// widened keyboard is reaching past it.
@@ -932,6 +976,8 @@ fn snapshot(state: &State) -> Snapshot {
                     .map(|(idx, name, ..)| MidiManualView {
                         idx: *idx,
                         name: name.to_string(),
+                        keyboard: state.played_from(*idx).keyboard,
+                        automatic: state.played_from(*idx).automatic,
                         inputs: state
                             .manual_inputs(*idx)
                             .iter()
@@ -957,10 +1003,49 @@ fn snapshot(state: &State) -> Snapshot {
                     .collect()
             })
             .unwrap_or_default(),
-        learning: state.learn.as_ref().map(|learn| LearningView {
-            manual: learn.manual,
-            slot: learn.slot,
-            step: if learn.heard.is_some() { "high" } else { "low" },
+        learning: state.learn.as_ref().and_then(|learn| match learn.target {
+            crate::bindings::LearnTarget::Manual { manual, slot } => Some(LearningView {
+                manual,
+                slot,
+                step: if learn.heard.is_some() { "high" } else { "low" },
+            }),
+            crate::bindings::LearnTarget::Console { .. } => None,
+        }),
+    };
+    let manual_count = state.manual_names().len();
+    let console_view = ConsoleView {
+        heard: state.console_heard,
+        keyboards: state
+            .console_keyboards()
+            .iter()
+            .enumerate()
+            .map(|(idx, keyboard)| ConsoleKeyboardView {
+                idx,
+                name: keyboard.name.clone(),
+                pedal: keyboard.pedal,
+                device: keyboard.input.device.clone(),
+                channel: keyboard.input.channel,
+                connected: keyboard.input.device == crate::COMPUTER_KEYBOARD
+                    || state.midi_ports.iter().any(|p| p.name == keyboard.input.device),
+                low: keyboard.input.low,
+                high: keyboard.input.high,
+                transpose: keyboard.input.transpose,
+                plays: (0..manual_count)
+                    .filter(|&manual| state.played_from(manual).keyboard == Some(idx))
+                    .collect(),
+            })
+            .collect(),
+        learning: state.learn.as_ref().and_then(|learn| match learn.target {
+            crate::bindings::LearnTarget::Console { keyboard, pedal, range } => {
+                Some(ConsoleLearningView {
+                    keyboard,
+                    pedal,
+                    range,
+                    step: if learn.heard.is_some() { "high" } else { "low" },
+                    repeat: learn.repeat.clone(),
+                })
+            }
+            crate::bindings::LearnTarget::Manual { .. } => None,
         }),
     };
 
@@ -1098,6 +1183,7 @@ fn snapshot(state: &State) -> Snapshot {
         source_home,
         reverb: state.reverb_wet.map(F32),
         midi,
+        console: console_view,
         // Bindings, the computer keyboard, and the vocabulary a UI can
         // offer — everything a Controls pane needs to draw itself.
         controls: state

@@ -13,8 +13,8 @@ use aristide_model::StopId;
 
 use super::{Control, KeyboardInput, Pending, Resolution, State};
 use crate::bindings::{
-    channels_overlap, normalize_input, Binding, ControlLearn, Learn, MidiPort, Route, Subject,
-    COMPUTER_KEYBOARD, LEARN_TIMEOUT,
+    channels_overlap, normalize_input, Binding, ControlLearn, Learn, LearnTarget, MidiPort, Route,
+    Subject, COMPUTER_KEYBOARD, LEARN_TIMEOUT,
 };
 use crate::{config, control};
 
@@ -220,6 +220,17 @@ impl State {
     /// binding table governs both, and so an octave button on a MIDI
     /// console can shift the computer keyboard as readily as `=` can.
     pub fn key(&mut self, code: &str, pressed: bool) {
+        // Detecting the console: a letter pressed is the computer
+        // keyboard answering, and plays nothing.
+        if self
+            .learning()
+            .is_some_and(|learn| matches!(learn.target, LearnTarget::Console { .. }))
+        {
+            if pressed && let Some(note) = control::key_note(code) {
+                self.learn_key(COMPUTER_KEYBOARD, None, note);
+            }
+            return;
+        }
         let fired: Vec<Binding> = self
             .key_bindings
             .iter()
@@ -1474,6 +1485,21 @@ impl State {
         let organ = self.organ_key.clone();
         let names = self.manual_names();
         let mut changed = false;
+        let shifted_keyboards: Vec<usize> = match subject {
+            Subject::Manual(manual) => self.played_from(manual).keyboard.into_iter().collect(),
+            _ => (0..self.midi_config.console.len())
+                .filter(|&k| self.midi_config.console[k].input.device == device)
+                .collect(),
+        };
+        for index in shifted_keyboards {
+            let keyboard = &mut self.midi_config.console[index];
+            let shifted = to(keyboard.input.transpose).clamp(-36, 36);
+            if shifted != keyboard.input.transpose {
+                keyboard.input.transpose = shifted;
+                changed = true;
+                tracing::info!("control: {} now plays {shifted:+} semitones", keyboard.name);
+            }
+        }
         for (index, name) in names.iter().enumerate() {
             for input in self.midi_config.inputs_mut(&organ, name) {
                 let mine = match subject {
@@ -1631,9 +1657,9 @@ impl State {
     pub fn listen(&mut self, manual: usize, slot: usize) {
         self.pending = None;
         self.learn = Some(Learn {
-            manual,
-            slot,
+            target: LearnTarget::Manual { manual, slot },
             heard: None,
+            repeat: None,
             started: Instant::now(),
         });
     }
@@ -1642,16 +1668,20 @@ impl State {
     /// the bottom of its compass; the second fixes the top and writes
     /// the assignment. Pressing the same key twice is a slip, not a
     /// one-key keyboard, so it keeps waiting.
-    pub(crate) fn learn_key(&mut self, device: &str, channel: u8, key: u8) {
+    pub(crate) fn learn_key(&mut self, device: &str, channel: Option<u8>, key: u8) {
         let Some(mut learn) = self.learning() else {
+            return;
+        };
+        let LearnTarget::Manual { manual, slot } = learn.target else {
+            self.learn_console_key(learn, device, channel, key);
             return;
         };
         match learn.heard.take() {
             None => {
-                tracing::info!("midi: heard {device} channel {} key {key}", channel + 1);
+                tracing::info!("midi: heard {device} channel {channel:?} key {key}");
                 learn.heard = Some(config::Input {
                     device: device.to_string(),
-                    channel: Some(channel + 1),
+                    channel,
                     low: Some(key),
                     high: None,
                     transpose: 0,
@@ -1668,7 +1698,7 @@ impl State {
             Some(mut input) => {
                 input.high = Some(key);
                 self.learn = None;
-                self.propose_input(learn.manual, learn.slot, input);
+                self.propose_input(manual, slot, input);
             }
         }
     }

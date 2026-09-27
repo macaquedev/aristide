@@ -58,6 +58,14 @@ const HEADER: &str = "\
 # or missing manual drops its inputs rather than playing the wrong
 # division.
 #
+# A [[console]] entry is one keyboard of this machine's console, bottom
+# manual first: a name, `pedal = true` for a pedalboard, and the same
+# device / channel / low / high fields as above. Every organ plays from
+# it: the n-th hand manual from the n-th hand keyboard, the n-th pedal
+# from the n-th pedalboard. An organ's `keyboards` table overrides that
+# per manual (manual = \"keyboard name\", or \"\" for none); a manual that
+# lists inputs of its own is left to them unless the table names it.
+#
 # A [[...controls]] entry is a binding: what a message that isn't a note
 # does. Both halves are text —
 #
@@ -133,9 +141,60 @@ pub struct MidiConfig {
     /// Per machine, because they name this machine's speakers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub speakers: Vec<SpeakerDef>,
+    /// The player's physical console, bottom manual first, whatever
+    /// organ is loaded: each keyboard is taught once and every organ
+    /// plays from it, as Hauptwerk's console keyboards do.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub console: Vec<ConsoleKeyboard>,
     /// Organ name (as the loaded set reports it) → its assignments.
     #[serde(default)]
     pub organs: BTreeMap<String, OrganConfig>,
+}
+
+/// One keyboard of the player's console: a hand manual or a
+/// pedalboard, and the input it arrives on. The name is what an
+/// organ's keyboard map refers to it by.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConsoleKeyboard {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub pedal: bool,
+    #[serde(flatten)]
+    pub input: Input,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// Where an organ's manual is played from, when the organ says so
+/// rather than taking the console in order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyboardChoice {
+    /// The console keyboard of this name.
+    Console(String),
+    /// Deliberately silent: no console keyboard plays it.
+    Nothing,
+}
+
+impl Serialize for KeyboardChoice {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            KeyboardChoice::Console(name) => serializer.serialize_str(name),
+            KeyboardChoice::Nothing => serializer.serialize_str(""),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for KeyboardChoice {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let name = String::deserialize(deserializer)?;
+        Ok(if name.is_empty() {
+            KeyboardChoice::Nothing
+        } else {
+            KeyboardChoice::Console(name)
+        })
+    }
 }
 
 /// One speaker group: its name and 1-based interface channel pair.
@@ -370,8 +429,16 @@ impl MidiConfig {
 pub struct OrganConfig {
     /// Manual name → the inputs that play it, in the order the player
     /// added them. The order is the slot numbering the UI edits by.
+    /// These are this organ's own, on top of the console keyboard that
+    /// plays the manual.
     #[serde(default)]
     pub manuals: BTreeMap<String, Vec<Input>>,
+    /// Manual name → the console keyboard that plays it. A manual not
+    /// listed takes the console in order: the n-th hand manual the
+    /// n-th hand keyboard, the n-th pedal the n-th pedalboard — unless
+    /// it has inputs of its own above, which predate the console.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub keyboards: BTreeMap<String, KeyboardChoice>,
     /// Everything an input does that isn't playing a note: pistons,
     /// the transposer, an expression shoe. Order is the slot numbering.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -3743,6 +3810,27 @@ fn write_atomically(path: &Path, body: String) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    /// The console and an organ's keyboard map read back exactly, in
+    /// the shape the file header documents.
+    #[test]
+    fn console_and_keyboard_map_round_trip() {
+        let text = "[[console]]\nname = \"Manual 1\"\ndevice = \"Fatar\"\nchannel = 2\n\n\
+                    [[console]]\nname = \"Pedalboard\"\npedal = true\ndevice = \"Computer keyboard\"\n\n\
+                    [organs.\"Demo\".keyboards]\nPedal = \"\"\n\"First Manual\" = \"Pedalboard\"\n";
+        use super::*;
+        let config: MidiConfig = toml::from_str(text).expect("parses");
+        assert_eq!(config.console.len(), 2);
+        assert_eq!(config.console[0].input.channel, Some(2));
+        assert!(config.console[1].pedal && !config.console[0].pedal);
+        let keyboards = &config.organs["Demo"].keyboards;
+        assert_eq!(keyboards["Pedal"], KeyboardChoice::Nothing);
+        assert_eq!(keyboards["First Manual"], KeyboardChoice::Console("Pedalboard".into()));
+        let written = toml::to_string_pretty(&config).expect("writes");
+        let again: MidiConfig = toml::from_str(&written).expect("reads back");
+        assert_eq!(again.console, config.console);
+        assert_eq!(again.organs["Demo"].keyboards, *keyboards);
+    }
+
     #[test]
     fn sample_prefs_round_trip_and_tolerate_hand_edits() {
         use super::*;

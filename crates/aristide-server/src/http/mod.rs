@@ -25,6 +25,7 @@ use tiny_http::{Header, Method, Response, Server};
 use crate::State;
 
 mod build;
+mod console;
 mod couplers;
 mod midi;
 mod organ;
@@ -138,6 +139,11 @@ pub(crate) fn respond(
         (Method::Post, "/api/control/learn") => midi::control_learn,
         (Method::Post, "/api/couplers") => couplers::repitch,
         (Method::Post, "/api/midi/rescan") => midi::rescan,
+        (Method::Post, "/api/console/add") => console::add,
+        (Method::Post, "/api/console/set") => console::set,
+        (Method::Post, "/api/console/remove") => console::remove,
+        (Method::Post, "/api/console/learn") => console::learn,
+        (Method::Post, "/api/console/map") => console::map,
         (Method::Post, "/api/note") => play::note,
         (Method::Post, "/api/panic") => play::panic_button,
         (Method::Post, "/api/general") => play::general,
@@ -412,6 +418,7 @@ mod tests {
             suggested_channels: vec![Some(3), Some(1), Some(2)],
             learn: None,
             control_learn: None,
+            console_heard: 0,
             pending: None,
             key_bindings: Vec::new(),
             keyboard: Vec::new(),
@@ -1187,7 +1194,7 @@ mod tests {
         // Demo set: First Manual, Second Manual, Pedal — every one of
         // them listed, every one of them empty.
         assert!(
-            body.contains("{\"idx\":1,\"name\":\"First Manual\",\"inputs\":[],\"native\":[36,96]}"),
+            body.contains("{\"idx\":1,\"name\":\"First Manual\",\"keyboard\":null,\"automatic\":true,\"inputs\":[],\"native\":[36,96]}"),
             "manuals listed with nothing assigned: {body}"
         );
         assert!(!body.contains("\"learning\""), "not listening yet");
@@ -1285,7 +1292,7 @@ mod tests {
             "removing the first input renumbers the rest: {body}"
         );
         respond(&state, &Method::Post, "/api/midi/unbind?manual=2&slot=0");
-        assert!(state_json(&state).contains("\"name\":\"Second Manual\",\"inputs\":[],\"native\":"));
+        assert!(state_json(&state).contains("\"name\":\"Second Manual\",\"keyboard\":null,\"automatic\":true,\"inputs\":[],\"native\":"));
 
         // A manual this organ hasn't got is refused, not clamped.
         respond(
@@ -2346,6 +2353,103 @@ mod tests {
         );
     }
 
+    /// The console is taught once and every organ plays from it in
+    /// order: hand keyboards to hand manuals, pedalboards to pedals.
+    #[test]
+    fn console_keyboards_play_the_organ_in_order() {
+        let Some(state) = demo_state() else { return };
+        let body = state_json(&state);
+        assert!(body.contains("\"console\":{\"keyboards\":[],\"heard\""), "{body}");
+        let (hand, pedal) = {
+            let locked = state.lock().expect("state");
+            let Control::Organ(console) = &locked.control else { panic!("organ expected") };
+            let count = console.manual_states().len();
+            let hand = (0..count).find(|&m| !console.manual_pedal(m)).expect("a hand manual");
+            (hand, (0..count).find(|&m| console.manual_pedal(m)))
+        };
+
+        // Detection: a letter answers for the computer keyboard, and
+        // plays nothing while it teaches.
+        respond(&state, &Method::Post, "/api/console/learn?keyboard=0");
+        assert!(state_json(&state).contains("\"learning\":{\"keyboard\":0"));
+        respond(&state, &Method::Post, "/api/key?code=KeyZ&on=1");
+        let body = state_json(&state);
+        assert!(
+            body.contains("\"name\":\"Manual 1\",\"pedal\":false,\"device\":\"Computer keyboard\""),
+            "the first press names the keyboard: {body}"
+        );
+        assert!(
+            body.contains(&format!("\"keyboard\":{{\"manual\":{hand},")),
+            "and the first hand manual plays from it: {body}"
+        );
+        assert!(!body.contains("\"learning\":{\"keyboard\""), "one press is enough");
+
+        // The same keyboard pressed again for the next manual is a slip.
+        respond(&state, &Method::Post, "/api/console/learn?keyboard=1");
+        respond(&state, &Method::Post, "/api/key?code=KeyX&on=1");
+        let body = state_json(&state);
+        assert!(body.contains("\"repeat\":\"Manual 1\""), "{body}");
+        assert_eq!(state.lock().expect("state").console_keyboards().len(), 1);
+        respond(&state, &Method::Post, "/api/console/learn");
+
+        // A pedalboard maps onto the pedal; picking the computer keyboard
+        // for it moves the keyboard rather than doubling it.
+        respond(&state, &Method::Post, "/api/console/add?pedal=1");
+        respond(&state, &Method::Post, "/api/console/set?keyboard=1&device=Computer%20keyboard");
+        let body = state_json(&state);
+        assert!(body.contains("\"name\":\"Pedalboard\",\"pedal\":true,\"device\":\"Computer keyboard\""), "{body}");
+        assert!(body.contains("\"name\":\"Manual 1\",\"pedal\":false,\"device\":\"\""), "moved: {body}");
+        match pedal {
+            Some(pedal) => assert!(body.contains(&format!("\"keyboard\":{{\"manual\":{pedal},")), "{body}"),
+            None => assert!(!body.contains("\"keyboard\":{\"manual\""), "{body}"),
+        }
+
+        // The organ can choose otherwise, and silence a manual outright.
+        respond(&state, &Method::Post, &format!("/api/console/map?manual={hand}&keyboard=Pedalboard"));
+        assert_eq!(
+            state.lock().expect("state").played_from(hand),
+            crate::PlayedFrom { keyboard: Some(1), automatic: false }
+        );
+        respond(&state, &Method::Post, &format!("/api/console/map?manual={hand}&keyboard=none"));
+        if let Some(pedal) = pedal {
+            respond(&state, &Method::Post, &format!("/api/console/map?manual={pedal}&keyboard=none"));
+        }
+        assert!(!state_json(&state).contains("\"keyboard\":{\"manual\""));
+        respond(&state, &Method::Post, &format!("/api/console/map?manual={hand}&keyboard=auto"));
+
+        // Renaming follows through the organ's map; removing forgets it.
+        respond(&state, &Method::Post, "/api/console/set?keyboard=1&name=Pedals");
+        if let Some(pedal) = pedal {
+            let locked = state.lock().expect("state");
+            let name = &locked.manual_names()[pedal];
+            assert_eq!(
+                locked.midi_config.organ(&locked.organ_key).and_then(|o| o.keyboards.get(name)),
+                Some(&crate::config::KeyboardChoice::Nothing)
+            );
+        }
+        respond(&state, &Method::Post, "/api/console/remove?keyboard=1");
+        respond(&state, &Method::Post, "/api/console/remove?keyboard=0");
+        assert!(state_json(&state).contains("\"console\":{\"keyboards\":[],\"heard\""));
+    }
+
+    /// A manual the organ wired for itself before the console existed
+    /// keeps playing from exactly that, not from the console as well.
+    #[test]
+    fn an_organs_own_inputs_outrank_the_console_order() {
+        let Some(state) = demo_state() else { return };
+        let hand = {
+            let locked = state.lock().expect("state");
+            let Control::Organ(console) = &locked.control else { panic!("organ expected") };
+            (0..console.manual_states().len()).find(|&m| !console.manual_pedal(m)).expect("hand")
+        };
+        respond(&state, &Method::Post, &format!("/api/midi/bind?manual={hand}&slot=0&device=Computer%20keyboard"));
+        respond(&state, &Method::Post, "/api/console/add");
+        respond(&state, &Method::Post, "/api/console/set?keyboard=0&device=Fatar");
+        let locked = state.lock().expect("state");
+        assert_eq!(locked.played_from(hand), crate::PlayedFrom { keyboard: None, automatic: true });
+        assert_eq!(locked.keyboard.len(), 1, "the organ's own row still plays");
+    }
+
     #[test]
     fn port_names_survive_the_query_string() {
         assert_eq!(unescape("Midiplus%20AKM320%20MIDI%201"), "Midiplus AKM320 MIDI 1");
@@ -2446,6 +2550,7 @@ mod tests {
             suggested_channels: Vec::new(),
             learn: None,
             control_learn: None,
+            console_heard: 0,
             pending: None,
             key_bindings: Vec::new(),
             keyboard: Vec::new(),
