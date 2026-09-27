@@ -32,12 +32,12 @@ export function LibraryPanel({ state, send, load, create, play }: { state?: Snap
   };
 
   return <Stack className="library" gap="md">
-    <Group justify="space-between" wrap="nowrap">
+    <Group justify="space-between">
       <Text fw={600} size="lg">Library</Text>
-      <Group gap="xs" wrap="nowrap">
+      <Group gap="xs">
         {library.length > 6 && <TextInput aria-label="Search organs" placeholder="Search" leftSection={<Search size={16}/>} value={query} onChange={e => setQuery(e.currentTarget.value)}/>}
         <Button variant="default" leftSection={<FilePlus size={18}/>} onClick={() => setNaming(true)} disabled={naming || Boolean(state?.loading)}>New organ</Button>
-        <Button leftSection={<Plus size={18}/>} onClick={() => setAdding(true)}>Add organ</Button>
+        <Button leftSection={<Plus size={18}/>} onClick={() => setAdding(true)}>Load from GrandOrgue/Hauptwerk</Button>
       </Group>
     </Group>
     {state?.loading && <Paper withBorder p="md"><Group><Loader size="sm"/><Text>{state.loading}</Text></Group></Paper>}
@@ -54,15 +54,13 @@ export function LibraryPanel({ state, send, load, create, play }: { state?: Snap
     {!library.length && !state?.loading && !naming && <Stack align="center" gap="xs" py="xl">
       <Text fw={600}>No organs yet</Text>
       <Text c="dimmed" size="sm">GrandOrgue and unencrypted Hauptwerk organs</Text>
-      <Group mt="sm"><Button variant="default" leftSection={<FilePlus size={18}/>} onClick={() => setNaming(true)}>New organ</Button>
-        <Button leftSection={<Plus size={18}/>} onClick={() => setAdding(true)}>Add organ</Button></Group>
     </Stack>}
     <AddOrgan opened={adding} close={() => setAdding(false)} load={path => { setAdding(false); load(path); }}/>
     <Modal opened={Boolean(deleting)} onClose={() => setDeleting(undefined)} title={`Are you sure you want to delete ${deleting?.name}?`}>
       <Stack>
         <Text>{deleting?.owned
           ? 'Its settings, combinations and edits are deleted. The sample files stay on disk.'
-          : 'It is removed from the Library. Its files stay on disk, and Add organ can find it again.'}</Text>
+          : 'It is removed from the Library. Its files stay on disk, and it can be loaded again from GrandOrgue/Hauptwerk.'}</Text>
         <Group justify="flex-end">
           <Button variant="default" onClick={() => setDeleting(undefined)} data-autofocus>Cancel</Button>
           <Button color="red" onClick={() => deleting && remove(deleting)}>Delete</Button>
@@ -129,7 +127,7 @@ function AddOrgan({ opened, close, load }: { opened: boolean; close: () => void;
   };
   useEffect(() => { if (opened && !browse) void visit(); }, [opened]);
   const entries = browse?.entries.filter(e => e.dir || !/\.(scl|kbm)$/i.test(e.name)) ?? [];
-  return <Drawer opened={opened} onClose={close} title="Add organ" position="right" size="lg">
+  return <Drawer opened={opened} onClose={close} title="Load from GrandOrgue/Hauptwerk" position="right" size="lg">
     <Stack gap="sm">
       <form onSubmit={e => { e.preventDefault(); void visit(path); }}>
         <Group wrap="nowrap"><TextInput aria-label="Folder" value={path} onChange={e => setPath(e.currentTarget.value)} style={{ flex: 1 }}/><Button type="submit" variant="default">Go</Button></Group>

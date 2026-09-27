@@ -16,7 +16,7 @@ organs should appear in a proper list, and delete should ask "are you sure".
   sample files stay; anything else only leaves the Library. The playing organ
   cannot be deleted.
 - A search field appears once there are more than six organs.
-- Add organ is the same folder browser in a drawer, restyled as a list.
+- Load from GrandOrgue/Hauptwerk is the same folder browser in a drawer, restyled as a list.
 - New organ asks for a name inline, creates a blank organ (`/api/organ/new`),
   loads it and opens Organ, where divisions and stops are added.
 - Below 700 px the folder is hidden so the format and last play stay readable.
