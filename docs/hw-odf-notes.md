@@ -157,7 +157,7 @@ are plain XML with licensed samples, so the XML sniff alone is not enough.
 | `4` | `Pitch_ExactSamplePitch` in Hz | exact Hz stored on the attack |
 
 Solignac states nothing for its pipe samples (their `smpl` chunks carry unity note +
-fraction; the organ is at a′ = 419 Hz and the fractions say so) and code 3 for its key
+fraction; fitted over all pipes they put the organ at a′ ≈ 416 Hz) and code 3 for its key
 noises; Skrzatusz states code 1 for pipes and 4 for noises. Recording metadata is now a declared fact, never a waveform-analysis hint. The
 adapter retains per-attack explicit pitch in Hz and requests a declared recording-
 to-pipe mapping; see the [pitch contract](progress/2026-09-06-recording-pitch-contract.md).

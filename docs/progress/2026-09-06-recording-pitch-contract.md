@@ -38,7 +38,9 @@ that every Hauptwerk runtime pitch mode is emulated. In particular, the general
 `EnablePlayingAtOriginalOrganPitch` capability flag is not treated as a request
 to bypass the recording-to-pipe relationship.
 
-Consequently imported Solignac uses its defined destination pitch (base-pitch 0
+Superseded 2026-09-27 ([as-recorded pitch](2026-09-27-as-recorded-pitch.md)):
+declared pipes now keep their recorded pitch and move only by whole semitones.
+Consequently imported Solignac used its defined destination pitch (base-pitch 0
 maps to A440), instead of the previous heuristic's inferred approximately A419
 home. GrandOrgue original playback retains the author's offsets. This is an
 intentional behavioral correction, not a new temperament inferred from audio.

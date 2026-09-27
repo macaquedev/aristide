@@ -342,6 +342,7 @@ pub fn build_with(
         ));
     }
 
+    keep_declared_recordings(organ, &mut staged);
     let (home, rank_anchor) = fit_home_tuning(organ, &staged);
     let mut specs = assign_voice_specs(
         organ,
@@ -958,6 +959,38 @@ fn stage_rank_pipes(
             pitch: p.pitch,
         })
         .collect()
+}
+
+/// Declared pipes sound as recorded: a recording moves only by the whole
+/// semitones that put it under the pipe it serves, measured from the set's
+/// own pitch (the middle recording-to-pipe interval), so a 416 Hz organ
+/// stays at 416 Hz in its own temperament and a sample reused a note or an
+/// octave away still sounds its pipe's note. Targets then retune from there.
+fn keep_declared_recordings(organ: &Organ, staged: &mut [StagedPipe]) {
+    let recorded_offset = |p: &StagedPipe| {
+        let pipe = &organ.ranks[p.rank_index].pipes[p.pipe_index as usize];
+        let recording = p.pitch.recording?;
+        (pipe.sample_pitch_mode == aristide_model::SamplePitchMode::Declared).then(|| {
+            aristide_model::units::cents_between(pipe.nominal_frequency_hz, recording.hz)
+        })
+    };
+    let mut offsets: Vec<f64> = staged.iter().filter_map(recorded_offset).collect();
+    if offsets.is_empty() {
+        return;
+    }
+    // A recorded interval, never an average between two, folded to within
+    // half an octave of the ladder: no organ's pitch standard is an octave off.
+    offsets.sort_by(f64::total_cmp);
+    let middle = offsets[(offsets.len() - 1) / 2];
+    let set_pitch = middle - (middle / 1200.0).round() * 1200.0;
+    for p in staged.iter_mut() {
+        if let Some(offset) = recorded_offset(p) {
+            let placement = ((offset - set_pitch) / 100.0).round() * 100.0;
+            let kept = offset - placement;
+            p.pitch.transpose_cents += kept;
+            p.pitch.sounding_cents = p.pitch.sounding_cents.map(|cents| cents + kept);
+        }
+    }
 }
 
 /// A pipe's sounding pitch class against the 440 ladder (0 = A), plus
@@ -1955,47 +1988,55 @@ mod tests {
                 key_count: 1,
             }],
         });
-        let loaded = build(&organ, 44100.0, 32, None).unwrap();
-        let home = loaded.home.unwrap();
-        assert!((home.a4_hz - 415.0).abs() < 1e-6);
-        assert_eq!(loaded.specs[&(RankId(1), 0)].rate, 1.0);
-        let bank = std::sync::Arc::new(loaded.bank);
-        for (temperament, expected) in [
-            (crate::tuning::Temperament::Original, 415.0),
-            (crate::tuning::Temperament::Equal, 440.0),
+        // A Hauptwerk declaration names the destination pipe, yet the
+        // organ as recorded still sounds its own 415.
+        for mode in [
+            aristide_model::SamplePitchMode::AsRecorded,
+            aristide_model::SamplePitchMode::Declared,
         ] {
-            let mut console = crate::console::Console::new(
-                organ.clone(),
-                loaded.specs.clone(),
-                vec![StopId(1)],
-                44100.0,
-            );
-            console.set_home(Some(std::sync::Arc::new(home.clone())));
-            console.set_tuning(crate::tuning::Tuning {
-                temperament,
-                reference: crate::tuning::PitchReference {
-                    key: 69,
-                    hz: expected,
-                },
-                pipes: crate::tuning::PipeRetune::Exact,
-                ..Default::default()
-            });
-            let (mut engine, mut handle) = aristide_engine::Engine::new(44100.0, bank.clone());
-            engine.set_lite(true); // Isolate sample pitch from the wind model.
-            for start in console.note_on_manual(0, 69, 127).0 {
-                handle.send(start.command());
+            organ.ranks[0].pipes[0].sample_pitch_mode = mode;
+            let loaded = build(&organ, 44100.0, 32, None).unwrap();
+            let home = loaded.home.unwrap();
+            assert!((home.a4_hz - 415.0).abs() < 1e-6, "{mode:?}");
+            assert!((loaded.specs[&(RankId(1), 0)].rate - 1.0).abs() < 1e-6, "{mode:?}");
+            let bank = std::sync::Arc::new(loaded.bank);
+            for (temperament, expected) in [
+                (crate::tuning::Temperament::Original, 415.0),
+                (crate::tuning::Temperament::Equal, 440.0),
+            ] {
+                let mut console = crate::console::Console::new(
+                    organ.clone(),
+                    loaded.specs.clone(),
+                    vec![StopId(1)],
+                    44100.0,
+                );
+                console.set_home(Some(std::sync::Arc::new(home.clone())));
+                console.set_tuning(crate::tuning::Tuning {
+                    temperament,
+                    reference: crate::tuning::PitchReference {
+                        key: 69,
+                        hz: expected,
+                    },
+                    pipes: crate::tuning::PipeRetune::Exact,
+                    ..Default::default()
+                });
+                let (mut engine, mut handle) = aristide_engine::Engine::new(44100.0, bank.clone());
+                engine.set_lite(true); // Isolate sample pitch from the wind model.
+                for start in console.note_on_manual(0, 69, 127).0 {
+                    handle.send(start.command());
+                }
+                let mut pcm = vec![0.0; 88200 * 2];
+                engine.process(&mut pcm, 2);
+                let mono: Vec<f32> = pcm[(88200 - 16384) * 2..]
+                    .chunks_exact(2)
+                    .map(|v| (v[0] + v[1]) * 0.5)
+                    .collect();
+                let hz = measured_f0(&mono, 44100.0, expected);
+                assert!(
+                    cents_between(expected, hz).abs() < 3.0,
+                    "{mode:?} {temperament:?}: rendered {hz} Hz instead of {expected}"
+                );
             }
-            let mut pcm = vec![0.0; 88200 * 2];
-            engine.process(&mut pcm, 2);
-            let mono: Vec<f32> = pcm[(88200 - 16384) * 2..]
-                .chunks_exact(2)
-                .map(|v| (v[0] + v[1]) * 0.5)
-                .collect();
-            let hz = measured_f0(&mono, 44100.0, expected);
-            assert!(
-                cents_between(expected, hz).abs() < 3.0,
-                "{temperament:?}: rendered {hz} Hz instead of {expected}"
-            );
         }
     }
 
@@ -4527,6 +4568,17 @@ mod compound_pitch_tests {
             }
             let organ = aristide_formats::hauptwerk::load(&path).unwrap().organ;
             let loaded = build(&organ, 44_100.0, 16, None).unwrap();
+            // As recorded: the organ keeps its own pitch, near a′ = 416 Hz.
+            let home = loaded
+                .home
+                .as_ref()
+                .expect("Solignac declares its recording pitch");
+            assert!(
+                (home.a4_hz - 416.0).abs() < 1.0,
+                "{definition}: recorded a′ = {:.2} Hz",
+                home.a4_hz
+            );
+            let set_pitch = home.anchor_cents();
             if definition == "Solignac extend" {
                 use crate::tuning::{PipeRetune, Temperament, Tuning};
                 for (prefix, first, last) in [("2222", 36u16, 89u16), ("2331", 60, 89)] {
@@ -4611,21 +4663,22 @@ mod compound_pitch_tests {
                         info.midi_unity_note.unwrap() as f64
                             + info.pitch_fraction.unwrap_or(0) as f64 / 4294967296.0,
                     );
-                    let expected = match pipe.sample_pitch_mode {
-                        aristide_model::SamplePitchMode::AsRecorded => {
-                            pipe.pitch_tuning_cents + attacks[0].pitch_offset_cents
-                        }
-                        aristide_model::SamplePitchMode::Declared => {
-                            cents_between(recorded, pipe.nominal_frequency_hz)
-                                + pipe.pitch_tuning_cents
-                                + attacks[0].pitch_offset_cents
-                        }
-                    };
+                    let authored = pipe.pitch_tuning_cents + attacks[0].pitch_offset_cents;
+                    let placement = cents - authored;
                     assert!(
-                        (cents - expected).abs() < 0.01,
-                        "{definition}: {} pipe {index}: {cents} vs {expected}",
+                        (placement - (placement / 100.0).round() * 100.0).abs() < 0.01,
+                        "{definition}: {} pipe {index}: moved {placement} cents, not whole semitones",
                         rank.name
                     );
+                    if pipe.sample_pitch_mode == aristide_model::SamplePitchMode::Declared {
+                        let sounding =
+                            cents_between(pipe.nominal_frequency_hz, recorded) + placement;
+                        assert!(
+                            (sounding - set_pitch).abs() <= 50.0,
+                            "{definition}: {} pipe {index}: sounds {sounding:.1} cents from its pipe, the set {set_pitch:.1}",
+                            rank.name
+                        );
+                    }
                 }
             }
             if definition == "Solignac extend" {
