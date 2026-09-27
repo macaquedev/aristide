@@ -503,6 +503,7 @@ fn assemble_organ(
                             // The adoption inventory pulls stop by
                             // stop, so edits look for [[stop]] lines.
                             via_division: false,
+                            blank: false,
                         },
                     )
                 })

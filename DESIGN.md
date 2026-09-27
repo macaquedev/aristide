@@ -321,7 +321,11 @@ member stops actually sound, splitting a windchest shared with outsiders,
 while borrowed pipes stand with their own rank and stay outside), the organ's
 whole structure (manuals declared/renamed/reordered/removed, sources added,
 stops pulled and unpulled — the pane's editor, each edit a line in the file
-followed by a reload), each keyboard's declared kind
+followed by a reload), blank stops (`[[blank]] name/on` — a stop with no
+ranks, placed after the pulls, sounding only what its `[[rule]]` takes from
+other stops; `[[rule]]` rows and events are keyed by manual and stop name, so
+a stop rename, a `[[move]]` and a manual rename carry them along, and removing
+a stop removes its rule and the events that sounded it), each keyboard's declared kind
 (`[[manual]] kind = manual/pedal/microtonal` — never deduced; "microtonal"
 draws a Terpstra/Lumatone-style hex key field whose isomorphic layout is the
 manual's `hex = { rows, cols, right, upright, anchor }` — the classic

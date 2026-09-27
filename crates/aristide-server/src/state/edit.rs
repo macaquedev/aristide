@@ -431,6 +431,30 @@ impl State {
         Ok(())
     }
 
+    /// Add a stop with no pipes to a manual, for its rule to give sound
+    /// to later. Structural: the file gains a `[[blank]]` line and the
+    /// organ rebuilds.
+    pub fn add_blank_stop(&mut self, on: &str, name: &str) -> Result<(), String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("the stop needs a name".into());
+        }
+        let Some(on) = self
+            .manual_names()
+            .into_iter()
+            .find(|manual| manual.eq_ignore_ascii_case(on))
+        else {
+            return Err(format!("this organ has no manual named {on:?}"));
+        };
+        if self.stop_name_taken(&on, name, None) {
+            return Err(format!("{on} already has a stop named {name:?}"));
+        }
+        let path = self.organ_file()?;
+        config::append_composite_blank(&path, name, &on)?;
+        self.reload_organ_file(path);
+        Ok(())
+    }
+
     /// A stop's console name, current manual name, and provenance —
     /// what every per-stop file edit needs to find its lines.
     pub(super) fn stop_coordinates(

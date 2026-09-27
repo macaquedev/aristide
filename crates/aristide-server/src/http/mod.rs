@@ -101,6 +101,7 @@ pub(crate) fn respond(
         (Method::Post, "/api/organ/source/add") => organ::source_add,
         (Method::Post, "/api/organ/pull") => stops::pull,
         (Method::Post, "/api/organ/unpull") => stops::unpull,
+        (Method::Post, "/api/organ/stop/blank") => stops::blank,
         (Method::Post, "/api/organ/stop/rename") => stops::rename,
         (Method::Post, "/api/organ/stop/order") => stops::order,
         (Method::Post, "/api/organ/stop/voice") => stops::voice,
@@ -382,6 +383,7 @@ mod tests {
                             .unwrap_or_default(),
                         source_stop: stop.name.clone(),
                         via_division: false,
+                        blank: false,
                     },
                 )
             })

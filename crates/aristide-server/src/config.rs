@@ -2032,6 +2032,7 @@ pub fn append_composite_move(
     table["from"] = toml_edit::value(from);
     table["to"] = toml_edit::value(to);
     moves.push(table);
+    retarget_rules(&mut doc, (from, stop), (to, stop));
     write_atomically(path, doc.to_string())
 }
 
@@ -2143,6 +2144,83 @@ fn tables_mut<'a>(
         .flat_map(|tables| tables.iter_mut())
 }
 
+/// Whether a table names `stop` on `manual` — how `[[rule]]` rows and
+/// their events address a stop.
+fn names_stop(table: &toml_edit::Table, manual: &str, stop: &str) -> bool {
+    field_is(table, "manual", manual) && field_is(table, "stop", stop)
+}
+
+/// Rule rows and events are keyed by console names: when a stop is
+/// renamed or moved, every row and event naming it follows.
+fn retarget_rules(doc: &mut toml_edit::DocumentMut, from: (&str, &str), to: (&str, &str)) {
+    for row in tables_mut(doc, "rule") {
+        let events = row.get_mut("event").and_then(|e| e.as_array_of_tables_mut());
+        for event in events.into_iter().flat_map(|events| events.iter_mut()) {
+            if names_stop(event, from.0, from.1) {
+                set_string_preserving(event, "manual", to.0);
+                set_string_preserving(event, "stop", to.1);
+            }
+        }
+        if names_stop(row, from.0, from.1) {
+            set_string_preserving(row, "manual", to.0);
+            set_string_preserving(row, "stop", to.1);
+        }
+    }
+}
+
+/// A removed stop takes its rule with it, and every other rule loses
+/// the events that sounded it: `gone` says which rows and events those are.
+fn drop_rules(doc: &mut toml_edit::DocumentMut, gone: impl Fn(&toml_edit::Table) -> bool) {
+    let Some(rows) = doc.get_mut("rule").and_then(|r| r.as_array_of_tables_mut()) else {
+        return;
+    };
+    rows.retain(|row| !gone(row));
+    for row in rows.iter_mut() {
+        if let Some(events) = row.get_mut("event").and_then(|e| e.as_array_of_tables_mut()) {
+            events.retain(|event| !gone(event));
+        }
+    }
+    if rows.is_empty() {
+        doc.remove("rule");
+    }
+}
+
+/// Every `[[rule]]` row and event on a manual follows its rename.
+fn rename_rule_manual(doc: &mut toml_edit::DocumentMut, from: &str, to: &str) {
+    for row in tables_mut(doc, "rule") {
+        rename_field(row, "manual", from, to);
+        let events = row.get_mut("event").and_then(|e| e.as_array_of_tables_mut());
+        for event in events.into_iter().flat_map(|events| events.iter_mut()) {
+            rename_field(event, "manual", from, to);
+        }
+    }
+}
+
+/// A stop with no pipes, `[[blank]]`, for its rule to give sound to.
+pub fn append_composite_blank(path: &Path, name: &str, on: &str) -> Result<(), String> {
+    let mut doc = composite_doc(path)?;
+    let tables = doc
+        .entry("blank")
+        .or_insert(toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new()));
+    let Some(tables) = tables.as_array_of_tables_mut() else {
+        return Err("[[blank]] is not an array of tables".into());
+    };
+    let mut table = toml_edit::Table::new();
+    table["name"] = toml_edit::value(name);
+    table["on"] = toml_edit::value(on);
+    tables.push(table);
+    write_atomically(path, doc.to_string())
+}
+
+/// The `[[blank]]` line of a blank stop, by its name and the manual it
+/// was declared on.
+fn blank_index(doc: &toml_edit::DocumentMut, name: &str, on: &str) -> Option<usize> {
+    let blanks = doc.get("blank")?.as_array_of_tables()?;
+    (0..blanks.len()).find(|&i| {
+        blanks.get(i).is_some_and(|table| field_is(table, "name", name) && field_is(table, "on", on))
+    })
+}
+
 /// Declare a new manual in a composite file. The compass is written
 /// out (a declared manual with nothing pulled yet has no other way to
 /// have one); a non-default kind is written as `kind = "..."`.
@@ -2204,12 +2282,12 @@ pub fn rename_composite_manual(path: &Path, from: &str, to: &str) -> Result<bool
     if !found {
         return Ok(false);
     }
-    for table in tables_mut(&mut doc, "stop") {
-        rename_field(table, "on", from, to);
+    for key in ["stop", "division", "blank"] {
+        for table in tables_mut(&mut doc, key) {
+            rename_field(table, "on", from, to);
+        }
     }
-    for table in tables_mut(&mut doc, "division") {
-        rename_field(table, "on", from, to);
-    }
+    rename_rule_manual(&mut doc, from, to);
     for table in tables_mut(&mut doc, "move") {
         rename_field(table, "from", from, to);
         rename_field(table, "to", from, to);
@@ -2271,7 +2349,7 @@ pub fn remove_composite_manual(path: &Path, name: &str) -> Result<bool, String> 
     if manuals.is_empty() {
         doc.remove("manual");
     }
-    for key in ["stop", "division"] {
+    for key in ["stop", "division", "blank"] {
         if let Some(tables) = doc.get_mut(key).and_then(|i| i.as_array_of_tables_mut()) {
             tables.retain(|table| !field_is(table, "on", name));
             if tables.is_empty() {
@@ -2285,6 +2363,7 @@ pub fn remove_composite_manual(path: &Path, name: &str) -> Result<bool, String> 
             doc.remove("move");
         }
     }
+    drop_rules(&mut doc, |table| field_is(table, "manual", name));
     if let Some(defines) = doc
         .get_mut("couplers")
         .and_then(|couplers| couplers.get_mut("define"))
@@ -2663,9 +2742,19 @@ pub fn rename_composite_stop(
     new: &str,
 ) -> Result<bool, String> {
     let mut doc = composite_doc(path)?;
+    retarget_rules(&mut doc, (on, old), (on, new));
     let (pulled, _) = pulled_onto(&doc, old, on);
     let on = pulled.as_str();
-    if prov.via_division {
+    if prov.blank {
+        let Some(index) = blank_index(&doc, old, on) else {
+            return Ok(false);
+        };
+        let table = doc["blank"]
+            .as_array_of_tables_mut()
+            .and_then(|tables| tables.get_mut(index))
+            .expect("blank line just found");
+        set_string_preserving(table, "name", new);
+    } else if prov.via_division {
         let Some(index) = division_pull_index(&doc, prov, on) else {
             return Ok(false);
         };
@@ -3090,9 +3179,19 @@ pub fn remove_composite_stop(
     on: &str,
 ) -> Result<bool, String> {
     let mut doc = composite_doc(path)?;
+    drop_rules(&mut doc, |table| names_stop(table, on, console_name));
     let (on, moves) = pulled_onto(&doc, console_name, on);
     let on = on.as_str();
-    if prov.via_division {
+    if prov.blank {
+        let Some(doomed) = blank_index(&doc, console_name, on) else {
+            return Ok(false);
+        };
+        let blanks = doc["blank"].as_array_of_tables_mut().expect("blank line just found");
+        blanks.remove(doomed);
+        if blanks.is_empty() {
+            doc.remove("blank");
+        }
+    } else if prov.via_division {
         let Some(index) = division_pull_index(&doc, prov, on) else {
             return Ok(false);
         };
@@ -4676,6 +4775,7 @@ mod tests {
             source_manual: "Great".into(),
             source_stop: "Montre 8".into(),
             via_division: false,
+            blank: false,
         };
         assert!(
             remove_composite_stop(&path, &montre, "Montre 8", "Hauptwerk").expect("unpulls")
@@ -4713,6 +4813,7 @@ mod tests {
             source_manual: "Pedal".into(),
             source_stop: "Bourdon 8".into(),
             via_division: false,
+            blank: false,
         };
         assert!(remove_composite_stop(&path, &bourdon, "Bourdon 8", "Great").expect("removes"));
         let parsed = def(&path);
@@ -4779,12 +4880,14 @@ stops = ["Montre 8"]
             source_manual: "Hauptwerk".into(),
             source_stop: "Montre 8".into(),
             via_division: true,
+            blank: false,
         };
         let pulled_stop = instrument::StopProvenance {
             source: "gib".into(),
             source_manual: "Récit".into(),
             source_stop: "Trompette 8".into(),
             via_division: false,
+            blank: false,
         };
 
         for prov in [&pulled_stop, &division_stop] {
@@ -5642,5 +5745,55 @@ volume = 0.7
         assert!(config.forget(Path::new("/sets/b.toml")));
         assert!(!config.forget(Path::new("/sets/b.toml")), "already gone");
         assert_eq!(config.library.len(), 1);
+    }
+
+    /// A blank stop's line follows a rename and goes with removal, and
+    /// every rule row and event naming the stop follows it through a
+    /// rename, a move and its division's rename — or goes with it.
+    #[test]
+    fn blank_stops_and_their_rules_follow_edits() {
+        let dir = std::env::temp_dir().join("aristide-blank-rules-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("organ.toml");
+        let rule = |manual: &str, stop: &str| format!(
+            "[[rule]]\nmanual = \"{manual}\"\nstop = \"{stop}\"\n\n[[rule.event]]\nmanual = \"Great\"\nstop = \"Idea\"\nstart = \"down\"\n\n"
+        );
+        std::fs::write(&path, format!(
+            "name = \"Blank\"\n\n[[manual]]\nname = \"Great\"\n\n[[manual]]\nname = \"Swell\"\n\n{}{}",
+            rule("Great", "Idea"), rule("Swell", "Other"),
+        )).expect("writes");
+        let def = |path: &Path| -> instrument::Definition {
+            toml::from_str(&std::fs::read_to_string(path).expect("reads")).expect("parses")
+        };
+        append_composite_blank(&path, "Idea", "Great").expect("adds");
+        assert_eq!(def(&path).blanks[0].on, "Great");
+        let prov = instrument::StopProvenance {
+            source: String::new(),
+            source_manual: "Great".into(),
+            source_stop: "Idea".into(),
+            via_division: false,
+            blank: true,
+        };
+
+        assert!(rename_composite_stop(&path, &prov, "Great", "Idea", "Thought").expect("renames"));
+        let parsed = def(&path);
+        assert_eq!(parsed.blanks[0].name, "Thought");
+        assert_eq!((parsed.rules[0].manual.as_str(), parsed.rules[0].stop.as_str()), ("Great", "Thought"));
+        assert_eq!(parsed.rules[1].events[0].stop, "Thought", "another rule's event follows");
+
+        append_composite_move(&path, "Thought", "Great", "Swell").expect("moves");
+        assert!(rename_composite_manual(&path, "Swell", "Echo").expect("renames manual"));
+        let parsed = def(&path);
+        assert_eq!(parsed.rules[0].manual, "Echo");
+        assert_eq!(parsed.rules[1].manual, "Echo", "the other stop's own row follows its division");
+        assert_eq!(parsed.rules[1].events[0].manual, "Echo");
+
+        assert!(remove_composite_stop(&path, &prov, "Thought", "Echo").expect("removes"));
+        let parsed = def(&path);
+        assert!(parsed.blanks.is_empty() && parsed.moves.is_empty());
+        assert_eq!(parsed.rules.len(), 1, "its own rule went with it");
+        assert!(parsed.rules[0].events.is_empty(), "and so did events sounding it");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

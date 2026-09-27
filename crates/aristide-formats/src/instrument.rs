@@ -110,6 +110,8 @@ pub struct Definition {
     pub divisions: Vec<DivisionPull>,
     #[serde(default, rename = "stop")]
     pub stops: Vec<StopPull>,
+    #[serde(default, rename = "blank")]
+    pub blanks: Vec<BlankStop>,
     #[serde(default, rename = "move")]
     pub moves: Vec<MoveDef>,
     /// Swell boxes of the file's own devising (`[[enclosure]]`), on
@@ -296,6 +298,15 @@ pub struct MoveDef {
     pub stop: String,
     pub from: String,
     pub to: String,
+}
+
+/// A stop with no pipes of its own, for a rule to give it sound by
+/// taking pipes from other stops. Placed after every pull.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BlankStop {
+    pub name: String,
+    pub on: String,
 }
 
 /// Pull a whole division: every stop of one source manual.
@@ -628,7 +639,10 @@ impl Definition {
     /// doesn't takes every source whole; one that does gets exactly
     /// what it pulls.
     fn declares(&self) -> bool {
-        !self.manuals.is_empty() || !self.divisions.is_empty() || !self.stops.is_empty()
+        !self.manuals.is_empty()
+            || !self.divisions.is_empty()
+            || !self.stops.is_empty()
+            || !self.blanks.is_empty()
     }
 
     /// Aliases a pull actually names; a file declaring nothing takes
@@ -690,6 +704,9 @@ pub struct StopProvenance {
     /// Whether a `[[division]]` pull brought it in (true) or a
     /// `[[stop]]` line of its own (false).
     pub via_division: bool,
+    /// A `[[blank]]` line of the file's own rather than a pull: `source`
+    /// is empty and `source_stop` is the name it was loaded under.
+    pub blank: bool,
 }
 
 #[derive(Debug)]
@@ -894,6 +911,7 @@ pub fn assemble(
         register_layout_sources(&mut assembly, def, sources);
         pull_declared_divisions(&mut assembly, def, sources)?;
         pull_declared_stops(&mut assembly, def, sources)?;
+        place_blank_stops(&mut assembly, def)?;
     }
     apply_moves(&mut assembly, def);
 
@@ -930,6 +948,30 @@ pub fn assemble(
         adopted: def.adopted,
         warnings: assembly.warnings,
     })
+}
+
+/// Every `[[blank]]`: a stop with no ranks, silent until its rule
+/// sounds other stops' pipes.
+fn place_blank_stops(assembly: &mut Assembly, def: &Definition) -> Result<(), InstrumentError> {
+    for blank in &def.blanks {
+        let manual = assembly.find_manual(&blank.on)?;
+        assembly.pitch_labels.push(None);
+        assembly.provenance.push(StopProvenance {
+            source: String::new(),
+            source_manual: blank.on.clone(),
+            source_stop: blank.name.clone(),
+            via_division: false,
+            blank: true,
+        });
+        assembly.placed.push(PlacedStop {
+            name: blank.name.clone(),
+            manual,
+            ranges: Vec::new(),
+            own_pipes: false,
+            compass: None,
+        });
+    }
+    Ok(())
 }
 
 /// Every file-declared `[[manual]]`, created out of thin air before any
@@ -1618,6 +1660,7 @@ impl Assembly<'_> {
                 .unwrap_or_default(),
             source_stop: stop.name.clone(),
             via_division,
+            blank: false,
         });
         self.stop_map
             .insert((source_idx, stop.id), StopId(self.placed.len() as u32));
@@ -2670,6 +2713,7 @@ mod tests {
                 source_manual: "Swell".into(),
                 source_stop: "Hautbois 8".into(),
                 via_division: true,
+                blank: false,
             }
         );
         assert_eq!(
@@ -2679,6 +2723,7 @@ mod tests {
                 source_manual: "Great".into(),
                 source_stop: "Principal 8".into(),
                 via_division: false,
+                blank: false,
             }
         );
         assert!(
@@ -2691,6 +2736,30 @@ mod tests {
             "a rename naming no pulled stop is reported: {:?}",
             built.warnings
         );
+    }
+
+    /// A blank stop is a stop with no pipes: it lands on its manual after
+    /// the pulls, a move carries it like any other, and a missing manual
+    /// fails loudly.
+    #[test]
+    fn blank_stops_have_no_ranks_and_move_like_any_stop() {
+        let sources = vec![("A".to_string(), source("A", "/a"))];
+        let mut definition = def("Blank");
+        definition.manuals = vec![manual("Great", Some(36), Some(96)), manual("Solo", Some(48), Some(96))];
+        definition.blanks = vec![BlankStop { name: "Idea".into(), on: "Great".into() }];
+        let built = assemble(&definition, &sources, Vec::new()).expect("assembles");
+        let idea = built.organ.stops.iter().find(|s| s.name == "Idea").expect("placed");
+        assert!(idea.ranks.is_empty());
+        assert_eq!(idea.manual, built.organ.manuals[0].id);
+        assert!(built.provenance.last().is_some_and(|p| p.blank && p.source_stop == "Idea"));
+
+        definition.moves = vec![MoveDef { stop: "Idea".into(), from: "Great".into(), to: "Solo".into() }];
+        let built = assemble(&definition, &sources, Vec::new()).expect("assembles");
+        let idea = built.organ.stops.iter().find(|s| s.name == "Idea").expect("placed");
+        assert_eq!(idea.manual, built.organ.manuals[1].id);
+
+        definition.blanks[0].on = "Nowhere".into();
+        assert!(assemble(&definition, &sources, Vec::new()).is_err());
     }
 
     /// A [[move]] relocates a pulled stop by name after all pulls,

@@ -92,6 +92,22 @@ pub(super) fn pull(state: &Mutex<State>, query: &str) -> Reply {
     }
 }
 
+// A stop with no pipes: `on=<manual name>&name=<stop name>`. The organ
+// rebuilds with it; its rule gives it sound.
+pub(super) fn blank(state: &Mutex<State>, query: &str) -> Reply {
+    let mut state = state.lock().expect("state poisoned");
+    if state.is_loading() {
+        return bad_request("an organ is already loading");
+    }
+    match (param(query, "on").map(unescape), param(query, "name").map(unescape)) {
+        (Some(on), Some(name)) => match state.add_blank_stop(&on, &name) {
+            Ok(()) => json(state_json_locked(&state)),
+            Err(err) => bad_request(&err),
+        },
+        _ => bad_request("missing on/name"),
+    }
+}
+
 pub(super) fn unpull(state: &Mutex<State>, query: &str) -> Reply {
     let mut state = state.lock().expect("state poisoned");
     if state.is_loading() {
