@@ -13,8 +13,8 @@ use aristide_model::StopId;
 
 use super::{Control, KeyboardInput, Pending, Resolution, State};
 use crate::bindings::{
-    channels_overlap, normalize_input, Binding, ControlLearn, Learn, LearnTarget, MidiPort, Route,
-    Subject, COMPUTER_KEYBOARD, LEARN_TIMEOUT,
+    channels_overlap, normalize_input, Binding, ControlLearn, Learn, MidiPort, Route, Subject,
+    COMPUTER_KEYBOARD, LEARN_TIMEOUT,
 };
 use crate::{config, control};
 
@@ -220,12 +220,9 @@ impl State {
     /// binding table governs both, and so an octave button on a MIDI
     /// console can shift the computer keyboard as readily as `=` can.
     pub fn key(&mut self, code: &str, pressed: bool) {
-        // Detecting the console: a letter pressed is the computer
-        // keyboard answering, and plays nothing.
-        if self
-            .learning()
-            .is_some_and(|learn| !matches!(learn.target, LearnTarget::Manual { .. }))
-        {
+        // Auto-detect: a letter pressed is the computer keyboard
+        // answering, and plays nothing.
+        if self.learning().is_some_and(|learn| learn.once) {
             if pressed && let Some(note) = control::key_note(code) {
                 self.learn_key(COMPUTER_KEYBOARD, None, note);
             }
@@ -1485,21 +1482,6 @@ impl State {
         let organ = self.organ_key.clone();
         let names = self.manual_names();
         let mut changed = false;
-        let shifted_keyboards: Vec<usize> = match subject {
-            Subject::Manual(manual) => self.played_from(manual).keyboard.into_iter().collect(),
-            _ => (0..self.midi_config.console.len())
-                .filter(|&k| self.midi_config.console[k].input.device == device)
-                .collect(),
-        };
-        for index in shifted_keyboards {
-            let keyboard = &mut self.midi_config.console[index];
-            let shifted = to(keyboard.input.transpose).clamp(-36, 36);
-            if shifted != keyboard.input.transpose {
-                keyboard.input.transpose = shifted;
-                changed = true;
-                tracing::info!("control: {} now plays {shifted:+} semitones", keyboard.name);
-            }
-        }
         for (index, name) in names.iter().enumerate() {
             for input in self.midi_config.inputs_mut(&organ, name) {
                 let mine = match subject {
@@ -1657,11 +1639,57 @@ impl State {
     pub fn listen(&mut self, manual: usize, slot: usize) {
         self.pending = None;
         self.learn = Some(Learn {
-            target: LearnTarget::Manual { manual, slot },
+            manual,
+            slot,
             heard: None,
-            repeat: None,
+            once: false,
             started: Instant::now(),
         });
+    }
+
+    /// Auto-detect: the next key pressed, on any keyboard, is the one
+    /// that plays `manual`.
+    pub fn detect(&mut self, manual: usize) {
+        self.listen(manual, 0);
+        if let Some(learn) = &mut self.learn {
+            learn.once = true;
+        }
+    }
+
+    /// `input` alone plays `manual`. The same keyboard (device and
+    /// overlapping channel) stops playing any other manual: detecting or
+    /// choosing a keyboard for this manual moves it here, never asks.
+    /// Returns false when the manual doesn't exist.
+    pub fn assign_input(&mut self, manual: usize, input: Option<config::Input>) -> bool {
+        self.pending = None;
+        let names = self.manual_names();
+        if manual >= names.len() {
+            return false;
+        }
+        let organ = self.organ_key.clone();
+        let input = input.map(|mut input| {
+            normalize_input(&mut input);
+            input
+        });
+        for (index, name) in names.iter().enumerate() {
+            let inputs = self.midi_config.inputs(&organ, name).to_vec();
+            for slot in (0..inputs.len()).rev() {
+                let same = input.as_ref().is_some_and(|input| {
+                    inputs[slot].device == input.device
+                        && channels_overlap(inputs[slot].channel, input.channel)
+                });
+                if index == manual || same {
+                    self.midi_config.remove_input(&organ, name, slot);
+                }
+            }
+        }
+        if let Some(input) = input {
+            tracing::info!("midi: {} ← {}", names[manual], input.device);
+            self.midi_config.set_input(&organ, &names[manual], 0, input);
+        }
+        self.resolve_routes();
+        self.persist();
+        true
     }
 
     /// One key played while listening. The first names the keyboard and
@@ -1672,10 +1700,21 @@ impl State {
         let Some(mut learn) = self.learning() else {
             return;
         };
-        let LearnTarget::Manual { manual, slot } = learn.target else {
-            self.learn_console_key(learn, device, channel, key);
+        if learn.once {
+            self.learn = None;
+            self.detected += 1;
+            let input = config::Input {
+                device: device.to_string(),
+                channel,
+                low: None,
+                high: None,
+                transpose: 0,
+                bend: None,
+                map: None,
+            };
+            self.assign_input(learn.manual, Some(input));
             return;
-        };
+        }
         match learn.heard.take() {
             None => {
                 tracing::info!("midi: heard {device} channel {channel:?} key {key}");
@@ -1698,7 +1737,7 @@ impl State {
             Some(mut input) => {
                 input.high = Some(key);
                 self.learn = None;
-                self.propose_input(manual, slot, input);
+                self.propose_input(learn.manual, learn.slot, input);
             }
         }
     }

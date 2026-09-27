@@ -157,6 +157,39 @@ fn bound_map(state: &State, manual: usize, slot: usize, query: &str) -> Option<S
     }
 }
 
+// This device alone plays this manual, as auto-detect would leave it:
+// `device` empty for none, `ch` 1-16 or absent for any channel. The
+// same keyboard stops playing any other manual.
+pub(super) fn assign(state: &Mutex<State>, query: &str) -> Reply {
+    let Some(manual) = param(query, "manual").and_then(|v| v.parse::<usize>().ok()) else {
+        return bad_request("missing manual");
+    };
+    let channel = match param(query, "ch") {
+        None | Some("any") => None,
+        Some(value) => match value.parse::<u8>() {
+            Ok(ch) if (1..=16).contains(&ch) => Some(ch),
+            _ => return bad_request("ch must be 1-16 or any"),
+        },
+    };
+    let input = param(query, "device").map(unescape).filter(|d| !d.is_empty()).map(|device| {
+        crate::config::Input {
+            device,
+            channel,
+            low: None,
+            high: None,
+            transpose: 0,
+            bend: None,
+            map: None,
+        }
+    });
+    let mut state = state.lock().expect("state poisoned");
+    state.learn = None;
+    if !state.assign_input(manual, input) {
+        return bad_request("no such manual");
+    }
+    json(state_json_locked(&state))
+}
+
 pub(super) fn unbind(state: &Mutex<State>, query: &str) -> Reply {
     let manual = param(query, "manual").and_then(|v| v.parse::<usize>().ok());
     let slot = param(query, "slot").and_then(|v| v.parse::<usize>().ok());
@@ -180,9 +213,16 @@ pub(super) fn learn(state: &Mutex<State>, query: &str) -> Reply {
     let mut state = state.lock().expect("state poisoned");
     let manual = param(query, "manual").and_then(|v| v.parse::<usize>().ok());
     let slot = param(query, "slot").and_then(|v| v.parse::<usize>().ok());
+    let manuals = state.console().map_or(0, |console| console.manual_states().len());
     match (manual, slot) {
+        (Some(manual), _) if param(query, "detect") == Some("1") => {
+            if manual >= manuals {
+                return bad_request("no such manual");
+            }
+            tracing::info!("midi: detecting the keyboard for manual {manual}");
+            state.detect(manual);
+        }
         (Some(manual), Some(slot)) => {
-            let manuals = state.console().map_or(0, |console| console.manual_states().len());
             if manual >= manuals {
                 return bad_request("no such manual");
             }

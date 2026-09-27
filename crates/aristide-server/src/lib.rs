@@ -21,8 +21,7 @@ mod tuning;
 pub use bindings::{COMPUTER_KEYBOARD, request_midi_rescan};
 pub use desktop::{ApiReply, DesktopRuntime, RuntimeStatus};
 pub use state::{
-    Control, CouplerRouteEdit, KeyboardEdit, LoadRequest, Pending, PlayedFrom, Resolution, Setup,
-    State, TremControl,
+    Control, CouplerRouteEdit, LoadRequest, Pending, Resolution, Setup, State, TremControl,
 };
 
 use std::path::PathBuf;

@@ -177,28 +177,15 @@ impl MidiPort {
 /// actually is.
 #[derive(Clone)]
 pub struct Learn {
-    pub target: LearnTarget,
+    pub manual: usize,
+    /// Which of the manual's inputs to write; past the end appends one.
+    pub slot: usize,
     /// Set by the first key: the keyboard being taught, and its bottom.
     pub heard: Option<config::Input>,
-    /// The console keyboard the last press already belongs to: a slip
-    /// the console detection asks the player to correct, not a keyboard.
-    pub repeat: Option<String>,
+    /// Auto-detect, as Hauptwerk's: one press names the keyboard that
+    /// plays the manual from now on, and nothing else about it.
+    pub once: bool,
     pub(crate) started: Instant,
-}
-
-/// What a learn gesture teaches.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum LearnTarget {
-    /// One of an organ's own inputs, `slot` past the end appending one.
-    /// Two presses: the compass's bottom, then its top.
-    Manual { manual: usize, slot: usize },
-    /// A keyboard of the player's console, `keyboard` past the end
-    /// adding one (a pedalboard when `pedal`). One press names its
-    /// device and channel; with `range`, a second fixes its compass.
-    Console { keyboard: usize, pedal: bool, range: bool },
-    /// One of the loaded organ's manuals: the keyboard pressed plays it
-    /// from now on, found among the console's or added to it.
-    Division { manual: usize },
 }
 
 /// Listening forever would leave a live console silently swallowing the
@@ -1285,7 +1272,7 @@ mod tests {
             suggested_channels: Vec::new(),
             learn: None,
             control_learn: None,
-            console_heard: 0,
+            detected: 0,
             pending: None,
             key_bindings: Vec::new(),
             keyboard: Vec::new(),

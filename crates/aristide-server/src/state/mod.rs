@@ -20,12 +20,10 @@ use crate::{config, load};
 
 mod build;
 mod edit;
-mod keyboards;
 mod learn;
 mod routing;
 mod tuning;
 
-pub use keyboards::{KeyboardEdit, PlayedFrom};
 pub use routing::RouteChange;
 
 /// How many stages the crescendo pedal has above the heel.
@@ -144,9 +142,9 @@ pub struct State {
     /// Set while it waits for the *control* to press: which binding row
     /// the next message that isn't a note belongs to.
     pub control_learn: Option<ControlLearn>,
-    /// How many console keyboards detection has heard, so a UI can
-    /// tell a wait that ended in a key from one that gave up.
-    pub console_heard: u32,
+    /// How many keyboards auto-detect has heard, so a UI can tell a wait
+    /// that ended in a key from one that gave up.
+    pub detected: u32,
     /// A bind waiting on the player: it would give a device (or one of
     /// its messages) a second job, and the console is showing the
     /// keep-both / replace / cancel dialog.
@@ -364,7 +362,7 @@ impl State {
             suggested_channels: Vec::new(),
             learn: None,
             control_learn: None,
-            console_heard: 0,
+            detected: 0,
             pending: None,
             key_bindings: Vec::new(),
             keyboard: Vec::new(),
@@ -419,15 +417,12 @@ impl State {
         // written back into the file. Both halves have to come across
         // together — this insert is wholesale, so a general the file
         // didn't carry would be wiped by every reload.
-        // The keyboard map is about this player's console, which the
-        // file cannot know, so it stays with the user config.
         if let Some((_, midi, combinations)) = &loaded.composite {
             let organ_key = self.organ_key.clone();
-            let mut organ = config::organ_config_from_file(midi, combinations);
-            if let Some(saved) = self.midi_config.organs.get(&organ_key) {
-                organ.keyboards = saved.keyboards.clone();
-            }
-            self.midi_config.organs.insert(organ_key, organ);
+            self.midi_config.organs.insert(
+                organ_key,
+                config::organ_config_from_file(midi, combinations),
+            );
         }
         // Every source lands in the library, so the picker can offer
         // it next time without the command line.
@@ -503,22 +498,10 @@ impl State {
     fn saved_assignments(&self) -> Vec<(usize, Vec<config::Input>)> {
         let names = self.manual_names();
         let names: Vec<&str> = names.iter().map(String::as_str).collect();
-        let mut assignments = self.organ_assignments(&names);
-        for (manual, input) in self.console_inputs() {
-            match assignments.iter_mut().find(|(m, _)| *m == manual) {
-                Some((_, inputs)) => inputs.push(input),
-                None => assignments.push((manual, vec![input])),
-            }
-        }
-        assignments
-    }
-
-    /// The inputs this organ lists for its manuals itself.
-    fn organ_assignments(&self, names: &[&str]) -> Vec<(usize, Vec<config::Input>)> {
         self.midi_config
             .assignments(&self.organ_key)
             .filter_map(|(manual, inputs)| {
-                match aristide_formats::sidecar::match_names(names, manual).as_slice() {
+                match aristide_formats::sidecar::match_names(&names, manual).as_slice() {
                     [index] => Some((*index, inputs.to_vec())),
                     _ => {
                         tracing::warn!(
