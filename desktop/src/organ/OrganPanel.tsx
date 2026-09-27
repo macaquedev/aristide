@@ -208,6 +208,8 @@ export function OrganPanel({ organ, state, stopId, select, offerUndo, openScope 
     <AddStop opened={adding?.kind === 'stop'} manual={adding?.kind === 'stop' ? adding.manual : ''} taken={adding?.kind === 'stop' ? named(adding.manual) : []} close={() => setAdding(undefined)}
       pull={(from, source, name) => change('organ/pull', { from, manual: source, on: adding?.kind === 'stop' ? adding.manual : '', ...(name ? { stop: name } : {}) },
         'That stop could not be added.', name && adding?.kind === 'stop' ? { kind: 'stop', name, manual: adding.manual } : undefined)}
+      blank={name => change('organ/stop/blank', { on: adding?.kind === 'stop' ? adding.manual : '', name }, 'The blank stop could not be added.',
+        adding?.kind === 'stop' ? { kind: 'stop', name, manual: adding.manual } : undefined)}
       addSource={path => change('organ/source/add', { path }, 'That sample set could not be added. Choose a GrandOrgue or unencrypted Hauptwerk organ.')}/>
     <AddDivision opened={adding?.kind === 'division'} close={() => setAdding(undefined)}
       add={(name, pedal) => change('organ/manual/add', { name, kind: pedal ? 'pedal' : 'manual', low: 36, high: pedal ? 67 : 96 }, 'The division could not be added. Use a name no other division has.', { kind: 'division', name })}/>
@@ -293,17 +295,33 @@ function CouplerEditor({ coupler, manuals, busy, rename, route, keep, remove }: 
   </Stack>;
 }
 
-function AddStop({ opened, manual, taken, close, pull, addSource }: {
+function AddStop({ opened, manual, taken, close, pull, blank, addSource }: {
   opened: boolean; manual: string; taken: string[]; close: () => void;
-  pull: (from: string, sourceManual: string, stop?: string) => Promise<boolean>; addSource: (path: string) => Promise<boolean>;
+  pull: (from: string, sourceManual: string, stop?: string) => Promise<boolean>; blank: (name: string) => Promise<boolean>; addSource: (path: string) => Promise<boolean>;
 }) {
   const [offerings, setOfferings] = useState<Offerings>();
   const [failed, setFailed] = useState(false);
+  const [name, setName] = useState('');
   const load = () => { setFailed(false); request<Offerings>('GET', '/api/organ/offerings').then(setOfferings, () => setFailed(true)); };
-  useEffect(() => { if (opened) load(); }, [opened]);
+  useEffect(() => {
+    if (!opened) return;
+    load();
+    let n = 1;
+    while (taken.includes((n === 1 ? 'new stop' : `new stop ${n}`))) n++;
+    setName(n === 1 ? 'New stop' : `New stop ${n}`);
+  }, [opened]);
   const done = (ok: boolean) => { if (ok) close(); };
+  const clash = taken.includes(name.trim().toLowerCase());
   return <Drawer closeButtonProps={{ 'aria-label': 'Close' }} opened={opened} onClose={close} title={`Add stop to ${manual}`} position="right" size="md">
     <Stack gap="md">
+      <form onSubmit={e => { e.preventDefault(); if (name.trim() && !clash) void blank(name.trim()).then(done); }}>
+        <Stack gap={6}><Text fw={600}>Blank stop</Text>
+          <Group align="start" wrap="nowrap">
+            <TextInput aria-label="Blank stop name" style={{ flex: 1 }} value={name} onChange={e => setName(e.currentTarget.value)} error={clash ? `In ${manual}` : undefined}/>
+            <Button type="submit" variant="default" disabled={!name.trim() || clash}>Add blank stop</Button>
+          </Group>
+        </Stack>
+      </form>
       {failed && <Text>The sample sets could not be read. Close this and try again.</Text>}
       {!offerings && !failed && <Group><Loader size="xs"/><Text size="sm" c="dimmed">Reading sample sets</Text></Group>}
       {offerings?.sources.map(source => <Stack key={source.alias} gap={6}>

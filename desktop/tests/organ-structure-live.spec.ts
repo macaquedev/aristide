@@ -175,3 +175,65 @@ test('Stops drag to reorder and to another division', async ({ page }) => {
   await page.request.post(`/api/organ/stop/order?manual=${manual.idx}&stops=${restore.join(',')}`);
   await expect.poll(() => order(manual.idx)).toEqual(before);
 });
+
+test('A blank stop is added silent, takes a source, and keeps it through edits', async ({ page }) => {
+  test.setTimeout(120_000);
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Organ', exact: true }).click();
+  const tree = page.getByRole('navigation', { name: 'Organ' });
+  const start = await snapshot(page);
+  const manual = start.manuals[1];
+  const source = start.stops.find(s => s.midx === manual.idx)!;
+  const rule = async (id: number) => (await page.request.get(`/api/rule?stop=${id}`)).json() as Promise<{ custom: boolean; voices: number }>;
+  const blankId = async (name: string) => (await snapshot(page)).stops.find(s => s.name === name)?.id;
+
+  await tree.getByRole('region', { name: manual.name }).getByRole('button', { name: 'Add stop', exact: true }).click();
+  const sheet = page.getByRole('dialog', { name: `Add stop to ${manual.name}` });
+  await expect(sheet.getByRole('textbox', { name: 'Blank stop name' })).toHaveValue('New stop');
+  await sheet.getByRole('textbox', { name: 'Blank stop name' }).fill(source.name);
+  await expect(sheet.getByRole('button', { name: 'Add blank stop' })).toBeDisabled();
+  await sheet.getByRole('textbox', { name: 'Blank stop name' }).fill('Idea');
+  await page.waitForTimeout(300);
+  await page.screenshot({ path: 'test-results/organ-blank-sheet.png' });
+  await sheet.getByRole('button', { name: 'Add blank stop' }).click();
+  await expect.poll(() => blankId('Idea'), { timeout: 20_000 }).toBeDefined();
+  await settled(page);
+  await expect(page.locator('.roll-stop-name').first()).toContainText('Idea');
+  await expect(page.getByText('0 voices per key')).toBeVisible();
+
+  // Give it pipes from another stop.
+  await page.getByRole('button', { name: /^Source: / }).click();
+  await page.getByRole('dialog', { name: 'Source' }).getByRole('button', { name: source.name, exact: true }).click();
+  await expect.poll(async () => (await rule((await blankId('Idea'))!)).voices).toBeGreaterThan(0);
+  await page.screenshot({ path: 'test-results/organ-blank-sourced.png' });
+
+  // Renamed and moved to another division, then rebuilt: the rule stays.
+  // A stop with a rule of its own carries the custom mark after its name.
+  const row = (name: string) => tree.getByRole('button', { name: new RegExp(`^${name}\\b`) });
+  await row('Idea').click({ button: 'right' });
+  await page.getByRole('menuitem', { name: 'Rename' }).click();
+  await page.getByRole('dialog').getByRole('textbox', { name: 'Name' }).fill('Thought');
+  await page.getByRole('dialog').getByRole('textbox', { name: 'Name' }).press('Enter');
+  await expect.poll(() => blankId('Thought')).toBeDefined();
+  const other = start.manuals.find(m => m.idx !== manual.idx)!;
+  await page.getByRole('combobox', { name: 'Division', exact: true }).click();
+  await page.getByRole('option', { name: other.name, exact: true }).click();
+  await expect.poll(async () => (await snapshot(page)).stops.find(s => s.name === 'Thought')?.midx).toBe(other.idx);
+  await expect(page.locator('.roll-stop-name').first()).toContainText('Thought');
+  await expect(page.getByText(`${other.name} · 1 voice per key`)).toBeVisible();
+  await page.request.post(`/api/organ/stop/blank?on=${encodeURIComponent(other.name)}&name=Rebuild`);
+  await settled(page);
+  const kept = await rule((await blankId('Thought'))!);
+  expect(kept.custom).toBe(true);
+  expect(kept.voices).toBeGreaterThan(0);
+
+  for (const name of ['Thought', 'Rebuild']) {
+    await expect(page.getByText('Rebuilding the organ')).toBeHidden();
+    await row(name).click();
+    await page.keyboard.press('Delete');
+    await page.getByRole('dialog').getByRole('button', { name: 'Delete', exact: true }).click();
+    await expect.poll(() => blankId(name), { timeout: 20_000 }).toBeUndefined();
+    await settled(page);
+  }
+  expect((await snapshot(page)).stops.map(s => `${s.manual}/${s.name}`).sort()).toEqual(start.stops.map(s => `${s.manual}/${s.name}`).sort());
+});
