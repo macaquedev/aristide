@@ -22,8 +22,8 @@ export function App() {
   const [dismissedLoadError, setDismissedLoadError] = useState<string>();
   const [undo, setUndo] = useState<() => void>();
   const offerUndo = useCallback((action?: () => void) => setUndo(() => action), []);
-  // Only an organ picked in the Library opens on Play; rebuilds and saved copies stay where they are.
-  const picked = useRef(false);
+  // Only an organ picked or created in the Library changes panel; rebuilds and saved copies stay where they are.
+  const landing = useRef<Panel>(undefined);
   const loading = useRef(false);
   // Nothing loads at startup: with no organ, the app opens on the Library.
   const started = useRef(false);
@@ -36,8 +36,8 @@ export function App() {
     if (state?.loading) loading.current = true;
     else if (loading.current) {
       loading.current = false;
-      if (picked.current && !state?.load_error) setPanel('Play');
-      picked.current = false;
+      if (landing.current && !state?.load_error) setPanel(landing.current);
+      landing.current = undefined;
     }
   }, [state?.loading, state?.load_error]);
   const error = engine.error ?? (state?.load_error !== dismissedLoadError ? state?.load_error : undefined);
@@ -66,7 +66,8 @@ export function App() {
       </Stack>}
       {panel === 'Play' && state && <Play state={state} command={command} openLibrary={() => setPanel('Library')} openStop={stop => { setSelected(stop.id); setPanel('Organ'); }}/>} 
       {panel === 'Library' && <LibraryPanel state={state} send={engine.send} play={() => setPanel('Play')}
-        load={path => { picked.current = true; command('organ/load', { path }); }}/>}
+        load={path => { landing.current = 'Play'; command('organ/load', { path }); }}
+        create={name => { landing.current = 'Organ'; return engine.send('organ/new', { name }).catch(error => { landing.current = undefined; throw error; }); }}/>}
       {panel === 'Settings' && <Stack p="lg"><Group><Button variant="subtle" leftSection={<ArrowLeft size={18}/>} onClick={() => setPanel('Play')}>Play</Button><Text fw={600}>Settings</Text></Group>
         <Appearance density={density} changeDensity={value => { setDensity(value); localStorage.setItem('aristide-density', value); }}/>
         {state && <ConsoleSettings state={state} command={command}/>}

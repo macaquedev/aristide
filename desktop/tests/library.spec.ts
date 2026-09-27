@@ -70,3 +70,13 @@ test('the playing organ cannot be deleted and tapping it returns to Play', async
   await expect(page.getByRole('button', { name: 'Play', exact: true })).toHaveAttribute('aria-current', 'page');
   expect(requests.filter(url => url.startsWith('/api/organ/load'))).toEqual([]);
 });
+
+test('New organ asks for a name and creates a blank organ', async ({ page }) => {
+  const requests = await rig(page);
+  await page.getByRole('button', { name: 'New organ' }).click();
+  await expect(page.getByRole('button', { name: 'Create' })).toBeDisabled();
+  await page.getByRole('textbox', { name: 'Organ name' }).fill('Chapel');
+  await page.getByRole('button', { name: 'Create' }).click();
+  await expect(page.getByRole('button', { name: 'Create' })).toHaveCount(0);
+  expect(requests).toEqual(['/api/organ/new?name=Chapel']);
+});

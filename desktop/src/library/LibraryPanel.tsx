@@ -1,17 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { ActionIcon, Badge, Button, Drawer, Group, Loader, Menu, Modal, Paper, Stack, Text, TextInput, UnstyledButton } from '@mantine/core';
-import { ChevronRight, EllipsisVertical, FileMusic, Folder, FolderUp, Pencil, Plus, Search, Trash2 } from 'lucide-react';
+import { ChevronRight, EllipsisVertical, FileMusic, FilePlus, Folder, FolderUp, Pencil, Plus, Search, Trash2 } from 'lucide-react';
 import { endpoint, request, type Browse, type LibraryEntry, type Snapshot } from '../api';
 import './library.css';
 
 type Details = { path: string; format: string; location: string | null };
 type Send = (path: string, values?: Record<string, string | number>) => Promise<Snapshot>;
 
-export function LibraryPanel({ state, send, load, play }: { state?: Snapshot; send: Send; load: (path: string) => void; play: () => void }) {
+export function LibraryPanel({ state, send, load, create, play }: { state?: Snapshot; send: Send; load: (path: string) => void; create: (name: string) => Promise<unknown>; play: () => void }) {
   const library = state?.library ?? [];
   const [details, setDetails] = useState<Record<string, Details>>({});
   const [query, setQuery] = useState('');
   const [adding, setAdding] = useState(false);
+  const [naming, setNaming] = useState(false);
   const [renaming, setRenaming] = useState<string>();
   const [deleting, setDeleting] = useState<LibraryEntry>();
   const [failure, setFailure] = useState<string>();
@@ -35,10 +36,14 @@ export function LibraryPanel({ state, send, load, play }: { state?: Snapshot; se
       <Text fw={600} size="lg">Library</Text>
       <Group gap="xs" wrap="nowrap">
         {library.length > 6 && <TextInput aria-label="Search organs" placeholder="Search" leftSection={<Search size={16}/>} value={query} onChange={e => setQuery(e.currentTarget.value)}/>}
+        <Button variant="default" leftSection={<FilePlus size={18}/>} onClick={() => setNaming(true)} disabled={naming || Boolean(state?.loading)}>New organ</Button>
         <Button leftSection={<Plus size={18}/>} onClick={() => setAdding(true)}>Add organ</Button>
       </Group>
     </Group>
     {state?.loading && <Paper withBorder p="md"><Group><Loader size="sm"/><Text>{state.loading}</Text></Group></Paper>}
+    {naming && <Paper withBorder className="library-row">
+      <NameForm name="" action="Create" failure="The organ could not be created. Try another name." submit={create} done={() => setNaming(false)}/>
+    </Paper>}
     {library.length > 0 && <Paper withBorder className="library-list" role="list">
       {shown.map(entry => <LibraryRow key={entry.path} entry={entry} details={details[entry.path]} busy={Boolean(state?.loading)}
         renaming={renaming === entry.path} startRename={() => setRenaming(entry.path)} stopRename={() => setRenaming(undefined)}
@@ -46,10 +51,11 @@ export function LibraryPanel({ state, send, load, play }: { state?: Snapshot; se
         open={() => entry.loaded ? play() : load(entry.path)} askDelete={() => setDeleting(entry)}/>)}
       {!shown.length && <Text c="dimmed" p="md">No organ matches “{query.trim()}”.</Text>}
     </Paper>}
-    {!library.length && !state?.loading && <Stack align="center" gap="xs" py="xl">
+    {!library.length && !state?.loading && !naming && <Stack align="center" gap="xs" py="xl">
       <Text fw={600}>No organs yet</Text>
       <Text c="dimmed" size="sm">GrandOrgue and unencrypted Hauptwerk organs</Text>
-      <Button mt="sm" leftSection={<Plus size={18}/>} onClick={() => setAdding(true)}>Add organ</Button>
+      <Group mt="sm"><Button variant="default" leftSection={<FilePlus size={18}/>} onClick={() => setNaming(true)}>New organ</Button>
+        <Button leftSection={<Plus size={18}/>} onClick={() => setAdding(true)}>Add organ</Button></Group>
     </Stack>}
     <AddOrgan opened={adding} close={() => setAdding(false)} load={path => { setAdding(false); load(path); }}/>
     <Modal opened={Boolean(deleting)} onClose={() => setDeleting(undefined)} title={`Are you sure you want to delete ${deleting?.name}?`}>
@@ -75,7 +81,7 @@ function LibraryRow({ entry, details, busy, renaming, startRename, stopRename, r
 }) {
   const meta = [details?.format, details?.location, played(entry.played)].filter(Boolean) as string[];
   return <div className="library-row" role="listitem" data-loaded={entry.loaded || undefined}>
-    {renaming ? <RenameForm name={entry.name} rename={rename} done={stopRename}/>
+    {renaming ? <NameForm name={entry.name} action="Save" failure="Another organ has this name, or its file is read-only." submit={rename} done={stopRename}/>
       : <UnstyledButton className="library-open" onClick={open} disabled={busy && !entry.loaded} aria-label={entry.loaded ? `${entry.name}, playing` : `Load ${entry.name}`}>
         <Text fw={600} truncate="end">{entry.name}</Text>
         {meta.length > 0 && <Text component="div" size="sm" c="dimmed" className="library-meta" title={details?.location ?? undefined}>
@@ -93,7 +99,7 @@ function LibraryRow({ entry, details, busy, renaming, startRename, stopRename, r
   </div>;
 }
 
-function RenameForm({ name, rename, done }: { name: string; rename: (name: string) => Promise<unknown>; done: () => void }) {
+function NameForm({ name, action, failure, submit: save, done }: { name: string; action: string; failure: string; submit: (name: string) => Promise<unknown>; done: () => void }) {
   const [value, setValue] = useState(name);
   const [error, setError] = useState<string>();
   const input = useRef<HTMLInputElement>(null);
@@ -101,13 +107,13 @@ function RenameForm({ name, rename, done }: { name: string; rename: (name: strin
   const submit = () => {
     const next = value.trim();
     if (!next || next === name) { done(); return; }
-    rename(next).then(done, () => setError('Another organ has this name, or its file is read-only.'));
+    save(next).then(done, () => setError(failure));
   };
   return <form className="library-rename" onSubmit={e => { e.preventDefault(); submit(); }}>
-    <TextInput ref={input} aria-label="Organ name" value={value} error={error} autoFocus
+    <TextInput ref={input} aria-label="Organ name" placeholder="Organ name" value={value} error={error} autoFocus
       onChange={e => { setValue(e.currentTarget.value); setError(undefined); }}
       onKeyDown={e => { if (e.key === 'Escape') { e.stopPropagation(); done(); } }}/>
-    <Button type="submit" disabled={!value.trim()}>Save</Button>
+    <Button type="submit" disabled={!value.trim()}>{action}</Button>
     <Button variant="default" onClick={done}>Cancel</Button>
   </form>;
 }
