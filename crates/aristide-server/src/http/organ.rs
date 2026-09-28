@@ -361,7 +361,9 @@ pub(super) fn load(state: &Mutex<State>, query: &str) -> Reply {
         paths,
         stops: Vec::new(),
         initial: false,
+        rebuild: false,
     });
+    crate::wake_loader();
     json(state_json_locked(&state))
 }
 
@@ -385,7 +387,9 @@ pub(super) fn create(state: &Mutex<State>, query: &str) -> Reply {
                 paths: vec![path],
                 stops: Vec::new(),
                 initial: false,
+                rebuild: false,
             });
+            crate::wake_loader();
             json(state_json_locked(&state))
         }
         Err(err) => bad_request(&err),

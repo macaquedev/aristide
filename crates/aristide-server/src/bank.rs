@@ -15,7 +15,7 @@ use aristide_formats::wav;
 #[cfg(test)]
 use aristide_model::units::cents_between;
 use aristide_model::units::{cents_to_ratio, db_to_linear, equal_ladder_hz};
-use aristide_model::{Organ, Pipe, PipeRef, PipeSource, RankId};
+use aristide_model::{AttackSample, Organ, Pipe, PipeRef, PipeSource, RankId};
 
 /// Playback parameters for one sounding pipe, precomputed against the
 /// device sample rate.
@@ -98,6 +98,9 @@ pub struct AttackOption {
 
 pub struct LoadedBank {
     pub bank: SampleBank,
+    /// Where each decoded file landed in `bank`: what lets a rebuilt
+    /// organ over the same files play this bank without decoding.
+    pub index: SampleIndex,
     /// (rank, pipe index) → playback spec. Borrowed pipes carry their
     /// target's spec; silent and failed pipes are absent.
     pub specs: HashMap<(RankId, u16), VoiceSpec>,
@@ -314,57 +317,110 @@ pub fn build_with(
 
     // Every sampled pipe, decoded with its recording facts, awaiting the pitch
     // decisions that need the whole instrument in view.
-    let mut cache = DecodeCache {
-        decoded: HashMap::new(),
-        release_cache: HashMap::new(),
-    };
+    let mut index = SampleIndex::default();
     let mut staged: Vec<StagedPipe> = Vec::new();
     for (rank_index, rank) in organ.ranks.iter().enumerate() {
-        let enclosures = chest_enclosures.get(&rank.windchest).copied().unwrap_or(
-            [aristide_engine::enclosure::ENCLOSURE_NONE;
-                aristide_engine::enclosure::MAX_VOICE_ENCLOSURES],
-        );
         // Recording facts are shared; each pipe resolves its own playback relationship.
         let pending = decode_rank_attacks(
             rank,
             &mut bank,
             &mut skipped,
             &mut attack_options,
-            &mut cache,
+            &mut index,
             &mut maps,
         );
         staged.extend(stage_rank_pipes(
             rank,
             rank_index,
-            enclosures,
+            rank_enclosures(&chest_enclosures, rank),
             pending,
             &mut skipped,
         ));
     }
 
-    keep_declared_recordings(organ, &mut staged);
-    let (home, rank_anchor) = fit_home_tuning(organ, &staged);
-    let mut specs = assign_voice_specs(
-        organ,
-        device_rate,
-        home.as_ref(),
-        &rank_anchor,
-        staged,
-        &mut skipped,
-    );
-    assign_borrowed_pipe_specs(organ, &mut specs, &mut attack_options, &mut skipped);
+    let (specs, home, rank_anchors) =
+        settle_specs(organ, device_rate, staged, &mut attack_options, &mut skipped);
     if bank.streamed_samples() > 0 {
         bank.set_stores(std::sync::Arc::new(stores));
     }
 
     Ok(LoadedBank {
         bank,
+        index,
         specs,
         attack_options,
         skipped,
         home,
-        rank_anchors: rank_anchor,
+        rank_anchors,
     })
+}
+
+/// The playback half of a load over a bank already built: `organ`'s
+/// voice specs against the samples `index` says are there, without
+/// decoding or touching the bank. `None` when `organ` needs a file —
+/// or a switch between two recordings — the bank does not hold.
+pub fn respec(organ: &Organ, device_rate: f32, index: &SampleIndex) -> Option<Respecced> {
+    let mut attack_options = HashMap::new();
+    let mut skipped = Vec::new();
+    let chest_enclosures = resolve_chest_enclosures(organ, &mut skipped);
+    let mut staged: Vec<StagedPipe> = Vec::new();
+    for (rank_index, rank) in organ.ranks.iter().enumerate() {
+        let pending = look_up_rank_attacks(rank, index, &mut attack_options)?;
+        staged.extend(stage_rank_pipes(
+            rank,
+            rank_index,
+            rank_enclosures(&chest_enclosures, rank),
+            pending,
+            &mut skipped,
+        ));
+    }
+    let (specs, home, rank_anchors) =
+        settle_specs(organ, device_rate, staged, &mut attack_options, &mut skipped);
+    Some(Respecced {
+        specs,
+        attack_options,
+        home,
+        rank_anchors,
+    })
+}
+
+/// [`LoadedBank`] without the bank: what [`respec`] settles. What
+/// didn't load was reported when the bank was built.
+pub struct Respecced {
+    pub specs: HashMap<(RankId, u16), VoiceSpec>,
+    pub attack_options: HashMap<(RankId, u16), Vec<AttackOption>>,
+    pub home: Option<crate::tuning::HomeTuning>,
+    pub rank_anchors: HashMap<RankId, f64>,
+}
+
+fn rank_enclosures(
+    chest_enclosures: &HashMap<u32, [u8; aristide_engine::enclosure::MAX_VOICE_ENCLOSURES]>,
+    rank: &aristide_model::Rank,
+) -> [u8; aristide_engine::enclosure::MAX_VOICE_ENCLOSURES] {
+    chest_enclosures.get(&rank.windchest).copied().unwrap_or(
+        [aristide_engine::enclosure::ENCLOSURE_NONE; aristide_engine::enclosure::MAX_VOICE_ENCLOSURES],
+    )
+}
+
+/// The pitch decisions that need the whole instrument in view, and
+/// every pipe's spec from them.
+#[allow(clippy::type_complexity)]
+fn settle_specs(
+    organ: &Organ,
+    device_rate: f32,
+    mut staged: Vec<StagedPipe>,
+    attack_options: &mut HashMap<(RankId, u16), Vec<AttackOption>>,
+    skipped: &mut Vec<String>,
+) -> (
+    HashMap<(RankId, u16), VoiceSpec>,
+    Option<crate::tuning::HomeTuning>,
+    HashMap<RankId, f64>,
+) {
+    keep_declared_recordings(organ, &mut staged);
+    let (home, rank_anchor) = fit_home_tuning(organ, &staged);
+    let mut specs = assign_voice_specs(organ, device_rate, home.as_ref(), &rank_anchor, staged, skipped);
+    assign_borrowed_pipe_specs(organ, &mut specs, attack_options, skipped);
+    (specs, home, rank_anchor)
 }
 
 /// The cache's companion tail file: `<hash>.samples` → `<hash>.tails`.
@@ -791,11 +847,14 @@ fn finish_decode(
 /// Attack/release dedup state threaded across every rank: a file
 /// shared by several pipes (borrowed pipes, shared samples) decodes
 /// and enters the bank once.
-struct DecodeCache {
+#[derive(Default)]
+pub struct SampleIndex {
     /// path → Ok(bank index + source metadata) or failure already noted.
     decoded: HashMap<PathBuf, Option<DecodedInfo>>,
     /// Separate release files, deduplicated independently of attacks.
     release_cache: HashMap<PathBuf, Option<u32>>,
+    /// Recording switches attached, as (from, to) bank indices.
+    switches: std::collections::HashSet<(u32, u32)>,
 }
 
 /// Decode every sampled pipe in one rank into its bank entries: the
@@ -808,7 +867,7 @@ fn decode_rank_attacks(
     bank: &mut SampleBank,
     skipped: &mut Vec<String>,
     attack_options: &mut HashMap<(RankId, u16), Vec<AttackOption>>,
-    cache: &mut DecodeCache,
+    cache: &mut SampleIndex,
     maps: &mut DecodedMaps,
 ) -> Vec<PendingPipe> {
     let mut pending: Vec<PendingPipe> = Vec::new();
@@ -872,56 +931,108 @@ fn decode_rank_attacks(
                 variants.push((attack_index, info));
             }
         }
-        let Some(&(primary_index, info)) = variants.first() else {
-            continue;
-        };
-        let attack = &attacks[primary_index];
-        if variants.len() > 1 {
-            let primary_pitch = crate::pitch::resolve(pipe, info, attack);
-            let options = variants
-                .iter()
-                .map(|&(index, variant)| {
-                    let pitch = crate::pitch::resolve(pipe, variant, &attacks[index]);
-                    AttackOption {
-                        sample: variant.index,
-                        rate_factor: (variant.sample_rate / info.sample_rate
-                            * cents_to_ratio(pitch.transpose_cents - primary_pitch.transpose_cents))
-                            as f32,
-                        home_delta_cents: pitch.sounding_cents.unwrap_or(0.0)
-                            - primary_pitch.sounding_cents.unwrap_or(0.0),
-                        correction_delta_cents: pitch.target_correction_cents
-                            - primary_pitch.target_correction_cents,
-                        wave_tremulant: attacks[index].wave_tremulant,
-                        min_velocity: attacks[index].min_velocity,
-                        max_since_release_ms: attacks[index].max_time_since_last_release_ms,
-                    }
-                })
-                .collect();
-            attack_options.insert((rank.id, pipe_index as u16), options);
-            // Wire the mid-hold recording switches. A wave tremulant
-            // engaging or releasing crosses already-held voices from
-            // the recording made under one state into the one made
-            // under the other, so every ordered pair of variants whose
-            // `IsTremulant` differs needs a loop→loop phase map.
-            // Variants that agree on it never switch mid-hold — a note
-            // does not change how hard it was struck, nor how long ago
-            // the pipe last closed — so they cost nothing here.
-            for &(a, from) in variants.iter() {
-                for &(b, to) in variants.iter() {
-                    if attacks[a].wave_tremulant != attacks[b].wave_tremulant {
-                        bank.attach_switch(from.index, to.index);
-                    }
-                }
-            }
+        for (from, to) in switch_pairs(attacks, &variants) {
+            bank.attach_switch(from, to);
+            cache.switches.insert((from, to));
         }
-
-        pending.push(PendingPipe {
-            pipe_index: pipe_index as u16,
-            info,
-            pitch: crate::pitch::resolve(pipe, info, attack),
-        });
+        if let Some(pipe) = pend_pipe(rank, pipe_index, pipe, attacks, &variants, attack_options) {
+            pending.push(pipe);
+        }
     }
     pending
+}
+
+/// [`decode_rank_attacks`] against an index alone: every attack must
+/// already be decoded and every switch attached.
+fn look_up_rank_attacks(
+    rank: &aristide_model::Rank,
+    index: &SampleIndex,
+    attack_options: &mut HashMap<(RankId, u16), Vec<AttackOption>>,
+) -> Option<Vec<PendingPipe>> {
+    let mut pending: Vec<PendingPipe> = Vec::new();
+    for (pipe_index, pipe) in rank.pipes.iter().enumerate() {
+        let PipeSource::Sampled { attacks, releases } = &pipe.source else {
+            continue;
+        };
+        if releases.iter().any(|release| !index.release_cache.contains_key(&release.path)) {
+            return None;
+        }
+        let mut variants: Vec<(usize, DecodedInfo)> = Vec::new();
+        for (attack_index, attack) in attacks.iter().enumerate() {
+            if let Some(info) = *index.decoded.get(&attack.path)? {
+                variants.push((attack_index, info));
+            }
+        }
+        if switch_pairs(attacks, &variants).any(|pair| !index.switches.contains(&pair)) {
+            return None;
+        }
+        if let Some(pipe) = pend_pipe(rank, pipe_index, pipe, attacks, &variants, attack_options) {
+            pending.push(pipe);
+        }
+    }
+    Some(pending)
+}
+
+/// Wire the mid-hold recording switches. A wave tremulant engaging or
+/// releasing crosses already-held voices from the recording made under
+/// one state into the one made under the other, so every ordered pair
+/// of variants whose `IsTremulant` differs needs a loop→loop phase map.
+/// Variants that agree on it never switch mid-hold — a note does not
+/// change how hard it was struck, nor how long ago the pipe last
+/// closed — so they cost nothing here.
+fn switch_pairs<'a>(
+    attacks: &'a [AttackSample],
+    variants: &'a [(usize, DecodedInfo)],
+) -> impl Iterator<Item = (u32, u32)> + 'a {
+    let several = variants.len() > 1;
+    variants.iter().filter(move |_| several).flat_map(move |&(a, from)| {
+        variants
+            .iter()
+            .filter(move |&&(b, _)| attacks[a].wave_tremulant != attacks[b].wave_tremulant)
+            .map(move |&(_, to)| (from.index, to.index))
+    })
+}
+
+/// One pipe's playback from its decoded attack variants: the first is
+/// its primary, the rest join the selection table.
+fn pend_pipe(
+    rank: &aristide_model::Rank,
+    pipe_index: usize,
+    pipe: &Pipe,
+    attacks: &[AttackSample],
+    variants: &[(usize, DecodedInfo)],
+    attack_options: &mut HashMap<(RankId, u16), Vec<AttackOption>>,
+) -> Option<PendingPipe> {
+    let &(primary_index, info) = variants.first()?;
+    let attack = &attacks[primary_index];
+    if variants.len() > 1 {
+        let primary_pitch = crate::pitch::resolve(pipe, info, attack);
+        let options = variants
+            .iter()
+            .map(|&(index, variant)| {
+                let pitch = crate::pitch::resolve(pipe, variant, &attacks[index]);
+                AttackOption {
+                    sample: variant.index,
+                    rate_factor: (variant.sample_rate / info.sample_rate
+                        * cents_to_ratio(pitch.transpose_cents - primary_pitch.transpose_cents))
+                        as f32,
+                    home_delta_cents: pitch.sounding_cents.unwrap_or(0.0)
+                        - primary_pitch.sounding_cents.unwrap_or(0.0),
+                    correction_delta_cents: pitch.target_correction_cents
+                        - primary_pitch.target_correction_cents,
+                    wave_tremulant: attacks[index].wave_tremulant,
+                    min_velocity: attacks[index].min_velocity,
+                    max_since_release_ms: attacks[index].max_time_since_last_release_ms,
+                }
+            })
+            .collect();
+        attack_options.insert((rank.id, pipe_index as u16), options);
+    }
+    Some(PendingPipe {
+        pipe_index: pipe_index as u16,
+        info,
+        pitch: crate::pitch::resolve(pipe, info, attack),
+    })
 }
 
 /// Stage authored playback decisions. Audio analysis is deliberately not an input.
@@ -2046,6 +2157,36 @@ mod tests {
     /// the organ keeps its recorded tuning. And harmonics reach the
     /// nominal: the Plein jeu's first rank is pitched 2 octaves up
     /// (HarmonicNumber=32) from its C2 key.
+    #[test]
+    fn a_rebuilt_organ_replays_its_bank_until_it_needs_a_new_file() {
+        let Some(path) = demo_organ() else {
+            eprintln!("skipping: demo set not present");
+            return;
+        };
+        let mut organ = aristide_formats::grandorgue::load(&path).expect("loads").organ;
+        let loaded = build(&organ, 48_000.0, 16, None).expect("bank builds");
+        let sorted = |specs: &HashMap<(RankId, u16), VoiceSpec>| {
+            let mut all: Vec<String> = specs.iter().map(|entry| format!("{entry:?}")).collect();
+            all.sort();
+            all
+        };
+
+        let same = respec(&organ, 48_000.0, &loaded.index).expect("every file is in the bank");
+        assert_eq!(sorted(&same.specs), sorted(&loaded.specs), "the same organ plays the same");
+
+        let dropped = organ.ranks.pop().expect("a rank").id;
+        let fewer = respec(&organ, 48_000.0, &loaded.index).expect("a subset needs nothing new");
+        assert!(fewer.specs.keys().all(|(rank, _)| *rank != dropped));
+
+        let mut stranger = organ.ranks[0].clone();
+        stranger.id = RankId(9_999);
+        if let PipeSource::Sampled { attacks, .. } = &mut stranger.pipes[0].source {
+            attacks[0].path = PathBuf::from("not/in/the/bank.wav");
+        }
+        organ.ranks.push(stranger);
+        assert!(respec(&organ, 48_000.0, &loaded.index).is_none(), "a new file must decode");
+    }
+
     #[test]
     fn demo_set_keeps_its_recorded_tuning() {
         let Some(path) = demo_organ() else {

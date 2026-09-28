@@ -102,7 +102,9 @@ pub struct BusSetup {
 
 pub struct PreparedInstrument {
     pub console: Console,
-    pub bank: SampleBank,
+    /// The freshly decoded bank and where each file landed in it, or
+    /// `None` when the console plays the bank it was prepared over.
+    pub samples: Option<(SampleBank, bank::SampleIndex)>,
     pub wind: Option<aristide_engine::wind::WindParams>,
     pub tremulants: Vec<TremulantSetup>,
     pub enclosures: Vec<(u8, aristide_engine::enclosure::EnclosureParams)>,
@@ -1798,11 +1800,26 @@ pub fn prepare(
 /// [`prepare`] with the player's sample-memory preferences (residency,
 /// cache, streaming) — the user config's `[samples]`, never the organ
 /// file's: where a set's bytes live is the loading machine's business.
+#[cfg(test)]
 pub fn prepare_with(
     paths: &[PathBuf],
     stops: &[String],
     sample_rate: f32,
     prefs: &config::SamplePrefs,
+    progress: &dyn Fn(String),
+) -> Result<PreparedInstrument> {
+    prepare_over(paths, stops, sample_rate, prefs, None, progress)
+}
+
+/// [`prepare_with`] over a bank already playing: when every file the
+/// organ needs is in `playing`, nothing decodes and the console plays
+/// that bank; otherwise the samples load as usual.
+pub fn prepare_over(
+    paths: &[PathBuf],
+    stops: &[String],
+    sample_rate: f32,
+    prefs: &config::SamplePrefs,
+    playing: Option<&bank::SampleIndex>,
     progress: &dyn Fn(String),
 ) -> Result<PreparedInstrument> {
     anyhow::ensure!(!paths.is_empty(), "no sample set given");
@@ -1854,15 +1871,26 @@ pub fn prepare_with(
             ));
         }
     }
-    let loaded = decode_samples(&organ, prefs, paths, sample_rate, progress)?;
-    let bank::LoadedBank {
-        bank,
-        specs,
-        attack_options,
-        home,
-        rank_anchors,
-        ..
-    } = loaded;
+    let respecced = playing.and_then(|index| bank::respec(&organ, sample_rate, index));
+    let (samples, specs, attack_options, home, rank_anchors) = match respecced {
+        Some(respecced) => (
+            None,
+            respecced.specs,
+            respecced.attack_options,
+            respecced.home,
+            respecced.rank_anchors,
+        ),
+        None => {
+            let loaded = decode_samples(&organ, prefs, paths, sample_rate, progress)?;
+            (
+                Some((loaded.bank, loaded.index)),
+                loaded.specs,
+                loaded.attack_options,
+                loaded.home,
+                loaded.rank_anchors,
+            )
+        }
+    };
 
     let wind = configure_wind(&sidecar);
     let tremulants = configure_tremulants(&sidecar, &organ);
@@ -1907,7 +1935,7 @@ pub fn prepare_with(
 
     Ok(PreparedInstrument {
         console,
-        bank,
+        samples,
         wind,
         tremulants,
         enclosures,
@@ -1923,6 +1951,13 @@ pub fn prepare_with(
         routing,
         warnings: load_warnings,
     })
+}
+
+#[cfg(test)]
+impl PreparedInstrument {
+    fn bank(&self) -> &SampleBank {
+        &self.samples.as_ref().expect("a freshly decoded bank").0
+    }
 }
 
 /// A `reference_key` as the file spells it ("C4", "F#3", or a MIDI
@@ -1964,7 +1999,7 @@ mod tests {
         let prepared = prepare(&[path], &[], 48_000.0, &|_| {}).expect("blank organ prepares");
         assert_eq!(prepared.console.organ_name(), "Blank Chapel");
         assert!(prepared.console.stop_states().is_empty());
-        assert!(prepared.bank.is_empty());
+        assert!(prepared.bank().is_empty());
         assert!(
             prepared.composite.is_some(),
             "the blank file owns its own MIDI wiring like any composite"
@@ -2083,7 +2118,7 @@ mod tests {
             adopted.console.coupler_repitch(),
             direct.console.coupler_repitch()
         );
-        assert_eq!(adopted.bank.len(), direct.bank.len(), "every sample decoded");
+        assert_eq!(adopted.bank().len(), direct.bank().len(), "every sample decoded");
         assert!(adopted.composite.is_some(), "the organ file owns the wiring");
         assert!(direct.composite.is_none());
         let _ = std::fs::remove_dir_all(&dir);
@@ -2162,7 +2197,7 @@ mod tests {
         );
         // Under the player's preferences (auto, a demo-sized set)
         // nothing streams: the file's `on` changed nothing.
-        assert_eq!(prepared.bank.streamed_bytes(), 0);
+        assert_eq!(prepared.bank().streamed_bytes(), 0);
 
         // The same set under a streaming preference does stream — the
         // preference is what decides.
@@ -2173,7 +2208,7 @@ mod tests {
         };
         let prepared = prepare_with(&[dir.join("demo.organ")], &[], 48_000.0, &streaming, &|_| {})
             .expect("prepares streaming");
-        assert!(prepared.bank.streamed_bytes() > 0);
+        assert!(prepared.bank().streamed_bytes() > 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2291,7 +2326,7 @@ mod tests {
         })
         .expect("demo set prepares");
         assert!(!prepared.console.stop_states().is_empty(), "stops exist");
-        assert!(!prepared.bank.is_empty(), "samples decoded");
+        assert!(!prepared.bank().is_empty(), "samples decoded");
         assert!(
             !phases.lock().expect("phases").is_empty(),
             "progress was reported"

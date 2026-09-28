@@ -32,6 +32,33 @@ pub struct CouplerRouteView {
     pub own_pipes: bool,
 }
 
+/// What a console hands its rebuilt successor ([`Console::hand_over`]):
+/// stops by (manual, stop) name, couplers and enclosures by name.
+pub struct Registration {
+    hand: Vec<(String, String)>,
+    crescendo: Vec<(String, String)>,
+    couplers: Vec<String>,
+    stop_noise: HashMap<(String, String), u64>,
+    coupler_noise: HashMap<String, u64>,
+    trem_noise: Option<u64>,
+    enclosures: Vec<(String, f32)>,
+    /// (manual, key, velocity) for every key held down.
+    held: Vec<(String, u16, u8)>,
+    wave_trems: u32,
+    next_handle: u64,
+}
+
+/// What [`Console::take_over`] leaves for the engine.
+pub struct TakenOver {
+    /// Voices to release: noise loops of stops and couplers that are
+    /// gone, and pipes the re-pressed keys expedite.
+    pub released: Vec<u64>,
+    /// Enclosure positions, by the new console's indices.
+    pub enclosures: Vec<(usize, f32)>,
+    /// The held keys' voices.
+    pub starts: Vec<VoiceStart>,
+}
+
 /// A voice the console wants started, tagged with the handle it will
 /// later be stopped by.
 pub struct VoiceStart {
@@ -3260,6 +3287,155 @@ impl Console {
     }
 
     /// Forget everything sounding (the engine is told separately).
+    /// Retire this console for a rebuilt one over the same engine: every
+    /// pipe voice to release, and what the player has set up — by
+    /// name, since a rebuild may renumber everything — for
+    /// [`Console::take_over`]. Open noise loops are handed over, not
+    /// released, so nothing thumps.
+    pub fn hand_over(&mut self) -> (Vec<u64>, Registration) {
+        let released = self.speaking.drain().map(|(_, voice)| voice.handle).collect();
+        let stop = |stop: &StopId| self.stop_name(*stop);
+        let registration = Registration {
+            hand: self.hand.iter().filter_map(stop).collect(),
+            crescendo: self.crescendo.iter().filter_map(stop).collect(),
+            couplers: self
+                .engaged_couplers
+                .iter()
+                .map(|&index| self.organ.couplers[index].name.clone())
+                .collect(),
+            stop_noise: self
+                .stop_noise_open
+                .iter()
+                .filter_map(|(id, &handle)| Some((stop(id)?, handle)))
+                .collect(),
+            coupler_noise: self
+                .coupler_noise_open
+                .iter()
+                .map(|(&index, &handle)| (self.organ.couplers[index].name.clone(), handle))
+                .collect(),
+            trem_noise: self.trem_noise_open,
+            enclosures: self
+                .organ
+                .enclosures
+                .iter()
+                .zip(&self.enclosure_positions)
+                .map(|(enclosure, &position)| (enclosure.name.clone(), position))
+                .collect(),
+            held: self
+                .held_velocity
+                .iter()
+                .map(|(&(manual, key), &velocity)| (self.organ.manuals[manual].name.clone(), key, velocity))
+                .collect(),
+            wave_trems: self.wave_trems,
+            next_handle: self.next_handle,
+        };
+        self.all_off();
+        self.stop_noise_open.clear();
+        self.coupler_noise_open.clear();
+        self.trem_noise_open = None;
+        (released, registration)
+    }
+
+    /// Carry on from the console this one replaces (see
+    /// [`Console::hand_over`]): its registration, swell positions and
+    /// open noise loops wherever the names still resolve, then its held
+    /// keys pressed again. Answers the noise voices whose stop or
+    /// coupler is gone, to release, and the enclosure positions and
+    /// voices to send.
+    pub fn take_over(&mut self, from: Registration) -> TakenOver {
+        self.next_handle = self.next_handle.max(from.next_handle);
+        self.wave_trems = from.wave_trems;
+        let stop = |name: &(String, String)| {
+            self.organ
+                .stops
+                .iter()
+                .find(|stop| self.stop_name(stop.id).as_ref() == Some(name))
+                .map(|stop| stop.id)
+        };
+        let coupler = |name: &str| self.organ.couplers.iter().position(|c| c.name == name);
+        let hand: Vec<StopId> = from.hand.iter().filter_map(stop).collect();
+        let crescendo: Vec<StopId> = from.crescendo.iter().filter_map(stop).collect();
+        let couplers: Vec<usize> = from
+            .couplers
+            .iter()
+            .filter_map(|name| coupler(name))
+            .filter(|&index| self.available_couplers.get(index).copied().unwrap_or(true))
+            .collect();
+        let mut released = Vec::new();
+        let stop_noise: Vec<(StopId, u64)> = from
+            .stop_noise
+            .iter()
+            .filter_map(|(name, &handle)| match stop(name) {
+                Some(id) if hand.contains(&id) || crescendo.contains(&id) => Some((id, handle)),
+                _ => {
+                    released.push(handle);
+                    None
+                }
+            })
+            .collect();
+        let coupler_noise: Vec<(usize, u64)> = from
+            .coupler_noise
+            .iter()
+            .filter_map(|(name, &handle)| match coupler(name) {
+                Some(index) if couplers.contains(&index) => Some((index, handle)),
+                _ => {
+                    released.push(handle);
+                    None
+                }
+            })
+            .collect();
+        let enclosures: Vec<(usize, f32)> = from
+            .enclosures
+            .iter()
+            .filter_map(|(name, position)| {
+                let index = self.organ.enclosures.iter().position(|e| &e.name == name)?;
+                Some((index, *position))
+            })
+            .collect();
+        let held: Vec<(usize, u16, u8)> = from
+            .held
+            .iter()
+            .filter_map(|(manual, key, velocity)| {
+                let index = self.organ.manuals.iter().position(|m| &m.name == manual)?;
+                Some((index, *key, *velocity))
+            })
+            .collect();
+
+        self.drawn = hand.clone();
+        for &id in &crescendo {
+            if !self.drawn.contains(&id) {
+                self.drawn.push(id);
+            }
+        }
+        self.hand = hand;
+        self.crescendo = crescendo;
+        self.engaged_couplers = couplers;
+        self.stop_noise_open = stop_noise.into_iter().collect();
+        self.coupler_noise_open = coupler_noise.into_iter().collect();
+        self.trem_noise_open = from.trem_noise;
+        for &(index, position) in &enclosures {
+            self.enclosure_positions[index] = position;
+        }
+        let mut starts = Vec::new();
+        for (manual, key, velocity) in held {
+            let (started, expedited) = self.note_on_manual(manual, key, velocity);
+            starts.extend(started);
+            released.extend(expedited);
+        }
+        TakenOver {
+            released,
+            enclosures,
+            starts,
+        }
+    }
+
+    /// A stop's (manual, stop) names — what survives a rebuild.
+    fn stop_name(&self, stop: StopId) -> Option<(String, String)> {
+        let stop = self.organ.stops.iter().find(|s| s.id == stop)?;
+        let manual = self.organ.manuals.iter().find(|m| m.id == stop.manual)?;
+        Some((manual.name.clone(), stop.name.clone()))
+    }
+
     pub fn all_off(&mut self) {
         self.sounding.clear();
         self.held_velocity.clear();
@@ -4574,6 +4750,32 @@ mod tests {
         rule.events[1].source.rank = Some(RankId(1));
         assert!(console.set_stop_rule(StopId(1), Some(rule)).is_err(), "rank 1 is not stop 2's");
         assert!(!console.stop_has_rule(StopId(1)));
+    }
+
+    #[test]
+    fn a_rebuilt_console_carries_the_registration_and_held_keys() {
+        let mut old = test_console();
+        old.set_drawn(StopId(2), false);
+        let (held, _) = old.note_on_manual(0, 60, 90);
+        let (released, registration) = old.hand_over();
+        assert_eq!(released, vec![held[0].handle], "the old pipe releases");
+        assert!(old.manual_states()[0].4.is_empty());
+
+        // The rebuild renamed nothing but renumbered the stops.
+        let mut new = test_console();
+        new.organ.stops.reverse();
+        for (index, stop) in new.organ.stops.iter_mut().enumerate() {
+            stop.id = StopId(index as u32 + 10);
+        }
+        new.hand.clear();
+        new.drawn.clear();
+        let taken = new.take_over(registration);
+        let principal = new.organ.stops.iter().find(|s| s.name == "Principal 8").unwrap().id;
+        assert!(new.is_hand_drawn(principal));
+        assert!(!new.is_hand_drawn(StopId(10)), "Octave 4 stays off");
+        assert_eq!(taken.starts.len(), 1, "the held key sounds again");
+        assert!(taken.starts[0].handle > held[0].handle, "handles never repeat");
+        assert_eq!(new.manual_states()[0].4, vec![60]);
     }
 
     #[test]

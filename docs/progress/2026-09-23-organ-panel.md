@@ -48,10 +48,16 @@ Failures show one sentence in a modal.
 
 ## Gaps
 
-- **Structural edits rebuild the organ, and sound stops for the rebuild**
-  (about 0.1 s on the demo; longer on large sets). That breaks Control flow
-  rule 4 for these edits. Making add, remove and reorder live needs the
-  console to change in place instead of reloading from the file.
+- ~~Structural edits rebuild the organ, and sound stops for the rebuild.~~
+  Fixed 28 Sept 2026: a structural edit re-reads the organ file and swaps
+  only the console under the running engine when every sample it needs is
+  already in the bank. That covers adding a blank stop or a copy of one
+  already loaded, removals, divisions, couplers and enclosures. The audio
+  stream, registration, couplers, swell, crescendo, tremulants and held keys
+  carry across by name. Held keys re-attack. An edit replies once the
+  rebuild lands (about 10 ms on the demo). Only an edit that needs new
+  samples, or one after the sample-memory preferences changed, still
+  reloads the organ.
 - Stops cannot yet be duplicated in place or dragged to reorder within a
   division. Adding a stop again from its sample set is how to copy one for
   now, and the copy needs a different division or a rename first.

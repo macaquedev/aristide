@@ -166,7 +166,31 @@ pub(crate) fn respond(
     {
         return adopted_refusal();
     }
-    handler(state, query)
+    let reply = handler(state, query);
+    if *method == Method::Post && crate::loader_running() && await_rebuild(state) {
+        return json(snapshot::state_json(state));
+    }
+    reply
+}
+
+/// A structural edit rebuilds the organ from its file. Most rebuilds
+/// only swap the console and take milliseconds, so the edit answers
+/// with the rebuilt organ rather than a console mid-rebuild; one that
+/// must load new samples is left to report its progress. True when a
+/// rebuild was queued and has landed.
+fn await_rebuild(state: &Mutex<State>) -> bool {
+    let rebuilding = |state: &State| state.pending_load.as_ref().is_some_and(|r| r.rebuild) || state.loading.is_some();
+    if !state.lock().is_ok_and(|state| state.pending_load.as_ref().is_some_and(|r| r.rebuild)) {
+        return false;
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        if !rebuilding(&state.lock().expect("state poisoned")) {
+            return true;
+        }
+    }
+    false
 }
 
 /// A key press/release from an API client — same path as a MIDI note, but
@@ -3139,6 +3163,7 @@ mod tests {
                 paths: vec![file.clone()],
                 stops: Vec::new(),
                 initial: false,
+                rebuild: false,
             });
         }
         let raced = respond(&state, &Method::Post, "/api/organ/move?stop=18&manual=0");

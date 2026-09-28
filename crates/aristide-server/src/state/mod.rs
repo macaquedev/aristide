@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use aristide_engine::EngineHandle;
+use aristide_engine::{Command, EngineHandle};
 use aristide_formats::instrument;
 use aristide_model::StopId;
 
@@ -258,6 +258,10 @@ pub struct LoadRequest {
     /// Queued by the command line: a failure should exit the process,
     /// as a bad CLI path always has, not leave a silent server running.
     pub initial: bool,
+    /// The loaded organ's own file again after a structural edit: when
+    /// every sample it needs is already playing, the console is swapped
+    /// under the running engine instead of the organ reloading.
+    pub rebuild: bool,
 }
 
 /// One coupler route as the console editor sends it (the JSON the
@@ -323,7 +327,8 @@ pub struct Setup {
 /// land at startup, so a future field can't be added to one path and
 /// forgotten in the other.
 pub struct Installed {
-    pub engine: EngineHandle,
+    /// `None` keeps the running engine: a rebuild over its bank.
+    pub engine: Option<EngineHandle>,
     pub console: Console,
     pub suggested_channels: Vec<Option<u8>>,
     pub trems: Vec<TremControl>,
@@ -433,7 +438,9 @@ impl State {
         for (label, path) in &loaded.setup.sources {
             self.midi_config.remember(label, path);
         }
-        self.engine = loaded.engine;
+        if let Some(engine) = loaded.engine {
+            self.engine = engine;
+        }
         self.control = Control::Organ(loaded.console);
         self.suggested_channels = loaded.suggested_channels;
         self.trems = loaded.trems;
@@ -466,6 +473,71 @@ impl State {
         self.send_bus_sends();
         self.resolve_routes();
         self.persist();
+    }
+
+    /// Swap a rebuilt organ in under the running engine, which plays
+    /// on: the old console's pipes release, and the player's
+    /// registration, swell, crescendo, stepper frame, tremulants and
+    /// held keys carry across wherever their names still resolve.
+    pub fn rebuild(&mut self, mut loaded: Installed) {
+        let handed = match &mut self.control {
+            Control::Organ(old) => Some(old.hand_over()),
+            _ => None,
+        };
+        let (crescendo, frame, setter) = (self.crescendo_stage, self.stepper_frame, self.setter_armed);
+        let engaged: Vec<(String, Vec<u8>)> = self
+            .trems
+            .iter()
+            .filter(|trem| trem.engaged)
+            .map(|trem| (trem.name.clone(), trem.groups.clone()))
+            .collect();
+        let mut taken = None;
+        if let Some((released, registration)) = handed {
+            for handle in released {
+                self.engine.send(Command::StopVoice { handle });
+            }
+            taken = Some(loaded.console.take_over(registration));
+        }
+        // A tremulant still there with the same chests stays engaged
+        // (the engine never stopped it); any other lets go of its chests.
+        let mut calmed = Vec::new();
+        for (name, groups) in engaged {
+            match loaded.trems.iter_mut().find(|trem| trem.name == name && trem.groups == groups) {
+                Some(trem) => trem.engaged = true,
+                None => {
+                    for &group in &groups {
+                        self.engine.send(Command::SetTremulant { group, engaged: false });
+                        self.engine.send(Command::SetWaveTremulant { group, engaged: false });
+                    }
+                    calmed.extend(groups);
+                }
+            }
+        }
+        for group in calmed {
+            for switch in loaded.console.set_wave_tremulant(group, false) {
+                self.engine.send(switch.command());
+            }
+        }
+        self.install(loaded);
+        self.crescendo_stage = crescendo;
+        self.stepper_frame = frame;
+        self.setter_armed = setter;
+        if let Some(taken) = taken {
+            for handle in taken.released {
+                self.engine.send(Command::StopVoice { handle });
+            }
+            for (enclosure, position) in taken.enclosures {
+                if let Some((enclosure, position)) = self
+                    .console_mut()
+                    .and_then(|console| console.set_enclosure(enclosure, position))
+                {
+                    self.engine.send(Command::SetEnclosurePosition { enclosure, position });
+                }
+            }
+            for start in taken.starts {
+                self.engine.send(start.command());
+            }
+        }
     }
 
     /// The loaded organ's console, if an organ (not the tone
@@ -726,7 +798,9 @@ impl State {
             paths: vec![path],
             stops: Vec::new(),
             initial: false,
+            rebuild: true,
         });
+        crate::wake_loader();
     }
 
     /// Whether the library entry at `path` is the organ playing now.

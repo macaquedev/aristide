@@ -296,6 +296,8 @@ fn run_server(args: Args, ready: Option<desktop::Ready>) -> Result<()> {
     let mut reported_overruns = 0u32;
     let mut reported_underruns = 0u64;
     let mut reported_denials = 0u64;
+    let _ = LOADER.set(std::thread::current());
+    let mut playing: Option<Playing> = None;
     loop {
         // Loads run here, on the thread that owns the stream. The lock
         // is NOT held while loading: the console keeps answering, and
@@ -303,7 +305,7 @@ fn run_server(args: Args, ready: Option<desktop::Ready>) -> Result<()> {
         let request = state.lock().expect("state poisoned").pending_load.take();
         if let Some(request) = request {
             let initial = request.initial;
-            if let Err(err) = perform_load(&state, &mut audio, request) {
+            if let Err(err) = perform_load(&state, &mut audio, request, &mut playing) {
                 if initial {
                     return Err(err);
                 }
@@ -324,7 +326,7 @@ fn run_server(args: Args, ready: Option<desktop::Ready>) -> Result<()> {
                 continue;
             }
         }
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        std::thread::park_timeout(std::time::Duration::from_millis(500));
         use std::sync::atomic::Ordering::Relaxed;
         let total = audio.overruns.load(Relaxed);
         if total > reported_overruns {
@@ -462,102 +464,19 @@ fn adopt_set(state: &Mutex<State>, request: LoadRequest, progress: &dyn Fn(Strin
     }
 }
 
-/// Prepare the requested instrument off the shared lock, then swap it
-/// in: new engine and stream, engine-wide settings, console, routing.
-/// On error the running organ (or the bare test tone) stays untouched.
-fn perform_load(
-    state: &Arc<Mutex<State>>,
-    audio: &mut AudioOutput,
-    request: LoadRequest,
-) -> Result<()> {
-    let progress = |phase: String| {
-        state.lock().expect("state poisoned").loading = Some(phase);
-    };
-    progress("loading…".to_string());
-    let request = adopt_set(state, request, &progress);
-    let sample_prefs = state
-        .lock()
-        .expect("state poisoned")
-        .midi_config
-        .samples
-        .clone();
-    let load::PreparedInstrument {
-        console,
-        bank,
-        wind,
-        tremulants,
-        enclosures,
-        expression_cc,
-        reverb,
-        composite,
-        suggested_channels,
-        setup,
-        provenance,
-        stop_voicing,
-        pipe_voicing,
-        buses,
-        routing,
-        warnings,
-    } = load::prepare_with(
-        &request.paths,
-        &request.stops,
-        audio.sample_rate,
-        &sample_prefs,
-        &progress,
-    )?;
-
-    // Routed buses may want interface channels past the stereo pair;
-    // try to reopen the device wide enough BEFORE the stream starts.
-    // A device that can't (or a bus with no explicit output) is fine —
-    // the engine folds unreachable pairs back onto the main output.
-    // Setup's speaker groups count too, so a group the Route panel
-    // sends to is reachable without reloading.
-    let speakers = state.lock().expect("state poisoned").speakers();
-    let wanted_channels = buses
-        .iter()
-        .filter_map(|setup| setup.output)
-        .chain(speakers.iter().map(|s| (s.left, s.right)))
-        .map(|(left, right)| left.max(right) as usize + 1)
-        .max()
-        .unwrap_or(0);
-    if wanted_channels > 0 {
-        audio.ensure_channels(wanted_channels);
-    }
-
-    // Fault every sample page in NOW; doing it lazily means page faults
-    // inside the audio callback on each pipe's first note.
-    progress("waking samples…".to_string());
-    let bank = Arc::new(bank);
-    let prefault_started = Instant::now();
-    let checksum = bank.pre_fault();
-    tracing::info!(
-        "pre-faulted {:.0} MiB of samples in {:.1?} (checksum {checksum:.3})",
-        bank.resident_bytes() as f64 / (1024.0 * 1024.0),
-        prefault_started.elapsed()
-    );
-
-    // Let whatever the outgoing organ is sounding fade before its
-    // engine goes away with the stream.
-    {
-        let mut state = state.lock().expect("state poisoned");
-        let State {
-            engine, control, ..
-        } = &mut *state;
-        if let Control::Organ(old) = control {
-            old.all_off();
-        }
-        engine.send(Command::AllNotesOff);
-    }
-    std::thread::sleep(std::time::Duration::from_millis(200));
-
-    progress("starting audio…".to_string());
-    let mut handle = audio.start(Arc::clone(&bank), reverb.clone())?;
-
-    let master_gain = state.lock().expect("state poisoned").master_gain;
-    handle.send(Command::SetMasterGain {
-        linear: master_gain,
-    });
-    for setup in &buses {
+/// Send an organ's engine-wide settings — bus outputs and delays,
+/// wind, enclosures, tremulant shapes — to `handle`: a fresh engine
+/// after a load, or the running one after a rebuild. Answers the
+/// tremulants as the control plane tracks them, all disengaged.
+fn configure_engine(
+    handle: &mut aristide_engine::EngineHandle,
+    buses: &[load::BusSetup],
+    wind: Option<aristide_engine::wind::WindParams>,
+    enclosures: &[(u8, aristide_engine::enclosure::EnclosureParams)],
+    expression_cc: u8,
+    tremulants: Vec<load::TremulantSetup>,
+) -> Vec<TremControl> {
+    for setup in buses {
         if let Some((left, right)) = setup.output {
             tracing::info!(
                 "routing: bus {} → channels {}/{} at ×{:.2}",
@@ -611,7 +530,7 @@ fn perform_load(
             handle.send(Command::SetWind { group, params });
         }
     }
-    for &(enclosure, params) in &enclosures {
+    for &(enclosure, params) in enclosures {
         tracing::info!(
             "enclosure {}: floor {:.1} dB, shelf {:.1} dB @ {:.0}→{:.0} Hz, \
              sweep {:.2} s, closed pressure rise {:.1} % (CC{})",
@@ -658,7 +577,169 @@ fn perform_load(
             params: setup.params,
         });
     }
+    trems
+}
 
+/// The thread that runs loads, parked between them.
+static LOADER: std::sync::OnceLock<std::thread::Thread> = std::sync::OnceLock::new();
+
+/// Start a queued load now rather than at the loader's next look.
+pub(crate) fn wake_loader() {
+    if let Some(loader) = LOADER.get() {
+        loader.unpark();
+    }
+}
+
+/// Whether a loader runs queued loads: tests drive `State` without one.
+pub(crate) fn loader_running() -> bool {
+    LOADER.get().is_some()
+}
+
+/// The bank the running engine plays, and what it was decoded under:
+/// a rebuild of the same organ file plays it again without decoding.
+struct Playing {
+    index: bank::SampleIndex,
+    prefs: config::SamplePrefs,
+    sample_rate: f32,
+}
+
+/// Prepare the requested instrument off the shared lock, then swap it
+/// in: new engine and stream, engine-wide settings, console, routing.
+/// A rebuild whose samples are all playing already swaps only the
+/// console, under the running engine. On error the running organ (or
+/// the bare test tone) stays untouched.
+fn perform_load(
+    state: &Arc<Mutex<State>>,
+    audio: &mut AudioOutput,
+    request: LoadRequest,
+    playing: &mut Option<Playing>,
+) -> Result<()> {
+    let progress = |phase: String| {
+        state.lock().expect("state poisoned").loading = Some(phase);
+    };
+    progress("loading…".to_string());
+    let request = adopt_set(state, request, &progress);
+    let sample_prefs = state
+        .lock()
+        .expect("state poisoned")
+        .midi_config
+        .samples
+        .clone();
+    let over = playing
+        .as_ref()
+        .filter(|playing| {
+            request.rebuild && playing.prefs == sample_prefs && playing.sample_rate == audio.sample_rate
+        })
+        .map(|playing| &playing.index);
+    let load::PreparedInstrument {
+        console,
+        samples,
+        wind,
+        tremulants,
+        enclosures,
+        expression_cc,
+        reverb,
+        composite,
+        suggested_channels,
+        setup,
+        provenance,
+        stop_voicing,
+        pipe_voicing,
+        buses,
+        routing,
+        warnings,
+    } = load::prepare_over(
+        &request.paths,
+        &request.stops,
+        audio.sample_rate,
+        &sample_prefs,
+        over,
+        &progress,
+    )?;
+    let Some((bank, index)) = samples else {
+        let mut state = state.lock().expect("state poisoned");
+        let trems = configure_engine(&mut state.engine, &buses, wind, &enclosures, expression_cc, tremulants);
+        let reverb_wet = state.reverb_wet;
+        state.rebuild(state::Installed {
+            engine: None,
+            console,
+            suggested_channels,
+            trems,
+            reverb_wet,
+            expression_cc,
+            composite,
+            setup,
+            provenance,
+            stop_voicing,
+            pipe_voicing,
+            load_warnings: warnings,
+            routing,
+            output_channels: audio.channels,
+        });
+        tracing::info!("organ rebuilt over its playing samples: {}", state.organ_key);
+        return Ok(());
+    };
+    // The engine playing the old bank is about to go.
+    *playing = None;
+
+    // Routed buses may want interface channels past the stereo pair;
+    // try to reopen the device wide enough BEFORE the stream starts.
+    // A device that can't (or a bus with no explicit output) is fine —
+    // the engine folds unreachable pairs back onto the main output.
+    // Setup's speaker groups count too, so a group the Route panel
+    // sends to is reachable without reloading.
+    let speakers = state.lock().expect("state poisoned").speakers();
+    let wanted_channels = buses
+        .iter()
+        .filter_map(|setup| setup.output)
+        .chain(speakers.iter().map(|s| (s.left, s.right)))
+        .map(|(left, right)| left.max(right) as usize + 1)
+        .max()
+        .unwrap_or(0);
+    if wanted_channels > 0 {
+        audio.ensure_channels(wanted_channels);
+    }
+
+    // Fault every sample page in NOW; doing it lazily means page faults
+    // inside the audio callback on each pipe's first note.
+    progress("waking samples…".to_string());
+    let bank = Arc::new(bank);
+    let prefault_started = Instant::now();
+    let checksum = bank.pre_fault();
+    tracing::info!(
+        "pre-faulted {:.0} MiB of samples in {:.1?} (checksum {checksum:.3})",
+        bank.resident_bytes() as f64 / (1024.0 * 1024.0),
+        prefault_started.elapsed()
+    );
+
+    // Let whatever the outgoing organ is sounding fade before its
+    // engine goes away with the stream.
+    {
+        let mut state = state.lock().expect("state poisoned");
+        let State {
+            engine, control, ..
+        } = &mut *state;
+        if let Control::Organ(old) = control {
+            old.all_off();
+        }
+        engine.send(Command::AllNotesOff);
+    }
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    progress("starting audio…".to_string());
+    let mut handle = audio.start(Arc::clone(&bank), reverb.clone())?;
+
+    let master_gain = state.lock().expect("state poisoned").master_gain;
+    handle.send(Command::SetMasterGain {
+        linear: master_gain,
+    });
+    let trems = configure_engine(&mut handle, &buses, wind, &enclosures, expression_cc, tremulants);
+
+    *playing = Some(Playing {
+        index,
+        prefs: sample_prefs.clone(),
+        sample_rate: audio.sample_rate,
+    });
     let memory = state::MemoryReport {
         prefs: sample_prefs,
         samples: bank.len(),
@@ -676,7 +757,7 @@ fn perform_load(
         .map(|path| path.canonicalize().unwrap_or_else(|_| path.clone()))
         .collect();
     state.install(state::Installed {
-        engine: handle,
+        engine: Some(handle),
         console,
         suggested_channels,
         trems,
@@ -711,6 +792,7 @@ fn startup_load(args: &Args) -> Option<LoadRequest> {
         paths: args.sets.clone(),
         stops: args.stops.clone(),
         initial: true,
+        rebuild: false,
     })
 }
 

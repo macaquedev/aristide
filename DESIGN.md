@@ -321,7 +321,13 @@ member stops actually sound, splitting a windchest shared with outsiders,
 while borrowed pipes stand with their own rank and stay outside), the organ's
 whole structure (manuals declared/renamed/reordered/removed, sources added,
 stops pulled and unpulled — the pane's editor, each edit a line in the file
-followed by a reload), blank stops (`[[blank]] name/on` — a stop with no
+followed by a rebuild from it; the first load keeps a path → bank-index map
+of every decoded file, and a rebuild whose files are all in it re-parses
+the file, re-specs its pipes against that map (`bank::respec`) and swaps
+only the console under the running engine, carrying registration, swell,
+crescendo, tremulants, open noise loops and held keys across by name;
+only a rebuild needing new files, or new sample preferences, reloads),
+blank stops (`[[blank]] name/on` — a stop with no
 ranks, placed after the pulls, sounding only what its `[[rule]]` takes from
 other stops; `[[rule]]` rows and events are keyed by manual and stop name, so
 a stop rename, a `[[move]]` and a manual rename carry them along, and removing
