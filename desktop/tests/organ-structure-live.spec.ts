@@ -200,9 +200,12 @@ test('A blank stop is added silent, takes a source, and keeps it through edits',
   await settled(page);
   await expect(page.locator('.roll-stop-name').first()).toContainText('Idea');
   await expect(page.getByText('0 voices per key')).toBeVisible();
+  await expect(page.getByRole('button', { name: /^Source: / })).toHaveCount(0);
 
-  // Give it pipes from another stop.
+  // Give it pipes from another stop. It has none of its own, so it is never its own source.
+  await page.getByRole('button', { name: 'Add event', exact: true }).click();
   await page.getByRole('button', { name: /^Source: / }).click();
+  await expect(page.getByRole('dialog', { name: 'Source' }).getByRole('button', { name: 'Idea', exact: true })).toHaveCount(0);
   await page.getByRole('dialog', { name: 'Source' }).getByRole('button', { name: source.name, exact: true }).click();
   await expect.poll(async () => (await rule((await blankId('Idea'))!)).voices).toBeGreaterThan(0);
   await page.screenshot({ path: 'test-results/organ-blank-sourced.png' });
