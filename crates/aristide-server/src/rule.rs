@@ -93,9 +93,9 @@ impl Rule {
         }
     }
 
-    /// Whether this rule sounds exactly what the stop does without one.
-    pub fn is_plain(&self, stop: StopId) -> bool {
-        matches!(self.events.as_slice(), [event] if *event == Rule::plain(stop).events[0])
+    /// A rule that sounds nothing: a blank stop's before it has events.
+    pub fn silent() -> Rule {
+        Rule { stamps: fixed_stamps(), events: Vec::new() }
     }
 
     pub fn stamp(&self, id: &str) -> Option<&Stamp> {
@@ -307,7 +307,6 @@ mod tests {
     #[test]
     fn a_plain_rule_is_one_event_until_release() {
         let rule = Rule::plain(StopId(3));
-        assert!(rule.is_plain(StopId(3)));
         assert_eq!(
             rule.timing(&rule.events[0]),
             Ok(Timing::Down { delay_ms: 0.0, end_ms: None, hold_ms: None })

@@ -114,8 +114,11 @@ fn rule_json(console: &Console, stop: StopId) -> Option<Value> {
             None => console.stop_ranks(event.source.stop).len(),
         })
         .sum();
+    // Only pipework can sound: a blank stop — this one included — is
+    // never a source.
     let sources: Vec<Value> = stops
         .iter()
+        .filter(|(id, ..)| console.stop_has_pipes(*id))
         .map(|(id, name, manual, midx, _)| {
             json!({
                 "stop": id.0,

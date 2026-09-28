@@ -1878,20 +1878,44 @@ impl Console {
         parts
     }
 
-    /// Install every stop's rule at load. Plain rules are dropped.
+    /// Install every stop's rule at load. Default rules are dropped.
     pub fn set_stop_rules(&mut self, rules: HashMap<StopId, crate::rule::Rule>) {
         self.stop_rules = rules
             .into_iter()
-            .filter(|(stop, rule)| !rule.is_plain(*stop))
+            .filter(|(stop, rule)| !self.is_default_rule(*stop, rule))
             .collect();
     }
 
-    /// One stop's rule — the conventional one when it has none of its own.
+    /// Whether a stop has pipework of its own for events to sound.
+    pub fn stop_has_pipes(&self, stop: StopId) -> bool {
+        self.organ
+            .stops
+            .iter()
+            .any(|s| s.id == stop && !s.ranks.is_empty() && !self.noise_stops.contains(&s.id))
+    }
+
+    /// The rule a stop has without one of its own: its own pipes from
+    /// key-down until release, or no events at all for a blank stop —
+    /// it has nothing of its own to sound.
+    fn default_rule(&self, stop: StopId) -> crate::rule::Rule {
+        if self.stop_has_pipes(stop) {
+            crate::rule::Rule::plain(stop)
+        } else {
+            crate::rule::Rule::silent()
+        }
+    }
+
+    /// Whether a rule sounds exactly what the stop does without one.
+    fn is_default_rule(&self, stop: StopId, rule: &crate::rule::Rule) -> bool {
+        rule.events == self.default_rule(stop).events
+    }
+
+    /// One stop's rule — its default when it has none of its own.
     pub fn stop_rule(&self, stop: StopId) -> crate::rule::Rule {
         self.stop_rules
             .get(&stop)
             .cloned()
-            .unwrap_or_else(|| crate::rule::Rule::plain(stop))
+            .unwrap_or_else(|| self.default_rule(stop))
     }
 
     pub fn stop_has_rule(&self, stop: StopId) -> bool {
@@ -1910,7 +1934,7 @@ impl Console {
             return Err("no such stop".into());
         }
         match rule {
-            Some(rule) if !rule.is_plain(stop) => {
+            Some(rule) if !self.is_default_rule(stop, &rule) => {
                 rule.validate()?;
                 for event in &rule.events {
                     let source = self
@@ -1919,6 +1943,13 @@ impl Console {
                         .iter()
                         .find(|s| s.id == event.source.stop && !self.noise_stops.contains(&s.id))
                         .ok_or("an event's source stop is not in this organ")?;
+                    if source.ranks.is_empty() {
+                        return Err(if source.id == stop {
+                            "a stop without pipes cannot sound itself".into()
+                        } else {
+                            format!("{} has no pipes to sound", source.name)
+                        });
+                    }
                     if event
                         .source
                         .rank
@@ -4543,6 +4574,37 @@ mod tests {
         rule.events[1].source.rank = Some(RankId(1));
         assert!(console.set_stop_rule(StopId(1), Some(rule)).is_err(), "rank 1 is not stop 2's");
         assert!(!console.stop_has_rule(StopId(1)));
+    }
+
+    #[test]
+    fn a_blank_stop_starts_silent_and_never_sounds_itself() {
+        use crate::rule::{Event, Rule, Source};
+        let mut console = test_console();
+        console.organ.stops.push(Stop {
+            compass: None,
+            id: StopId(3),
+            name: "Blank".into(),
+            manual: ManualId(1),
+            ranks: Vec::new(),
+            own_pipes: false,
+        });
+        assert!(console.stop_rule(StopId(3)).events.is_empty(), "nothing of its own to sound");
+        assert!(!console.stop_has_pipes(StopId(3)));
+
+        let event = |stop| Event { source: Source { stop, rank: None }, cents: 0.0, level_db: 0.0, start: "down".into(), end: None };
+        let mut rule = Rule::silent();
+        rule.events.push(event(StopId(3)));
+        assert!(console.set_stop_rule(StopId(3), Some(rule)).is_err(), "itself");
+        let mut rule = Rule::silent();
+        rule.events.push(event(StopId(3)));
+        assert!(console.set_stop_rule(StopId(1), Some(rule)).is_err(), "another blank stop");
+
+        let mut rule = Rule::silent();
+        rule.events.push(event(StopId(1)));
+        console.set_stop_rule(StopId(3), Some(rule)).expect("another stop's pipes");
+        assert!(console.stop_has_rule(StopId(3)));
+        console.set_stop_rule(StopId(3), Some(Rule::silent())).expect("silent");
+        assert!(!console.stop_has_rule(StopId(3)), "no events is a blank stop's default");
     }
 
     #[test]

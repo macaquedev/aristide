@@ -150,7 +150,11 @@ export function StopEditor({ organ, stops, stopId: current, actions, offerUndo, 
   const source = model.sources.find(s => s.id === note?.source);
   const start = model.stamps.find(s => s.id === note?.start);
   const end = model.stamps.find(s => s.id === note?.end);
+  // A new event takes the selected event's pipes, else the stop's own, else the first stop with pipes.
+  const fallback = model.sources.find(s => s.id === String(rule.stop.id))?.id ?? model.sources[0]?.id;
   const add = (anchor: Anchor, stamp: string, pitch: number) => {
+    const from = note?.source ?? fallback;
+    if (!from) return;
     let stamps = model.stamps;
     let ending: string | null = null;
     if (anchor === 'up') {
@@ -159,7 +163,7 @@ export function StopEditor({ organ, stops, stopId: current, actions, offerUndo, 
       if (!next) { next = freshStamp('up', onset.ms + 50); stamps = [...stamps, next]; }
       ending = next.id;
     }
-    const added: RollNote = { id: noteId(model.notes.length), source: note?.source ?? String(rule.stop.id), pitch, start: stamp, end: ending, level: 0 };
+    const added: RollNote = { id: noteId(model.notes.length), source: from, pitch, start: stamp, end: ending, level: 0 };
     edit({ ...model, stamps, notes: [...model.notes, added] });
     setSelected(added.id);
   };
@@ -228,7 +232,7 @@ export function StopEditor({ organ, stops, stopId: current, actions, offerUndo, 
       <div className="roll-event-strip" aria-label="Events">{model.notes.map(n => <Button key={n.id} variant={note?.id === n.id ? 'light' : 'subtle'} aria-pressed={note?.id === n.id} onClick={() => setSelected(n.id)}>
         {model.sources.find(s => s.id === n.source)?.name ?? 'Missing'} <span className="event-chip-pitch">{cents(n.pitch)}</span></Button>)}</div>
         <Button variant="default" ml="auto" disabled={!rule.custom} onClick={() => { setHistory(h => [...h, toRule(model)]); send(null); }}>Reset</Button>
-        <Button onClick={() => add('down', 'down', 0)}>Add event</Button>
+        <Button disabled={!fallback} onClick={() => add('down', 'down', 0)}>Add event</Button>
       </Group>
       <div className="roll-workspace variant-split">
         <div className="roll-pair">{canvas('down')}{canvas('up')}</div>

@@ -1593,7 +1593,15 @@ fn configure_rules(
     let mut rules = std::collections::HashMap::new();
     for def in &sidecar.rules {
         match crate::rule::from_def(console, def) {
-            Ok((stop, rule)) => {
+            Ok((stop, mut rule)) => {
+                let before = rule.events.len();
+                rule.events.retain(|event| console.stop_has_pipes(event.source.stop));
+                if rule.events.len() < before {
+                    load_warnings.push(format!(
+                        "rule for {:?}: events sourcing a stop without pipes were dropped",
+                        def.stop
+                    ));
+                }
                 rules.insert(stop, rule);
             }
             Err(why) => load_warnings.push(format!("rule for {:?}: {why}", def.stop)),
