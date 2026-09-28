@@ -85,6 +85,24 @@ test('draw, drag and zoom preserve timestamp constraints', async ({ page }) => {
   await expect(page.getByRole('combobox', { name: 'Starts at', exact: true })).toHaveValue('Key down + 0 ms');
 });
 
+test('dragging a note resists pitch changes', async ({ page }) => {
+  await page.goto('/?study=1&layout=split');
+  const canvas = page.getByRole('group', { name: 'Key down piano roll', exact: true });
+  await canvas.scrollIntoViewIfNeeded();
+  const theorbe = canvas.locator('.event-note').filter({ has: page.locator('title', { hasText: /^Théorbe/ }) }).first();
+  const drag = async (dx: number, dy: number) => {
+    const body = (await theorbe.locator('.note-body').boundingBox())!;
+    await page.mouse.move(body.x + 25, body.y + 12);
+    await page.mouse.down();
+    await page.mouse.move(body.x + 25 + dx, body.y + 12 + dy, { steps: 8 });
+    await page.mouse.up();
+  };
+  await drag(0, -14);
+  await expect(theorbe).toHaveAttribute('aria-label', /^Théorbe, 0 ¢,/);
+  await drag(0, -80);
+  await expect(theorbe).not.toHaveAttribute('aria-label', /^Théorbe, 0 ¢,/);
+});
+
 test('release drawing creates a finite ending', async ({ page }) => {
   await page.goto('/?study=1&layout=split');
   const release = page.getByRole('group', { name: 'Key up piano roll', exact: true });

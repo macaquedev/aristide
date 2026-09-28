@@ -4,6 +4,10 @@ import { anchorName, cents, nearestStamp, snapPitch, validNote } from './rollMod
 import type { Anchor, RollModel, RollNote, Stamp } from './rollModel';
 
 export type RollView = { time: number; center: number; span: number; pitchSpan: number };
+
+/** Dragging a note resists pitch: a dead zone first, then a fraction of the pointer's travel. */
+const pitchDeadZone = 16, pitchGain = .25;
+const pitchTravel = (dy: number) => Math.sign(dy) * Math.max(0, Math.abs(dy) - pitchDeadZone) * pitchGain;
 type Props = {
   anchor: Anchor; model: RollModel; selected: string; source?: string; height: number;
   view: RollView; setView: (view: RollView) => void; snap: boolean; steps: number; grid: boolean; pan: boolean;
@@ -125,7 +129,7 @@ export function RollCanvas(p: Props) {
             const start = p.model.stamps.find(s => s.id === next.start)!;
             if (g.resize) next.end = stampAt(pos.x).id;
             else {
-              next.pitch = snapPitch(g.note.pitch - dy / scaleY, p.steps, p.snap);
+              next.pitch = snapPitch(g.note.pitch - pitchTravel(dy) / scaleY, p.steps, p.snap);
               if (start.anchor === p.anchor && Math.abs(dx) > 4) next.start = stampAt(x(start.ms) + dx).id;
             }
             if (validNote(next, p.model.stamps)) setDraft(next);
