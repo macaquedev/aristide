@@ -121,6 +121,6 @@ function StopButton({ stop, toggle, open }: { stop: Stop; toggle: () => void; op
     onPointerMove={e => { if (Math.hypot(e.clientX - origin.current.x, e.clientY - origin.current.y) > 10) { clear(); consumed.current = true; } }}
     onPointerUp={clear} onPointerCancel={() => { clear(); consumed.current = true; }} onPointerLeave={clear}
     onClick={() => { if (!consumed.current) toggle(); consumed.current = false; }}>
-    <span className="stop-name">{stop.name}{stop.custom && <span className="stop-mark" aria-label="custom"> ◇</span>}</span><span className="stop-pitch">{footage ? formatFootage(footage) : `${stop.ranks.length} ranks`}</span>
+    <span className="stop-name">{stop.name}{stop.custom && <span className="stop-mark" aria-label="custom"> ◇</span>}</span><span className="stop-pitch">{footage ? formatFootage(footage) : stop.ranks.length > 1 ? `${stop.ranks.length} ranks` : ''}</span>
   </button>;
 }

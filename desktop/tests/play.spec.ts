@@ -153,3 +153,13 @@ test('stop pitches show footage as organ fractions', async ({ page }) => {
   await expect(page.getByRole('button', { name: 'Septième' })).toContainText('1⅐′');
   await page.screenshot({ path: 'test-results/footage.png' });
 });
+
+test('a stop without footage names only a mixture\'s ranks', async ({ page }) => {
+  await rig(page, [
+    { id: 3, name: 'Fourniture', midx: 0, manual: 'Great', on: false, pitch: { native: null, footage: null, cents: 0, gain: 0, own: false }, ranks: [{ id: 3, name: 'I' }, { id: 4, name: 'II' }, { id: 5, name: 'III' }] },
+    { id: 6, name: 'Blank', midx: 0, manual: 'Great', on: false, pitch: { native: null, footage: null, cents: 0, gain: 0, own: false }, ranks: [] },
+  ]);
+  await expect(page.getByRole('button', { name: 'Fourniture' })).toContainText('3 ranks');
+  await expect(page.getByRole('button', { name: 'Blank', exact: true }).locator('.stop-pitch')).toHaveText('');
+  await page.screenshot({ path: 'test-results/blank-stop.png' });
+});
