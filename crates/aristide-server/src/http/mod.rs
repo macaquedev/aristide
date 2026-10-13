@@ -1576,13 +1576,16 @@ mod tests {
             ],
             "events": [
                 plain["events"][0],
-                { "source": { "stop": other["stop"], "rank": null }, "cents": 1250.0, "level": -3.0, "start": "down", "end": "t1" },
+                { "source": { "stop": other["stop"], "rank": null }, "cents": 1250.0, "level": -3.0, "start": "down", "end": "t1",
+                  "played": { "high": 300.0 }, "sounding": { "low": -1200.0, "high": 2400.0 } },
             ],
         });
         let encoded: String = url_encode(&rule.to_string());
         let set = body_of(respond(&state, &Method::Post, &format!("/api/organ/rule?stop={first}&rule={encoded}")));
         assert_eq!(set["custom"], true);
         assert_eq!(set["events"][1]["cents"], 1250.0);
+        assert_eq!(set["events"][1]["played"], serde_json::json!({ "high": 300.0 }));
+        assert_eq!(set["events"][0]["played"], serde_json::Value::Null, "an unlimited event stays unlimited");
         let text = std::fs::read_to_string(&file).expect("reads");
         assert!(text.contains("[[rule]]") && text.contains("[[rule.event]]"), "saved: {text}");
 
@@ -1593,7 +1596,10 @@ mod tests {
         let reloaded = prepared.console.stop_states().iter()
             .find(|(_, n, ..)| *n == name).map(|(id, ..)| *id).expect("same stop");
         assert!(prepared.console.stop_has_rule(reloaded), "the rule came back");
-        assert_eq!(prepared.console.stop_rule(reloaded).events[1].cents, 1250.0);
+        let event = &prepared.console.stop_rule(reloaded).events[1];
+        assert_eq!(event.cents, 1250.0);
+        assert_eq!(event.played, Some(aristide_formats::sidecar::PitchWindow { low: None, high: Some(300.0) }));
+        assert_eq!(event.sounding, Some(aristide_formats::sidecar::PitchWindow { low: Some(-1200.0), high: Some(2400.0) }));
 
         let bad = respond(&state, &Method::Post, &format!("/api/organ/rule?stop={first}&rule=%7B%7D"));
         assert_eq!(bad.status_code().0, 400);

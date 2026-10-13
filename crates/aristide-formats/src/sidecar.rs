@@ -91,6 +91,12 @@ pub struct Sidecar {
 /// level_db = -3.0
 /// start = "down"
 /// end = "t1"
+///
+/// [rule.event.played]      # only keys whose pitch lies in this window
+/// low = -900.0
+///
+/// [rule.event.sounding]    # only while the event itself sounds below
+/// high = 2700.0
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -126,6 +132,29 @@ pub struct RuleEventDef {
     pub start: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub played: Option<PitchWindow>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sounding: Option<PitchWindow>,
+}
+
+/// A band of pitch, in cents from the organ's own pitch standard (the
+/// a′ its pitch reference implies, at 0). Cents, not keys or note
+/// names, so the same window means the same thing under any tuning.
+/// Either edge may be open; both edges are inclusive.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PitchWindow {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub low: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub high: Option<f64>,
+}
+
+impl PitchWindow {
+    pub fn contains(&self, cents: f64) -> bool {
+        self.low.is_none_or(|low| cents >= low) && self.high.is_none_or(|high| cents <= high)
+    }
 }
 
 /// Audio routing: which stops render onto which output bus, where each

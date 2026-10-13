@@ -3,6 +3,7 @@
 
 use std::sync::Mutex;
 
+use aristide_formats::sidecar::PitchWindow;
 use aristide_model::{RankId, StopId};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -70,6 +71,10 @@ struct WireEvent {
     level: f64,
     start: String,
     end: Option<String>,
+    #[serde(default)]
+    played: Option<PitchWindow>,
+    #[serde(default)]
+    sounding: Option<PitchWindow>,
 }
 
 #[derive(Deserialize)]
@@ -94,6 +99,8 @@ impl WireRule {
                     level_db: event.level,
                     start: event.start,
                     end: event.end,
+                    played: event.played,
+                    sounding: event.sounding,
                 })
                 .collect(),
         }
@@ -147,6 +154,8 @@ fn rule_json(console: &Console, stop: StopId) -> Option<Value> {
                 "level": event.level_db,
                 "start": event.start,
                 "end": event.end,
+                "played": event.played,
+                "sounding": event.sounding,
             }))
             .collect::<Vec<_>>(),
         "sources": sources,

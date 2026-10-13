@@ -15,6 +15,7 @@ use aristide_engine::Command;
 
 use crate::bank::VoiceSpec;
 use crate::tuning::Tuning;
+use aristide_formats::sidecar::PitchWindow;
 
 /// One coupler route as the console editor sees it: manuals as
 /// console indexes, the target flattened. `to == None` with
@@ -272,6 +273,10 @@ struct Part<'a> {
     /// Keeps speaking this long past key-up.
     hold_ms: Option<f64>,
     lane: u32,
+    /// The band the key's own pitch must lie in, if any.
+    played: Option<PitchWindow>,
+    /// The band the sounding pitch must lie in, if any.
+    sounding: Option<PitchWindow>,
 }
 
 pub struct Console {
@@ -1408,8 +1413,17 @@ impl Console {
         // property of the whole stop, and half-glided voices under a
         // stop that then re-speaks would be a mess.
         let mut settled = Vec::new();
+        // A pitch trim can carry an event across its sounding window:
+        // then which voices speak changes, and only a re-price says so.
+        let windowed = self
+            .stop_rules
+            .get(&stop)
+            .is_some_and(|rule| rule.events.iter().any(|event| event.sounding.is_some()));
         for (at, ladder_key, rank, was, start_gain, shift) in voices {
             let now = self.trim_for(stop, rank, ladder_key as i32);
+            if windowed && (now.cents - was.cents).abs() > 1e-6 {
+                return Revoicing::reprice();
+            }
             let (tuning, _) = self.voice_tuning(stop, rank);
             let Some(deviation) = tuning.deviation_cents(ladder_key.max(0) as u16) else {
                 return Revoicing::reprice();
@@ -1863,6 +1877,8 @@ impl Console {
                     end_ms: None,
                     hold_ms: None,
                     lane: 0,
+                    played: None,
+                    sounding: None,
                 })
                 .collect();
         };
@@ -1899,6 +1915,8 @@ impl Console {
                     end_ms,
                     hold_ms,
                     lane,
+                    played: event.played,
+                    sounding: event.sounding,
                 });
             }
         }
@@ -2129,6 +2147,22 @@ impl Console {
                     // from doubling the tape speed.
                     let trim = self.trim_for(part.owner.id, range.rank, midi_key as i32);
                     let adjust_cents = trim.cents + part.cents;
+                    // A mixture's breaks: an event may answer only a
+                    // band of keys, or only while it sounds in a band,
+                    // both judged as pitch in this stop's tuning — the
+                    // key the stop's own division sees, so a coupled
+                    // press breaks where that keyboard's key would.
+                    if part.played.is_some() || part.sounding.is_some() {
+                        let (stop_tuning, _) = self.voice_tuning(stop.id, range.rank);
+                        let Some(key_cents) = stop_tuning.pitch_cents(midi_key.max(0) as u16) else {
+                            continue;
+                        };
+                        if part.played.is_some_and(|window| !window.contains(key_cents))
+                            || part.sounding.is_some_and(|window| !window.contains(key_cents + adjust_cents))
+                        {
+                            continue;
+                        }
+                    }
                     // A target tuning bends each pipe from where it
                     // was measured to sound (or from the organ's model
                     // of it, when it keeps its drift), not from the
@@ -4675,8 +4709,8 @@ mod tests {
         rule.stamps.push(Stamp { id: "u1".into(), anchor: Anchor::Up, ms: 50.0 });
         rule.stamps.push(Stamp { id: "u2".into(), anchor: Anchor::Up, ms: 150.0 });
         let octave = Source { stop: StopId(2), rank: Some(RankId(2)) };
-        rule.events.push(Event { source: octave, cents: 1200.0, level_db: -6.0, start: "down".into(), end: Some("t1".into()) });
-        rule.events.push(Event { source: octave, cents: 0.0, level_db: 0.0, start: "u1".into(), end: Some("u2".into()) });
+        rule.events.push(Event { source: octave, cents: 1200.0, level_db: -6.0, start: "down".into(), end: Some("t1".into()), played: None, sounding: None });
+        rule.events.push(Event { source: octave, cents: 0.0, level_db: 0.0, start: "u1".into(), end: Some("u2".into()), played: None, sounding: None });
         rule
     }
 
@@ -4726,6 +4760,41 @@ mod tests {
         let (stopped, _, later) = console.note_off_manual(0, 60);
         assert_eq!(stopped, vec![starts[0].handle]);
         assert!(later.is_empty());
+    }
+
+    /// A mixture written as events: a rank that breaks back an octave
+    /// above a′, and a twelfth that stops once it would sound above
+    /// +2000 cents — one judged by the key's pitch, one by its own.
+    #[test]
+    fn rule_events_break_at_the_pitch_windows_they_name() {
+        use crate::rule::{Event, Rule, Source};
+        use aristide_formats::sidecar::PitchWindow;
+        let mut console = test_console();
+        console.set_drawn(StopId(2), false);
+        let event = |stop, cents, played, sounding| Event {
+            source: Source { stop: StopId(stop), rank: None },
+            cents,
+            level_db: 0.0,
+            start: "down".into(),
+            end: None,
+            played,
+            sounding,
+        };
+        let mut rule = Rule::silent();
+        rule.events.push(event(2, 1200.0, Some(PitchWindow { low: None, high: Some(0.0) }), None));
+        rule.events.push(event(2, 0.0, Some(PitchWindow { low: Some(100.0), high: None }), None));
+        rule.events.push(event(1, 1900.0, None, Some(PitchWindow { low: None, high: Some(2000.0) })));
+        console.set_stop_rule(StopId(1), Some(rule)).expect("valid rule");
+        let mut sounding = |key| {
+            console.note_on_manual(0, key, 127);
+            let mut pipes: Vec<(u32, u16)> = console.speaking.keys().map(|at| (at.rank.0, at.pipe)).collect();
+            console.note_off_manual(0, key);
+            pipes.sort();
+            pipes
+        };
+        assert_eq!(sounding(69), vec![(1, 52), (2, 45)], "below the break: the octave and the twelfth");
+        assert_eq!(sounding(70), vec![(1, 53), (2, 34)], "above it the rank breaks back to unison");
+        assert_eq!(sounding(71), vec![(2, 35)], "the twelfth stops once it would pass +2000");
     }
 
     #[test]
@@ -4793,7 +4862,7 @@ mod tests {
         assert!(console.stop_rule(StopId(3)).events.is_empty(), "nothing of its own to sound");
         assert!(!console.stop_has_pipes(StopId(3)));
 
-        let event = |stop| Event { source: Source { stop, rank: None }, cents: 0.0, level_db: 0.0, start: "down".into(), end: None };
+        let event = |stop| Event { source: Source { stop, rank: None }, cents: 0.0, level_db: 0.0, start: "down".into(), end: None, played: None, sounding: None };
         let mut rule = Rule::silent();
         rule.events.push(event(StopId(3)));
         assert!(console.set_stop_rule(StopId(3), Some(rule)).is_err(), "itself");

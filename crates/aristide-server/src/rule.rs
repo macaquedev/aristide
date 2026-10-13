@@ -5,11 +5,16 @@
 //! level, starting at a timestamp after key-down or key-up and ending
 //! at release or at a later timestamp.
 //!
+//! An event may be limited to a band of pitch: `played`, the pitch of
+//! the key that triggers it, or `sounding`, the pitch the event itself
+//! sounds at. Both are cents from the organ's pitch standard, so a
+//! mixture's breaks are written the same way under any tuning.
+//!
 //! Timestamps are shared: every onset and finite ending names one, so
 //! moving a timestamp moves everything attached to it. `down` and `up`
 //! are the fixed 0 ms timestamps of the two timelines.
 
-use aristide_formats::sidecar::{RuleDef, RuleEventDef, RuleStampDef};
+use aristide_formats::sidecar::{PitchWindow, RuleDef, RuleEventDef, RuleStampDef};
 use aristide_model::{RankId, StopId};
 use serde::{Deserialize, Serialize};
 
@@ -21,6 +26,9 @@ pub const UP: &str = "up";
 pub const MAX_MS: f64 = 30_000.0;
 /// Pitch offsets span eight octaves either way.
 pub const MAX_CENTS: f64 = 9_600.0;
+/// Pitch windows span the audible range from the organ's pitch standard
+/// and then some: a 64′ bottom to the top of a 1′.
+pub const MAX_PITCH_CENTS: f64 = 9_600.0;
 pub const LEVEL_DB: std::ops::RangeInclusive<f64> = -60.0..=12.0;
 /// More events than this is a mistake, not an instrument: each one is
 /// a voice per key on every press.
@@ -56,6 +64,10 @@ pub struct Event {
     pub start: String,
     /// `None` = until release.
     pub end: Option<String>,
+    /// `None` = every key.
+    pub played: Option<PitchWindow>,
+    /// `None` = at any pitch.
+    pub sounding: Option<PitchWindow>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -89,6 +101,8 @@ impl Rule {
                 level_db: 0.0,
                 start: DOWN.into(),
                 end: None,
+                played: None,
+                sounding: None,
             }],
         }
     }
@@ -134,6 +148,17 @@ impl Rule {
             }
             if !LEVEL_DB.contains(&event.level_db) {
                 return Err("level runs from −60 to +12 dB".into());
+            }
+            for window in [event.played, event.sounding].into_iter().flatten() {
+                let edges = [window.low, window.high];
+                if edges.iter().flatten().any(|edge| !edge.is_finite() || edge.abs() > MAX_PITCH_CENTS) {
+                    return Err(format!("pitch windows run ±{MAX_PITCH_CENTS} cents"));
+                }
+                if let [Some(low), Some(high)] = edges
+                    && low > high
+                {
+                    return Err("a pitch window's low edge must not be above its high edge".into());
+                }
             }
             self.timing(event)?;
         }
@@ -219,6 +244,8 @@ pub fn to_def(console: &Console, stop: StopId, rule: &Rule) -> Option<RuleDef> {
             level_db: event.level_db,
             start: event.start.clone(),
             end: event.end.clone(),
+            played: event.played,
+            sounding: event.sounding,
         });
     }
     Some(RuleDef {
@@ -276,6 +303,8 @@ pub fn from_def(console: &Console, def: &RuleDef) -> Result<(StopId, Rule), Stri
             level_db: event.level_db,
             start: event.start.clone(),
             end: event.end.clone(),
+            played: event.played,
+            sounding: event.sounding,
         });
     }
     let rule = Rule { stamps, events };
@@ -338,5 +367,12 @@ mod tests {
         let mut rule = Rule::plain(StopId(0));
         rule.stamps[0].ms = 10.0;
         assert!(rule.validate().is_err(), "down is fixed");
+        let mut rule = Rule::plain(StopId(0));
+        rule.events[0].played = Some(PitchWindow { low: Some(300.0), high: Some(-300.0) });
+        assert!(rule.validate().is_err(), "an inverted window");
+        rule.events[0].played = Some(PitchWindow { low: None, high: Some(f64::NAN) });
+        assert!(rule.validate().is_err(), "a window edge must be a number");
+        rule.events[0].played = Some(PitchWindow { low: Some(-300.0), high: None });
+        assert!(rule.validate().is_ok(), "an open edge is fine");
     }
 }

@@ -819,6 +819,21 @@ impl Tuning {
         self.deviation_cents_core(key).map(|d| d + self.offset_cents)
     }
 
+    /// The pitch this tuning gives manual key `key`, in cents from the
+    /// organ's own pitch standard: 0 is the a′ the pitch reference
+    /// implies, so pulling the whole organ's pitch (the reference Hz,
+    /// the fine offset) leaves every key where it was. Under 19-EDO a
+    /// key reads its 19-EDO pitch; as recorded, its place on the
+    /// recorded ladder. `None` for a key the tuning leaves unmapped.
+    pub fn pitch_cents(&self, key: u16) -> Option<f64> {
+        let pull = if self.corrects_pipes() {
+            self.reference.anchor_cents()
+        } else {
+            self.original_shift_cents()
+        };
+        Some((key as f64 - 69.0) * 100.0 + self.deviation_cents_core(key)? - pull)
+    }
+
     /// [`Tuning::deviation_cents`] before the fine offset is added —
     /// split out so the offset applies exactly once, on every branch,
     /// without duplicating it at each early return.
@@ -1092,6 +1107,32 @@ mod tests {
         tuning.edo = 19;
         assert!((hz(&tuning, 60) - 256.0).abs() < 0.01);
         assert!((hz(&tuning, 79) - 512.0).abs() < 0.01);
+    }
+
+    /// A key's pitch is measured from the organ's own pitch standard:
+    /// pulling the whole organ moves nothing, a different division
+    /// moves every key to its own pitch in it.
+    #[test]
+    fn pitch_cents_ignores_the_organs_pitch_and_follows_the_division() {
+        let close = |got: Option<f64>, want: f64| {
+            let got = got.expect("mapped key");
+            assert!((got - want).abs() < 1e-6, "{got} ≠ {want}");
+        };
+        let mut tuning = Tuning { temperament: Temperament::Equal, ..Tuning::default() };
+        close(tuning.pitch_cents(69), 0.0);
+        close(tuning.pitch_cents(81), 1200.0);
+        tuning.reference = PitchReference { key: 69, hz: 415.0 };
+        tuning.offset_cents = 7.0;
+        close(tuning.pitch_cents(69), 0.0);
+        close(tuning.pitch_cents(60), -900.0);
+        tuning.reference = PitchReference { key: 60, hz: 256.0 };
+        tuning.offset_cents = 0.0;
+        tuning.edo = 19;
+        close(tuning.pitch_cents(60), -900.0);
+        close(tuning.pitch_cents(61), -900.0 + 1200.0 / 19.0);
+        close(tuning.pitch_cents(79), 300.0);
+        let recorded = Tuning::default();
+        close(recorded.pitch_cents(57), -1200.0);
     }
 
     #[test]
