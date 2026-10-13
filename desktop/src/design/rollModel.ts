@@ -5,6 +5,10 @@ export type RollNote = { id: string; source: string; pitch: number; start: strin
 export type Source = { id: string; name: string; kind: 'Rank' | 'Stop'; organ: string; transpose: number };
 export type RollModel = { stamps: Stamp[]; notes: RollNote[]; sources: Source[] };
 export const anchorName = (anchor: Anchor) => anchor === 'down' ? 'Key down' : 'Key up';
+const signed = (c: number) => `${c > 0 ? '+' : c < 0 ? '−' : ''}${Math.abs(Number(c.toFixed(2)))}`;
+const range = (w: PitchWindow) => w.low !== undefined && w.high !== undefined ? `${signed(w.low)}…${signed(w.high)} ¢` : w.low !== undefined ? `from ${signed(w.low)} ¢` : `to ${signed(w.high!)} ¢`;
+/** A note's limits in a few words, for labels: "keys to −950 ¢ · sounds to +3600 ¢". */
+export const limitText = (note: RollNote) => [note.played && `keys ${range(note.played)}`, note.sounding && `sounds ${range(note.sounding)}`].filter(Boolean).join(' · ');
 export const cents = (pitch: number) => `${pitch > 0 ? '+' : ''}${Number(pitch.toFixed(2))} ¢`;
 export const initialRoll: RollModel = {
   stamps: [

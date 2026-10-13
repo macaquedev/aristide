@@ -77,3 +77,72 @@
 .event-limit-edge { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px; }
 .event-limit-row .number-control { width: 100%; min-width: 0; padding-inline: 6px; }
 @media (max-width: 1100px) { .variant-split .roll-inspector-fields .event-limits { grid-column: 1 / -1; } }
+
+.note-count rect { fill: var(--mantine-color-dark-6); stroke: var(--mantine-color-blue-3); }
+.note-count text { fill: var(--mantine-color-gray-1); font-size: .75rem; font-weight: 600; }
+
+.limit-pickers { flex-wrap: wrap; }
+.limits-top { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 12px; align-items: start; }
+.limits-roll { min-width: 0; }
+.limits-roll .roll-lanes { display: grid; gap: 8px; }
+@media (max-width: 1000px) { .limits-top { grid-template-columns: minmax(0, 1fr); } }
+
+.limit-sentence p { margin: 0 0 6px; line-height: 2.1; font-size: .95rem; }
+.limit-sentence.is-compact p { line-height: 1.9; font-size: .85rem; margin: 0; }
+.limit-reference { color: var(--mantine-color-dimmed); }
+.limit-sentence .limit-reference { font-size: .8rem; line-height: 1.4; }
+.limit-chip { font: inherit; font-weight: 600; color: var(--mantine-color-gray-1); background: var(--mantine-color-dark-5); border: 1px solid var(--mantine-color-blue-6);
+  border-radius: 4px; padding: 2px 8px; margin: 0 2px; cursor: pointer; white-space: nowrap; }
+.limit-chip span { font-weight: 400; color: var(--mantine-color-gray-5); font-size: .85em; }
+.limit-chip.is-open { font-weight: 400; color: var(--mantine-color-gray-4); border-style: dashed; border-color: var(--mantine-color-dark-3); background: transparent; }
+.limit-chip:hover, .limit-chip:focus-visible { background: var(--mantine-color-dark-4); }
+
+.compass-chart, .key-strips, .limit-sentences { border: 1px solid var(--mantine-color-dark-4); border-radius: 4px; overflow: hidden; touch-action: none; }
+.chart-hit { fill: transparent; }
+.chart-probe { fill: var(--mantine-color-dark-6); }
+.chart-keys rect { fill: var(--mantine-color-gray-4); }
+.chart-keys rect.is-black, .strip-key.is-black { fill: var(--mantine-color-dark-3); }
+.strip-key { fill: var(--mantine-color-gray-4); }
+.chart-line { cursor: pointer; }
+.chart-sounds { fill: none; stroke: var(--mantine-color-gray-5); stroke-width: 4; stroke-linecap: round; stroke-linejoin: round; }
+.chart-missing { fill: none; stroke: var(--mantine-color-gray-6); stroke-width: 2; stroke-dasharray: 2 5; stroke-linecap: round; }
+.chart-limited { fill: none; stroke: var(--mantine-color-blue-4); stroke-width: 1.5; stroke-dasharray: 1 4; opacity: .7; }
+.chart-label { fill: var(--mantine-color-gray-5); font-size: .72rem; pointer-events: none; }
+.chart-line.is-selected .chart-sounds { stroke: var(--mantine-color-blue-4); stroke-width: 6; }
+.chart-line.is-selected .chart-missing { stroke: var(--mantine-color-blue-3); }
+.chart-line.is-selected .chart-label { fill: var(--mantine-color-blue-2); font-weight: 600; font-size: .8rem; }
+.limit-shade rect { fill: var(--mantine-color-dark-9); opacity: .55; pointer-events: none; }
+.limit-handle { cursor: grab; }
+.limit-handle line { stroke: var(--mantine-color-blue-4); stroke-width: 2; }
+.limit-handle rect:not(.limit-hit) { fill: var(--mantine-color-blue-8); stroke: var(--mantine-color-blue-4); }
+.limit-handle text { fill: var(--mantine-color-gray-0); font-size: .75rem; font-weight: 600; pointer-events: none; }
+.limit-handle.is-open line { stroke: var(--mantine-color-dark-3); stroke-dasharray: 4 4; }
+.limit-handle.is-open rect:not(.limit-hit) { fill: var(--mantine-color-dark-6); stroke: var(--mantine-color-dark-3); }
+.limit-handle.is-open text { fill: var(--mantine-color-gray-5); font-weight: 400; }
+.limit-hit { fill: transparent; }
+
+.strip-row { cursor: pointer; }
+.strip-row-hit { fill: transparent; }
+.strip-row.is-selected .strip-row-hit { fill: var(--mantine-color-dark-6); }
+.strip-label, .strip-pitch { fill: var(--mantine-color-gray-4); font-size: .8rem; }
+.strip-row.is-selected .strip-label, .strip-row.is-selected .strip-pitch { fill: var(--mantine-color-blue-2); font-weight: 600; }
+.strip-cell { fill: transparent; stroke: none; }
+.strip-cell.is-sounds { fill: var(--mantine-color-gray-6); }
+.strip-row.is-selected .strip-cell.is-sounds { fill: var(--mantine-color-blue-5); }
+.strip-cell.is-missing { stroke: var(--mantine-color-dark-3); stroke-width: .5; }
+.hatch-line { stroke: var(--mantine-color-gray-6); stroke-width: 1.5; }
+.strip-cell.is-key, .strip-cell.is-sounding { fill: var(--mantine-color-dark-7); }
+
+.limit-sentences { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 1px; background: var(--mantine-color-dark-4); touch-action: auto; }
+.limit-sentence-row { padding: 12px; background: var(--mantine-color-dark-8); cursor: pointer; }
+.limit-sentence-row.is-selected { background: var(--mantine-color-dark-6); box-shadow: inset 3px 0 0 var(--mantine-color-blue-5); }
+
+.limit-probe { border: 1px solid var(--mantine-color-dark-4); border-radius: 4px; padding: 10px 12px; }
+.limit-probe-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 4px 16px; margin-top: 6px; }
+.probe-item { display: flex; justify-content: space-between; gap: 12px; font: inherit; font-size: .85rem; background: none; border: 0; padding: 4px 0; color: var(--mantine-color-gray-2); cursor: pointer; text-align: left; }
+.probe-item:not(.is-sounds) { color: var(--mantine-color-gray-6); }
+.probe-item.is-sounds span:last-child { color: var(--mantine-color-blue-3); }
+.limit-handle .limit-line { fill: none; stroke: var(--mantine-color-blue-4); stroke-width: 2; }
+.limit-shade path { fill: var(--mantine-color-dark-9); opacity: .55; pointer-events: none; }
+.limit-pickers > div { max-width: 100%; }
+.limit-pickers .mantine-SegmentedControl-root { max-width: 100%; overflow-x: auto; }

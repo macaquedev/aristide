@@ -118,3 +118,31 @@ Validation: frontend production build, mouse/touch browser tests, two-finger
 per-pipe editing, inheritance and screenshot inspection. A scrolling/focus bug
 in numeric popovers was fixed before review: focus is now handled by the stock
 popover focus trap after placement, avoiding hidden fields when the page scrolls.
+
+## Event limits and overlapping events (2026-10-13)
+
+A silent study of how an event's key and sounding limits read, and of events that
+share a time and pitch on the roll. Fixture: a Plein jeu with a two-rank
+Fourniture breaking back an octave above B3 (−950 ¢), a Tierce that stops above
++3600 ¢, unison Bourdon and Flûte 8′s, and a pedal Bourdon that runs out at D4.
+Pitches are cents from the reference key (A4 = 415 Hz); 19 equal re-derives
+every key's pitch, so breaks and the pedal's last pipe move to the keys that now
+carry those pitches, and keys get neutral numbers.
+
+| Limits view | Link |
+|---|---|
+| Pitch chart: keys across, sounding pitch up, handles for both limits | [Open](http://localhost:1420/?study=1&panel=limits&view=chart&overlap=stack) |
+| Break chart: keys across, offset from the key up; breaks are steps | [Open](http://localhost:1420/?study=1&panel=limits&view=breaks&overlap=stack) |
+| Key strips: one strip per event, filled where it sounds, hatched where no pipe | [Open](http://localhost:1420/?study=1&panel=limits&view=strips&overlap=stack) |
+| Sentence only: every event's limits as editable sentences | [Open](http://localhost:1420/?study=1&panel=limits&view=sentence&overlap=stack) |
+
+Overlaps on the roll: Offset (today's leaders), Stack (thinner bars around the
+shared pitch), Merge (one bar with a count; tapping cycles through it), Lanes
+(one roll per source). Every view shares the inspector sentence ("Plays when the
+key is between … and …, and only while it sounds between … and …. Pitches
+relative to A4 = 415 Hz.") and a key readout saying what one key plays and why
+each other event is silent there.
+
+Validation: `bunx playwright test limits-study`: dragging a key limit, sentence
+chips, 19 equal naming, stack and merge selection, no horizontal scroll at
+1280 and 390 px; screenshots reviewed.

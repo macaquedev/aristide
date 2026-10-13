@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import { Button, Group, Text } from '@mantine/core';
-import { anchorName, cents, nearestStamp, snapPitch, validNote } from './rollModel';
+import { anchorName, cents, limitText, nearestStamp, snapPitch, validNote } from './rollModel';
 import type { Anchor, RollModel, RollNote, Stamp } from './rollModel';
 
 export type RollView = { time: number; center: number; span: number; pitchSpan: number };
@@ -14,7 +14,10 @@ type Props = {
   select: (id: string) => void; inspect: (id: string) => void; remove: (id: string) => void; update: (note: RollNote) => void;
   add: (anchor: Anchor, stamp: string, pitch: number, source?: string) => void;
   editStamp: (stamp: Stamp) => void; addStamp: (anchor: Anchor) => void;
+  /** How events sharing a time and pitch are drawn: pushed apart with leaders, stacked on their pitch, or merged into one bar. */
+  overlap?: 'offset' | 'stack' | 'merge';
 };
+type Bar = { note: RollNote; start: Stamp; end?: Stamp; from: number; to: number; py: number; by: number; h: number; continuation: boolean; arrow: boolean; group: RollNote[] };
 
 /** Time is always constrained by marker identity; pitch guides are independent of snapping. */
 export function RollCanvas(p: Props) {
@@ -23,7 +26,7 @@ export function RollCanvas(p: Props) {
   const [width, setWidth] = useState(500);
   const [draft, setDraft] = useState<RollNote>();
   const clip = useId().replace(/:/g, '');
-  const gesture = useRef<{ x: number; y: number; view: RollView; note?: RollNote; resize?: boolean; moved: boolean; pan: boolean } | null>(null);
+  const gesture = useRef<{ x: number; y: number; view: RollView; note?: RollNote; resize?: boolean; moved: boolean; pan: boolean; before: string } | null>(null);
   const latest = useRef(p); latest.current = p;
   const left = 70, top = 38, bottom = p.height - 12;
   const plotWidth = Math.max(1, width - left - 14), plotHeight = bottom - top;
@@ -71,7 +74,7 @@ export function RollCanvas(p: Props) {
   const notes = p.model.notes.map(n => draft?.id === n.id ? draft : n).filter(n => !p.source || n.source === p.source);
   // Close microtonal pitches can overlap at overview zoom. Keep the true pitch dot,
   // offset the label/bar only, and connect it with a leader rather than quantizing.
-  const bars: { note: RollNote; start: Stamp; end?: Stamp; from: number; to: number; py: number; by: number; continuation: boolean; arrow: boolean }[] = [];
+  const placed: Bar[] = [];
   for (const note of [...notes].sort((a, b) => b.pitch - a.pitch)) {
     const start = p.model.stamps.find(s => s.id === note.start)!;
     const end = p.model.stamps.find(s => s.id === note.end);
@@ -82,11 +85,32 @@ export function RollCanvas(p: Props) {
     const to = arrow ? width - 14 : x(end!.ms);
     if (to < left || from > width - 14) continue;
     const py = y(note.pitch);
-    let by = py - 12;
-    for (const other of bars) {
-      if (from < other.to && to > other.from && Math.abs(by - other.by) < 28) by = other.by + 30;
+    placed.push({ note, start, end, from, to, py, by: py - 12, h: 24, continuation, arrow, group: [note] });
+  }
+  const bars: Bar[] = [];
+  if (!p.overlap || p.overlap === 'offset') {
+    for (const bar of placed) {
+      for (const other of bars) {
+        if (bar.from < other.to && bar.to > other.from && Math.abs(bar.by - other.by) < 28) bar.by = other.by + 30;
+      }
+      bars.push(bar);
     }
-    bars.push({ note, start, end, from, to, py, by, continuation, arrow });
+  } else {
+    const clusters: Bar[][] = [];
+    for (const bar of placed) {
+      const cluster = clusters.find(c => c.some(o => bar.from < o.to && bar.to > o.from && Math.abs(bar.py - o.py) < 20));
+      if (cluster) cluster.push(bar); else clusters.push([bar]);
+    }
+    for (const cluster of clusters) {
+      const centre = cluster.reduce((sum, b) => sum + b.py, 0) / cluster.length;
+      if (p.overlap === 'stack') {
+        const h = cluster.length === 1 ? 24 : 18, gap = 2, total = cluster.length * (h + gap) - gap;
+        cluster.forEach((bar, i) => bars.push({ ...bar, by: centre - total / 2 + i * (h + gap), h }));
+      } else {
+        const shown = cluster.find(b => b.note.id === p.selected) ?? cluster[0];
+        bars.push({ ...shown, from: Math.min(...cluster.map(b => b.from)), to: Math.max(...cluster.map(b => b.to)), group: cluster.map(b => b.note) });
+      }
+    }
   }
   const firstStep = Math.ceil((p.view.center - p.view.pitchSpan / 2) / (1200 / p.steps));
   const count = Math.min(1200, Math.ceil(p.view.pitchSpan / (1200 / p.steps)) + 1);
@@ -115,7 +139,7 @@ export function RollCanvas(p: Props) {
           e.preventDefault(); e.currentTarget.setPointerCapture(e.pointerId);
           const pan = p.pan || e.button === 1;
           if (note && !pan) p.select(note.id);
-          gesture.current = { ...pos, view: p.view, note, resize: Boolean((e.target as Element).closest('[data-resize]')), moved: false, pan };
+          gesture.current = { ...pos, view: p.view, note, resize: Boolean((e.target as Element).closest('[data-resize]')), moved: false, pan, before: p.selected };
         }}
         onPointerMove={e => {
           const g = gesture.current;
@@ -139,7 +163,11 @@ export function RollCanvas(p: Props) {
           const g = gesture.current;
           if (!g) return;
           if (draft && g.moved) p.update(draft);
-          else if (g.note && !g.pan && !g.moved) p.inspect(g.note.id);
+          else if (g.note && !g.pan && !g.moved) {
+            const group = bars.find(b => b.note.id === g.note!.id)?.group ?? [g.note];
+            const at = group.findIndex(n => n.id === g.before);
+            p.inspect(group.length > 1 && at >= 0 ? group[(at + 1) % group.length].id : g.note.id);
+          }
           else if (!g.note && !g.pan && !g.moved) { const pos = point(e); p.add(p.anchor, stampAt(pos.x).id, pitchAt(pos.y), p.source); }
           gesture.current = null; setDraft(undefined);
           if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
@@ -158,10 +186,12 @@ export function RollCanvas(p: Props) {
         {guides.filter((pitch, i) => (firstStep + i) % sparse === 0 || Math.abs(pitch) < .01).map(pitch => <text key={pitch} className={Math.abs(pitch) < .01 ? 'roll-zero-label' : 'roll-axis-label'} x={left - 12} y={y(pitch) + 4} textAnchor="end">{Number(pitch.toFixed(1))}</text>)}
         <g clipPath={`url(#${clip})`}>
           {bars.map(bar => {
-            const { note, from, to, by, py, arrow, continuation } = bar;
+            const { note, from, to, by, h, py, arrow, continuation, group } = bar;
             const source = p.model.sources.find(s => s.id === note.source)!;
             const sx = Math.max(left, from), ex = Math.min(width - 14, to);
-            const label = `${source.name} · ${cents(note.pitch)}`;
+            const others = group.filter(n => n.id !== note.id).map(n => p.model.sources.find(s => s.id === n.source)?.name);
+            const limits = group.length === 1 ? limitText(note) : '';
+            const label = `${source.name}${others.length ? ` + ${others.join(', ')}` : ''} · ${cents(note.pitch)}${limits ? ` · ${limits}` : ''}`;
             const selected = p.selected === note.id;
             return <g key={note.id} data-note={note.id} className={`event-note ${selected ? 'is-selected' : ''}`}
               role="button" tabIndex={0} aria-label={`${source.name}, ${cents(note.pitch)}, ${continuation ? 'held after release' : `${bar.start.ms} ms`}, ${arrow ? note.end ? 'hold after release' : 'until release' : `ends ${bar.end!.ms} ms`}`}
@@ -180,15 +210,16 @@ export function RollCanvas(p: Props) {
                 }
               }}>
               <title>{label} · {source.kind}{continuation ? ' · continuation from key down' : ''}</title>
-              <line className="note-leader" x1={sx + 2} x2={sx + 2} y1={py} y2={by + 12}/>
+              {Math.abs(by + h / 2 - py) > 1 && <line className="note-leader" x1={sx + 2} x2={sx + 2} y1={py} y2={by + h / 2}/>}
               <circle className="note-pitch-dot" cx={sx + 2} cy={py} r={3}/>
-              <rect className="note-body" x={sx} y={by} width={Math.max(1, ex - sx)} height={24} rx={3}/>
-              <svg x={sx + (continuation ? 22 : 8)} y={by} width={Math.max(1, ex - sx - (continuation ? 44 : 30))} height={24} overflow="hidden">
-                <text className="note-label" x={0} y={16}>{label}</text>
+              <rect className="note-body" x={sx} y={by} width={Math.max(1, ex - sx)} height={h} rx={3}/>
+              <svg x={sx + (continuation ? 22 : 8)} y={by} width={Math.max(1, ex - sx - (continuation ? 44 : group.length > 1 ? 58 : 30))} height={h} overflow="hidden">
+                <text className="note-label" x={0} y={h / 2 + 4}>{label}</text>
               </svg>
-              {continuation && <path className="note-arrow" data-testid="continuation-arrow" d={`M${sx + 16} ${by + 6} l-7 6 7 6 M${sx + 9} ${by + 12} h12`}/>}
-              {arrow ? <path className="note-arrow" data-testid="hold-arrow" d={`M${ex - 17} ${by + 6} l7 6 -7 6 M${ex - 23} ${by + 12} h12`}/> : to <= width - 14 && <line className="note-end" x1={ex - 1} x2={ex - 1} y1={by + 3} y2={by + 21}/>}
-              {(arrow || to <= width - 14) && <rect data-resize="true" className="note-resize" x={ex - 12} y={by - 5} width={16} height={34}><title>Drag ending to a timestamp</title></rect>}
+              {group.length > 1 && <g className="note-count"><rect x={ex - 52} y={by + h / 2 - 9} width={26} height={18} rx={9}/><text x={ex - 39} y={by + h / 2 + 4} textAnchor="middle">×{group.length}</text></g>}
+              {continuation && <path className="note-arrow" data-testid="continuation-arrow" d={`M${sx + 16} ${by + h / 2 - 6} l-7 6 7 6 M${sx + 9} ${by + h / 2} h12`}/>}
+              {arrow ? <path className="note-arrow" data-testid="hold-arrow" d={`M${ex - 17} ${by + h / 2 - 6} l7 6 -7 6 M${ex - 23} ${by + h / 2} h12`}/> : to <= width - 14 && <line className="note-end" x1={ex - 1} x2={ex - 1} y1={by + 3} y2={by + h - 3}/>}
+              {(arrow || to <= width - 14) && <rect data-resize="true" className="note-resize" x={ex - 12} y={by - 5} width={16} height={h + 10}><title>Drag ending to a timestamp</title></rect>}
             </g>;
           })}
         </g>
