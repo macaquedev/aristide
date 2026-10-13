@@ -5,6 +5,11 @@
 //! level, starting at a timestamp after key-down or key-up and ending
 //! at release or at a later timestamp.
 //!
+//! An event takes its sound from pipes (a stop's ranks, or one of them)
+//! or from a keyboard: pressing the same key there, as a coupler does,
+//! so whatever is drawn on that keyboard sounds — at the event's pitch,
+//! level and timing.
+//!
 //! An event may be limited to a band of pitch: `played`, the pitch of
 //! the key that triggers it, or `sounding`, the pitch the event itself
 //! sounds at. Both are cents from the organ's pitch standard, so a
@@ -15,7 +20,7 @@
 //! are the fixed 0 ms timestamps of the two timelines.
 
 use aristide_formats::sidecar::{PitchWindow, RuleDef, RuleEventDef, RuleStampDef};
-use aristide_model::{RankId, StopId};
+use aristide_model::{ManualId, RankId, StopId};
 use serde::{Deserialize, Serialize};
 
 use crate::console::Console;
@@ -48,12 +53,21 @@ pub struct Stamp {
     pub ms: f64,
 }
 
-/// Where an event's pipes come from: one stop's pipework as that stop
-/// lays it out on its keyboard, every rank of it or only `rank`.
+/// Where an event's sound comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Source {
-    pub stop: StopId,
-    pub rank: Option<RankId>,
+pub enum Source {
+    /// One stop's pipework as that stop lays it out on its keyboard,
+    /// every rank of it or only `rank`.
+    Pipes { stop: StopId, rank: Option<RankId> },
+    /// The same key pressed on this keyboard, as a coupler presses it:
+    /// whatever is drawn there sounds.
+    Keyboard(ManualId),
+}
+
+impl Source {
+    pub fn pipes(stop: StopId) -> Source {
+        Source::Pipes { stop, rank: None }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -96,7 +110,7 @@ impl Rule {
         Rule {
             stamps: fixed_stamps(),
             events: vec![Event {
-                source: Source { stop, rank: None },
+                source: Source::pipes(stop),
                 cents: 0.0,
                 level_db: 0.0,
                 start: DOWN.into(),
@@ -159,6 +173,9 @@ impl Rule {
                 {
                     return Err("a pitch window's low edge must not be above its high edge".into());
                 }
+            }
+            if matches!(event.source, Source::Keyboard(_)) && matches!(self.timing(event)?, Timing::Up { .. }) {
+                return Err("a keyboard is pressed with the key, not after its release".into());
             }
             self.timing(event)?;
         }
@@ -224,17 +241,16 @@ pub fn to_def(console: &Console, stop: StopId, rule: &Rule) -> Option<RuleDef> {
     let (manual, name) = names_of(console, stop)?;
     let mut events = Vec::with_capacity(rule.events.len());
     for event in &rule.events {
-        let (source_manual, source_stop) = names_of(console, event.source.stop)?;
-        let rank = match event.source.rank {
-            Some(rank) => Some(
-                console
-                    .stop_ranks(event.source.stop)
-                    .into_iter()
-                    .find(|(id, _)| *id == rank)?
-                    .1
-                    .to_string(),
-            ),
-            None => None,
+        let (source_manual, source_stop, rank) = match event.source {
+            Source::Pipes { stop, rank } => {
+                let (source_manual, source_stop) = names_of(console, stop)?;
+                let rank = match rank {
+                    Some(rank) => Some(console.stop_ranks(stop).into_iter().find(|(id, _)| *id == rank)?.1.to_string()),
+                    None => None,
+                };
+                (source_manual, Some(source_stop), rank)
+            }
+            Source::Keyboard(manual) => (console.manual_name(manual)?.to_string(), None, None),
         };
         events.push(RuleEventDef {
             manual: source_manual,
@@ -283,22 +299,31 @@ pub fn from_def(console: &Console, def: &RuleDef) -> Result<(StopId, Rule), Stri
     }
     let mut events = Vec::with_capacity(def.events.len());
     for event in &def.events {
-        let source = stop_named(console, &event.manual, &event.stop).ok_or_else(|| {
-            format!("source stop {:?} on {:?} matches nothing", event.stop, event.manual)
-        })?;
-        let rank = match &event.rank {
-            Some(name) => Some(
+        let source = match &event.stop {
+            None => Source::Keyboard(
                 console
-                    .stop_ranks(source)
-                    .into_iter()
-                    .find(|(_, rank)| rank.eq_ignore_ascii_case(name))
-                    .map(|(id, _)| id)
-                    .ok_or_else(|| format!("rank {name:?} is not in {:?}", event.stop))?,
+                    .manual_named(&event.manual)
+                    .ok_or_else(|| format!("keyboard {:?} matches nothing", event.manual))?,
             ),
-            None => None,
+            Some(stop) => {
+                let source = stop_named(console, &event.manual, stop)
+                    .ok_or_else(|| format!("source stop {stop:?} on {:?} matches nothing", event.manual))?;
+                let rank = match &event.rank {
+                    Some(name) => Some(
+                        console
+                            .stop_ranks(source)
+                            .into_iter()
+                            .find(|(_, rank)| rank.eq_ignore_ascii_case(name))
+                            .map(|(id, _)| id)
+                            .ok_or_else(|| format!("rank {name:?} is not in {stop:?}"))?,
+                    ),
+                    None => None,
+                };
+                Source::Pipes { stop: source, rank }
+            }
         };
         events.push(Event {
-            source: Source { stop: source, rank },
+            source,
             cents: event.cents,
             level_db: event.level_db,
             start: event.start.clone(),
@@ -367,6 +392,9 @@ mod tests {
         let mut rule = Rule::plain(StopId(0));
         rule.stamps[0].ms = 10.0;
         assert!(rule.validate().is_err(), "down is fixed");
+        let mut rule = with(&[("u1", Anchor::Up, 50.0), ("u2", Anchor::Up, 150.0)], "u1", Some("u2"));
+        rule.events[0].source = Source::Keyboard(ManualId(2));
+        assert!(rule.validate().is_err(), "a keyboard is pressed with the key");
         let mut rule = Rule::plain(StopId(0));
         rule.events[0].played = Some(PitchWindow { low: Some(300.0), high: Some(-300.0) });
         assert!(rule.validate().is_err(), "an inverted window");

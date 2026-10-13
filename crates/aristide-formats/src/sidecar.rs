@@ -92,6 +92,11 @@ pub struct Sidecar {
 /// start = "down"
 /// end = "t1"
 ///
+/// [[rule.event]]
+/// manual = "Pédale"         # no stop: press this keyboard, as coupled
+/// cents = 300.0
+/// start = "down"
+///
 /// [rule.event.played]      # only keys whose pitch lies in this window
 /// low = -900.0
 ///
@@ -122,7 +127,9 @@ pub struct RuleStampDef {
 #[serde(deny_unknown_fields)]
 pub struct RuleEventDef {
     pub manual: String,
-    pub stop: String,
+    /// Absent: the event presses `manual` itself, as a coupler would.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rank: Option<String>,
     #[serde(default)]

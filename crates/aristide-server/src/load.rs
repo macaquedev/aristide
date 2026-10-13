@@ -1597,7 +1597,10 @@ fn configure_rules(
         match crate::rule::from_def(console, def) {
             Ok((stop, mut rule)) => {
                 let before = rule.events.len();
-                rule.events.retain(|event| console.stop_has_pipes(event.source.stop));
+                rule.events.retain(|event| match event.source {
+                    crate::rule::Source::Pipes { stop, .. } => console.stop_has_pipes(stop),
+                    crate::rule::Source::Keyboard(_) => true,
+                });
                 if rule.events.len() < before {
                     load_warnings.push(format!(
                         "rule for {:?}: events sourcing a stop without pipes were dropped",

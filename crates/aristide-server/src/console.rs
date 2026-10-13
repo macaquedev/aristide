@@ -218,6 +218,55 @@ struct Landing {
     /// own lane for `own_pipes` routes — their copies double instead
     /// of merging (see [`PipeKey`]).
     lane: u32,
+    /// Set when a drawn stop's keyboard event pressed this key rather
+    /// than a coupler: what that event adds to every voice it wakes.
+    pressed: Option<Pressed>,
+}
+
+/// A stop's keyboard event, carried on the key it presses: the stop
+/// that pressed it and the event's own pitch, level, timing and limits,
+/// composed onto whatever is drawn on that keyboard.
+#[derive(Debug, Clone, Copy)]
+struct Pressed {
+    via: StopId,
+    cents: f64,
+    gain: f32,
+    delay_ms: f64,
+    end_ms: Option<f64>,
+    hold_ms: Option<f64>,
+    lane: u32,
+    played: Option<PitchWindow>,
+    sounding: Option<PitchWindow>,
+}
+
+impl Pressed {
+    /// One part of a stop drawn on the pressed keyboard, sounded through
+    /// this event: pitches and levels add, delays add, the earlier
+    /// ending wins, and timed events keep lanes of their own.
+    fn compose<'a>(&self, mut part: Part<'a>, edge: Edge) -> Part<'a> {
+        part.cents += self.cents;
+        part.gain *= self.gain;
+        if edge == Edge::Down {
+            part.delay_ms += self.delay_ms;
+            part.end_ms = match (part.end_ms.map(|end| end + self.delay_ms), self.end_ms) {
+                (Some(inner), Some(outer)) => Some(inner.min(outer)),
+                (inner, outer) => inner.or(outer),
+            };
+            part.hold_ms = if part.end_ms.is_some() {
+                None
+            } else {
+                match (part.hold_ms, self.hold_ms) {
+                    (Some(inner), Some(outer)) => Some(inner.max(outer)),
+                    (inner, outer) => inner.or(outer),
+                }
+            };
+        }
+        part.lane = match (self.lane, part.lane) {
+            (0, lane) | (lane, 0) => lane,
+            (outer, inner) => outer ^ inner.rotate_left(16),
+        };
+        part
+    }
 }
 
 /// The refcount identity of one virtual pipe: WHERE the sound comes
@@ -1575,7 +1624,7 @@ impl Console {
     /// `unison_off` covers it, in which case its own division is silent
     /// and only the coupled copies speak: the note moves rather than
     /// doubles.
-    fn couple(&self, manual: ManualId, midi_key: i16) -> Vec<Landing> {
+    fn couple(&self, manual: ManualId, midi_key: i16, edge: Edge) -> Vec<Landing> {
         let mut unison_off = false;
         let mut copies: Vec<Landing> = Vec::new();
         for &engaged in &self.engaged_couplers {
@@ -1600,6 +1649,7 @@ impl Console {
                     fill: repitch,
                     bounded: !repitch,
                     lane: if target.own_pipes { engaged as u32 + 1 } else { 0 },
+                    pressed: None,
                 };
                 match copies.iter_mut().find(|c| {
                     (c.manual, c.midi_key, c.lane)
@@ -1624,6 +1674,7 @@ impl Console {
                 fill: true,
                 bounded: true,
                 lane: 0,
+                pressed: None,
             });
         }
         // A copy that lands exactly on the played key adds nothing —
@@ -1632,7 +1683,67 @@ impl Console {
         landings.extend(copies.into_iter().filter(|c| {
             unison_off || c.lane != 0 || (c.manual, c.midi_key) != (manual, midi_key)
         }));
+        landings.extend(self.keyboard_presses(manual, midi_key, edge));
         landings
+    }
+
+    /// The keys drawn stops on `manual` press on other keyboards (or
+    /// their own): each keyboard event of their rules lands like a
+    /// coupler's route — same key, same compass policy — carrying the
+    /// event's pitch, level, timing and limits. Like coupled notes, these
+    /// don't press further: only the played keyboard's stops press.
+    fn keyboard_presses(&self, manual: ManualId, midi_key: i16, edge: Edge) -> Vec<Landing> {
+        let mut landings = Vec::new();
+        for stop in &self.organ.stops {
+            if stop.manual != manual || !self.drawn.contains(&stop.id) {
+                continue;
+            }
+            let Some(rule) = self.stop_rules.get(&stop.id) else {
+                continue;
+            };
+            for (index, event) in rule.events.iter().enumerate() {
+                let crate::rule::Source::Keyboard(target) = event.source else {
+                    continue;
+                };
+                let Ok(crate::rule::Timing::Down { delay_ms, end_ms, hold_ms }) = rule.timing(event) else {
+                    continue;
+                };
+                // A press that ended before release has nothing to say
+                // at it; one held to release lets the release events of
+                // what it woke speak.
+                if edge == Edge::Up && end_ms.is_some() {
+                    continue;
+                }
+                let ordinary = delay_ms == 0.0 && end_ms.is_none() && hold_ms.is_none();
+                landings.push(Landing {
+                    manual: target,
+                    midi_key,
+                    fill: self.couplers_repitch,
+                    bounded: !self.couplers_repitch,
+                    lane: 0,
+                    pressed: Some(Pressed {
+                        via: stop.id,
+                        cents: event.cents,
+                        gain: aristide_model::units::db_to_linear(event.level_db) as f32,
+                        delay_ms: if edge == Edge::Down { delay_ms } else { 0.0 },
+                        end_ms,
+                        hold_ms,
+                        lane: if ordinary { 0 } else { (stop.id.0 + 1) << 8 | (index as u32 + 1) },
+                        played: event.played,
+                        sounding: event.sounding,
+                    }),
+                });
+            }
+        }
+        landings
+    }
+
+    /// Whether a stop's rule presses any keyboard — then drawing it, or
+    /// editing it, changes what other stops sound under held keys.
+    fn stop_presses(&self, stop: StopId) -> bool {
+        self.stop_rules
+            .get(&stop)
+            .is_some_and(|rule| rule.events.iter().any(|event| matches!(event.source, crate::rule::Source::Keyboard(_))))
     }
 
     /// Whether a route fires for this key right now. A classic route
@@ -1896,7 +2007,10 @@ impl Console {
                 }
                 _ => continue,
             };
-            let Some(owner) = self.organ.stops.iter().find(|s| s.id == event.source.stop) else {
+            let crate::rule::Source::Pipes { stop: source, rank } = event.source else {
+                continue;
+            };
+            let Some(owner) = self.organ.stops.iter().find(|s| s.id == source) else {
                 continue;
             };
             let ordinary = delay_ms == 0.0 && end_ms.is_none() && hold_ms.is_none();
@@ -1904,7 +2018,7 @@ impl Console {
             for range in owner
                 .ranks
                 .iter()
-                .filter(|range| event.source.rank.is_none_or(|rank| rank == range.rank))
+                .filter(|range| rank.is_none_or(|rank| rank == range.rank))
             {
                 parts.push(Part {
                     range,
@@ -1978,15 +2092,25 @@ impl Console {
         if !self.organ.stops.iter().any(|s| s.id == stop) {
             return Err("no such stop".into());
         }
+        let pressed_before = self.stop_presses(stop);
         match rule {
             Some(rule) if !self.is_default_rule(stop, &rule) => {
                 rule.validate()?;
                 for event in &rule.events {
+                    let (source_stop, source_rank) = match event.source {
+                        crate::rule::Source::Pipes { stop, rank } => (stop, rank),
+                        crate::rule::Source::Keyboard(manual) => {
+                            if !self.organ.manuals.iter().any(|m| m.id == manual) {
+                                return Err("an event's keyboard is not in this organ".into());
+                            }
+                            continue;
+                        }
+                    };
                     let source = self
                         .organ
                         .stops
                         .iter()
-                        .find(|s| s.id == event.source.stop && !self.noise_stops.contains(&s.id))
+                        .find(|s| s.id == source_stop && !self.noise_stops.contains(&s.id))
                         .ok_or("an event's source stop is not in this organ")?;
                     if source.ranks.is_empty() {
                         return Err(if source.id == stop {
@@ -1995,10 +2119,7 @@ impl Console {
                             format!("{} has no pipes to sound", source.name)
                         });
                     }
-                    if event
-                        .source
-                        .rank
-                        .is_some_and(|rank| !source.ranks.iter().any(|r| r.rank == rank))
+                    if source_rank.is_some_and(|rank| !source.ranks.iter().any(|r| r.rank == rank))
                     {
                         return Err("an event's rank is not in its source stop".into());
                     }
@@ -2009,7 +2130,13 @@ impl Console {
                 self.stop_rules.remove(&stop);
             }
         }
-        Ok(self.reprice_stop(stop))
+        let (mut stopped, mut starts) = self.reprice_stop(stop);
+        // What the old rule pressed elsewhere sounds through other stops:
+        // only re-deriving the held keys lets it go.
+        if pressed_before && self.is_drawn(stop) {
+            self.recouple_held_keys(&mut stopped, &mut starts);
+        }
+        Ok((stopped, starts))
     }
 
     /// The pipes one key press sounds, with each voice's parameters
@@ -2046,13 +2173,14 @@ impl Console {
         // route asked to. A 16' running off the bottom of a rank, or a
         // coupler into a division with a shorter compass, sounds
         // nothing there unless its route opts into repitching.
-        for landing in self.couple(origin, played) {
+        for landing in self.couple(origin, played, edge) {
             let Landing {
                 manual: manual_id,
                 midi_key,
                 fill,
                 bounded,
                 lane,
+                pressed,
             } = landing;
             let Some(target) = self
                 .organ
@@ -2080,7 +2208,7 @@ impl Console {
                 if stop.manual != manual_id
                     || stop.compass.is_some_and(|(low, high)| (midi_key as i32) < low || (midi_key as i32) > high)
                     || !self.drawn.contains(&stop.id)
-                    || only.is_some_and(|only| only != stop.id)
+                    || only.is_some_and(|only| only != stop.id && pressed.is_none_or(|p| p.via != only))
                 {
                     continue;
                 }
@@ -2095,6 +2223,10 @@ impl Console {
                     ))
                 });
                 for part in self.parts(stop, edge) {
+                    let part = match &pressed {
+                        Some(pressed) => pressed.compose(part, edge),
+                        None => part,
+                    };
                     let range = part.range;
                     let own = part.owner.id == stop.id;
                     // A borrowed stop's ranges are laid out on its own
@@ -2152,14 +2284,16 @@ impl Console {
                     // both judged as pitch in this stop's tuning — the
                     // key the stop's own division sees, so a coupled
                     // press breaks where that keyboard's key would.
-                    if part.played.is_some() || part.sounding.is_some() {
+                    let limits = [(part.played, part.sounding), pressed.map_or((None, None), |p| (p.played, p.sounding))];
+                    if limits.iter().any(|(played, sounding)| played.is_some() || sounding.is_some()) {
                         let (stop_tuning, _) = self.voice_tuning(stop.id, range.rank);
                         let Some(key_cents) = stop_tuning.pitch_cents(midi_key.max(0) as u16) else {
                             continue;
                         };
-                        if part.played.is_some_and(|window| !window.contains(key_cents))
-                            || part.sounding.is_some_and(|window| !window.contains(key_cents + adjust_cents))
-                        {
+                        if limits.iter().any(|(played, sounding)| {
+                            played.is_some_and(|window| !window.contains(key_cents))
+                                || sounding.is_some_and(|window| !window.contains(key_cents + adjust_cents))
+                        }) {
                             continue;
                         }
                     }
@@ -2702,7 +2836,13 @@ impl Console {
                 self.stop_noise_open.insert(stop, noise.handle);
                 starts.push(noise);
             }
-            let mut expedited = self.start_stop_under_held_keys(stop, &mut starts);
+            let mut expedited = if self.stop_presses(stop) {
+                let mut stopped = Vec::new();
+                self.recouple_held_keys(&mut stopped, &mut starts);
+                stopped
+            } else {
+                self.start_stop_under_held_keys(stop, &mut starts)
+            };
             expedited.sort_unstable();
             expedited.dedup();
             return (expedited, starts);
@@ -2727,7 +2867,12 @@ impl Console {
         }
         // Note-off on the open noise voice = the push-in thump.
         released.extend(self.stop_noise_open.remove(&stop));
-        (released, Vec::new())
+        // What it pressed on other keyboards belongs to the stops there.
+        let mut starts = Vec::new();
+        if self.stop_presses(stop) {
+            self.recouple_held_keys(&mut released, &mut starts);
+        }
+        (released, starts)
     }
 
     /// Start `stop`'s pipes under every currently held key (coupling
@@ -3183,6 +3328,25 @@ impl Console {
 
     /// Whether a manual is the pedalboard, straight from the model —
     /// UIs render it at the bottom and stop guessing from the name.
+    /// A keyboard's name, by id.
+    pub fn manual_name(&self, manual: ManualId) -> Option<&str> {
+        self.organ.manuals.iter().find(|m| m.id == manual).map(|m| m.name.as_str())
+    }
+
+    /// A keyboard by its name, ignoring case.
+    pub fn manual_named(&self, name: &str) -> Option<ManualId> {
+        self.organ.manuals.iter().find(|m| m.name.eq_ignore_ascii_case(name)).map(|m| m.id)
+    }
+
+    /// The id of the keyboard at `index` in console order, and back.
+    pub fn manual_id(&self, index: usize) -> Option<ManualId> {
+        self.organ.manuals.get(index).map(|m| m.id)
+    }
+
+    pub fn manual_index(&self, manual: ManualId) -> Option<usize> {
+        self.organ.manuals.iter().position(|m| m.id == manual)
+    }
+
     pub fn manual_pedal(&self, manual: usize) -> bool {
         self.organ.manuals.get(manual).is_some_and(|m| m.pedal())
     }
@@ -4708,7 +4872,7 @@ mod tests {
         rule.stamps.push(Stamp { id: "t1".into(), anchor: Anchor::Down, ms: 50.0 });
         rule.stamps.push(Stamp { id: "u1".into(), anchor: Anchor::Up, ms: 50.0 });
         rule.stamps.push(Stamp { id: "u2".into(), anchor: Anchor::Up, ms: 150.0 });
-        let octave = Source { stop: StopId(2), rank: Some(RankId(2)) };
+        let octave = Source::Pipes { stop: StopId(2), rank: Some(RankId(2)) };
         rule.events.push(Event { source: octave, cents: 1200.0, level_db: -6.0, start: "down".into(), end: Some("t1".into()), played: None, sounding: None });
         rule.events.push(Event { source: octave, cents: 0.0, level_db: 0.0, start: "u1".into(), end: Some("u2".into()), played: None, sounding: None });
         rule
@@ -4772,7 +4936,7 @@ mod tests {
         let mut console = test_console();
         console.set_drawn(StopId(2), false);
         let event = |stop, cents, played, sounding| Event {
-            source: Source { stop: StopId(stop), rank: None },
+            source: Source::pipes(StopId(stop)),
             cents,
             level_db: 0.0,
             start: "down".into(),
@@ -4813,10 +4977,13 @@ mod tests {
     fn a_rule_naming_missing_pipework_is_refused() {
         let mut console = test_console();
         let mut rule = titanique();
-        rule.events[1].source.stop = StopId(99);
+        rule.events[1].source = crate::rule::Source::Pipes { stop: StopId(99), rank: Some(RankId(2)) };
         assert!(console.set_stop_rule(StopId(1), Some(rule)).is_err());
         let mut rule = titanique();
-        rule.events[1].source.rank = Some(RankId(1));
+        rule.events[1].source = crate::rule::Source::Keyboard(ManualId(9));
+        assert!(console.set_stop_rule(StopId(1), Some(rule)).is_err(), "no keyboard 9");
+        let mut rule = titanique();
+        rule.events[1].source = crate::rule::Source::Pipes { stop: StopId(2), rank: Some(RankId(1)) };
         assert!(console.set_stop_rule(StopId(1), Some(rule)).is_err(), "rank 1 is not stop 2's");
         assert!(!console.stop_has_rule(StopId(1)));
     }
@@ -4862,7 +5029,7 @@ mod tests {
         assert!(console.stop_rule(StopId(3)).events.is_empty(), "nothing of its own to sound");
         assert!(!console.stop_has_pipes(StopId(3)));
 
-        let event = |stop| Event { source: Source { stop, rank: None }, cents: 0.0, level_db: 0.0, start: "down".into(), end: None, played: None, sounding: None };
+        let event = |stop| Event { source: Source::pipes(stop), cents: 0.0, level_db: 0.0, start: "down".into(), end: None, played: None, sounding: None };
         let mut rule = Rule::silent();
         rule.events.push(event(StopId(3)));
         assert!(console.set_stop_rule(StopId(3), Some(rule)).is_err(), "itself");
@@ -5026,6 +5193,118 @@ mod tests {
             }
         }
         Console::new(organ, specs, vec![StopId(1), StopId(2)], 48_000.0)
+    }
+
+    /// A blank stop on Great whose rule presses Swell: `events` are
+    /// (cents, start) pairs; Great's own stop is put in.
+    fn pressing_console(events: &[(f64, &str)]) -> Console {
+        use crate::rule::{Event, Rule, Source};
+        let mut console = coupled_console();
+        console.organ.stops.push(Stop {
+            compass: None,
+            id: StopId(3),
+            name: "Presses Swell".into(),
+            manual: ManualId(1),
+            ranks: vec![],
+            own_pipes: false,
+        });
+        console.set_drawn(StopId(1), false);
+        let mut rule = Rule::silent();
+        for &(cents, start) in events {
+            rule.events.push(Event {
+                source: Source::Keyboard(ManualId(2)),
+                cents,
+                level_db: 0.0,
+                start: start.into(),
+                end: None,
+                played: None,
+                sounding: None,
+            });
+        }
+        console.set_stop_rule(StopId(3), Some(rule)).expect("valid rule");
+        console
+    }
+
+    fn held_pipes(console: &Console) -> Vec<(u32, u16)> {
+        let mut pipes: Vec<(u32, u16)> = console.speaking.keys().map(|at| (at.rank.0, at.pipe)).collect();
+        pipes.sort();
+        pipes
+    }
+
+    /// A stop's keyboard event presses the same key there, as a coupler
+    /// would: what is drawn on Swell sounds, at the event's pitch.
+    #[test]
+    fn a_stop_presses_another_keyboard_like_a_coupler() {
+        let mut console = pressing_console(&[(0.0, "down"), (1200.0, "down")]);
+        console.set_drawn(StopId(3), true);
+        console.note_on_manual(0, 60, 127);
+        assert_eq!(held_pipes(&console), vec![(2, 24), (2, 36)], "Swell's rank at the key and its octave");
+        console.note_off_manual(0, 60);
+        assert!(console.speaking.is_empty());
+
+        console.set_drawn(StopId(2), false);
+        console.note_on_manual(0, 60, 127);
+        assert!(held_pipes(&console).is_empty(), "nothing drawn on Swell, nothing to press");
+        let (_, starts) = console.set_drawn(StopId(2), true);
+        assert_eq!(starts.len(), 2, "drawing on Swell under the held key speaks through the press");
+        console.note_off_manual(0, 60);
+    }
+
+    #[test]
+    fn drawing_a_pressing_stop_under_a_held_key_couples_it() {
+        let mut console = pressing_console(&[(0.0, "down")]);
+        console.note_on_manual(0, 60, 127);
+        assert!(held_pipes(&console).is_empty());
+        let (_, starts) = console.set_drawn(StopId(3), true);
+        assert_eq!(starts.len(), 1);
+        assert_eq!(held_pipes(&console), vec![(2, 24)]);
+        let (stopped, _) = console.set_drawn(StopId(3), false);
+        assert_eq!(stopped.len(), 1, "retiring it lets Swell's pipe go");
+        assert!(held_pipes(&console).is_empty());
+
+        // A rule edit that stops pressing lets go too.
+        console.set_drawn(StopId(3), true);
+        assert_eq!(held_pipes(&console), vec![(2, 24)]);
+        console.set_stop_rule(StopId(3), Some(crate::rule::Rule::silent())).expect("valid");
+        assert!(held_pipes(&console).is_empty());
+    }
+
+    /// Like a coupler into a shorter keyboard, a press past Swell's
+    /// compass sounds nothing: the pedal Bourdon case.
+    #[test]
+    fn a_press_stops_at_the_pressed_keyboards_compass() {
+        let mut console = pressing_console(&[(0.0, "down")]);
+        console.set_compass(1, 36, 62);
+        console.set_drawn(StopId(3), true);
+        console.note_on_manual(0, 62, 127);
+        assert_eq!(held_pipes(&console), vec![(2, 26)]);
+        console.note_off_manual(0, 62);
+        console.note_on_manual(0, 63, 127);
+        assert!(held_pipes(&console).is_empty());
+    }
+
+    /// A timed press keeps its own lane and timing, composed onto what it wakes.
+    #[test]
+    fn a_delayed_press_delays_what_it_wakes() {
+        use crate::rule::{Anchor, Stamp};
+        let mut console = pressing_console(&[]);
+        let mut rule = console.stop_rule(StopId(3));
+        rule.stamps.push(Stamp { id: "t1".into(), anchor: Anchor::Down, ms: 100.0 });
+        rule.events.push(crate::rule::Event {
+            source: crate::rule::Source::Keyboard(ManualId(2)),
+            cents: 0.0,
+            level_db: -6.0,
+            start: "t1".into(),
+            end: None,
+            played: None,
+            sounding: None,
+        });
+        console.set_stop_rule(StopId(3), Some(rule)).expect("valid");
+        console.set_drawn(StopId(3), true);
+        let (starts, _) = console.note_on_manual(0, 60, 127);
+        assert_eq!(starts.len(), 1);
+        assert_eq!(starts[0].spec.delay_frames, 4800, "100 ms at 48 kHz");
+        assert!((starts[0].spec.gain - 0.501).abs() < 0.01, "−6 dB");
     }
 
     /// "A fourths coupler that plays a fourth down, but only from

@@ -41,11 +41,23 @@ pub(super) fn set(state: &Mutex<State>, query: &str) -> Reply {
             return bad_request("rule=<json> or reset=1 is required");
         };
         match serde_json::from_str::<WireRule>(&unescape(text)) {
-            Ok(wire) => Some(wire.into_rule()),
+            Ok(wire) => Some(wire),
             Err(err) => return bad_request(&format!("rule: {err}")),
         }
     };
     let mut state = state.lock().expect("state poisoned");
+    let next = match next {
+        Some(wire) => {
+            let Some(console) = state.console() else {
+                return bad_request("no organ is loaded");
+            };
+            match wire.into_rule(console) {
+                Ok(rule) => Some(rule),
+                Err(why) => return bad_request(&why),
+            }
+        }
+        None => None,
+    };
     if let Err(why) = state.set_stop_rule(stop, next) {
         return bad_request(&why);
     }
@@ -77,33 +89,35 @@ struct WireEvent {
     sounding: Option<PitchWindow>,
 }
 
+/// `{ "stop": ID, "rank": ID|null }` for pipes, `{ "keyboard": INDEX }`
+/// for pressing a keyboard as a coupler does.
 #[derive(Deserialize)]
 struct WireSource {
-    stop: u32,
+    stop: Option<u32>,
     rank: Option<u32>,
+    keyboard: Option<usize>,
 }
 
 impl WireRule {
-    fn into_rule(self) -> Rule {
-        Rule {
-            stamps: self.stamps,
-            events: self
-                .events
-                .into_iter()
-                .map(|event| Event {
-                    source: Source {
-                        stop: StopId(event.source.stop),
-                        rank: event.source.rank.map(RankId),
-                    },
-                    cents: event.cents,
-                    level_db: event.level,
-                    start: event.start,
-                    end: event.end,
-                    played: event.played,
-                    sounding: event.sounding,
-                })
-                .collect(),
+    fn into_rule(self, console: &Console) -> Result<Rule, String> {
+        let mut events = Vec::with_capacity(self.events.len());
+        for event in self.events {
+            let source = match (event.source.keyboard, event.source.stop) {
+                (Some(index), None) => Source::Keyboard(console.manual_id(index).ok_or("no such keyboard")?),
+                (None, Some(stop)) => Source::Pipes { stop: StopId(stop), rank: event.source.rank.map(RankId) },
+                _ => return Err("an event's source is a stop or a keyboard".into()),
+            };
+            events.push(Event {
+                source,
+                cents: event.cents,
+                level_db: event.level,
+                start: event.start,
+                end: event.end,
+                played: event.played,
+                sounding: event.sounding,
+            });
         }
+        Ok(Rule { stamps: self.stamps, events })
     }
 }
 
@@ -116,9 +130,15 @@ fn rule_json(console: &Console, stop: StopId) -> Option<Value> {
     let voices: usize = rule
         .events
         .iter()
-        .map(|event| match event.source.rank {
-            Some(_) => 1,
-            None => console.stop_ranks(event.source.stop).len(),
+        .map(|event| match event.source {
+            Source::Pipes { rank: Some(_), .. } => 1,
+            Source::Pipes { stop, rank: None } => console.stop_ranks(stop).len(),
+            // A pressed keyboard costs what is drawn there now.
+            Source::Keyboard(manual) => stops
+                .iter()
+                .filter(|(id, _, _, midx, on)| *on && console.manual_id(*midx) == Some(manual) && console.stop_has_pipes(*id))
+                .map(|(id, ..)| console.stop_ranks(*id).len())
+                .sum(),
         })
         .sum();
     // Only pipework can sound: a blank stop — this one included — is
@@ -149,7 +169,10 @@ fn rule_json(console: &Console, stop: StopId) -> Option<Value> {
             .events
             .iter()
             .map(|event| json!({
-                "source": { "stop": event.source.stop.0, "rank": event.source.rank.map(|r| r.0) },
+                "source": match event.source {
+                    Source::Pipes { stop, rank } => json!({ "stop": stop.0, "rank": rank.map(|r| r.0) }),
+                    Source::Keyboard(manual) => json!({ "keyboard": console.manual_index(manual) }),
+                },
                 "cents": event.cents,
                 "level": event.level_db,
                 "start": event.start,
@@ -159,5 +182,10 @@ fn rule_json(console: &Console, stop: StopId) -> Option<Value> {
             }))
             .collect::<Vec<_>>(),
         "sources": sources,
+        "keyboards": console
+            .manual_states()
+            .into_iter()
+            .map(|(midx, name, ..)| json!({ "midx": midx, "name": name }))
+            .collect::<Vec<_>>(),
     }))
 }

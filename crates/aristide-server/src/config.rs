@@ -5780,7 +5780,7 @@ volume = 0.7
         let parsed = def(&path);
         assert_eq!(parsed.blanks[0].name, "Thought");
         assert_eq!((parsed.rules[0].manual.as_str(), parsed.rules[0].stop.as_str()), ("Great", "Thought"));
-        assert_eq!(parsed.rules[1].events[0].stop, "Thought", "another rule's event follows");
+        assert_eq!(parsed.rules[1].events[0].stop.as_deref(), Some("Thought"), "another rule's event follows");
 
         append_composite_move(&path, "Thought", "Great", "Swell").expect("moves");
         assert!(rename_composite_manual(&path, "Swell", "Echo").expect("renames manual"));

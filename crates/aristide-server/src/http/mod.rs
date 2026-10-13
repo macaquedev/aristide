@@ -1578,6 +1578,7 @@ mod tests {
                 plain["events"][0],
                 { "source": { "stop": other["stop"], "rank": null }, "cents": 1250.0, "level": -3.0, "start": "down", "end": "t1",
                   "played": { "high": 300.0 }, "sounding": { "low": -1200.0, "high": 2400.0 } },
+                { "source": { "keyboard": 0 }, "cents": 1200.0, "level": 0.0, "start": "down", "end": null },
             ],
         });
         let encoded: String = url_encode(&rule.to_string());
@@ -1586,6 +1587,8 @@ mod tests {
         assert_eq!(set["events"][1]["cents"], 1250.0);
         assert_eq!(set["events"][1]["played"], serde_json::json!({ "high": 300.0 }));
         assert_eq!(set["events"][0]["played"], serde_json::Value::Null, "an unlimited event stays unlimited");
+        assert_eq!(set["events"][2]["source"], serde_json::json!({ "keyboard": 0 }));
+        assert!(!set["keyboards"].as_array().unwrap().is_empty(), "keyboards to press are offered");
         let text = std::fs::read_to_string(&file).expect("reads");
         assert!(text.contains("[[rule]]") && text.contains("[[rule.event]]"), "saved: {text}");
 
@@ -1600,6 +1603,9 @@ mod tests {
         assert_eq!(event.cents, 1250.0);
         assert_eq!(event.played, Some(aristide_formats::sidecar::PitchWindow { low: None, high: Some(300.0) }));
         assert_eq!(event.sounding, Some(aristide_formats::sidecar::PitchWindow { low: Some(-1200.0), high: Some(2400.0) }));
+        let pressed = &prepared.console.stop_rule(reloaded).events[2];
+        assert!(matches!(pressed.source, crate::rule::Source::Keyboard(_)), "the keyboard press came back");
+        assert_eq!(pressed.cents, 1200.0);
 
         let bad = respond(&state, &Method::Post, &format!("/api/organ/rule?stop={first}&rule=%7B%7D"));
         assert_eq!(bad.status_code().0, 400);
