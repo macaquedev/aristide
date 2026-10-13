@@ -146,3 +146,23 @@ each other event is silent there.
 Validation: `bunx playwright test limits-study`: dragging a key limit, sentence
 chips, 19 equal naming, stack and merge selection, no horizontal scroll at
 1280 and 390 px; screenshots reviewed.
+
+## Simple stop (2026-10-13)
+
+[Open the Simple stop study](http://localhost:1420/?study=1&panel=simple): the
+stop editor for an ordinary organist. A stop is a short list of sounds, each a
+sentence of tappable words: what it plays ("Doublette 2′", "Bourdon 8′ from
+Pédale", "Couple the Pédale"), its pitch in musical words with the footage it
+sounds at ("an octave down · 4′"), and its keys ("all keys", "C4 – F6"), plus a
+level slider. A strip under each sound shows where it plays across the keyboard,
+hatched where it has no pipe. "Try a key" says what any key plays and why the
+rest are silent.
+
+Keys are chosen by dragging on a keyboard, never typed. A mixture break is one
+action: tap a key and "Split here", which sends the keys above it an octave
+lower. Timing and fine-tuning (cents, "never sounds higher than …") wait behind
+⋯; the piano roll is one step further, for echoes and release sounds.
+
+Validation: `bunx playwright test simple-stop`: sentences, Try a key, pitch
+menu, split, add and undo, timing, no horizontal scroll at 1280 and 390 px;
+screenshots reviewed.

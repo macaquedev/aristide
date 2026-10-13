@@ -1,0 +1,26 @@
+.simple-stop { max-width: 1100px; }
+.simple-try, .simple-sound { border: 1px solid var(--mantine-color-dark-4); border-radius: 4px; padding: 12px; background: var(--mantine-color-dark-8); }
+.simple-sounds { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.simple-sentence { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.simple-word { font-weight: 600; }
+.simple-joiner { color: var(--mantine-color-dimmed); }
+.simple-level { flex: 1 1 140px; min-width: 120px; max-width: 220px; margin-left: auto; padding: 0 8px; }
+
+.simple-keyboard { display: flex; width: 100%; gap: 1px; touch-action: none; cursor: pointer; user-select: none; }
+.simple-key { flex: 1; background: var(--mantine-color-gray-4); border-radius: 0 0 2px 2px; }
+.simple-key.is-black { background: var(--mantine-color-dark-3); height: 64%; }
+.simple-key.is-chosen { background: var(--mantine-color-blue-5); }
+.simple-key.is-black.is-chosen { background: var(--mantine-color-blue-7); }
+
+.simple-coverage { display: flex; gap: 1px; height: 8px; margin-top: 10px; }
+.simple-coverage span { flex: 1; border-radius: 1px; background: var(--mantine-color-dark-6); }
+.simple-coverage .is-plays { background: var(--mantine-color-blue-5); }
+.simple-coverage .is-missing { background: repeating-linear-gradient(45deg, var(--mantine-color-gray-6) 0 2px, transparent 2px 4px); }
+
+.simple-try-list { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 10px; font-size: .9rem; }
+.simple-try-list .is-plays { color: var(--mantine-color-gray-1); }
+.simple-try-list span:not(.is-plays) { color: var(--mantine-color-gray-6); }
+.legend { display: inline-block; width: 18px; height: 8px; margin: 0 4px 0 8px; vertical-align: middle; border-radius: 1px; }
+.legend.is-plays { background: var(--mantine-color-blue-5); }
+.legend.is-missing { background: repeating-linear-gradient(45deg, var(--mantine-color-gray-6) 0 2px, transparent 2px 4px); }
+@media (max-width: 600px) { .simple-level { max-width: none; margin-left: 0; flex: 1 1 calc(100% - 64px); } }

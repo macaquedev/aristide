@@ -7,11 +7,12 @@ import { TuningDeskStudy, tuningDeskLayouts } from './TuningDeskStudy';
 import { ArrowLeft, VolumeOff } from 'lucide-react';
 import { LayoutPreview } from './LayoutPreview';
 import { LimitsStudy, limitViews, overlapModes } from './LimitsStudy';
+import { SimpleStopStudy } from './SimpleStopStudy';
 import './study.css';
 
 export function Study() {
   const params = new URLSearchParams(location.search);
-  const [panel, setPanel] = useState(['tuning', 'limits'].includes(params.get('panel') ?? '') ? params.get('panel')! : 'build');
+  const [panel, setPanel] = useState(['tuning', 'limits', 'simple'].includes(params.get('panel') ?? '') ? params.get('panel')! : 'build');
   const [limitView, setLimitView] = useState(limitViews.some(v => v.value === params.get('view')) ? params.get('view')! : 'chart');
   const [overlap, setOverlap] = useState(overlapModes.some(v => v.value === params.get('overlap')) ? params.get('overlap')! : 'stack');
   const requested = params.get('layout');
@@ -26,20 +27,21 @@ export function Study() {
   const [kind, setKind] = useState('MIDI');
   const [assigned, setAssigned] = useState<Record<string, string>>({});
   useEffect(() => {
-    const query = panel === 'limits' ? new URLSearchParams({ study: '1', panel, view: limitView, overlap }) : new URLSearchParams({ study: '1', panel, layout: panel === 'build' ? build : tuning });
-    if (panel !== 'limits' && (panel === 'build' ? legacy : legacyTuning)) query.set('legacy', '1');
+    const query = panel === 'simple' ? new URLSearchParams({ study: '1', panel }) : panel === 'limits' ? new URLSearchParams({ study: '1', panel, view: limitView, overlap }) : new URLSearchParams({ study: '1', panel, layout: panel === 'build' ? build : tuning });
+    if (panel !== 'limits' && panel !== 'simple' && (panel === 'build' ? legacy : legacyTuning)) query.set('legacy', '1');
     history.replaceState(null, '', `?${query}`);
   }, [panel, build, tuning, legacy, legacyTuning, limitView, overlap]);
   return <div className={`study ${panel === 'tuning' && !legacyTuning ? 'tuning-study-shell' : ''} ${density === 'compact' ? 'study-compact' : ''}`}><Stack>
     <header className="study-header"><Group><Button component="a" href="/" variant="default" leftSection={<ArrowLeft size={16}/>}>Play</Button><Text fw={600}>Design studies</Text></Group><Group gap="xs"><Badge color="gray" variant="outline">Prototype</Badge><Text c="dimmed"><VolumeOff size={14} aria-hidden="true"/> No audio</Text><Text c="dimmed">Not saved</Text></Group></header>
-    <Group justify="space-between"><SegmentedControl aria-label="Study panel" value={panel} onChange={setPanel} data={[{ value: 'build', label: 'Build' }, { value: 'tuning', label: 'Tuning' }, { value: 'limits', label: 'Limits' }]}/>
+    <Group justify="space-between"><SegmentedControl aria-label="Study panel" value={panel} onChange={setPanel} data={[{ value: 'build', label: 'Build' }, { value: 'simple', label: 'Simple stop' }, { value: 'tuning', label: 'Tuning' }, { value: 'limits', label: 'Limits' }]}/>
       <SegmentedControl aria-label="Density" value={density} onChange={setDensity} data={[{ value: 'comfortable', label: 'Comfortable' }, { value: 'compact', label: 'Compact' }]}/></Group>
     {panel === 'limits' && <Group gap="lg" className="limit-pickers">
       <div><Text size="xs" c="dimmed" mb={4}>Limits view</Text><SegmentedControl aria-label="Limits view" value={limitView} onChange={setLimitView} data={limitViews}/></div>
       <div><Text size="xs" c="dimmed" mb={4}>Overlaps on the roll</Text><SegmentedControl aria-label="Overlaps" value={overlap} onChange={setOverlap} data={overlapModes}/></div>
     </Group>}
-    {panel !== 'limits' && <div className="study-layouts" role="group" aria-label="Layout">{(panel === 'build' ? choices : tuningChoices).map(layout => <Button key={layout.value} className="layout-choice" variant={(panel === 'build' ? build : tuning) === layout.value ? 'filled' : 'default'} aria-pressed={(panel === 'build' ? build : tuning) === layout.value} onClick={() => (panel === 'build' ? setBuild : setTuning)(layout.value)}><LayoutPreview layout={layout.value}/><span>{layout.label.replace(/^\d · /, '')}</span></Button>)}</div>}
+    {panel !== 'limits' && panel !== 'simple' && <div className="study-layouts" role="group" aria-label="Layout">{(panel === 'build' ? choices : tuningChoices).map(layout => <Button key={layout.value} className="layout-choice" variant={(panel === 'build' ? build : tuning) === layout.value ? 'filled' : 'default'} aria-pressed={(panel === 'build' ? build : tuning) === layout.value} onClick={() => (panel === 'build' ? setBuild : setTuning)(layout.value)}><LayoutPreview layout={layout.value}/><span>{layout.label.replace(/^\d · /, '')}</span></Button>)}</div>}
     <div hidden={panel !== 'build'}>{legacy ? <BuildStudy layout={build} compact={density === 'compact'} assign={setAssignment}/> : <PianoRollStudy layout={build} compact={density === 'compact'} assign={setAssignment}/>}</div>
+    {panel === 'simple' && <SimpleStopStudy/>}
     {panel === 'limits' && <LimitsStudy view={limitView} overlap={overlap} assign={setAssignment}/>}
     <div hidden={panel !== 'tuning'}>{legacyTuning ? <TuningStudy layout={tuning} assign={setAssignment}/> : <TuningDeskStudy layout={tuning} assign={setAssignment}/>}</div>
     {Object.entries(assigned).map(([address, control]) => <Group key={address}><Badge color="violet" variant="light">{control}</Badge><Text>{parameterLabel(address)}</Text></Group>)}
