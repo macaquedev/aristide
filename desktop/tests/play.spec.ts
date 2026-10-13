@@ -214,3 +214,27 @@ test('an event\'s limits open from Any and clear back to it', async ({ page }) =
   await expect.poll(() => posted().at(-1)?.played).toBeNull();
   await expect(page.getByRole('button', { name: 'Key to: any', exact: true })).toBeVisible();
 });
+
+test('an event can press another keyboard, as if coupled', async ({ page }) => {
+  const { requests } = await rig(page);
+  let rule = {
+    stop: { id: 1, name: 'Bourdon', manual: 'Great', midx: 0 }, custom: false, voices: 1,
+    stamps: [{ id: 'down', anchor: 'down', ms: 0 }, { id: 'up', anchor: 'up', ms: 0 }],
+    events: [{ source: { stop: 1, rank: null } as object, cents: 0, level: 0, start: 'down', end: null, played: null, sounding: null }],
+    sources: [{ stop: 1, name: 'Bourdon', manual: 'Great', midx: 0, ranks: [{ id: 1, name: 'Bourdon' }] }],
+    keyboards: [{ midx: 0, name: 'Great' }, { midx: 1, name: 'Pedal' }],
+  };
+  await page.route('**/api/rule?*', route => route.fulfill({ json: rule }));
+  await page.route('**/api/organ/rule?*', route => {
+    const url = new URL(route.request().url());
+    requests.push(url.pathname + url.search);
+    rule = { ...rule, ...JSON.parse(url.searchParams.get('rule')!), custom: true };
+    return route.fulfill({ json: rule });
+  });
+  await page.getByRole('button', { name: 'Bourdon' }).click({ button: 'right' });
+  await page.getByRole('button', { name: 'Source: Bourdon', exact: true }).click();
+  await page.getByRole('button', { name: /^Pedal, as if coupled/ }).click();
+  await expect.poll(() => requests.filter(url => url.startsWith('/api/organ/rule')).map(url => JSON.parse(new URL(url, 'http://x').searchParams.get('rule')!).events[0].source).at(-1)).toEqual({ keyboard: 1 });
+  await expect(page.getByRole('button', { name: 'Source: Pedal · as coupled', exact: true })).toBeVisible();
+  await page.screenshot({ path: 'test-results/keyboard-source.png' });
+});

@@ -7,18 +7,21 @@ import { anchorName, cents, validNote, type Anchor, type PitchWindow, type RollM
 import { TuningPanel } from '../tuning/TuningPanel';
 import '../design/roll.css';
 
-type RuleSource = { stop: number; rank: number | null };
+/** Pipes of a stop (or one of its ranks), or a keyboard pressed as a coupler presses it. */
+type RuleSource = { stop: number; rank: number | null } | { keyboard: number };
 type RuleEvent = { source: RuleSource; cents: number; level: number; start: string; end: string | null; played?: PitchWindow | null; sounding?: PitchWindow | null };
 type Rule = { stamps: Stamp[]; events: RuleEvent[] };
 type SourceStop = { stop: number; name: string; manual: string; midx: number; ranks: { id: number; name: string }[] };
+type Keyboard = { midx: number; name: string };
 export type StopRule = Rule & {
   stop: { id: number; name: string; manual: string; midx: number };
-  custom: boolean; voices: number; sources: SourceStop[];
+  custom: boolean; voices: number; sources: SourceStop[]; keyboards?: Keyboard[];
 };
 
 const home: RollView = { time: 0, center: 0, span: 120, pitchSpan: 3600 };
-const sourceId = ({ stop, rank }: RuleSource) => rank === null ? String(stop) : `${stop}:${rank}`;
+const sourceId = (source: RuleSource) => 'keyboard' in source ? `k${source.keyboard}` : source.rank === null ? String(source.stop) : `${source.stop}:${source.rank}`;
 const parseSource = (id: string): RuleSource => {
+  if (id.startsWith('k')) return { keyboard: Number(id.slice(1)) };
   const [stop, rank] = id.split(':').map(Number);
   return { stop, rank: rank === undefined || Number.isNaN(rank) ? null : rank };
 };
@@ -26,10 +29,10 @@ const noteId = (index: number) => `e${index}`;
 const indexOf = (id: string) => Number(id.slice(1));
 
 function toModel(rule: StopRule): RollModel {
-  const sources = rule.sources.flatMap(stop => [
+  const sources = [...(rule.keyboards ?? []).map(k => ({ id: `k${k.midx}`, name: `${k.name} · as coupled`, kind: 'Keyboard' as const, organ: k.name, transpose: 0 })), ...rule.sources.flatMap(stop => [
     { id: String(stop.stop), name: stop.name, kind: 'Stop' as const, organ: stop.manual, transpose: 0 },
     ...(stop.ranks.length > 1 ? stop.ranks.map(rank => ({ id: `${stop.stop}:${rank.id}`, name: `${stop.name} · ${rank.name}`, kind: 'Rank' as const, organ: stop.manual, transpose: 0 })) : []),
-  ]);
+  ])];
   return {
     stamps: rule.stamps,
     notes: rule.events.map((event, index) => ({ id: noteId(index), source: sourceId(event.source), pitch: event.cents, start: event.start, end: event.end, level: event.level, played: event.played, sounding: event.sounding })),
@@ -199,7 +202,7 @@ export function StopEditor({ organ, stops, stopId: current, actions, offerUndo, 
   const inspector = note && source && start ? <Stack gap="md" className="roll-inspector-fields">
     <Text fw={600}>Event</Text>
     <Button variant="default" justify="space-between" onClick={() => setSourceOpen(true)} aria-label={`Source: ${source.name}`}
-      rightSection={<Text component="span" size="xs" c="dimmed">{source.organ}</Text>}>{source.name}</Button>
+      rightSection={<Text component="span" size="xs" c="dimmed">{source.kind === 'Keyboard' ? 'Keyboard' : source.organ}</Text>}>{source.name}</Button>
     <Group grow align="start">
       <div><Text c="dimmed" size="xs">Pitch offset</Text><NumberControl label="Pitch" value={note.pitch} unit="¢" min={-9600} max={9600} change={pitch => update({ ...note, pitch })} assign={() => setNotice(true)}/></div>
       <div><Text c="dimmed" size="xs">Level</Text><NumberControl label="Level" value={note.level} unit="dB" step={0.5} min={-60} max={12} change={level => update({ ...note, level })} assign={() => setNotice(true)}/></div>
@@ -227,7 +230,7 @@ export function StopEditor({ organ, stops, stopId: current, actions, offerUndo, 
     editStamp={stamp => { setStampError(''); setStampEditor(stamp); }}
     addStamp={anchor => { setStampError(''); setStampEditor({ anchor, ms: Math.max(...model.stamps.filter(s => s.anchor === anchor).map(s => s.ms)) + 50 }); }}/>;
   const zoom = (axis: 'span' | 'pitchSpan', factor: number) => setViews(v => Object.fromEntries(Object.entries(v).map(([key, value]) => [key, { ...value, [axis]: Math.max(axis === 'span' ? 10 : 8, Math.min(axis === 'span' ? 10000 : 19200, value[axis] * factor)) }])) as Record<Anchor, RollView>);
-  const divisions = [...new Map(stops.map(s => [s.midx, s.manual])).entries()];
+  const divisions = [...new Map([...(rule.keyboards ?? []).map(k => [k.midx, k.name] as const), ...stops.map(s => [s.midx, s.manual] as const)]).entries()].sort((a, b) => a[0] - b[0]);
   // Renames and moves land live without reopening the rule.
   const live = stops.find(s => s.id === rule.stop.id);
   const ownTuning = live?.tuning?.follow === 'own';
@@ -269,6 +272,9 @@ export function StopEditor({ organ, stops, stopId: current, actions, offerUndo, 
     </Stack>
     <Drawer closeButtonProps={{ 'aria-label': 'Close' }} opened={sourceOpen} onClose={() => setSourceOpen(false)} title="Source" position="right" size="md"><Stack gap="xs">
       {divisions.map(([midx, manual]) => <Stack key={midx} gap={4}><Text size="xs" c="dimmed">{manual}</Text>
+        {rule.keyboards?.some(k => k.midx === midx) && <Button variant={`k${midx}` === note?.source ? 'light' : 'default'} justify="space-between"
+          disabled={start?.anchor === 'up'} onClick={() => { if (note) update({ ...note, source: `k${midx}` }); setSourceOpen(false); }}
+          rightSection={<Text component="span" size="xs" c="dimmed">Keyboard</Text>}>{manual}, as if coupled</Button>}
         {rule.sources.filter(s => s.midx === midx).flatMap(s => [{ id: String(s.stop), label: s.name, rank: false },
           ...(s.ranks.length > 1 ? s.ranks.map(r => ({ id: `${s.stop}:${r.id}`, label: r.name, rank: true })) : [])]).map(option =>
           <Button key={option.id} variant={option.id === note?.source ? 'light' : 'default'} justify="start" pl={option.rank ? 'xl' : undefined}
