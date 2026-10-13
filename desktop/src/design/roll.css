@@ -71,3 +71,9 @@
 .roll-scroll.vertical::-webkit-slider-runnable-track { width: 8px; height: 100%; }
 .roll-scroll.vertical::-webkit-slider-thumb { width: 8px; height: 48px; }
 .roll-inspector-fields > .mantine-Group-root:last-child button { padding-inline: 8px; }
+.event-limits { display: grid; gap: 6px; }
+.event-limit-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 6px; align-items: center; }
+.event-limit-row > p { grid-column: 1 / -1; }
+.event-limit-edge { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px; }
+.event-limit-row .number-control { width: 100%; min-width: 0; padding-inline: 6px; }
+@media (max-width: 1100px) { .variant-split .roll-inspector-fields .event-limits { grid-column: 1 / -1; } }

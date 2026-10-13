@@ -40,6 +40,24 @@ const toRule = (model: RollModel): Rule => ({
   stamps: model.stamps,
   events: model.notes.map(note => ({ source: parseSource(note.source), cents: note.pitch, level: note.level, start: note.start, end: note.end, played: note.played ?? null, sounding: note.sounding ?? null })),
 });
+type Edge = 'low' | 'high';
+const span = 9600;
+/** One edge of a pitch window: open ("Any") until set, then a cents value bounded by the other edge. */
+function WindowEdge({ label, window, edge, change, assign }: { label: string; window: PitchWindow | null | undefined; edge: Edge; change: (next: PitchWindow | null) => void; assign: () => void }) {
+  const value = window?.[edge];
+  const other = window?.[edge === 'low' ? 'high' : 'low'];
+  const set = (next: number | undefined) => {
+    const merged: PitchWindow = { ...window, [edge]: next };
+    if (merged[edge] === undefined) delete merged[edge];
+    change(merged.low === undefined && merged.high === undefined ? null : merged);
+  };
+  if (value === undefined) return <Button variant="default" aria-label={`${label}: any`} onClick={() => set(other ?? 0)}>Any</Button>;
+  return <div className="event-limit-edge">
+    <NumberControl label={label} value={value} unit="¢" min={edge === 'low' ? -span : other ?? -span} max={edge === 'high' ? span : other ?? span} change={set} assign={assign}/>
+    <Button variant="subtle" px={8} aria-label={`Clear ${label}`} onClick={() => set(undefined)}>×</Button>
+  </div>;
+}
+
 const freshStamp = (anchor: Anchor, ms: number): Stamp => ({ id: `${anchor[0]}${crypto.randomUUID().slice(0, 8)}`, anchor, ms });
 
 /** One stop's rule as two piano rolls (key down, key up) with the event inspector beside them, or its own tuning.
@@ -190,6 +208,14 @@ export function StopEditor({ organ, stops, stopId: current, actions, offerUndo, 
     <Select label="Duration" value={mode} allowDeselect={false} data={start.anchor === 'down' ? [{ value: 'held', label: 'Until release →' }, { value: 'finite', label: 'End at timestamp' }, { value: 'after', label: 'Hold after release → / ←' }] : [{ value: 'finite', label: 'End at timestamp' }]} onChange={changeMode}/>
     {end && <Select label="Ends at" value={end.id} allowDeselect={false} data={endings.filter(option => mode === 'after' ? model.stamps.find(s => s.id === option.value)!.anchor === 'up' : model.stamps.find(s => s.id === option.value)!.anchor === start.anchor)} onChange={value => value && update({ ...note, end: value })}/>}
     {end?.anchor === start.anchor && <Text size="xs" c="dimmed">{end.ms - start.ms} ms</Text>}
+    <div className="event-limits">
+      <Text c="dimmed" size="xs">Limits · ¢ from the organ's a′</Text>
+      {([['played', 'Key'], ['sounding', 'Sounding']] as const).map(([field, name]) => <div key={field} className="event-limit-row">
+        <Text size="sm">{name}</Text>
+        {(['low', 'high'] as const).map(edge => <WindowEdge key={edge} label={`${name} ${edge === 'low' ? 'from' : 'to'}`} window={note[field]} edge={edge}
+          change={next => update({ ...note, [field]: next })} assign={() => setNotice(true)}/>)}
+      </div>)}
+    </div>
     <Group grow>
       <Button variant="default" onClick={() => { const copy = { ...note, id: noteId(model.notes.length) }; edit({ ...model, notes: [...model.notes, copy] }); setSelected(copy.id); }}>Duplicate</Button>
       <Button variant="subtle" color="red" disabled={model.notes.length === 1} onClick={() => remove(note.id)}>Delete</Button>

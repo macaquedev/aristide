@@ -20,8 +20,15 @@ Both are cents, never note names or MIDI keys, so they mean the same under
   A pitch trim on a stop with a sounding window re-prices held keys instead
   of gliding them, since it can carry an event across its edge.
 - `/api/rule` reports `played`/`sounding` per event (null when unlimited);
-  `/api/organ/rule` accepts them. The stop editor carries them through every
-  edit but cannot show or set them yet.
+  `/api/organ/rule` accepts them.
+
+## Stop editor
+
+- The event inspector's **Limits** group has a Key and a Sounding row, each
+  with a from and a to edge. An edge reads Any until tapped, then is the
+  shared number control (bounded by the other edge, so a window can't
+  invert); × opens it again. They sit in the inspector, not on the roll:
+  the roll's axis is cents from the pressed key, the windows are absolute.
 
 Migration: rows with these windows do not load in older builds (the rule
 schema denies unknown fields). Older files load unchanged.
@@ -33,11 +40,12 @@ schema denies unknown fields). Older files load unchanged.
   reference, fine offset and 19-EDO; windows are validated and survive the
   API, the file and a reload.
 - `bunx playwright test play roll`: an edit in the stop editor posts the
-  untouched event's windows back.
+  untouched event's windows back; edges open from Any and clear back to it.
+  Screenshots reviewed at 1280 × 800, 900 px and 390 px wide.
 
 ## Gaps
 
-- No editor for the windows yet (next increment).
+- The roll does not show which events are limited; only the inspector does.
 - Held keys are not re-judged when a tuning changes; the next press is.
 - Beyond a borrowed rank's last pipe the console still stretches the nearest
   pipe rather than falling silent.

@@ -181,3 +181,36 @@ test('editing a stop keeps its events\' pitch windows', async ({ page }) => {
   expect(posted.events[0].sounding).toEqual({ low: -1200 });
   expect(posted.events[1].played).toBeNull();
 });
+
+test('an event\'s limits open from Any and clear back to it', async ({ page }) => {
+  const { requests } = await rig(page);
+  let rule = {
+    stop: { id: 1, name: 'Bourdon', manual: 'Great', midx: 0 }, custom: false, voices: 1,
+    stamps: [{ id: 'down', anchor: 'down', ms: 0 }, { id: 'up', anchor: 'up', ms: 0 }],
+    events: [{ source: { stop: 1, rank: null }, cents: 0, level: 0, start: 'down', end: null, played: null, sounding: null }],
+    sources: [{ stop: 1, name: 'Bourdon', manual: 'Great', midx: 0, ranks: [{ id: 1, name: 'Bourdon' }] }],
+  };
+  await page.route('**/api/rule?*', route => route.fulfill({ json: rule }));
+  await page.route('**/api/organ/rule?*', route => {
+    const url = new URL(route.request().url());
+    requests.push(url.pathname + url.search);
+    rule = { ...rule, ...JSON.parse(url.searchParams.get('rule')!), custom: true };
+    return route.fulfill({ json: rule });
+  });
+  await page.getByRole('button', { name: 'Bourdon' }).click({ button: 'right' });
+  const posted = () => requests.filter(url => url.startsWith('/api/organ/rule')).map(url => JSON.parse(new URL(url, 'http://x').searchParams.get('rule')!).events[0]);
+  await page.getByRole('button', { name: 'Key to: any', exact: true }).click();
+  await expect.poll(() => posted().at(-1)?.played).toEqual({ high: 0 });
+  await expect(page.getByRole('button', { name: 'Key to: 0 ¢', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Sounding from: any', exact: true }).click();
+  await expect.poll(() => posted().at(-1)?.sounding).toEqual({ low: 0 });
+  await page.screenshot({ path: 'test-results/event-limits.png' });
+  await page.setViewportSize({ width: 900, height: 900 });
+  await page.screenshot({ path: 'test-results/event-limits-medium.png', fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.screenshot({ path: 'test-results/event-limits-phone.png', fullPage: true });
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.getByRole('button', { name: 'Clear Key to', exact: true }).click();
+  await expect.poll(() => posted().at(-1)?.played).toBeNull();
+  await expect(page.getByRole('button', { name: 'Key to: any', exact: true })).toBeVisible();
+});
