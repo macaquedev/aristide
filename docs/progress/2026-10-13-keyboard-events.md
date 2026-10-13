@@ -22,8 +22,6 @@ two now share one path, so a stop that couples behaves like a coupler.
   `/api/organ/rule` accepts them. Renaming or removing a manual follows or
   drops keyboard lines with the existing rule-following code.
 
-Migration: files with keyboard lines do not load in older builds (a stop-less
-event was invalid there). Older files load unchanged.
 
 ## Stop editor
 

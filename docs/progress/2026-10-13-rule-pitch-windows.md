@@ -30,8 +30,6 @@ Both are cents, never note names or MIDI keys, so they mean the same under
   invert); × opens it again. They sit in the inspector, not on the roll:
   the roll's axis is cents from the pressed key, the windows are absolute.
 
-Migration: rows with these windows do not load in older builds (the rule
-schema denies unknown fields). Older files load unchanged.
 
 ## Validation
 
