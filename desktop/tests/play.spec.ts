@@ -163,3 +163,21 @@ test('a stop without footage names only a mixture\'s ranks', async ({ page }) =>
   await expect(page.getByRole('button', { name: 'Blank', exact: true }).locator('.stop-pitch')).toHaveText('');
   await page.screenshot({ path: 'test-results/blank-stop.png' });
 });
+
+test('editing a stop keeps its events\' pitch windows', async ({ page }) => {
+  const { requests } = await rig(page);
+  const windowed = { source: { stop: 2, rank: null }, cents: 1200, level: 0, start: 'down', end: null, played: { high: 300 }, sounding: { low: -1200 } };
+  await page.route('**/api/rule?*', route => route.fulfill({ json: {
+    stop: { id: 1, name: 'Bourdon', manual: 'Great', midx: 0 }, custom: true, voices: 1,
+    stamps: [{ id: 'down', anchor: 'down', ms: 0 }, { id: 'up', anchor: 'up', ms: 0 }],
+    events: [windowed],
+    sources: [{ stop: 1, name: 'Bourdon', manual: 'Great', midx: 0, ranks: [{ id: 1, name: 'Bourdon' }] }, { stop: 2, name: 'Principal', manual: 'Pedal', midx: 1, ranks: [{ id: 2, name: 'Principal' }] }],
+  } }));
+  await page.getByRole('button', { name: 'Bourdon' }).click({ button: 'right' });
+  await page.getByRole('button', { name: 'Add event', exact: true }).click();
+  await expect.poll(() => requests.find(url => url.startsWith('/api/organ/rule'))).toBeTruthy();
+  const posted = JSON.parse(new URL(requests.find(url => url.startsWith('/api/organ/rule'))!, 'http://x').searchParams.get('rule')!);
+  expect(posted.events[0].played).toEqual({ high: 300 });
+  expect(posted.events[0].sounding).toEqual({ low: -1200 });
+  expect(posted.events[1].played).toBeNull();
+});

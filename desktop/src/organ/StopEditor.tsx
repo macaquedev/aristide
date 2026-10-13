@@ -3,12 +3,12 @@ import { Button, Checkbox, Drawer, Group, Loader, Modal, NumberInput, SegmentedC
 import { editInstrument, endpoint, request } from '../api';
 import { NumberControl } from '../design/NumberControl';
 import { RollCanvas, type RollView } from '../design/RollCanvas';
-import { anchorName, cents, validNote, type Anchor, type RollModel, type RollNote, type Stamp } from '../design/rollModel';
+import { anchorName, cents, validNote, type Anchor, type PitchWindow, type RollModel, type RollNote, type Stamp } from '../design/rollModel';
 import { TuningPanel } from '../tuning/TuningPanel';
 import '../design/roll.css';
 
 type RuleSource = { stop: number; rank: number | null };
-type RuleEvent = { source: RuleSource; cents: number; level: number; start: string; end: string | null };
+type RuleEvent = { source: RuleSource; cents: number; level: number; start: string; end: string | null; played?: PitchWindow | null; sounding?: PitchWindow | null };
 type Rule = { stamps: Stamp[]; events: RuleEvent[] };
 type SourceStop = { stop: number; name: string; manual: string; midx: number; ranks: { id: number; name: string }[] };
 export type StopRule = Rule & {
@@ -32,13 +32,13 @@ function toModel(rule: StopRule): RollModel {
   ]);
   return {
     stamps: rule.stamps,
-    notes: rule.events.map((event, index) => ({ id: noteId(index), source: sourceId(event.source), pitch: event.cents, start: event.start, end: event.end, level: event.level })),
+    notes: rule.events.map((event, index) => ({ id: noteId(index), source: sourceId(event.source), pitch: event.cents, start: event.start, end: event.end, level: event.level, played: event.played, sounding: event.sounding })),
     sources,
   };
 }
 const toRule = (model: RollModel): Rule => ({
   stamps: model.stamps,
-  events: model.notes.map(note => ({ source: parseSource(note.source), cents: note.pitch, level: note.level, start: note.start, end: note.end })),
+  events: model.notes.map(note => ({ source: parseSource(note.source), cents: note.pitch, level: note.level, start: note.start, end: note.end, played: note.played ?? null, sounding: note.sounding ?? null })),
 });
 const freshStamp = (anchor: Anchor, ms: number): Stamp => ({ id: `${anchor[0]}${crypto.randomUUID().slice(0, 8)}`, anchor, ms });
 

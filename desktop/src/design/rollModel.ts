@@ -1,6 +1,7 @@
 export type Anchor = 'down' | 'up';
 export type Stamp = { id: string; anchor: Anchor; ms: number };
-export type RollNote = { id: string; source: string; pitch: number; start: string; end: string | null; level: number };
+export type PitchWindow = { low?: number; high?: number };
+export type RollNote = { id: string; source: string; pitch: number; start: string; end: string | null; level: number; played?: PitchWindow | null; sounding?: PitchWindow | null };
 export type Source = { id: string; name: string; kind: 'Rank' | 'Stop'; organ: string; transpose: number };
 export type RollModel = { stamps: Stamp[]; notes: RollNote[]; sources: Source[] };
 export const anchorName = (anchor: Anchor) => anchor === 'down' ? 'Key down' : 'Key up';
